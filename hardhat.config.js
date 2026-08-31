@@ -1,29 +1,12 @@
 require("dotenv").config();
 require("@nomicfoundation/hardhat-toolbox");
 
-// Robinhood Chain network parameters — confirmed via official docs
-// (https://docs.robinhood.com/chain/connecting and
-// https://docs.robinhood.com/chain/deploy-smart-contracts) as of 2026-08-26.
-// Chain ID and the public RPC/explorer hosts are fixed protocol facts, so
-// they're hardcoded below rather than left as blank env vars. The RPC URL
-// itself is still overridable — Robinhood's docs note the public endpoints
-// are rate-limited and recommend a dedicated Alchemy endpoint
-// (https://robinhood-{mainnet|testnet}.g.alchemy.com/v2/{API_KEY}) for
-// anything beyond light testing.
-const ROBINHOOD_NETWORKS = {
-  robinhoodTestnet: {
-    chainId: 46630,
-    defaultRpcUrl: "https://rpc.testnet.chain.robinhood.com",
-    explorerApiUrl: "https://explorer.testnet.chain.robinhood.com/api",
-    explorerBrowserUrl: "https://explorer.testnet.chain.robinhood.com/",
-  },
-  robinhoodMainnet: {
-    chainId: 4663,
-    defaultRpcUrl: "https://rpc.mainnet.chain.robinhood.com",
-    explorerApiUrl: "https://robinhoodchain.blockscout.com/api",
-    explorerBrowserUrl: "https://robinhoodchain.blockscout.com/",
-  },
-};
+// See lib/networks.js for why this lives in its own module — the RPC URL
+// itself is still overridable via env var below; Robinhood's docs note the
+// public endpoints are rate-limited and recommend a dedicated Alchemy
+// endpoint (https://robinhood-{mainnet|testnet}.g.alchemy.com/v2/{API_KEY})
+// for anything beyond light testing.
+const { ROBINHOOD_NETWORKS } = require("./lib/networks");
 
 const DEPLOYER_PRIVATE_KEY = process.env.DEPLOYER_PRIVATE_KEY || "";
 

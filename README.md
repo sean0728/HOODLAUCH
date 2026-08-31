@@ -20,8 +20,9 @@ happens next — each charging its own flat fee, in ETH:
 
 Either way, the token is **deployed and verified before anything else
 happens** — verification always runs right after creation. Every launch is
-also recorded to a lightweight local ledger under `deployed-contracts/`
-(see below).
+also recorded to a lightweight local ledger under `deployed-contracts/`,
+split into its own subdirectory per network so a testnet launch and a
+mainnet launch never share a file (see below).
 
 This is an MVP for the on-chain piece only. It does not include the
 off-chain identity/socials/dashboard backend (see "What's not here" below).
@@ -81,20 +82,66 @@ pointed it at a pair:
   even configured — is untouched.
 - After every taxed transfer, the token checks its pool's **live** market
   cap (current pair reserves × a Chainlink-style ETH/USD price feed × total
-  supply) and, the moment that crosses `graduationTargetUsd` (default
-  **$80,000**), permanently sets `taxActive = false` and emits
-  `TaxDisabled`. There is no way to turn it back on — this check runs once,
-  in one direction, forever.
+  supply) against `graduationTargetUsd` (default **$80,000**). Once the
+  target is met, `taxActive` permanently flips to `false` and `TaxDisabled`
+  fires. There is no way to turn it back on — this check runs once, in one
+  direction, forever.
+- **Graduation requires confirmation, not one instantaneous reading.** A
+  pool's spot price is cheap to move temporarily, and since market cap here
+  is spot price × total supply, a typical launch's enormous total supply
+  relative to its actual (thin, freshly-seeded) liquidity means a
+  comparatively small, temporary trade could otherwise imply a market cap
+  far beyond the pool's real ETH value for exactly one instant — permanently
+  disabling the tax off a manipulated spike. So the first time a transfer
+  observes the target met, that only starts a candidacy
+  (`graduationCandidateAt`, `GraduationCandidateObserved`); the tax only
+  actually disables once a **later** transfer, at least
+  `GRADUATION_CONFIRMATION_WINDOW` (30 minutes) after the first observation,
+  still sees the target met. Any transfer in between that observes the
+  target no longer met resets the candidacy to zero
+  (`GraduationCandidateReset`) — so unwinding a manipulated position (itself
+  a transfer against the same pool) undoes the countdown instead of letting
+  it quietly finish, meaning an attacker has to keep real capital committed
+  and the price genuinely elevated for the entire window, not just for one
+  instant. See `AUDIT-LaunchedToken.md` for the full writeup of why this
+  mattered and how it's tested (`test/LaunchedTokenTax.test.js`'s
+  "graduation" and "resilience to a misbehaving pair" suites include a
+  dedicated pump-and-dump test proving the reset actually closes the loop).
 - **Oracle resilience** — if the price feed is stale (older than
   `maxOracleStaleness`, default 1 hour) or reports a non-positive price,
   the disable-check is silently skipped for that transfer (the transfer
-  itself still succeeds) rather than reverting. The check resumes normally
-  as soon as the feed is healthy again.
+  itself still succeeds) rather than reverting, leaving any in-progress
+  candidacy untouched. The check resumes normally as soon as the feed is
+  healthy again. The pool-reads-and-arithmetic half of the check is also
+  independently guarded (via an internal self-call wrapped in its own
+  try/catch): a misbehaving pair or an extreme-value overflow in the
+  graduation math degrades to "can't confirm graduation right now" rather
+  than reverting the transfer that triggered it.
+- **`updatePriceFeed(newPriceFeed_, newMaxOracleStaleness_)`** is a narrow,
+  factory-gated escape hatch (`TokenFactory.updateTokenPriceFeed`,
+  owner-only) for a price feed that goes permanently stale or was never a
+  real, maintained feed to begin with — a real risk on a young chain. It can
+  only repoint the oracle inputs the graduation check reads; it cannot touch
+  `feeBps`, `feeWallet`, `pair`, or `taxActive` directly, and disabling the
+  tax still requires the same market-cap/confirmation-window path as ever.
+- `totalSupply_` is capped at `MAX_TOTAL_SUPPLY` (1 quadrillion tokens, 18
+  decimals — comfortably above real-world outliers like PEPE's ~420
+  trillion or SHIB's ~589 trillion supply) at `initialize()`, purely as
+  defense-in-depth against the graduation math's arithmetic ever
+  overflowing for an unrealistic supply choice.
 - `configureTax()` is `onlyFactory` and callable **exactly once** per
   token — there's no path to reconfigure a live tax, retarget it at a
   different pair, or re-enable it after it's disabled.
 - A "Deploy Token" token never has `configureTax()` called on it at all, so
   it behaves as a completely ordinary, untaxed ERC20 for its entire life.
+
+`CustomToken`'s own platform tax (`platformTaxActive` / `platformFeeBps` /
+`configurePlatformTax()`) is a separate fee stream from a creator's own
+`buyFees`/`sellFees`, but mirrors every piece of the graduation mechanism
+above exactly — the same confirmation-window candidacy, the same
+`updatePriceFeed()` escape hatch (via `CustomTokenFactory.updateTokenPriceFeed`),
+the same `MAX_TOTAL_SUPPLY` cap — since both contracts read a pool's spot
+price the same way and are equally exposed to the same manipulation risk.
 
 Because the tax nets down what a taxed transfer actually delivers, any swap
 against a "Deploy and Add Liquidity (Launch)" token **must** use the
@@ -113,6 +160,119 @@ graduation target, oracle staleness tolerance — is adjustable going forward
 via `TokenFactory.setTaxDefaults()` (owner-only). Changing it only affects
 pools created after the change; existing tokens keep whatever they were
 configured with at creation.
+
+## CustomToken's swap-and-process pipeline: failure isolation, slippage floor, and cleanup
+
+`CustomToken`'s creator-side fee streams (reflections, marketing, auto-liquidity)
+are collected in-kind and turned into their real outcome — a DEX swap, an
+`addLiquidityETH` call, a plain ETH send to `marketingWallet` — in a single
+batched `_swapAndProcess()` step once pending fees cross `swapThreshold`,
+triggered automatically from inside `_update()` on any sell or plain transfer.
+See `AUDIT-CustomToken.md` for the full writeup; in short:
+
+- Each of the three steps (`_processLiquidity`, `_processMarketing`,
+  `_processReflections`) runs behind its own `try`/`catch`, via the same
+  external-self-call pattern the graduation math already used
+  (`_computeMarketCapFromPair`). Before this, a single broken step — a
+  `marketingWallet` that reverts on receiving ETH, a drained `reflectionAsset`
+  pool — reverted the *entire* transfer that happened to trigger the batch,
+  and since this runs on every sell/transfer, that meant one broken step could
+  permanently freeze all trading. Now a failing step's tokens go straight back
+  into the relevant `pending*Tokens` counter — deferred, never lost — and get
+  retried on the next qualifying transfer.
+- Every internal swap (and `addLiquidityETH`'s own token/ETH minimums) now
+  carries a real `amountOutMin`/slippage floor instead of `0`, derived from
+  the pool's own live reserves via the same constant-product quote helper
+  `TokenFactory`/`CustomTokenFactory` already use for `_effectiveMinBuyOut`,
+  and bounded by `processingSlippageBps` (creator-adjustable, 500–800 bps,
+  defaulting to 600 — see `setProcessingSlippageBps()`). This won't stop a
+  same-block sandwich outright (there's no pre-manipulation reference price to
+  fall back on for an autonomous, publicly-triggered swap like this one — see
+  the audit's own note on this), but it does catch a genuinely misbehaving
+  router, a multi-hop quote that drifted, or a hostile/reentrant pair, and
+  fails the transaction safely into the try/catch above rather than accepting
+  an arbitrarily bad fill silently.
+- `configurePlatformTax()` now rejects a `feeBps_` that, combined with the
+  token's own already-locked-in `buyFees`/`sellFees` total, would exceed
+  10,000 bps — that combination used to underflow `_update()`'s fee
+  subtraction and permanently brick every taxed transfer of that token.
+- `rescueToken()`/`rescueEth()` (creator-gated) recover ERC20/ETH dust stuck
+  on the contract — leftover from an imperfect-ratio `addLiquidityETH` call,
+  or a direct donation — while being structurally unable to touch this
+  token's own pending fee balances or any holder's still-unclaimed reflection
+  entitlement.
+- `transferCreator()`/`acceptCreator()` add the same two-step ownership
+  handoff (`Ownable2Step`-style) already used everywhere else in this
+  codebase, so a single mistyped address can never permanently strand the
+  `creator` role.
+- `initialize()` rejects a `reflectionAsset_` equal to the token's own
+  address, closing off a confusing self-referential swap path.
+
+### Tax-exemption whitelist, and the standard renounce/transfer levers
+
+Two more creator-controlled features round out `CustomToken`'s access
+surface, both onlyCreator-gated the same way as `setMarketingWallet`:
+
+- **`setTaxExempt(account, exempt)`** whitelists (or un-whitelists) a
+  specific address to bypass *all* tax — both the creator's own buy/sell
+  fee and the platform's graduating tax — on any transfer where it's
+  either side (`isTaxExempt` mapping, checked in `_update()` before either
+  fee is computed). This is for addresses that legitimately shouldn't be
+  taxed on their own token movements: the `LiquidityLocker` holding the
+  locked LP, a vesting/airdrop contract, a CEX deposit wallet. **It never
+  changes `buyFees`/`sellFees`/`platformFeeBps` themselves** — there is no
+  function anywhere in the contract that can raise, lower, or otherwise
+  touch those rates after `initialize()`/`configurePlatformTax()`. The
+  whitelist only ever changes *who* pays the one fixed rate everyone else
+  already pays; it can't be used to reintroduce the "creator jacks up the
+  tax" rug the immutable rates already close off. Every exempt/non-exempt
+  transition is logged via `TaxExemptionUpdated`.
+- **`transferCreator(newCreator)` / `acceptCreator()`** is the two-step
+  (`Ownable2Step`-style) handoff already covered above — moving the
+  creator role to a new address without a single mistyped address
+  permanently stranding it.
+- **`renounceCreator()`** is the standard "renounce ownership" assurance:
+  it permanently zeroes the `creator` role (and cancels any in-flight
+  `transferCreator` handoff), with no recovery path. The moment it's
+  called, every onlyCreator function — `setMarketingWallet`,
+  `setSwapThreshold`, `setRewardsBlocked`, `activateIndependentPair`,
+  `setProcessingSlippageBps`, `setTaxExempt`, `rescueToken`, `rescueEth`,
+  `transferCreator` — becomes permanently uncallable by anyone, including
+  whoever just called it. Renouncing doesn't need to "lock in" the tax
+  rate the way it does on some other launchpads' tokens, because the rate
+  was never mutable in the first place — renouncing here removes every
+  remaining *operational* lever, on top of a fee structure that was
+  already fixed at launch.
+
+## Burning tokens
+
+Both `LaunchedToken` and `CustomToken` expose a standard, OpenZeppelin-style
+burn interface, callable directly on the token contract by any holder —
+this is separate from (and in addition to, for `CustomToken`) the
+tax-triggered `burnBps` component described above:
+
+- `burn(uint256 amount)` — permanently destroys `amount` of the caller's
+  own tokens.
+- `burnFrom(address account, uint256 amount)` — same, but spends
+  `account`'s allowance to the caller first, so a third-party contract a
+  holder has approved can burn on their behalf without ever taking custody
+  of the tokens.
+
+Both are a **true burn**: they route through OpenZeppelin's `ERC20._burn`,
+which calls the same `_update()` every transfer already goes through, and
+`totalSupply()` actually decreases — this is not a transfer to
+`0x…dEaD` that would leave real supply sitting at an address someone could
+mistake for still being in circulation. Neither function is ever taxed,
+even on a token with an active transfer tax: a burn's destination is
+`address(0)`, which never equals a pool's `pair` address, so it can never
+match the condition either contract's tax logic checks (`from == pair ||
+to == pair`) — a holder destroying their own tokens keeps the full amount
+they intended to burn, with nothing skimmed off first. Covered by
+dedicated tests in both `test/TokenFactory.test.js` ("burn (LaunchedToken)")
+and `test/CustomToken.test.js` ("voluntary burn"), including that it's
+untaxed on a fully-taxed `CustomToken`, that `burnFrom` correctly requires
+and spends an allowance, and that the DEX pair's reflection exclusion
+(see above) isn't disturbed by a holder burning tokens around it.
 
 ## The creator buy-in
 
@@ -226,6 +386,81 @@ would have accrued is simply never distributed at all (rather than being
 redistributed pro-rata to real holders); doing the latter would require a
 much larger "excluded from rewards" dual-accounting rewrite and wasn't
 what was asked for here.
+
+## CustomToken's marketing wallet is paid in native ETH, not tokens
+
+`marketingBps` (part of the buy/sell fee split alongside `reflectionBps` and
+`burnBps`) is collected in `CustomToken`'s own tokens like every other fee
+component, but it is never *paid out* in tokens. `_processMarketing()`
+swaps the accumulated marketing-fee tokens for native ETH through the DEX
+router (the same pool the token trades on) once the swap threshold is hit,
+then sends that ETH straight to `marketingWallet`:
+
+```solidity
+(bool sent, ) = marketingWallet.call{value: ethOut}("");
+```
+
+So a creator who sets a marketing wallet is guaranteed to receive
+Robinhood Chain's native coin there, not a balance of the token itself —
+there's nothing for the marketing wallet to sell or route through a DEX
+before it's spendable. This is existing, tested behavior (see
+`test/CustomToken.test.js`'s marketing-tax tests, which assert on
+`marketingWallet`'s native ETH balance delta) — noted here because it's
+easy to assume a "marketing fee" pays out in the project's own token the
+way `reflectionBps` and `burnBps` do; it doesn't.
+
+## Blocking a wallet from reflections (`setRewardsBlocked`)
+
+The creator can block any address — a known bot, a wallet farming the
+reflection mechanism with wash trades, an exchange hot wallet that would
+otherwise accrue and never claim — from receiving further reflection
+payouts, without touching its token balance or ability to transfer:
+
+```solidity
+function setRewardsBlocked(address account, bool blocked) external onlyCreator;
+mapping(address => bool) public isBlockedFromRewards;
+```
+
+Once blocked, `account` shows `accumulativeDividendOf(account) == 0`
+immediately, on both distribution paths: a pull-based `claimReflections()`
+call reverts with nothing to claim, and a push-based `pushReflections()`
+sweep silently skips the address (without reverting the rest of the
+batch). This is the exact same read-time-guard pattern already used to
+exclude the DEX pair and the token contract itself (see the section
+above) — `accumulativeDividendOf` returns 0 up front rather than trying to
+retroactively zero out or claw back an entitlement.
+
+**Important caveat, stated plainly:** blocking is airtight for as long as
+it's active, but it is not a permanent forfeiture. The underlying
+magnified-dividend-per-share bookkeeping keeps running in the background
+for a blocked account exactly as it would for anyone else; blocking only
+makes `accumulativeDividendOf` report 0 while the flag is set. The moment
+the creator calls `setRewardsBlocked(account, false)`, that account's
+uninterrupted accrual — including whatever built up "underneath" the
+block — becomes claimable again. A true permanent forfeiture (redistribute
+a blocked wallet's would-be share to everyone else, forever) would need
+the same larger "excluded from rewards" dual-accounting rewrite noted in
+the pair-exclusion section above, and wasn't what was asked for here. Use
+`setRewardsBlocked` to pause a wallet's rewards for as long as you want it
+paused — not as a way to permanently erase value it would otherwise have
+been entitled to.
+
+One safety fix shipped alongside this: `withdrawableDividendOf` used to
+compute `accumulativeDividendOf(account) - withdrawnDividends[account]`
+directly, which would revert on underflow for a wallet that had already
+claimed once *before* being blocked (blocking forces the left-hand side to
+0 while the right-hand side stays whatever was already withdrawn). It now
+guards with `total > withdrawn ? total - withdrawn : 0`, so blocking a
+wallet with claim history is always safe and never bricks that wallet's
+entry in a `pushReflections()` sweep.
+
+Only the creator can call `setRewardsBlocked` (`onlyCreator`), and
+`address(0)` is rejected — see `test/CustomToken.test.js`'s "reflections —
+creator can block a wallet from rewards" tests for all seven scenarios
+covered (zero entitlement while blocked, safe claim after prior
+withdrawal, skip-not-revert in a push sweep, access control, the
+zero-address rejection, resumed accrual after unblocking, and balance/
+transfer ability being untouched throughout).
 
 ## Zero/blank tax fields never crash the contract
 
@@ -350,12 +585,29 @@ It exposes:
 - `GET /status/:voucherHash` — polled by the front end until the voucher
   reaches `"relayed"` (with `txHash`/`tokenAddress`/`pairAddress`) or
   `"failed"` (with an `error`).
+- `GET /launches` — every launch recorded for whichever network this relayer
+  instance is running against (`{ network, launches: [...] }`), read
+  straight off that network's `deployed-contracts/<network>/` ledger. Each
+  entry only carries the same public-safe fields the ledger's own CSV mirror
+  does (ticker, addresses, mode, liquidity/verification info, timestamps,
+  etc.) — never the archived `flattenedSource`, which would make every
+  response needlessly huge. This is what lets the front end show "every
+  launch on this network" instead of only whatever a given browser happened
+  to launch or see itself; since one relayer instance is always bound to one
+  network, switching Demo/Live on the front end means pointing it at a
+  different relayer instance (a different `relayerApiUrl` per mode — see the
+  front end's admin panel), which is what actually changes which network's
+  launches come back.
 - `GET /health` — liveness check.
 
 Its own bookkeeping (voucher lifecycle, block-scan cursors so a restart
-resumes instead of rescanning from genesis) lives in `relayer-data/` —
-plain JSON files, same philosophy as `deployed-contracts/`, and **not**
-something to hand-edit or commit.
+resumes instead of rescanning from genesis) lives in `relayer-data/<network>/`
+— plain JSON files, same philosophy as `deployed-contracts/`, and **not**
+something to hand-edit or commit. The relayer process always runs against
+exactly one network at a time (`--network <name>`, or `HARDHAT_NETWORK`),
+so it automatically writes into that network's own subdirectory — a
+testnet relayer's vouchers and cursor never mix with a mainnet relayer's,
+even if you happen to run both from the same checkout.
 
 The relayer starts watching for deposits **from its own startup block
 onward**, not from genesis — a deposit made before the relayer's first run
@@ -397,13 +649,14 @@ This repo is already set up for that:
 - It sets permissive CORS headers on every response, since the front end
   (`index.html`) is essentially always served from a different origin than
   wherever this API ends up.
-- `relayer-data/` and `deployed-contracts/` (its two JSON-file-backed data
-  directories) can be redirected via `RELAYER_DATA_DIR` /
-  `DEPLOYED_CONTRACTS_DIR` env vars — **check whether your host's default
-  app directory actually survives a redeploy or restart.** If it doesn't,
-  point these at whatever path your host documents as persistent storage;
-  otherwise a redeploy can silently forget in-flight vouchers, the
-  block-scan cursor, and the launch ledger.
+- `relayer-data/`, `deployed-contracts/`, and `deployments/` (its three
+  JSON-file-backed data directory roots — each one holding a subdirectory
+  per network underneath it) can be redirected via `RELAYER_DATA_DIR` /
+  `DEPLOYED_CONTRACTS_DIR` / `DEPLOYMENTS_DIR` env vars — **check whether
+  your host's default app directory actually survives a redeploy or
+  restart.** If it doesn't, point these at whatever path your host
+  documents as persistent storage; otherwise a redeploy can silently forget
+  in-flight vouchers, the block-scan cursor, and the launch ledger.
 
 Deploying to GoDaddy's Node.js Hosting specifically, using its GitHub-import
 flow (Hosting dashboard → **Node.js Apps** → **Add App** → **Connect
@@ -534,21 +787,33 @@ ledger, so you can see at a glance what actually got confirmed.
 
 ## The launch ledger (`deployed-contracts/`)
 
-`scripts/launch.js` writes every launch to `deployed-contracts/` — no
-database server required, just files:
+`scripts/launch.js` writes every launch to `deployed-contracts/<network>/`
+— one subdirectory per network (e.g. `deployed-contracts/robinhoodTestnet/`,
+`deployed-contracts/robinhoodMainnet/`) — no database server required, just
+files:
 
-- **`launched-tokens.json`** — the master ledger, one JSON object per
+- **`launched-tokens.json`** — that network's ledger, one JSON object per
   launch, appended to on every run.
 - **`launched-tokens.csv`** — the same data as a flat CSV, for opening in a
   spreadsheet or importing elsewhere. Columns include `mode`,
-  `tokenAddress`, `pairAddress`, and the rest of the liquidity/verification
-  fields alongside the original identity fields.
+  `tokenAddress`, `pairAddress`, `network`, and the rest of the
+  liquidity/verification fields alongside the original identity fields.
 - **`<SYMBOL>.json`** — that one launch's record on its own, named after
   the token's ticker (e.g. `AURA.json`).
 - **`<SYMBOL>.sol`** — an archival copy of `LaunchedToken.sol`'s flattened
   source, with a header comment giving the token address, pair address (if
   any), the implementation address (the one that's actually verified — see
   above), creator, network, and transaction hash.
+
+Launches are split by network specifically so a token launched on testnet
+can never collide with — or be mistaken for — one launched on mainnet under
+the same ticker: before this, every network wrote into one shared
+directory, so a testnet `AURA` and a mainnet `AURA` would silently
+overwrite each other's `AURA.json`/`AURA.sol`. Each entry still carries its
+own `network` field/column too, so a single ledger file stays
+self-describing even if it's copied out on its own. `readAllLedgers()` (in
+`lib/launchStore.js`) gives a combined, cross-network view when you want
+one; `listNetworks()` lists which network subdirectories currently exist.
 
 For a "Deploy and Add Liquidity (Launch)" launch that included a creator buy-in, the
 ledger record also carries `creatorBuyEthAmount` and `creatorTokensBought`;
@@ -558,6 +823,27 @@ ledger record also carries `creatorBuyEthAmount` and `creatorTokensBought`;
 swapping it for a real database later (Postgres, etc.) means changing that
 one file, not the launch flow that calls it. The record shape it writes is
 already what you'd want as a `launched_tokens` table's columns.
+
+## The platform deployment record (`deployments/`)
+
+`scripts/deploy.js` deploys the platform's own infrastructure — the
+`TokenFactory`/`CustomTokenFactory` pair, their token implementations and
+liquidity lockers, and whatever optional platform-rewards pieces that run
+included — which is a different thing from an individual token launch, so
+it gets its own directory rather than sharing `deployed-contracts/`.
+Every run writes into `deployments/<network>/`:
+
+- **`current.json`** — the latest deployment for that network, overwritten
+  every run. This is what you'd point another script, a `.env` template, or
+  the front end's network config at to get "the addresses in use right now"
+  for that network, instead of scrolling back through console output.
+- **`history.json`** — every run ever recorded for that network, appended
+  to, oldest first — so redeploying (including a run that reuses a piece
+  via `REWARDS_DISTRIBUTOR_ADDRESS`/`PLATFORM_TOKEN_ADDRESS`) never
+  silently loses the previous record.
+
+`lib/deploymentStore.js` is the module behind this, same dependency-free
+philosophy as `lib/launchStore.js` and `lib/relayerStore.js`.
 
 ## Design notes worth knowing before you touch this
 
@@ -664,6 +950,46 @@ automatically):
 
 ```bash
 npx hardhat run scripts/deploy.js --network hardhat
+```
+
+### Deploying to robinhoodTestnet
+
+Unlike mainnet, testnet has no confirmed official Uniswap V2 router and no
+confirmed Chainlink price feed (see the `DEX_ROUTER_ADDRESS`/
+`PRICE_FEED_ADDRESS` comments in `.env.example`) — `deploy.js` refuses to
+guess either one, so both need a real address before it'll run against
+`robinhoodTestnet`.
+
+For the router: verify any candidate address directly against the block
+explorer (`https://explorer.testnet.chain.robinhood.com`) before trusting
+it — check that it's verified under the name `UniswapV2Router02`, compiled
+with Solidity `0.6.6` (the real version; a different name or compiler
+version, e.g. a custom "SwapRouter" on `0.8.x`, means it's a different kind
+of contract that won't behave the way this platform's contracts expect),
+and that its constructor's `_factory`/`_WETH` addresses are themselves
+separately verified as `UniswapV2Factory`/`WETH9`. A router passing all of
+that is a genuine, unmodified Uniswap V2 deployment — safe to use for
+testing even though (unlike mainnet) it isn't an "official" one, since
+standard Uniswap V2 has no owner/upgrade/pause mechanism that could do
+anything to you beyond its already-public fee-sharing option.
+
+For the price feed: since no confirmed Chainlink feed exists on testnet,
+deploy `MockAggregatorV3` yourself:
+
+```bash
+npx hardhat run scripts/deployMockPriceFeed.js --network robinhoodTestnet
+```
+
+This refuses to run against `robinhoodMainnet` — it's a fixed-price,
+unauthenticated stand-in (anyone can call `setAnswer()` on it — see the
+contract) that must never back a real deployment. It prints the address to
+set as `PRICE_FEED_ADDRESS`.
+
+With both addresses in `.env` (`DEX_ROUTER_ADDRESS` and
+`PRICE_FEED_ADDRESS`), run the normal deploy:
+
+```bash
+npx hardhat run scripts/deploy.js --network robinhoodTestnet
 ```
 
 Launch a token with "Deploy Token" — create + verify only, 100% of supply
