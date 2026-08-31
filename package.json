@@ -1,0 +1,21 @@
+{
+  "name": "hoodlaunch-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Token factory, zero-tax token template, and liquidity locker for the Hood Launch launchpad concept.",
+  "main": "scripts/relayer.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "build": "hardhat compile",
+    "start": "node scripts/relayer.js",
+    "test": "hardhat test",
+    "deploy:local": "hardhat run scripts/deploy.js --network hardhat"
+  },
+  "dependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.22.2",
+    "hardhat": "^2.22.0"
+  }
+}

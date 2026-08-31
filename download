@@ -1,0 +1,12 @@
+node_modules
+artifacts
+cache
+.env
+coverage
+coverage.json
+
+# deployed-contracts/ (the launch ledger scripts/launch.js writes to) is
+# deliberately NOT ignored here — it's the record of what's actually been
+# launched, which is the point of keeping it. If you'd rather it not live
+# in git (e.g. once it's large, or once a real database has replaced it),
+# add it to this file yourself.
