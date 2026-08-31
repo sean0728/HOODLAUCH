@@ -371,13 +371,26 @@ This repo is already set up for that:
 
 - `package.json` declares `main`, `build` (`hardhat compile` — needed so the
   factory ABIs are available before startup), and `start` (`node
-  scripts/relayer.js`), and every package the relayer needs at runtime
-  (`hardhat`, `@nomicfoundation/hardhat-toolbox`, `dotenv`, `express`,
-  `@openzeppelin/contracts`) is a `dependencies` entry, not a
-  `devDependencies` one — some hosts run a production-only install that
-  skips `devDependencies` entirely, which would otherwise leave `hardhat`
-  missing at startup even though `npx hardhat run` worked fine on your own
-  machine.
+  scripts/relayer.js`), and every package the relayer needs at runtime is a
+  `dependencies` entry, not a `devDependencies` one — some hosts run a
+  production-only install that skips `devDependencies` entirely, which
+  would otherwise leave `hardhat` missing at startup even though `npx
+  hardhat run` worked fine on your own machine.
+- That list of `dependencies` is longer than you might expect —
+  `@nomicfoundation/hardhat-toolbox` bundles a dozen-plus sub-plugins
+  (`hardhat-ethers`, `hardhat-chai-matchers`, `hardhat-verify`, `typechain`,
+  `ts-node`, `typescript`, `solidity-coverage`, `hardhat-gas-reporter`,
+  etc.) as **peer dependencies**, not dependencies of its own package — npm
+  auto-installs those for you locally, so they're easy to forget even exist
+  until a host's install doesn't do that same auto-install. If you see
+  `HardhatError: HH801: Plugin @nomicfoundation/hardhat-toolbox requires
+  the following dependencies to be installed: ...` on a fresh host, that's
+  this exact problem: the toolbox's own config-loading check runs on
+  *every* Hardhat command (including a plain `hardhat compile`), regardless
+  of whether your code actually uses gas-reporter or typechain output, so
+  none of these are safe to leave off — they're all already listed in this
+  repo's `package.json` for that reason, with the versions HH801 itself
+  reports as compatible.
 - The relayer listens on `process.env.PORT` (falling back to `RELAYER_PORT`,
   then `8787`) rather than a fixed port — required by hosts that assign the
   port for you and route your app's domain to it.
