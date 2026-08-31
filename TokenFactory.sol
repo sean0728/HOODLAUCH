@@ -307,6 +307,7 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     event LiquiditySlippageBpsUpdated(uint256 newBps);
     event BuyInSlippageBpsUpdated(uint256 newBps);
     event RewardsDistributorUpdated(address newDistributor);
+    event TokenPriceFeedUpdated(address indexed token, address newPriceFeed, uint256 newMaxOracleStaleness);
 
     constructor(
         address tokenImplementation_,
@@ -915,5 +916,17 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         maxOracleStaleness = maxOracleStaleness_;
         rewardBps = rewardBps_;
         emit TaxDefaultsUpdated();
+    }
+
+    /// @notice Escape hatch for an already-launched token whose price feed
+    /// has gone permanently stale or was never a real, maintained feed —
+    /// see LaunchedToken.updatePriceFeed. Owner-only, and deliberately
+    /// narrow: this can only repoint that one token's oracle inputs, never
+    /// its fee rate, fee wallet, pair, or taxActive directly. Graduation
+    /// still requires the same market-cap/confirmation-window check as
+    /// ever; this only unblocks that path from behind a dead oracle.
+    function updateTokenPriceFeed(address token, address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyOwner {
+        LaunchedToken(token).updatePriceFeed(newPriceFeed_, newMaxOracleStaleness_);
+        emit TokenPriceFeedUpdated(token, newPriceFeed_, newMaxOracleStaleness_);
     }
 }

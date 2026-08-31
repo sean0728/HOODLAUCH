@@ -59,9 +59,48 @@ contract LaunchedToken is ERC20 {
     address public rewardsDistributor;
     uint256 public rewardBps; // absolute bps of transfer value diverted to rewardsDistributor, carved OUT OF feeBps (never on top of it); always <= feeBps
 
+    /// @notice Hard ceiling on totalSupply_, enforced once at initialize().
+    /// Purely defense-in-depth: currentMarketCapInFeedDecimals()'s own
+    /// arithmetic (usdPerToken * totalSupply()) would need a totalSupply in
+    /// the neighborhood of 1e44 tokens to have any realistic path to
+    /// overflowing a uint256 at ordinary prices — utterly outside anything
+    /// a real launch would ever use — but capping it here at 1 quadrillion
+    /// tokens (comfortably above real-world outliers like PEPE's ~420
+    /// trillion or SHIB's ~589 trillion supply) removes that edge case
+    /// entirely rather than relying on it staying implausible. See
+    /// _computeMarketCapFromPair for the other half of this hardening (a
+    /// revert in the graduation math is caught, not left to brick trading).
+    uint256 public constant MAX_TOTAL_SUPPLY = 1_000_000_000_000_000 * 1e18; // 1 quadrillion tokens, 18 decimals
+
+    /// @notice Once a taxed transfer first observes the pool's market cap at
+    /// or above graduationTargetUsd, this records when — rather than
+    /// disabling the tax immediately off that one instantaneous reading.
+    /// 0 means "not currently a graduation candidate". See
+    /// _maybeDisableTax() for why: a single spot-price read is cheap to
+    /// manipulate temporarily (a large trade against a pool whose totalSupply
+    /// dwarfs its real liquidity can imply a market cap far beyond the
+    /// pool's actual ETH value for exactly one instant), so graduation now
+    /// requires the target to still be met on a later transfer, at least
+    /// GRADUATION_CONFIRMATION_WINDOW after the first qualifying
+    /// observation — and any transfer that observes the target no longer
+    /// met in between resets this back to 0, so unwinding a manipulated
+    /// position (itself a transfer against the pool) undoes the candidate
+    /// window instead of letting it quietly finish counting down.
+    uint256 public graduationCandidateAt;
+
+    /// @notice Minimum time a pool's market cap must stay at or above
+    /// graduationTargetUsd, confirmed across at least two separate
+    /// pair-touching transfers, before the tax actually disables. Fixed
+    /// rather than owner-configurable — this is a security property of
+    /// every launch, not a tunable default.
+    uint256 public constant GRADUATION_CONFIRMATION_WINDOW = 30 minutes;
+
     event TokenInitialized(string name, string symbol, uint256 totalSupply, address indexed creator);
     event TaxConfigured(address indexed pair, address indexed feeWallet, uint256 feeBps, uint256 graduationTargetUsd);
     event TaxDisabled(uint256 marketCapInFeedDecimals);
+    event GraduationCandidateObserved(uint256 marketCapInFeedDecimals, uint256 confirmEligibleAt);
+    event GraduationCandidateReset();
+    event PriceFeedUpdated(address indexed newPriceFeed, uint256 newMaxOracleStaleness);
 
     modifier onlyFactory() {
         require(msg.sender == factory, "LaunchedToken: caller is not the factory");
@@ -84,6 +123,7 @@ contract LaunchedToken is ERC20 {
     ) external {
         require(!_initialized, "LaunchedToken: already initialized");
         require(totalSupply_ > 0, "LaunchedToken: supply must be > 0");
+        require(totalSupply_ <= MAX_TOTAL_SUPPLY, "LaunchedToken: supply too large");
         require(creator_ != address(0), "LaunchedToken: invalid creator");
         require(mintTo_ != address(0), "LaunchedToken: invalid mint recipient");
         require(factory_ != address(0), "LaunchedToken: invalid factory");
@@ -134,6 +174,27 @@ contract LaunchedToken is ERC20 {
         emit TaxConfigured(pair_, feeWallet_, feeBps_, graduationTargetUsd_);
     }
 
+    /// @notice Escape hatch for a price feed that's gone permanently stale
+    /// or was never a real, maintained feed to begin with (a real risk on a
+    /// young chain — see the comment on IAggregatorV3). Callable only by
+    /// the factory, which gates it behind its own owner (see
+    /// TokenFactory.updateTokenPriceFeed) — never by the creator or anyone
+    /// else. Deliberately narrow: it repoints the oracle inputs the
+    /// graduation check reads, and nothing else. It cannot touch feeBps,
+    /// feeWallet, pair, or taxActive directly, and disabling the tax still
+    /// requires the same currentMarketCapInFeedDecimals()/confirmation-
+    /// window path as ever — this only unblocks that path when it would
+    /// otherwise be stuck forever behind a dead oracle, it doesn't grant a
+    /// shortcut around it.
+    function updatePriceFeed(address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyFactory {
+        require(taxConfigured, "LaunchedToken: tax not configured");
+        require(newPriceFeed_ != address(0), "LaunchedToken: invalid price feed");
+        require(newMaxOracleStaleness_ > 0, "LaunchedToken: oracle staleness must be > 0");
+        priceFeed = IAggregatorV3(newPriceFeed_);
+        maxOracleStaleness = newMaxOracleStaleness_;
+        emit PriceFeedUpdated(newPriceFeed_, newMaxOracleStaleness_);
+    }
+
     function name() public view override returns (string memory) { return _tokenName; }
     function symbol() public view override returns (string memory) { return _tokenSymbol; }
 
@@ -173,37 +234,123 @@ contract LaunchedToken is ERC20 {
     /// yet, the feed can't be read, or its data is stale beyond
     /// maxOracleStaleness. A stale/broken feed never blocks trading — it
     /// only means the tax-disable check can't run until the feed recovers.
+    ///
+    /// The pool-reads-and-arithmetic half of this (everything past the
+    /// oracle call) is delegated to _computeMarketCapFromPair() through an
+    /// external self-call specifically so it can sit behind its own
+    /// try/catch: unlike the oracle call, that inner computation was
+    /// previously unguarded, so any revert from it (a misbehaving pair, or
+    /// arithmetic overflow) would have propagated out of here, out of
+    /// _maybeDisableTax(), and reverted the entire transfer instead of just
+    /// leaving the tax-disable check unable to run this time.
     function currentMarketCapInFeedDecimals() public view returns (uint256 marketCap, bool feedIsFresh) {
         if (pair == address(0)) return (0, false);
         try priceFeed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
             if (answer <= 0) return (0, false);
             if (block.timestamp - updatedAt > maxOracleStaleness) return (0, false);
 
-            (uint112 reserve0, uint112 reserve1, ) = IUniswapV2PairMinimal(pair).getReserves();
-            address token0 = IUniswapV2PairMinimal(pair).token0();
-            uint256 tokenReserve = token0 == address(this) ? uint256(reserve0) : uint256(reserve1);
-            uint256 ethReserve = token0 == address(this) ? uint256(reserve1) : uint256(reserve0);
-            if (tokenReserve == 0) return (0, false);
-
-            uint256 pricePerTokenWei = (ethReserve * 1e18) / tokenReserve;
-            uint256 ethUsd = uint256(answer);
-            uint256 usdPerToken = (pricePerTokenWei * ethUsd) / 1e18;
-            marketCap = (usdPerToken * totalSupply()) / 1e18;
-            feedIsFresh = true;
+            try this._computeMarketCapFromPair(uint256(answer)) returns (uint256 mc, bool ok) {
+                if (!ok) return (0, false);
+                return (mc, true);
+            } catch {
+                return (0, false);
+            }
         } catch {
             return (0, false);
         }
     }
 
+    /// @dev External purely so currentMarketCapInFeedDecimals() can wrap it
+    /// in try/catch (Solidity's try/catch only guards external calls) —
+    /// this is not meant to be called by anything other than this contract
+    /// itself, hence the msg.sender check. Contains everything that reads
+    /// the pair and derives a USD market cap from it; isolated here so a
+    /// revert anywhere in this block degrades to "can't confirm graduation
+    /// right now" instead of bricking the transfer that triggered it.
+    function _computeMarketCapFromPair(uint256 ethUsd) external view returns (uint256 marketCap, bool ok) {
+        require(msg.sender == address(this), "LaunchedToken: internal only");
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2PairMinimal(pair).getReserves();
+        address token0 = IUniswapV2PairMinimal(pair).token0();
+        uint256 tokenReserve = token0 == address(this) ? uint256(reserve0) : uint256(reserve1);
+        uint256 ethReserve = token0 == address(this) ? uint256(reserve1) : uint256(reserve0);
+        if (tokenReserve == 0) return (0, false);
+
+        uint256 pricePerTokenWei = (ethReserve * 1e18) / tokenReserve;
+        uint256 usdPerToken = (pricePerTokenWei * ethUsd) / 1e18;
+        marketCap = (usdPerToken * totalSupply()) / 1e18;
+        ok = true;
+    }
+
+    /// @notice Graduation requires the market cap target to be met on TWO
+    /// separate observations, at least GRADUATION_CONFIRMATION_WINDOW apart,
+    /// rather than disabling the tax off a single instantaneous reading.
+    ///
+    /// Why: a pool's spot price is cheap to move temporarily, and because
+    /// marketCap here is spot price * totalSupply(), a typical launch's
+    /// enormous totalSupply relative to its actual (thin, freshly-seeded)
+    /// liquidity means a comparatively small, temporary trade can imply a
+    /// market cap far beyond the pool's real ETH value for exactly one
+    /// instant — see the audit note in the repo. Requiring the target to
+    /// still hold on a later, separate transfer means unwinding the
+    /// manipulating position — itself a transfer against this same pool —
+    /// resets graduationCandidateAt back to 0 before confirmation can ever
+    /// complete, so an attacker has to keep real capital committed and the
+    /// price genuinely elevated for the entire window, not just for one
+    /// instant.
     function _maybeDisableTax() internal {
         if (!taxActive) return;
         (uint256 marketCap, bool feedIsFresh) = currentMarketCapInFeedDecimals();
-        if (!feedIsFresh) return;
+        if (!feedIsFresh) return; // oracle hiccup: leave any in-progress candidacy exactly as it was
 
         uint256 targetInFeedDecimals = graduationTargetUsd * (10 ** priceFeed.decimals());
-        if (marketCap >= targetInFeedDecimals) {
-            taxActive = false;
-            emit TaxDisabled(marketCap);
+        if (marketCap < targetInFeedDecimals) {
+            if (graduationCandidateAt != 0) {
+                graduationCandidateAt = 0;
+                emit GraduationCandidateReset();
+            }
+            return;
         }
+
+        if (graduationCandidateAt == 0) {
+            graduationCandidateAt = block.timestamp;
+            emit GraduationCandidateObserved(marketCap, block.timestamp + GRADUATION_CONFIRMATION_WINDOW);
+            return;
+        }
+
+        if (block.timestamp < graduationCandidateAt + GRADUATION_CONFIRMATION_WINDOW) {
+            return; // still within the confirmation window; needs a later transfer to confirm
+        }
+
+        taxActive = false;
+        emit TaxDisabled(marketCap);
+    }
+
+    // ---------------------------------------------------------------
+    // Burn: a true burn, callable directly by any holder at any time —
+    // unlike the transfer tax above, this has nothing to do with a pool and
+    // is never taxed (a burn's `to` is address(0), never `pair`, so the tax
+    // branch in _update() above never applies to it). "True burn" means
+    // totalSupply actually decreases (OpenZeppelin's ERC20._burn, which
+    // routes through the same _update() override as every other transfer)
+    // — not a transfer to a dead address that a holder or explorer could
+    // mistake for real supply still existing somewhere.
+    // ---------------------------------------------------------------
+
+    event TokensBurned(uint256 amount);
+
+    /// @notice Permanently destroys `amount` of the caller's own tokens.
+    function burn(uint256 amount) external {
+        _burn(msg.sender, amount);
+        emit TokensBurned(amount);
+    }
+
+    /// @notice Same as burn(), but spends `account`'s allowance to the
+    /// caller first — standard OpenZeppelin ERC20Burnable behavior, so a
+    /// third-party contract a holder has approved can burn on their behalf
+    /// without ever taking custody of the tokens first.
+    function burnFrom(address account, uint256 amount) external {
+        _spendAllowance(account, msg.sender, amount);
+        _burn(account, amount);
+        emit TokensBurned(amount);
     }
 }

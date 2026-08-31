@@ -19,8 +19,25 @@ contract MockRouter {
     address private immutable _weth;
     mapping(address => address) public pairs; // launched token => mock pair (also the LP token)
 
+    /// @notice Scales every swap function's actual payout by this many bps
+    /// before comparing it against the caller's amountOutMin — 10_000
+    /// (100%, a pure no-op) by default, so every test in this repo that
+    /// never touches this knob sees exactly the same honest fills as
+    /// before. Test-only lever for CustomToken's processingSlippageBps
+    /// coverage: dialing this below 10_000 simulates a router that
+    /// shortchanges a swap relative to what its own reserves imply (a
+    /// misbehaving router, or a multi-hop quote that drifted), so tests
+    /// can confirm the resulting amountOutMin actually trips — and that
+    /// tripping it degrades safely (see CustomToken._swapAndProcess's
+    /// try/catch isolation) instead of reverting the whole transfer.
+    uint256 public payoutBps = 10_000;
+
     constructor(address weth_) {
         _weth = weth_;
+    }
+
+    function setPayoutBps(uint256 newBps) external {
+        payoutBps = newBps;
     }
 
     // Holds ETH only momentarily, mid-multi-hop, in
@@ -101,6 +118,7 @@ contract MockRouter {
         require(tokenReserve > 0 && ethReserve > 0, "MockRouter: no liquidity for token");
 
         uint256 grossOut = (tokenReserve * msg.value) / (ethReserve + msg.value);
+        grossOut = (grossOut * payoutBps) / 10_000;
 
         (bool sentEth, ) = pair.call{value: msg.value}("");
         require(sentEth, "MockRouter: ETH forward failed");
@@ -139,6 +157,7 @@ contract MockRouter {
         uint256 tokenIn = IERC20(token).balanceOf(pair) - pairBalBefore;
 
         uint256 ethOut = (ethReserveBefore * tokenIn) / (tokenReserveBefore + tokenIn);
+        ethOut = (ethOut * payoutBps) / 10_000;
         require(ethOut >= amountOutMin, "MockRouter: insufficient output amount");
 
         MockLPToken(payable(pair)).withdrawEth(payable(to), ethOut);
@@ -182,6 +201,7 @@ contract MockRouter {
         // Hop 2: ETH -> tokenOut, sent to `to`.
         (uint256 tokenReserveOut, uint256 ethReserveOut) = _reservesFor(pairOut, tokenOut);
         uint256 grossOut = (tokenReserveOut * ethOut) / (ethReserveOut + ethOut);
+        grossOut = (grossOut * payoutBps) / 10_000;
         (bool sentEth, ) = pairOut.call{value: ethOut}("");
         require(sentEth, "MockRouter: ETH forward failed");
         uint256 balBefore = IERC20(tokenOut).balanceOf(to);

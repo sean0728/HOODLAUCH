@@ -47,14 +47,34 @@ import "./interfaces/IAggregatorV3.sol";
 ///
 /// Buy tax and sell tax are set independently, each capped at 5% (see
 /// MAX_TOTAL_BPS) — enforced once, at initialize(), and immutable for the
-/// life of the token from that point on. The only thing that can ever
-/// change after launch is the marketing wallet address itself, exactly as
-/// requested — every fee rate is locked in at creation, closing off the
-/// classic "creator jacks up the sell tax after launch" move.
+/// life of the token from that point on. Nothing in this contract can
+/// ever raise, lower, or otherwise touch buyFees/sellFees or the
+/// platform's own platformFeeBps after that point — there is no setter
+/// for any of them anywhere below. What CAN change after launch is
+/// operational, never the rate itself: the marketing wallet address, the
+/// swap-threshold batching knob, the processing-slippage tolerance, the
+/// rewards-blocked list, and a tax-exemption whitelist (isTaxExempt /
+/// setTaxExempt — bypasses tax entirely for a specific address, but never
+/// changes what rate anyone else pays). All of those, plus the creator
+/// role itself, go permanently dark the moment the creator calls
+/// renounceCreator() — see that function and transferCreator/
+/// acceptCreator below. This is deliberate: the classic "creator jacks up
+/// the sell tax after launch" rug is closed off at the rate level, not
+/// just gated behind a role that could be renounced later.
 contract CustomToken is ERC20, ReentrancyGuard {
     bool private _initialized;
 
     address public creator;
+    /// @notice Set by transferCreator(); becomes `creator` once the
+    /// proposed address calls acceptCreator() itself. Mirrors the
+    /// Ownable2Step pattern already used for every other privileged role
+    /// in this codebase (TokenFactory/CustomTokenFactory/LiquidityLocker
+    /// owners) so a single mistyped address can never permanently strand
+    /// the creator role — see setMarketingWallet, setSwapThreshold,
+    /// setRewardsBlocked, activateIndependentPair, and rescueToken/
+    /// rescueEth below, all of which become permanently uncallable
+    /// without a working creator address.
+    address public pendingCreator;
     address public factory;
     address public router;
     address public pair; // set once, by the factory, right after it seeds this token's pool
@@ -120,6 +140,20 @@ contract CustomToken is ERC20, ReentrancyGuard {
     address public rewardsDistributor;
     uint256 public rewardBps; // absolute bps of transfer value diverted to rewardsDistributor, carved OUT OF platformFeeBps (never on top of it); always <= platformFeeBps
 
+    /// @notice Hard ceiling on totalSupply_, enforced once at initialize().
+    /// See LaunchedToken.MAX_TOTAL_SUPPLY for the full reasoning — purely
+    /// defense-in-depth against currentMarketCapInFeedDecimals()'s own
+    /// arithmetic overflowing for an extreme, unrealistic supply.
+    uint256 public constant MAX_TOTAL_SUPPLY = 1_000_000_000_000_000 * 1e18; // 1 quadrillion tokens, 18 decimals
+
+    /// @notice Mirrors LaunchedToken.graduationCandidateAt exactly — see
+    /// that contract's comment for the full reasoning. 0 means "not
+    /// currently a graduation candidate".
+    uint256 public graduationCandidateAt;
+
+    /// @notice Mirrors LaunchedToken.GRADUATION_CONFIRMATION_WINDOW.
+    uint256 public constant GRADUATION_CONFIRMATION_WINDOW = 30 minutes;
+
     // ---- fees collected in-kind, awaiting a batched swap-and-process ----
     uint256 public pendingLiquidityTokens;
     uint256 public pendingMarketingTokens;
@@ -131,6 +165,28 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// above 5% of supply, so it can't be set so high it silently never
     /// fires) via setSwapThreshold().
     uint256 public swapThreshold;
+
+    /// @notice Slippage tolerance applied as a protective amountOutMin
+    /// floor to every internal swap-and-process trade (marketing's
+    /// token-for-ETH swap, half of the liquidity fee's token-for-ETH swap,
+    /// and the reflection fee's token-for-ETH-or-token swap), plus the
+    /// liquidity-add's own token/ETH minimums — see _quoteOut/
+    /// _applySlippage and Finding 2 of AUDIT-CustomToken.md. Before this,
+    /// every one of these traded with amountOutMin: 0 (or 0,0), making
+    /// them a predictable, repeatable MEV sandwich target since the
+    /// trigger condition (pending fees crossing swapThreshold) is public
+    /// on-chain state. Same 5.00%-8.00% band as TokenFactory/
+    /// CustomTokenFactory's liquiditySlippageBps/buyInSlippageBps, but
+    /// creator-adjustable here (via setProcessingSlippageBps) rather than
+    /// platform-owned, since these trades only ever affect this specific
+    /// token's own marketing/liquidity/reflection proceeds. Set to its
+    /// 600 (6.00%) default inside initialize() rather than as an inline
+    /// field initializer — this is a clone, and an inline initializer
+    /// only ever runs in the implementation contract's own constructor,
+    /// never on a clone (see swapThreshold above for the same reasoning).
+    uint16 public processingSlippageBps;
+    uint16 public constant MIN_PROCESSING_SLIPPAGE_BPS = 500; // 5.00%
+    uint16 public constant MAX_PROCESSING_SLIPPAGE_BPS = 800; // 8.00%
 
     bool private _inSwap;
     modifier lockTheSwap() {
@@ -161,6 +217,26 @@ contract CustomToken is ERC20, ReentrancyGuard {
     mapping(address => uint256) public withdrawnDividends;
     uint256 public totalDividendsDistributed;
     uint256 public totalDividendsWithdrawn;
+
+    /// @notice Creator-controlled block list: an address with
+    /// isBlockedFromRewards[account] == true never shows or accrues any
+    /// reflection entitlement, on either claimReflections() or
+    /// pushReflections() — see accumulativeDividendOf() and
+    /// setRewardsBlocked() below. Meant for the same kind of address the
+    /// pair/address(this) exclusion above already covers automatically:
+    /// a bot, a known bad actor, or any wallet the creator decides
+    /// shouldn't farm reflections — not a way to touch anyone's token
+    /// balance, trading ability, or already-claimed history.
+    mapping(address => bool) public isBlockedFromRewards;
+
+    /// @notice Creator-controlled tax-exemption whitelist: an address with
+    /// isTaxExempt[account] == true pays (and triggers) no tax at all —
+    /// neither the creator's own buy/sell fee (reflection/marketing/
+    /// liquidity/burn) nor the platform's graduating tax — on any
+    /// transfer where it's either side. See setTaxExempt() below for the
+    /// full reasoning on why this is safe: it only ever changes WHO pays
+    /// the already-fixed rate, never the rate itself.
+    mapping(address => bool) public isTaxExempt;
 
     /// @notice True iff either side's reflectionBps was nonzero at
     /// initialize() — fixed for the token's life, exactly like every other
@@ -197,6 +273,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     event PairSet(address indexed pair);
     event MarketingWalletUpdated(address indexed newWallet);
     event SwapThresholdUpdated(uint256 newThreshold);
+    event RewardsAccessUpdated(address indexed account, bool blocked);
     event DividendsDistributed(uint256 amount);
     event DividendWithdrawn(address indexed to, uint256 amount);
     event ReflectionsPushed(uint256 holdersPaid, uint256 totalPaid, uint256 nextCursor);
@@ -205,6 +282,16 @@ contract CustomToken is ERC20, ReentrancyGuard {
     event TokensBurned(uint256 amount);
     event PlatformTaxConfigured(address indexed feeWallet, uint256 feeBps, uint256 graduationTargetUsd);
     event PlatformTaxDisabled(uint256 marketCapInFeedDecimals);
+    event GraduationCandidateObserved(uint256 marketCapInFeedDecimals, uint256 confirmEligibleAt);
+    event GraduationCandidateReset();
+    event PriceFeedUpdated(address indexed newPriceFeed, uint256 newMaxOracleStaleness);
+    event ProcessingSlippageBpsUpdated(uint256 newBps);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
+    event EthRescued(address indexed to, uint256 amount);
+    event CreatorTransferStarted(address indexed previousCreator, address indexed newCreator);
+    event CreatorTransferred(address indexed previousCreator, address indexed newCreator);
+    event CreatorRenounced(address indexed previousCreator);
+    event TaxExemptionUpdated(address indexed account, bool exempt);
 
     // Runs exactly once, on the implementation contract the factory clones
     // from. Never runs again on any clone.
@@ -229,10 +316,12 @@ contract CustomToken is ERC20, ReentrancyGuard {
     ) external {
         require(!_initialized, "CustomToken: already initialized");
         require(totalSupply_ > 0, "CustomToken: supply must be > 0");
+        require(totalSupply_ <= MAX_TOTAL_SUPPLY, "CustomToken: supply too large");
         require(creator_ != address(0), "CustomToken: invalid creator");
         require(mintTo_ != address(0), "CustomToken: invalid mint recipient");
         require(factory_ != address(0), "CustomToken: invalid factory");
         require(router_ != address(0), "CustomToken: invalid router");
+        require(reflectionAsset_ != address(this), "CustomToken: reflection asset cannot be this token");
 
         uint256 buyTotal = uint256(buyFees_.reflectionBps) + buyFees_.marketingBps + buyFees_.liquidityBps + buyFees_.burnBps;
         uint256 sellTotal = uint256(sellFees_.reflectionBps) + sellFees_.marketingBps + sellFees_.liquidityBps + sellFees_.burnBps;
@@ -254,6 +343,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
         reflectionAsset = reflectionAsset_;
         marketingWallet = marketingWallet_;
         swapThreshold = totalSupply_ / 1000; // 0.1% default; see setSwapThreshold()
+        processingSlippageBps = 600; // 6.00% default; see setProcessingSlippageBps()
         reflectionsEnabled = buyFees_.reflectionBps > 0 || sellFees_.reflectionBps > 0;
 
         _mint(mintTo_, totalSupply_); // "deploy + liquidity": mints to the factory, which pairs it into the pool. "deploy only": mints straight to the creator — see CustomTokenFactory.createCustomToken.
@@ -331,6 +421,21 @@ contract CustomToken is ERC20, ReentrancyGuard {
         require(pair != address(0), "CustomToken: pair not set yet");
         require(rewardBps_ <= feeBps_, "CustomToken: rewardBps exceeds feeBps");
         require(rewardsDistributor_ != address(0) || rewardBps_ == 0, "CustomToken: rewardBps requires a distributor");
+        // Defends against the platform's own feeBps_ and this token's
+        // already-locked-in creator-side tax (buyFees/sellFees, set back
+        // at initialize()) summing past 100%. If they ever did,
+        // _update()'s `value - totalCut` would underflow and revert on
+        // every single taxed transfer of this token, permanently, since
+        // neither side's fee rate can change after this point — see
+        // Finding 3 of AUDIT-CustomToken.md. Not exploitable under any
+        // config shipped today (platform defaults are far below this),
+        // but this closes the combination off at configuration time
+        // rather than relying on the platform owner never raising feeBps_
+        // without checking.
+        uint256 buyTotal = uint256(buyFees.reflectionBps) + buyFees.marketingBps + buyFees.liquidityBps + buyFees.burnBps;
+        uint256 sellTotal = uint256(sellFees.reflectionBps) + sellFees.marketingBps + sellFees.liquidityBps + sellFees.burnBps;
+        uint256 maxCreatorTotal = buyTotal > sellTotal ? buyTotal : sellTotal;
+        require(feeBps_ + maxCreatorTotal <= 10_000, "CustomToken: combined platform and creator tax exceeds 100%");
 
         platformTaxConfigured = true;
         platformFeeWallet = feeWallet_;
@@ -343,6 +448,23 @@ contract CustomToken is ERC20, ReentrancyGuard {
         rewardBps = rewardBps_;
 
         emit PlatformTaxConfigured(feeWallet_, feeBps_, graduationTargetUsd_);
+    }
+
+    /// @notice Escape hatch for a platform price feed that's gone
+    /// permanently stale or was never a real, maintained feed to begin
+    /// with — mirrors LaunchedToken.updatePriceFeed exactly. Callable only
+    /// by the factory (which gates it behind its own owner — see
+    /// CustomTokenFactory.updateTokenPriceFeed), never by the creator.
+    /// Repoints only the oracle inputs the platform-tax graduation check
+    /// reads; touches nothing about platformFeeBps, platformFeeWallet,
+    /// pair, or platformTaxActive directly.
+    function updatePriceFeed(address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyFactory {
+        require(platformTaxConfigured, "CustomToken: platform tax not configured");
+        require(newPriceFeed_ != address(0), "CustomToken: invalid price feed");
+        require(newMaxOracleStaleness_ > 0, "CustomToken: oracle staleness must be > 0");
+        priceFeed = IAggregatorV3(newPriceFeed_);
+        maxOracleStaleness = newMaxOracleStaleness_;
+        emit PriceFeedUpdated(newPriceFeed_, newMaxOracleStaleness_);
     }
 
     function name() public view override returns (string memory) { return _tokenName; }
@@ -370,6 +492,155 @@ contract CustomToken is ERC20, ReentrancyGuard {
         emit SwapThresholdUpdated(newThreshold);
     }
 
+    /// @notice Retune the protective slippage floor applied to every
+    /// internal swap-and-process trade — see processingSlippageBps above.
+    /// Bounded to the same 5.00%-8.00% band already used elsewhere in this
+    /// codebase for the identical purpose.
+    function setProcessingSlippageBps(uint256 newBps) external onlyCreator {
+        require(newBps >= MIN_PROCESSING_SLIPPAGE_BPS, "CustomToken: slippage below 5% floor");
+        require(newBps <= MAX_PROCESSING_SLIPPAGE_BPS, "CustomToken: slippage above 8% ceiling");
+        processingSlippageBps = uint16(newBps);
+        emit ProcessingSlippageBpsUpdated(newBps);
+    }
+
+    /// @notice Step 1 of a two-step creator handoff — see pendingCreator
+    /// above and Finding 5 of AUDIT-CustomToken.md. Does nothing to the
+    /// live `creator` role until the proposed address calls
+    /// acceptCreator() itself.
+    function transferCreator(address newCreator) external onlyCreator {
+        require(newCreator != address(0), "CustomToken: invalid creator");
+        pendingCreator = newCreator;
+        emit CreatorTransferStarted(creator, newCreator);
+    }
+
+    /// @notice Step 2: only the proposed address can complete the
+    /// handoff, proving it controls that address before every
+    /// onlyCreator-gated function (setMarketingWallet, setSwapThreshold,
+    /// setRewardsBlocked, activateIndependentPair, setProcessingSlippageBps,
+    /// rescueToken, rescueEth) starts listening to it instead of the old
+    /// creator.
+    function acceptCreator() external {
+        require(msg.sender == pendingCreator, "CustomToken: caller is not the pending creator");
+        address previousCreator = creator;
+        creator = pendingCreator;
+        pendingCreator = address(0);
+        emit CreatorTransferred(previousCreator, creator);
+    }
+
+    /// @notice Permanently renounces the creator role — the standard
+    /// "renounce ownership" assurance a token's own buyers can go verify
+    /// on-chain. Sets `creator` (and any in-flight `pendingCreator`) to
+    /// address(0) forever, with no recovery path by design. The instant
+    /// this is called, every onlyCreator-gated function on this contract
+    /// — setMarketingWallet, setSwapThreshold, setRewardsBlocked,
+    /// activateIndependentPair, setProcessingSlippageBps, setTaxExempt,
+    /// rescueToken, rescueEth, transferCreator — becomes permanently
+    /// uncallable by anyone, including the address that just called this.
+    /// Note what this does NOT touch: buyFees, sellFees, and
+    /// platformFeeBps were never mutable in the first place (no function
+    /// anywhere sets them after initialize()/configurePlatformTax()), so
+    /// renouncing doesn't "lock in" the tax rate — it was already locked
+    /// in at launch. What renouncing removes is every remaining
+    /// *operational* lever, including the tax-exemption whitelist below.
+    function renounceCreator() external onlyCreator {
+        address previousCreator = creator;
+        creator = address(0);
+        pendingCreator = address(0);
+        emit CreatorRenounced(previousCreator);
+    }
+
+    /// @notice Recovers ERC20 tokens sitting on this contract that aren't
+    /// owed to anyone — e.g. dust left over from an imperfect-ratio
+    /// addLiquidityETH call inside _processLiquidity, or a token sent
+    /// here directly by mistake. See Finding 4 of AUDIT-CustomToken.md.
+    /// Structurally cannot reach into anything this contract still owes:
+    /// when `token` is this token itself, the rescuable amount excludes
+    /// every pending fee stream (pendingLiquidityTokens/
+    /// pendingMarketingTokens/pendingReflectionTokens); when `token` is
+    /// reflectionAsset, it excludes every holder's still-unclaimed
+    /// reflection entitlement (totalDividendsDistributed minus
+    /// totalDividendsWithdrawn) — for any other token, the full balance
+    /// is rescuable since this contract never intentionally holds one.
+    function rescueToken(address token, address to, uint256 amount) external onlyCreator {
+        require(to != address(0), "CustomToken: invalid recipient");
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        uint256 reserved;
+        if (token == address(this)) {
+            reserved = pendingLiquidityTokens + pendingMarketingTokens + pendingReflectionTokens;
+        }
+        if (reflectionAsset != address(0) && token == reflectionAsset) {
+            reserved += totalDividendsDistributed - totalDividendsWithdrawn;
+        }
+        uint256 rescuable = balance > reserved ? balance - reserved : 0;
+        require(amount <= rescuable, "CustomToken: amount exceeds rescuable balance");
+
+        bool sent = IERC20(token).transfer(to, amount);
+        require(sent, "CustomToken: rescue transfer failed");
+        emit TokenRescued(token, to, amount);
+    }
+
+    /// @notice Recovers stray native ETH sitting on this contract —
+    /// direct donations to receive(), or dust left over from an
+    /// imperfect-ratio addLiquidityETH call. Never touches ETH owed to
+    /// holders: when reflectionAsset == address(0) (native-ETH
+    /// reflections), the rescuable amount excludes every holder's
+    /// still-unclaimed dividend balance the same way rescueToken does
+    /// above.
+    function rescueEth(address to, uint256 amount) external onlyCreator {
+        require(to != address(0), "CustomToken: invalid recipient");
+        uint256 reserved = reflectionAsset == address(0) ? (totalDividendsDistributed - totalDividendsWithdrawn) : 0;
+        uint256 balance = address(this).balance;
+        uint256 rescuable = balance > reserved ? balance - reserved : 0;
+        require(amount <= rescuable, "CustomToken: amount exceeds rescuable balance");
+
+        (bool sent, ) = payable(to).call{value: amount}("");
+        require(sent, "CustomToken: rescue transfer failed");
+        emit EthRescued(to, amount);
+    }
+
+    /// @notice Blocks (or unblocks) `account` from ever showing or
+    /// accruing a reflection entitlement — see accumulativeDividendOf()
+    /// and isBlockedFromRewards above. Only affects reflections: a blocked
+    /// account can still hold, send, and receive the token normally, and
+    /// still pays/receives the same transfer tax as anyone else.
+    ///
+    /// While blocked, every distribution that happens is simply never
+    /// payable to this account — not deferred, not redirected to other
+    /// holders (same "safe over maximal" tradeoff as the pair exclusion
+    /// above; see the README for why). If later unblocked, the account's
+    /// entitlement resumes from the same magnified-dividend-per-share
+    /// bookkeeping every other holder uses, which was never paused while
+    /// they were blocked — so anything distributed during the blocked
+    /// window becomes claimable again once unblocked, exactly as if they'd
+    /// simply not gotten around to claiming it yet. Treat blocking as
+    /// meant to be permanent for an address you actually want to exclude;
+    /// toggling it on and off is not a way to selectively skip specific
+    /// distributions.
+    function setRewardsBlocked(address account, bool blocked) external onlyCreator {
+        require(account != address(0), "CustomToken: invalid account");
+        isBlockedFromRewards[account] = blocked;
+        emit RewardsAccessUpdated(account, blocked);
+    }
+
+    /// @notice Whitelists (or un-whitelists) `account` to bypass ALL tax —
+    /// both the creator's own buy/sell fee (reflection/marketing/
+    /// liquidity/burn) and the platform's graduating tax — on any
+    /// transfer where it's either side (see _update's `exempt` check).
+    /// Does NOT touch buyFees/sellFees/platformFeeBps themselves, which
+    /// stay exactly as fixed at launch — this only ever changes WHO pays
+    /// the already-fixed rate, never the rate itself, so it can't be used
+    /// to reintroduce the "creator jacks up the tax" rug this contract's
+    /// immutable fee rates are built to prevent. Meant for addresses that
+    /// legitimately shouldn't be taxed on their own token movements —
+    /// e.g. the LiquidityLocker holding the locked LP, a vesting or
+    /// airdrop-distribution contract, or a CEX deposit wallet the creator
+    /// has arranged a listing with.
+    function setTaxExempt(address account, bool exempt) external onlyCreator {
+        require(account != address(0), "CustomToken: invalid account");
+        isTaxExempt[account] = exempt;
+        emit TaxExemptionUpdated(account, exempt);
+    }
+
     // ---------------------------------------------------------------
     // Transfer tax + reflection bookkeeping
     // ---------------------------------------------------------------
@@ -391,6 +662,22 @@ contract CustomToken is ERC20, ReentrancyGuard {
             super._update(from, to, value);
             _afterBalanceChange(from, to, value);
             _maybeSwapAndProcess();
+            return;
+        }
+
+        // Tax-exemption whitelist (see setTaxExempt above): bypasses BOTH
+        // the creator's own fee and the platform's cut for this specific
+        // transfer, but every other side effect of a buy/sell still runs
+        // exactly as normal — the pending-fee batch can still be
+        // triggered by an exempt seller (it's about the token's overall
+        // backlog, not this trade), and the graduation check still runs
+        // (it's about market cap, not this trade's tax). Only the fee
+        // computation itself is skipped.
+        if (isTaxExempt[from] || isTaxExempt[to]) {
+            super._update(from, to, value);
+            _afterBalanceChange(from, to, value);
+            if (isSell) _maybeSwapAndProcess();
+            if (platformTaxActive) _maybeDisablePlatformTax();
             return;
         }
 
@@ -453,6 +740,35 @@ contract CustomToken is ERC20, ReentrancyGuard {
         if (platformTaxActive) _maybeDisablePlatformTax();
     }
 
+    // ---------------------------------------------------------------
+    // Burn: a true burn, callable directly by any holder at any time — on
+    // top of (and completely independent from) the tax-triggered burnBps
+    // component above. A voluntary burn's `to` is address(0), which is
+    // never `pair`, so it takes the plain untaxed path through _update()
+    // above (the `!isBuy && !isSell` branch) exactly like an ordinary
+    // wallet-to-wallet transfer — no tax is ever skimmed off a holder
+    // choosing to destroy their own tokens. "True burn" means totalSupply
+    // actually decreases (OpenZeppelin's ERC20._burn, routed through the
+    // same _update() override every other transfer uses), same as the
+    // existing tax burn already does — not a transfer to a dead address.
+    // ---------------------------------------------------------------
+
+    /// @notice Permanently destroys `amount` of the caller's own tokens.
+    function burn(uint256 amount) external {
+        _burn(msg.sender, amount);
+        emit TokensBurned(amount);
+    }
+
+    /// @notice Same as burn(), but spends `account`'s allowance to the
+    /// caller first — standard OpenZeppelin ERC20Burnable behavior, so a
+    /// third-party contract a holder has approved can burn on their behalf
+    /// without ever taking custody of the tokens first.
+    function burnFrom(address account, uint256 amount) external {
+        _spendAllowance(account, msg.sender, amount);
+        _burn(account, amount);
+        emit TokensBurned(amount);
+    }
+
     function _afterBalanceChange(address from, address to, uint256 value) private {
         if (value == 0) return;
 
@@ -512,18 +828,27 @@ contract CustomToken is ERC20, ReentrancyGuard {
     function accumulativeDividendOf(address account) public view returns (uint256) {
         // The pair (and the token contract itself) never has a real "holder"
         // entitled to reflections — its balance is pool liquidity, not a
-        // position. Block it here so withdrawableDividendOf() and
+        // position — and a creator-blocked address (see
+        // isBlockedFromRewards/setRewardsBlocked above) is excluded the
+        // same way. Block both here so withdrawableDividendOf() and
         // claimReflections() both automatically inherit the exclusion,
         // without touching the correction bookkeeping that every other
-        // (real) holder relies on for correct accounting.
-        if (account == pair || account == address(this)) return 0;
+        // (real, unblocked) holder relies on for correct accounting.
+        if (account == pair || account == address(this) || isBlockedFromRewards[account]) return 0;
         int256 total = int256(magnifiedDividendPerShare * balanceOf(account)) + _magnifiedDividendCorrections[account];
         if (total < 0) return 0; // defensive only — correct bookkeeping never produces a negative total
         return uint256(total) / MAGNITUDE;
     }
 
     function withdrawableDividendOf(address account) public view returns (uint256) {
-        return accumulativeDividendOf(account) - withdrawnDividends[account];
+        uint256 total = accumulativeDividendOf(account);
+        uint256 withdrawn = withdrawnDividends[account];
+        // Guards against underflow for an account that had already claimed
+        // before being blocked (accumulativeDividendOf forces `total` to 0
+        // the moment they're blocked, which would otherwise be less than
+        // their pre-existing withdrawnDividends) — correctly reads as
+        // "nothing withdrawable" rather than reverting.
+        return total > withdrawn ? total - withdrawn : 0;
     }
 
     /// @notice Pull your accumulated share of whatever's been distributed so
@@ -613,7 +938,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
             address holder = _reflectionHolders[cursor];
             cursor = cursor + 1 == total ? 0 : cursor + 1;
 
-            if (holder == address(this) || holder == pair) continue;
+            if (holder == address(this) || holder == pair || isBlockedFromRewards[holder]) continue;
             uint256 amount = withdrawableDividendOf(holder);
             if (amount == 0) continue;
 
@@ -667,38 +992,80 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// yet, the feed can't be read, or its data is stale beyond
     /// maxOracleStaleness. A stale/broken feed never blocks trading — it
     /// only means the tax-disable check can't run until the feed recovers.
+    ///
+    /// The pool-reads-and-arithmetic half of this (everything past the
+    /// oracle call) is delegated to _computeMarketCapFromPair() through an
+    /// external self-call specifically so it can sit behind its own
+    /// try/catch — see LaunchedToken.currentMarketCapInFeedDecimals for why
+    /// this matters: without it, a revert from a misbehaving pair or from
+    /// arithmetic overflow would propagate out and revert the entire
+    /// transfer instead of just leaving this check unable to run.
     function currentMarketCapInFeedDecimals() public view returns (uint256 marketCap, bool feedIsFresh) {
         if (pair == address(0)) return (0, false);
         try priceFeed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
             if (answer <= 0) return (0, false);
             if (block.timestamp - updatedAt > maxOracleStaleness) return (0, false);
 
-            (uint112 reserve0, uint112 reserve1, ) = IUniswapV2PairMinimal(pair).getReserves();
-            address token0 = IUniswapV2PairMinimal(pair).token0();
-            uint256 tokenReserve = token0 == address(this) ? uint256(reserve0) : uint256(reserve1);
-            uint256 ethReserve = token0 == address(this) ? uint256(reserve1) : uint256(reserve0);
-            if (tokenReserve == 0) return (0, false);
-
-            uint256 pricePerTokenWei = (ethReserve * 1e18) / tokenReserve;
-            uint256 ethUsd = uint256(answer);
-            uint256 usdPerToken = (pricePerTokenWei * ethUsd) / 1e18;
-            marketCap = (usdPerToken * totalSupply()) / 1e18;
-            feedIsFresh = true;
+            try this._computeMarketCapFromPair(uint256(answer)) returns (uint256 mc, bool ok) {
+                if (!ok) return (0, false);
+                return (mc, true);
+            } catch {
+                return (0, false);
+            }
         } catch {
             return (0, false);
         }
     }
 
+    /// @dev External purely so currentMarketCapInFeedDecimals() can wrap it
+    /// in try/catch — see LaunchedToken._computeMarketCapFromPair, which
+    /// this mirrors exactly. Not meant to be called by anything but this
+    /// contract itself.
+    function _computeMarketCapFromPair(uint256 ethUsd) external view returns (uint256 marketCap, bool ok) {
+        require(msg.sender == address(this), "CustomToken: internal only");
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2PairMinimal(pair).getReserves();
+        address token0 = IUniswapV2PairMinimal(pair).token0();
+        uint256 tokenReserve = token0 == address(this) ? uint256(reserve0) : uint256(reserve1);
+        uint256 ethReserve = token0 == address(this) ? uint256(reserve1) : uint256(reserve0);
+        if (tokenReserve == 0) return (0, false);
+
+        uint256 pricePerTokenWei = (ethReserve * 1e18) / tokenReserve;
+        uint256 usdPerToken = (pricePerTokenWei * ethUsd) / 1e18;
+        marketCap = (usdPerToken * totalSupply()) / 1e18;
+        ok = true;
+    }
+
+    /// @notice Mirrors LaunchedToken._maybeDisableTax exactly — see that
+    /// contract's comment for the full reasoning on why graduation now
+    /// requires two separate observations at least
+    /// GRADUATION_CONFIRMATION_WINDOW apart, rather than disabling the tax
+    /// off one instantaneous spot-price read.
     function _maybeDisablePlatformTax() internal {
         if (!platformTaxActive) return;
         (uint256 marketCap, bool feedIsFresh) = currentMarketCapInFeedDecimals();
-        if (!feedIsFresh) return;
+        if (!feedIsFresh) return; // oracle hiccup: leave any in-progress candidacy exactly as it was
 
         uint256 targetInFeedDecimals = graduationTargetUsd * (10 ** priceFeed.decimals());
-        if (marketCap >= targetInFeedDecimals) {
-            platformTaxActive = false;
-            emit PlatformTaxDisabled(marketCap);
+        if (marketCap < targetInFeedDecimals) {
+            if (graduationCandidateAt != 0) {
+                graduationCandidateAt = 0;
+                emit GraduationCandidateReset();
+            }
+            return;
         }
+
+        if (graduationCandidateAt == 0) {
+            graduationCandidateAt = block.timestamp;
+            emit GraduationCandidateObserved(marketCap, block.timestamp + GRADUATION_CONFIRMATION_WINDOW);
+            return;
+        }
+
+        if (block.timestamp < graduationCandidateAt + GRADUATION_CONFIRMATION_WINDOW) {
+            return; // still within the confirmation window; needs a later transfer to confirm
+        }
+
+        platformTaxActive = false;
+        emit PlatformTaxDisabled(marketCap);
     }
 
     // ---------------------------------------------------------------
@@ -713,6 +1080,23 @@ contract CustomToken is ERC20, ReentrancyGuard {
         _swapAndProcess();
     }
 
+    /// @dev Each of the three _process* steps below is called through an
+    /// external self-call wrapped in its own try/catch — the same pattern
+    /// _computeMarketCapFromPair already uses for the graduation math (try/
+    /// catch only wraps external calls, never arbitrary internal logic).
+    /// Before this fix, a revert in any one step — a marketingWallet that
+    /// rejects ETH, a reflectionAsset pool that's been drained, an
+    /// addLiquidityETH call that reverts for an ordinary router-level
+    /// reason — propagated straight out of _swapAndProcess and reverted
+    /// the entire outer transfer that happened to trigger this batch.
+    /// Since this runs on every sell/plain-transfer once pending fees
+    /// cross swapThreshold, that meant one broken step could permanently
+    /// brick all trading and transfers for the token, with no admin
+    /// override anywhere in the contract. See Finding 1 of
+    /// AUDIT-CustomToken.md. A failed step's tokens are added straight
+    /// back to the relevant pending counter — nothing is silently
+    /// forfeited, it just waits for whatever was broken to get fixed
+    /// (e.g. via setMarketingWallet()) and gets retried on a later batch.
     function _swapAndProcess() private lockTheSwap {
         uint256 liquidityTokens = pendingLiquidityTokens;
         uint256 marketingTokens = pendingMarketingTokens;
@@ -721,16 +1105,36 @@ contract CustomToken is ERC20, ReentrancyGuard {
         pendingMarketingTokens = 0;
         pendingReflectionTokens = 0;
 
-        if (liquidityTokens > 0) _processLiquidity(liquidityTokens);
-        if (marketingTokens > 0 && marketingWallet != address(0)) _processMarketing(marketingTokens);
-        if (reflectionTokens > 0) _processReflections(reflectionTokens);
+        if (liquidityTokens > 0) {
+            try this._processLiquidity(liquidityTokens) {
+                // succeeded — nothing left to do
+            } catch {
+                pendingLiquidityTokens += liquidityTokens;
+            }
+        }
+        if (marketingTokens > 0 && marketingWallet != address(0)) {
+            try this._processMarketing(marketingTokens) {
+            } catch {
+                pendingMarketingTokens += marketingTokens;
+            }
+        }
+        if (reflectionTokens > 0) {
+            try this._processReflections(reflectionTokens) {
+            } catch {
+                pendingReflectionTokens += reflectionTokens;
+            }
+        }
     }
 
     /// @dev Half swapped for ETH, the other half paired with that ETH as
     /// fresh liquidity — the resulting LP tokens go straight to a burn
     /// address, so this stream of liquidity can never be withdrawn by
-    /// anyone, ever, including the creator.
-    function _processLiquidity(uint256 amount) private {
+    /// anyone, ever, including the creator. External purely so
+    /// _swapAndProcess can wrap it in try/catch — see that function's own
+    /// comment; not meant to be called by anything but this contract
+    /// itself.
+    function _processLiquidity(uint256 amount) external {
+        require(msg.sender == address(this), "CustomToken: internal only");
         uint256 half = amount / 2;
         uint256 otherHalf = amount - half;
         if (half == 0 || otherHalf == 0) return;
@@ -742,12 +1146,21 @@ contract CustomToken is ERC20, ReentrancyGuard {
 
         _approve(address(this), router, otherHalf);
         (, , uint256 lpAmount) = IUniswapV2Router02(router).addLiquidityETH{value: ethForLiquidity}(
-            address(this), otherHalf, 0, 0, BURN_ADDRESS, block.timestamp + 15 minutes
+            address(this),
+            otherHalf,
+            _applySlippage(otherHalf),
+            _applySlippage(ethForLiquidity),
+            BURN_ADDRESS,
+            block.timestamp + 15 minutes
         );
         emit LiquidityAutoAdded(otherHalf, ethForLiquidity, lpAmount);
     }
 
-    function _processMarketing(uint256 amount) private {
+    /// @dev External purely so _swapAndProcess can wrap it in try/catch —
+    /// see that function's own comment; not meant to be called by
+    /// anything but this contract itself.
+    function _processMarketing(uint256 amount) external {
+        require(msg.sender == address(this), "CustomToken: internal only");
         uint256 ethBefore = address(this).balance;
         _swapTokensForEth(amount);
         uint256 ethOut = address(this).balance - ethBefore;
@@ -757,7 +1170,11 @@ contract CustomToken is ERC20, ReentrancyGuard {
         emit MarketingFeeSent(ethOut);
     }
 
-    function _processReflections(uint256 amount) private {
+    /// @dev External purely so _swapAndProcess can wrap it in try/catch —
+    /// see that function's own comment; not meant to be called by
+    /// anything but this contract itself.
+    function _processReflections(uint256 amount) external {
+        require(msg.sender == address(this), "CustomToken: internal only");
         if (reflectionAsset == address(0)) {
             uint256 ethBefore = address(this).balance;
             _swapTokensForEth(amount);
@@ -771,24 +1188,85 @@ contract CustomToken is ERC20, ReentrancyGuard {
         }
     }
 
+    /// @dev Standard Uniswap V2 constant-product quote (0.30% swap fee
+    /// baked into the 997/1000 constants) — used only to derive a
+    /// protective slippage floor below, never to execute anything, same
+    /// convention as TokenFactory/CustomTokenFactory's identical helper.
+    function _getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) private pure returns (uint256) {
+        uint256 amountInWithFee = amountIn * 997;
+        uint256 numerator = amountInWithFee * reserveOut;
+        uint256 denominator = reserveIn * 1000 + amountInWithFee;
+        return numerator / denominator;
+    }
+
+    /// @dev Quotes amountIn's expected output in tokenOut off the
+    /// relevant pool's own live reserves — the token/WETH leg always
+    /// reads `pair` directly (already known, no lookup needed); any other
+    /// leg (e.g. WETH/reflectionAsset) is looked up off the DEX factory.
+    /// Returns 0 if no pool exists yet or either reserve is empty, which
+    /// callers treat as "can't protect this trade" rather than blocking
+    /// it — a missing quote must never be able to revert or brick a
+    /// transfer (see Finding 1's reasoning, which this is deliberately
+    /// consistent with).
+    function _quoteOut(uint256 amountIn, address tokenIn, address tokenOut) private view returns (uint256) {
+        address pairAddr;
+        if (tokenIn == address(this) || tokenOut == address(this)) {
+            pairAddr = pair;
+        } else {
+            address dexFactory = IUniswapV2Router02(router).factory();
+            pairAddr = IUniswapV2FactoryMinimal(dexFactory).getPair(tokenIn, tokenOut);
+        }
+        if (pairAddr == address(0)) return 0;
+
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2PairMinimal(pairAddr).getReserves();
+        address token0 = IUniswapV2PairMinimal(pairAddr).token0();
+        uint256 reserveIn = token0 == tokenIn ? uint256(reserve0) : uint256(reserve1);
+        uint256 reserveOut = token0 == tokenIn ? uint256(reserve1) : uint256(reserve0);
+        if (reserveIn == 0 || reserveOut == 0) return 0;
+
+        return _getAmountOut(amountIn, reserveIn, reserveOut);
+    }
+
+    /// @dev floor = amount minus processingSlippageBps of it.
+    function _applySlippage(uint256 amount) private view returns (uint256) {
+        return amount - (amount * processingSlippageBps) / 10_000;
+    }
+
     function _swapTokensForEth(uint256 amount) private {
         address[] memory path = new address[](2);
         path[0] = address(this);
         path[1] = IUniswapV2Router02(router).WETH();
+        uint256 quoted = _quoteOut(amount, path[0], path[1]);
+        uint256 minOut = quoted > 0 ? _applySlippage(quoted) : 0;
         _approve(address(this), router, amount);
         IUniswapV2Router02(router).swapExactTokensForETHSupportingFeeOnTransferTokens(
-            amount, 0, path, address(this), block.timestamp + 15 minutes
+            amount, minOut, path, address(this), block.timestamp + 15 minutes
         );
     }
 
     function _swapTokensForToken(uint256 amount, address outputToken) private {
+        address weth = IUniswapV2Router02(router).WETH();
         address[] memory path = new address[](3);
         path[0] = address(this);
-        path[1] = IUniswapV2Router02(router).WETH();
+        path[1] = weth;
         path[2] = outputToken;
+
+        // Two-hop quote: estimate the WETH leg first, then use that
+        // estimate as the input to quote the second leg — an
+        // approximation (the real swap's first leg may land slightly
+        // differently), but one that only ever sets a protective floor,
+        // never the trade itself, same as every other quote helper in
+        // this codebase.
+        uint256 wethQuoted = _quoteOut(amount, path[0], path[1]);
+        uint256 minOut = 0;
+        if (wethQuoted > 0) {
+            uint256 finalQuoted = _quoteOut(wethQuoted, path[1], path[2]);
+            if (finalQuoted > 0) minOut = _applySlippage(finalQuoted);
+        }
+
         _approve(address(this), router, amount);
         IUniswapV2Router02(router).swapExactTokensForTokensSupportingFeeOnTransferTokens(
-            amount, 0, path, address(this), block.timestamp + 15 minutes
+            amount, minOut, path, address(this), block.timestamp + 15 minutes
         );
     }
 }

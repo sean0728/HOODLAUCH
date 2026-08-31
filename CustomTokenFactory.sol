@@ -229,6 +229,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     event BuyInSlippageBpsUpdated(uint256 newBps);
     event TaxDefaultsUpdated();
     event RewardsDistributorUpdated(address newDistributor);
+    event TokenPriceFeedUpdated(address indexed token, address newPriceFeed, uint256 newMaxOracleStaleness);
 
     constructor(
         address tokenImplementation_,
@@ -844,5 +845,17 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         maxOracleStaleness = maxOracleStaleness_;
         rewardBps = rewardBps_;
         emit TaxDefaultsUpdated();
+    }
+
+    /// @notice Escape hatch for an already-launched CustomToken whose
+    /// platform price feed has gone permanently stale or was never a real,
+    /// maintained feed — see CustomToken.updatePriceFeed /
+    /// TokenFactory.updateTokenPriceFeed (identical pattern). Owner-only,
+    /// and deliberately narrow: repoints only that token's oracle inputs,
+    /// never its fee rates, fee wallet, pair, or platformTaxActive
+    /// directly.
+    function updateTokenPriceFeed(address token, address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyOwner {
+        CustomToken(payable(token)).updatePriceFeed(newPriceFeed_, newMaxOracleStaleness_);
+        emit TokenPriceFeedUpdated(token, newPriceFeed_, newMaxOracleStaleness_);
     }
 }
