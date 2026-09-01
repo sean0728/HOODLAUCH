@@ -577,6 +577,21 @@ On startup, the relayer warns (but doesn't refuse to run) if the factory's
 on-chain `relayer()` address doesn't match its own wallet — call
 `setRelayer(<relayer wallet address>)` (owner-only, on each factory you
 want it to serve) before expecting real relays to succeed.
+`scripts/setRelayer.js` does exactly that from the command line instead of
+a console/Etherscan "write contract" call:
+
+```
+RELAYER_ADDRESS=0x... TOKEN_FACTORY_ADDRESS=0x... CUSTOM_TOKEN_FACTORY_ADDRESS=0x... \
+  npx hardhat run scripts/setRelayer.js --network robinhoodTestnet
+```
+
+Run it with the factory OWNER's key (`DEPLOYER_PRIVATE_KEY`, unless
+ownership has since moved), pointing `RELAYER_ADDRESS` at the relayer
+wallet's plain address — never its private key, which this script has no
+need for. It's a no-op if the relayer is already set correctly, and setting
+`RELAYER_ADDRESS` to the zero address turns gasless relayed launches back
+off for that factory (fully reversible). Restart `scripts/relayer.js`
+afterward — it only reads `relayer()` once, at startup.
 
 It exposes:
 
