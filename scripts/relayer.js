@@ -280,6 +280,16 @@ async function main() {
     next();
   });
 
+  // Some managed hosts (GoDaddy's Node.js Apps among them) run their own
+  // platform-level health check against the bare site root before they'll
+  // let you publish, separate from anything this app itself defines — with
+  // no route here at all, that probe got a 404 and the host reported the
+  // app as "unhealthy"/"unreachable" even while it was actually running
+  // fine (confirmed by this app's own startup logs). This just gives that
+  // probe a 200 to look at; it carries no other meaning; GET /health above
+  // remains the real liveness/diagnostic endpoint for humans and scripts.
+  app.get("/", (_req, res) => sendJson(res, 200, { ok: true, service: "hoodlaunch-relayer" }));
+
   app.get("/health", (_req, res) => sendJson(res, 200, { ok: true, relayer: relayerWallet.address }));
 
   // Lets the front end pull "every launch on this network" instead of only
