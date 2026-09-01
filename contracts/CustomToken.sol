@@ -95,6 +95,27 @@ contract CustomToken is ERC20, ReentrancyGuard {
     }
     uint16 public constant MAX_TOTAL_BPS = 500; // 5.00% per side, hard cap
 
+    /// @dev Scratch struct used only inside _update() to hold one transfer's
+    /// computed fee amounts. Purely a stack-pressure fix: with viaIR
+    /// enabled, the Yul optimizer still has its own (separate from the EVM's
+    /// classic 16-slot limit) ceiling on how many locals can be live at once
+    /// in one function, and _update() calling the private _afterBalanceChange
+    /// six times across several branches — each with a different subset of
+    /// these amounts still live — was landing right at that ceiling ("too
+    /// deep in the stack by 1 slots"). A memory struct collapses what used
+    /// to be seven separate stack-resident uint256 locals into one memory
+    /// pointer, which is what actually fixes it; the arithmetic and control
+    /// flow below are otherwise unchanged from before this struct existed.
+    struct TransferCuts {
+        uint256 reflection;
+        uint256 marketing;
+        uint256 liquidity;
+        uint256 burn;
+        uint256 platform;
+        uint256 total;
+        uint256 toContract;
+    }
+
     FeeSet public buyFees;
     FeeSet public sellFees;
 
@@ -682,40 +703,40 @@ contract CustomToken is ERC20, ReentrancyGuard {
         }
 
         FeeSet memory fees = isBuy ? buyFees : sellFees;
-        uint256 reflectionCut = (value * fees.reflectionBps) / 10_000;
-        uint256 marketingCut = (value * fees.marketingBps) / 10_000;
-        uint256 liquidityCut = (value * fees.liquidityBps) / 10_000;
-        uint256 burnCut = (value * fees.burnBps) / 10_000;
+        TransferCuts memory cuts;
+        cuts.reflection = (value * fees.reflectionBps) / 10_000;
+        cuts.marketing = (value * fees.marketingBps) / 10_000;
+        cuts.liquidity = (value * fees.liquidityBps) / 10_000;
+        cuts.burn = (value * fees.burnBps) / 10_000;
         // Platform cut is independent of the creator's own fee config above
         // (not part of `fees`/MAX_TOTAL_BPS) — same flat rate on both buy
         // and sell, exactly like LaunchedToken's tax.
-        uint256 platformCut = platformTaxActive ? (value * platformFeeBps) / 10_000 : 0;
-        uint256 totalCut = reflectionCut + marketingCut + liquidityCut + burnCut + platformCut;
+        cuts.platform = platformTaxActive ? (value * platformFeeBps) / 10_000 : 0;
+        cuts.total = cuts.reflection + cuts.marketing + cuts.liquidity + cuts.burn + cuts.platform;
 
-        uint256 toContract = reflectionCut + marketingCut + liquidityCut;
-        if (toContract > 0) {
-            super._update(from, address(this), toContract);
-            _afterBalanceChange(from, address(this), toContract);
-            pendingReflectionTokens += reflectionCut;
-            pendingMarketingTokens += marketingCut;
-            pendingLiquidityTokens += liquidityCut;
+        cuts.toContract = cuts.reflection + cuts.marketing + cuts.liquidity;
+        if (cuts.toContract > 0) {
+            super._update(from, address(this), cuts.toContract);
+            _afterBalanceChange(from, address(this), cuts.toContract);
+            pendingReflectionTokens += cuts.reflection;
+            pendingMarketingTokens += cuts.marketing;
+            pendingLiquidityTokens += cuts.liquidity;
         }
-        if (burnCut > 0) {
-            super._update(from, address(0), burnCut); // true burn — totalSupply actually decreases
-            _afterBalanceChange(from, address(0), burnCut);
-            emit TokensBurned(burnCut);
+        if (cuts.burn > 0) {
+            super._update(from, address(0), cuts.burn); // true burn — totalSupply actually decreases
+            _afterBalanceChange(from, address(0), cuts.burn);
+            emit TokensBurned(cuts.burn);
         }
-        if (platformCut > 0) {
-            // rewardCut is carved OUT OF platformCut, never added on top of
-            // it — the platform's total cut on this transfer stays exactly
-            // platformFeeBps. This never touches reflectionCut/
-            // marketingCut/liquidityCut/burnCut above, which are the
-            // creator's own separately-capped fee config and have nothing
-            // to do with this feature. rewardBps <= platformFeeBps is
-            // enforced once, at configurePlatformTax(), so this can never
-            // underflow.
+        if (cuts.platform > 0) {
+            // rewardCut is carved OUT OF cuts.platform, never added on top
+            // of it — the platform's total cut on this transfer stays
+            // exactly platformFeeBps. This never touches cuts.reflection/
+            // marketing/liquidity/burn above, which are the creator's own
+            // separately-capped fee config and have nothing to do with this
+            // feature. rewardBps <= platformFeeBps is enforced once, at
+            // configurePlatformTax(), so this can never underflow.
             uint256 rewardCut = (rewardsDistributor != address(0) && rewardBps > 0) ? (value * rewardBps) / 10_000 : 0;
-            uint256 toFeeWallet = platformCut - rewardCut;
+            uint256 toFeeWallet = cuts.platform - rewardCut;
             if (rewardCut > 0) {
                 // In-kind, straight to the rewards contract — no swap, same
                 // as the rest of the platform tax.
@@ -727,8 +748,8 @@ contract CustomToken is ERC20, ReentrancyGuard {
                 _afterBalanceChange(from, platformFeeWallet, toFeeWallet);
             }
         }
-        super._update(from, to, value - totalCut);
-        _afterBalanceChange(from, to, value - totalCut);
+        super._update(from, to, value - cuts.total);
+        _afterBalanceChange(from, to, value - cuts.total);
 
         // Never trigger a swap mid-buy (avoids selling against the pool's
         // reserves while a buy against those same reserves is still being
