@@ -196,8 +196,16 @@ async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementat
   console.log(`  recorded: ${paths.metaPath}`);
   return { implVerification, proxyVerification };
 }
-
+function logEnvVarPresence() {
+  const names = ["RELAYER_PRIVATE_KEY", "TOKEN_FACTORY_ADDRESS", "CUSTOM_TOKEN_FACTORY_ADDRESS", "HARDHAT_NETWORK", "PORT", "RELAYER_PORT"];
+  console.log("Env var check (name: present/length only, never the value):");
+  for (const name of names) {
+    const value = process.env[name];
+    console.log(`  ${name}: ${value ? `present (${value.length} chars)` : "MISSING"}`);
+  }
+}
 async function main() {
+logEnvVarPresence();
   const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
   if (!relayerPrivateKey) {
     throw new Error(
