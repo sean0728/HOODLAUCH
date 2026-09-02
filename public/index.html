@@ -2395,7 +2395,7 @@
     };
   }
   function resetLaunchDraft(){
-    draft = { name:"", ticker:"", desc:"", supply:1000000000, mode:"just", liquidityEth:1, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
+    draft = { name:"", ticker:"", desc:"", supply:1000000000, mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
     wizStep = 1;
   }
   // Every contract address actually touched by this launch, in one place —
@@ -4008,7 +4008,7 @@
 
   /* ---------------- create wizard ---------------- */
   let wizStep = 1;
-  let draft = { name:"", ticker:"", desc:"", supply:1000000000, mode:"just", liquidityEth:1, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
+  let draft = { name:"", ticker:"", desc:"", supply:1000000000, mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
 
   // ---- Custom Tax Token fee configuration (step 3 when draft.mode==="custom") ----
   const FEE_ROWS = [["reflectionBps","Reflections"],["marketingBps","Marketing"],["liquidityBps","Liquidity"],["burnBps","Burn"]];
@@ -4069,7 +4069,7 @@
       </div>
       <div class="field">
         <label for="fLiqEth">ETH to pair against 100% of the supply</label>
-        <div class="range-row"><input id="fLiqEth" type="range" min="0.1" max="10" step="0.1" value="${draft.liquidityEth}"><span class="range-val num" id="liqEthVal">${draft.liquidityEth} ETH</span></div>
+        <div class="range-row"><input id="fLiqEth" type="range" min="0.001" max="10" step="0.001" value="${draft.liquidityEth}"><span class="range-val num" id="liqEthVal">${draft.liquidityEth} ETH</span></div>
         <div class="hint">Creation and liquidity happen in one atomic transaction. Resulting LP tokens are locked to your wallet for ${lpLockDaysDisplay()} days.</div>
       </div>
       <div class="field">
@@ -4227,7 +4227,7 @@
         <h3 style="margin-bottom:18px;">Liquidity &amp; tax terms</h3>
         <div class="field">
           <label for="fLiqEth">ETH to pair against 100% of the supply</label>
-          <div class="range-row"><input id="fLiqEth" type="range" min="0.1" max="10" step="0.1" value="${draft.liquidityEth}"><span class="range-val num" id="liqEthVal">${draft.liquidityEth} ETH</span></div>
+          <div class="range-row"><input id="fLiqEth" type="range" min="0.001" max="10" step="0.001" value="${draft.liquidityEth}"><span class="range-val num" id="liqEthVal">${draft.liquidityEth} ETH</span></div>
           <div class="hint">Creation and liquidity happen in one atomic transaction — there's no separate "add later" step. Resulting LP tokens are locked to your wallet for 15 days.</div>
         </div>
         <div class="field">
