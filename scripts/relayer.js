@@ -291,27 +291,35 @@ async function main() {
 
   // Some managed hosts (GoDaddy's Node.js Apps among them) run their own
   // platform-level health check against the bare site root before they'll
-  // let you publish, separate from anything this app itself defines — with
-  // no route here at all, that probe got a 404 and the host reported the
-  // app as "unhealthy"/"unreachable" even while it was actually running
-  // fine (confirmed by this app's own startup logs). This just gives that
-  // probe a 200 to look at; it carries no other meaning; GET /health above
-  // remains the real liveness/diagnostic endpoint for humans and scripts.
-  app.get("/", (_req, res) => sendJson(res, 200, { ok: true, service: "hoodlaunch-relayer" }));
-
+  // let you publish, separate from anything this app itself defines — a
+  // 200 there was all that check ever needed, and the real frontend below
+  // now serves that same "/" route with an actual page, which satisfies it
+  // just as well. GET /health remains the real liveness/diagnostic endpoint
+  // for humans and scripts (it reports the relayer wallet address, which a
+  // static page load can't).
   app.get("/health", (_req, res) => sendJson(res, 200, { ok: true, relayer: relayerWallet.address }));
 
   // Serves the front end (public/index.html and anything else in that
-  // folder) from this same Express app, under /app — so the browser sees
-  // it as the exact same origin as this API. Browsers apply a page's
+  // folder) directly at the site root — not nested under /app or /site —
+  // so there both the exact same origin as this API AND the only frontend
+  // in play, with no separate copy elsewhere (e.g. a GoDaddy Website
+  // Builder page) for users to land on by mistake. Browsers apply a page's
   // Content-Security-Policy connect-src allowlist to every fetch() it
-  // makes; a frontend hosted on a different domain (e.g. GoDaddy's
-  // Website Builder, which sends its own restrictive CSP header) can
-  // have its fetch() calls to this API blocked by that policy no matter
-  // what CORS headers this server sends — CORS and CSP are enforced
+  // makes; a frontend hosted on a different domain (e.g. that Website
+  // Builder product, which sends its own restrictive CSP header) can have
+  // its fetch() calls to this API blocked by that policy no matter what
+  // CORS headers this server sends — CORS and CSP are enforced
   // independently, and loosening one does nothing for the other. Serving
-  // the front end from here sidesteps the whole problem: same origin is
-  // always implicitly allowed, so there's nothing for a CSP to block.
+  // the front end from here, as this exact app's root, sidesteps the whole
+  // problem: same origin is always implicitly allowed, so there's nothing
+  // for a CSP to block.
+  //
+  // (Earlier attempts mounted this under /app, then /site, as sub-paths —
+  // /app kept 404ing even once a diagnostic (fs.existsSync) proved
+  // public/index.html genuinely existed on disk on the deployed instance,
+  // which pointed at GoDaddy's own platform routing reserving /app for
+  // something of its own. Serving at the bare root sidesteps that guesswork
+  // entirely — there's no sub-path left for anything to collide with.)
   const publicDir = path.join(__dirname, "..", "public");
   try {
     const dirExists = fs.existsSync(publicDir);
@@ -322,7 +330,7 @@ async function main() {
   } catch (e) {
     console.log(`Static frontend check failed: ${e.message}`);
   }
-  app.use("/app", express.static(publicDir));
+  app.use(express.static(publicDir));
 
   // Lets the front end pull "every launch on this network" instead of only
   // ever showing what a given browser happened to launch or see itself —
