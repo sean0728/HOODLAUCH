@@ -196,9 +196,17 @@ async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementat
   console.log(`  recorded: ${paths.metaPath}`);
   return { implVerification, proxyVerification };
 }
-
+function logEnvVarPresence() {
+  const names = ["RELAYER_PRIVATE_KEY", "TOKEN_FACTORY_ADDRESS", "CUSTOM_TOKEN_FACTORY_ADDRESS", "HARDHAT_NETWORK", "PORT", "RELAYER_PORT"];
+  console.log("Env var check (name: present/length only, never the value):");
+  for (const name of names) {
+    const value = process.env[name];
+    console.log(`  ${name}: ${value ? `present (${value.length} chars)` : "MISSING"}`);
+  }
+}
 async function main() {
-  const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
+ logEnvVarPresence();
+ const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
   if (!relayerPrivateKey) {
     throw new Error(
       "Set RELAYER_PRIVATE_KEY to the relayer's own funded hot-wallet key before running this service. " +
@@ -289,10 +297,21 @@ async function main() {
   // probe a 200 to look at; it carries no other meaning; GET /health above
   // remains the real liveness/diagnostic endpoint for humans and scripts.
   app.get("/", (_req, res) => sendJson(res, 200, { ok: true, service: "hoodlaunch-relayer" }));
-  
-  app.use("/app", express.static(path.join(__dirname, "..", "public")));
 
   app.get("/health", (_req, res) => sendJson(res, 200, { ok: true, relayer: relayerWallet.address }));
+
+  // Serves the front end (public/index.html and anything else in that
+  // folder) from this same Express app, under /app — so the browser sees
+  // it as the exact same origin as this API. Browsers apply a page's
+  // Content-Security-Policy connect-src allowlist to every fetch() it
+  // makes; a frontend hosted on a different domain (e.g. GoDaddy's
+  // Website Builder, which sends its own restrictive CSP header) can
+  // have its fetch() calls to this API blocked by that policy no matter
+  // what CORS headers this server sends — CORS and CSP are enforced
+  // independently, and loosening one does nothing for the other. Serving
+  // the front end from here sidesteps the whole problem: same origin is
+  // always implicitly allowed, so there's nothing for a CSP to block.
+  app.use("/app", express.static(path.join(__dirname, "..", "public")));
 
   // Lets the front end pull "every launch on this network" instead of only
   // ever showing what a given browser happened to launch or see itself —
