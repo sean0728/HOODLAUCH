@@ -1252,7 +1252,7 @@
   // what this page shows or hides. Treat ADMIN_WALLET purely as "whose
   // wallet address unlocks this tab's UI," never as "who is authorized" —
   // authorization is decided by the contracts, not by this constant.
-  const ADMIN_WALLET = "0x3C78000A645Aac16cBa7F84B22FB86798825CA34";
+  const ADMIN_WALLET = "0x64dEAAfEa8F9a7238bf3a8Af54863dC1C08386A3";
   function isAdminWallet(w){ return !!w && w.toLowerCase() === ADMIN_WALLET.toLowerCase(); }
   const adminTabBtn = document.getElementById("adminTabBtn");
   function refreshAdminTabVisibility(){
