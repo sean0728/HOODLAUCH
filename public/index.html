@@ -1044,7 +1044,19 @@
     // demo: scripts/relayer.js published on GoDaddy Node.js Hosting (Airo AI
     // Builder), robinhoodTestnet, relayer wallet 0x1B40e4eC5DE62D301Fd7852FD5392eB0a609Cb9e
     // — confirmed reachable via GET /health and GET /launches on 2026-09-01.
-    relayerApiUrl: { demo: "https://11yl1zp42g.c37.airoapp.ai", live: null }, // fill in once a mainnet relayer instance is hosted somewhere reachable
+    //
+    // Resolved to location.origin rather than a fixed string: this page is
+    // now always served BY that same relayer process (see relayer.js's
+    // express.static mount at the site root), so wherever this page was
+    // actually loaded from — the custom domain, the platform's
+    // auto-generated *.airoapp.ai address, a future domain, anything — the
+    // relayer is reachable at that exact same origin. A hardcoded absolute
+    // URL here would only match one of those hostnames at a time, and the
+    // page's own Content-Security-Policy connect-src allowlist (see the
+    // <meta> tag in <head>) only ever allows 'self' for this endpoint, not
+    // a second hardcoded host — so anything other than the live origin gets
+    // silently blocked by the browser the moment the two don't match.
+    relayerApiUrl: { demo: location.origin, live: null }, // fill in once a mainnet relayer instance is hosted somewhere reachable
   };
   const PLATFORM_CONFIG_STORAGE_KEY = "hoodlaunch_platform_config";
 
