@@ -147,7 +147,7 @@ function sendJson(res, status, body) {
   );
 }
 
-async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementationAddress, creator, name, symbol, totalSupply, network, txHash, extra }) {
+async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementationAddress, creator, name, symbol, totalSupply, network, txHash, extra, mode }) {
   const implVerification = await verifyContract(implementationAddress, []);
   const proxyVerification = await verifyProxyClone(tokenAddress, implementationAddress);
 
@@ -163,7 +163,7 @@ async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementat
   const record = {
     name,
     symbol,
-    mode: `relayed-${kind}`,
+    mode: mode || `relayed-${kind}`,
     tokenAddress,
     pairAddress: pairAddress && pairAddress !== hre.ethers.ZeroAddress ? pairAddress : null,
     creator,
@@ -178,12 +178,12 @@ async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementat
       : null,
     flattenedSource: flattenedSource
       ? [
-          `// Deployment record for ${name} ($${symbol}) — relayed gasless launch`,
+          `// Deployment record for ${name} ($${symbol}) — ${mode || `relayed-${kind}`}`,
           `// Token address (EIP-1167 proxy clone): ${tokenAddress}`,
           `// Implementation address (this is what's actually verified on-chain): ${implementationAddress}`,
           `// Creator: ${creator}`,
           `// Network: ${network}`,
-          `// Relayed deployment tx: ${txHash}`,
+          `// Deployment tx: ${txHash}`,
           `// Recorded: ${new Date().toISOString()}`,
           "",
           flattenedSource,
@@ -495,14 +495,90 @@ async function main() {
     }
   }
 
+  // ---- direct (non-relayed) launch poller ----
+  // TokenCreated/CustomTokenCreated fire from the exact same internal
+  // finalize step regardless of whether createToken()/createCustomToken()
+  // was called directly by the creator's own wallet or by this relayer's
+  // own relayedCreateToken()/relayedCreateCustomToken() — so this is a
+  // reliable, chain-level way to catch launches the relayer never
+  // submitted itself and therefore never ran postLaunchPipeline for. A
+  // direct launch's ledger entry would otherwise only ever exist in the
+  // launching creator's own browser localStorage (see saveCustomTokens()
+  // in index.html) — invisible to GET /launches, to anyone else's
+  // browser, and to the "creator-held, watched for a later liquidity add"
+  // flow that only works for tokens the front end actually knows about.
+  //
+  // Uses its own cursor (":launches" suffix) so it never shares state with
+  // pollWatcher's deposit cursor above — the two track completely
+  // different event types read at different cadences. On first run for a
+  // given factory this only watches launches from that moment forward,
+  // same "don't rescan from genesis" posture as the deposit poller; this
+  // session's own manual backfill (see deployed-contracts/robinhoodTestnet/
+  // launched-tokens.json) already covers what existed before this shipped.
+  async function pollDirectLaunches(watcher) {
+    const factoryAddress = await watcher.factory.getAddress();
+    const cursorKey = `${factoryAddress}:launches`;
+    const latestBlock = await hre.ethers.provider.getBlockNumber();
+    const storedCursor = getCursor(cursorKey);
+    const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock;
+    if (fromBlock > latestBlock) return;
+    const toBlock = Math.min(latestBlock, fromBlock + MAX_BLOCK_RANGE_PER_POLL);
+
+    const events = await watcher.factory.queryFilter(watcher.factory.filters[watcher.createdEventName](), fromBlock, toBlock);
+    for (const event of events) {
+      await handleDirectLaunch(watcher, event).catch((err) =>
+        console.error(`[${watcher.kind}] error recording on-chain launch in tx ${event.transactionHash}: ${err.message}`)
+      );
+    }
+    setCursor(cursorKey, toBlock);
+  }
+
+  async function handleDirectLaunch(watcher, event) {
+    const network = hre.network.name;
+    const tokenAddress = event.args.token;
+
+    // Already on file — either postLaunchPipeline recorded it moments ago
+    // via the relayed path above (relayedCreateToken/relayedCreateCustomToken
+    // also emit this same event), or a previous poll already caught it.
+    // Either way, recording it twice would duplicate it in the CSV/JSON
+    // ledger, so this is the one check that keeps the two recording paths
+    // from stepping on each other.
+    const alreadyRecorded = readLedger(network).some(
+      (entry) => entry.tokenAddress && entry.tokenAddress.toLowerCase() === tokenAddress.toLowerCase()
+    );
+    if (alreadyRecorded) return;
+
+    const pairAddress = event.args.pair || hre.ethers.ZeroAddress;
+    const implementationAddress = await watcher.factory.tokenImplementation();
+    console.log(
+      `[${watcher.kind}] found an on-chain launch this relayer never submitted itself: token ${tokenAddress} ` +
+        `(tx ${event.transactionHash}) — recording it as a direct launch.`
+    );
+
+    await postLaunchPipeline({
+      kind: watcher.kind,
+      tokenAddress,
+      pairAddress,
+      implementationAddress,
+      creator: event.args.creator,
+      name: event.args.name,
+      symbol: event.args.symbol,
+      totalSupply: event.args.totalSupply,
+      network,
+      txHash: event.transactionHash,
+      mode: `direct-${watcher.kind}`,
+    });
+  }
+
   async function pollLoop() {
     for (const watcher of watchers) {
       await pollWatcher(watcher).catch((err) => console.error(`[${watcher.kind}] poll error: ${err.message}`));
+      await pollDirectLaunches(watcher).catch((err) => console.error(`[${watcher.kind}] direct-launch poll error: ${err.message}`));
     }
     setTimeout(pollLoop, POLL_INTERVAL_MS);
   }
 
-  console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits (only deposits made from now on — see cursors.json).`);
+  console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits and on-chain launches (only activity from now on — see cursors.json).`);
   pollLoop();
 }
 
