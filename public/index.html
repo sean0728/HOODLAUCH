@@ -2950,7 +2950,7 @@
   const GET_RESERVES_SELECTOR = "0902f1ac"; // IUniswapV2Pair.getReserves()
   const TOKEN0_SELECTOR = "0dfe1681";       // IUniswapV2Pair.token0()
 
-  // ---- real buy/sell (Live mode only — see isRealLiquidityToken in
+  // ---- real buy/sell (Demo/testnet and Live/mainnet — see isRealLiquidityToken in
   // openDetail). approve/allowance are plain ERC20; the two swap
   // selectors are the *SupportingFeeOnTransferTokens router variants —
   // the same ones TokenFactory._launchWithLiquidity /
@@ -3530,18 +3530,19 @@
     const isPoolDetected = t.status==="pool-detected";
     const isLivePool = t.status==="live-pool";
     const noSimulatedMarket = isCreatorHeld || isPoolDetected || isLivePool;
-    // Real buy/sell only ever turns on for a token that (a) was actually
-    // deployed on-chain through Hood Launch's own "Deploy and Add
-    // Liquidity" flow, with a real recorded pair, and (b) is being viewed
-    // while the app itself is switched to Live — per instruction, this
-    // never activates in Demo, even for a token that happens to have been
-    // deployed on testnet. A token missing any of that (simulated, not
-    // yet pooled, or on the other network from what's currently selected)
+    // Real buy/sell turns on for a token that (a) was actually deployed
+    // on-chain through Hood Launch's own "Deploy and Add Liquidity" flow,
+    // with a real recorded pair, and (b) is being viewed on whichever
+    // network it actually lives on — Demo/testnet and Live/mainnet are
+    // treated the same here, since both are genuine on-chain deployments
+    // with real contracts and real pools; only the chain differs. A token
+    // missing any of that (simulated, not yet pooled, or viewed while a
+    // different network than the one it was deployed to is selected)
     // keeps the existing fully-simulated widget below unchanged. This
     // deliberately excludes the isPoolDetected/isLivePool statuses above
     // — those are pools added independently, outside this platform, and
     // stay "use a DEX interface yourself" by design (see their panels).
-    const isRealLiquidityToken = appMode==="live" && !noSimulatedMarket && t.onChain && t.networkMode===appMode
+    const isRealLiquidityToken = !noSimulatedMarket && t.onChain && t.networkMode===appMode
       && t.pairAddress && t.pairAddress.toLowerCase()!==ZERO_ADDRESS;
     realTradeQuoteRefresh = null;
     const isOwner = !!(wallet && t.creatorWallet && wallet.toLowerCase()===t.creatorWallet.toLowerCase());
@@ -3782,11 +3783,11 @@
     }
   }
 
-  /* ---------------- real buy/sell (Live mode only) ----------------
+  /* ---------------- real buy/sell (Demo/testnet and Live/mainnet) ----------------
      Only ever wired up when openDetail() set isRealLiquidityToken — a
      token actually deployed through Hood Launch's own liquidity flow,
-     with a real recorded pair, viewed while the app itself is in Live
-     mode. Sends ordinary swaps straight to the same Uniswap V2-style
+     with a real recorded pair, viewed on whichever network (testnet or
+     mainnet) it was actually deployed to. Sends ordinary swaps straight to the same Uniswap V2-style
      router this platform's launch flow already calls
      (swapExact*SupportingFeeOnTransferTokens — the fee-on-transfer-safe
      variants), so a taxed LaunchedToken/CustomToken is handled correctly:
