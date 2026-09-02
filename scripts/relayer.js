@@ -42,6 +42,7 @@
 // a stolen relayer key can do is waste its own ETH balance or simply stop
 // relaying, not touch anyone else's funds).
 const path = require("path");
+const fs = require("fs");
 const express = require("express");
 const hre = require("hardhat");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
@@ -311,7 +312,17 @@ async function main() {
   // independently, and loosening one does nothing for the other. Serving
   // the front end from here sidesteps the whole problem: same origin is
   // always implicitly allowed, so there's nothing for a CSP to block.
-  app.use("/app", express.static(path.join(__dirname, "..", "public")));
+  const publicDir = path.join(__dirname, "..", "public");
+  try {
+    const dirExists = fs.existsSync(publicDir);
+    console.log(
+      `Static frontend check — publicDir=${publicDir} exists=${dirExists}` +
+        (dirExists ? ` contents=${JSON.stringify(fs.readdirSync(publicDir))}` : "")
+    );
+  } catch (e) {
+    console.log(`Static frontend check failed: ${e.message}`);
+  }
+  app.use("/app", express.static(publicDir));
 
   // Lets the front end pull "every launch on this network" instead of only
   // ever showing what a given browser happened to launch or see itself —
