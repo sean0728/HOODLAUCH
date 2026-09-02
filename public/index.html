@@ -2133,7 +2133,7 @@
     // in this wizard yet. Fine for an MVP, worth revisiting before this
     // sees real trading volume.
     const data = encodeCreateTokenCalldata({
-      name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply),
+      name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
       addLiquidity: isLiquidity, liquidityWei, buyInWei, minTokensOut: 0n,
     });
 
@@ -2308,7 +2308,7 @@
     const depositWei = feeWei + (isLiquidity ? liquidityWei + buyInWei : 0n);
 
     const voucher = {
-      creator: wallet, name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply),
+      creator: wallet, name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
       addLiquidityAtLaunch: isLiquidity, liquidityEthAmount: liquidityWei, creatorBuyEthAmount: buyInWei,
       minCreatorTokensOut: 0n, fee: feeWei, salt: randomVoucherSalt(),
       deadline: BigInt(Math.floor(Date.now()/1000) + RELAY_VOUCHER_TTL_SECONDS),
@@ -2581,7 +2581,7 @@
     // minCreatorTokensOut left at 0, same MVP tradeoff as the TokenFactory
     // flow above — no slippage-tolerance field in this wizard yet.
     const data = encodeCreateCustomTokenCalldata({
-      name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply),
+      name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
       addLiquidity, liquidityWei, buyFees: draft.customFees.buy, sellFees: draft.customFees.sell,
       reflectionAsset, marketingWallet, buyInWei, minTokensOut: 0n,
     });
@@ -2744,7 +2744,7 @@
     const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
 
     const voucher = {
-      creator: wallet, name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply),
+      creator: wallet, name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
       addLiquidity, liquidityEthAmount: liquidityWei,
       buyFees: { ...draft.customFees.buy }, sellFees: { ...draft.customFees.sell },
       reflectionAsset, marketingWallet, creatorBuyEthAmount: buyInWei,
