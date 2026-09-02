@@ -1,0 +1,22 @@
+{
+  "symbol": "HOOD",
+  "name": "Hood Launch",
+  "mode": "manual-platform-token",
+  "tokenAddress": "0x9D931Ef9D5873c8288192A30F9778689D0796b5E",
+  "pairAddress": "0xa5b910bf1568dbb67d246e2a68adb49895bb2e41",
+  "creator": "0x64dEAAfEa8F9a7238bf3a8Af54863dC1C08386A3",
+  "totalSupply": "1000000000000000000000000000",
+  "network": "robinhoodTestnet",
+  "deploymentTxHash": "0x338bd6ebd5292b0e7f501f1528ce4da712d6ce24792d46df71c6bb2f7c40e17f",
+  "verified": true,
+  "proxyVerified": false,
+  "liquidityEthAmount": "5000000000000000",
+  "liquidityTokenAmount": "1000000000000000000000000000",
+  "liquidityLpAmount": "2236067977499789696409",
+  "liquidityLockId": null,
+  "liquidityUnlockTime": null,
+  "creatorBuyEthAmount": null,
+  "creatorTokensBought": null,
+  "explorerUrl": null,
+  "createdAt": "2026-09-02T07:38:26.000Z"
+}
