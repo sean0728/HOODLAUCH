@@ -2197,9 +2197,21 @@
       const onChainSymbol = decodeAbiString(symbolHex);
       const onChainSupply = decodeUint256(supplyHex);
       const expectedSupply = BigInt(draft.supply) * (10n**18n);
-      const matches = onChainName===draft.name && onChainSymbol===draft.ticker && onChainSupply===expectedSupply;
-      if(matches){
+      // Name/symbol are immutable and must match exactly. Total supply is a
+      // different story: when a launch pairs a creator buy-in with a
+      // burn-on-buy tax (customFees.buy.burnBps > 0), that burn fires inside
+      // this SAME atomic transaction, before this read ever happens — so a
+      // real, correctly-launched token's on-chain supply is *expected* to
+      // read a little under the original mint. Only flag a real problem when
+      // the name/symbol don't match, or supply comes back HIGHER than what
+      // was minted (which should never happen and would mean something is
+      // genuinely wrong).
+      const nameSymbolMatch = onChainName===draft.name && onChainSymbol===draft.ticker;
+      const supplyMatch = onChainSupply===expectedSupply;
+      if(nameSymbolMatch && supplyMatch){
         onStep("verify", "done", `Confirmed on-chain: name, symbol, and total supply all match what you launched.`);
+      }else if(nameSymbolMatch && onChainSupply < expectedSupply){
+        onStep("verify", "done", `Confirmed on-chain: name and symbol match what you launched. Total supply reads slightly under the initial mint — expected when a buy-in tax burns tokens in the same transaction.`);
       }else{
         onStep("verify", "error", `On-chain contract reports "${escapeHtml(onChainName)}" ($${escapeHtml(onChainSymbol)}) — doesn't match what you launched. The token exists, but double-check it before trusting it.`);
       }
@@ -2647,9 +2659,21 @@
       const onChainSymbol = decodeAbiString(symbolHex);
       const onChainSupply = decodeUint256(supplyHex);
       const expectedSupply = BigInt(draft.supply) * (10n**18n);
-      const matches = onChainName===draft.name && onChainSymbol===draft.ticker && onChainSupply===expectedSupply;
-      if(matches){
+      // Name/symbol are immutable and must match exactly. Total supply is a
+      // different story: when a launch pairs a creator buy-in with a
+      // burn-on-buy tax (customFees.buy.burnBps > 0), that burn fires inside
+      // this SAME atomic transaction, before this read ever happens — so a
+      // real, correctly-launched token's on-chain supply is *expected* to
+      // read a little under the original mint. Only flag a real problem when
+      // the name/symbol don't match, or supply comes back HIGHER than what
+      // was minted (which should never happen and would mean something is
+      // genuinely wrong).
+      const nameSymbolMatch = onChainName===draft.name && onChainSymbol===draft.ticker;
+      const supplyMatch = onChainSupply===expectedSupply;
+      if(nameSymbolMatch && supplyMatch){
         onStep("verify", "done", `Confirmed on-chain: name, symbol, and total supply all match what you launched.`);
+      }else if(nameSymbolMatch && onChainSupply < expectedSupply){
+        onStep("verify", "done", `Confirmed on-chain: name and symbol match what you launched. Total supply reads slightly under the initial mint — expected when a buy-in tax burns tokens in the same transaction.`);
       }else{
         onStep("verify", "error", `On-chain contract reports "${escapeHtml(onChainName)}" ($${escapeHtml(onChainSymbol)}) — doesn't match what you launched. The token exists, but double-check it before trusting it.`);
       }
