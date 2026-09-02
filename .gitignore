@@ -1,0 +1,13 @@
+node_modules
+cache
+.env
+coverage
+coverage.json
+
+# deployed-contracts/ (the per-network launch ledgers scripts/launch.js
+# writes to) and deployments/ (the per-network platform-contract addresses
+# scripts/deploy.js writes to) are deliberately NOT ignored here — they're
+# the record of what's actually been deployed/launched on each network,
+# which is the point of keeping them. If you'd rather one not live in git
+# (e.g. once it's large, or once a real database has replaced it), add it
+# to this file yourself.
