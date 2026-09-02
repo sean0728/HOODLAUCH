@@ -2967,12 +2967,25 @@
   const SWAP_EXACT_ETH_FOR_TOKENS_SELECTOR = "b6f9de95";   // IUniswapV2Router02.swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256)
   const SWAP_EXACT_TOKENS_FOR_ETH_SELECTOR = "791ac947";   // IUniswapV2Router02.swapExactTokensForETHSupportingFeeOnTransferTokens(uint256,uint256,address[],address,uint256)
   const TOKEN_TAX_ACTIVE_SELECTOR = "d4dc0070"; // LaunchedToken.taxActive() — only meaningful for a plain (non-customTax) token; see wireRealTradePanel
+  const ADD_LIQUIDITY_ETH_SELECTOR = "f305d719"; // IUniswapV2Router02.addLiquidityETH(address,uint256,uint256,uint256,address,uint256) — standard across every V2 fork
 
   function encodeApproveCalldata(spender, amount){
     return "0x"+APPROVE_SELECTOR+encodeAddressParam(spender)+toHex32(BigInt(amount));
   }
   function encodeAllowanceCalldata(owner, spender){
     return "0x"+ALLOWANCE_SELECTOR+encodeAddressParam(owner)+encodeAddressParam(spender);
+  }
+  // All 6 params are static (address/uint256), so — same reasoning as
+  // encodeAddressUint256Calldata elsewhere in this file — the whole thing
+  // is just 6 head words back to back, no offset pointers needed.
+  function encodeAddLiquidityETHCalldata({token, amountTokenDesired, amountTokenMin, amountETHMin, to, deadline}){
+    return "0x"+ADD_LIQUIDITY_ETH_SELECTOR
+      +encodeAddressParam(token)
+      +toHex32(BigInt(amountTokenDesired))
+      +toHex32(BigInt(amountTokenMin))
+      +toHex32(BigInt(amountETHMin))
+      +encodeAddressParam(to)
+      +toHex32(BigInt(deadline));
   }
   // Both swap encoders inline path[] directly instead of a general
   // dynamic-array encoder — every swap this page ever sends is a plain
@@ -3819,12 +3832,26 @@
       if(!dexInfo) throw new Error("DEX router not configured for this network yet.");
       reserves = await getPairReserves(t.pairAddress, t.tokenAddress);
       if(!t.customTax){
-        const [taxActiveHex, feeBpsHex] = await Promise.all([
-          ethCall(t.tokenAddress, "0x"+TOKEN_TAX_ACTIVE_SELECTOR),
-          ethCall(t.tokenAddress, "0x"+FEE_BPS_SELECTOR),
-        ]);
-        liveTaxActive = decodeUint256(taxActiveHex) === 1n;
-        liveFeeBps = decodeUint256(feeBpsHex);
+        // Best-effort: a LaunchedToken/CustomToken clone always has
+        // taxActive()/feeBps(), but a token this page merely knows about
+        // rather than deployed itself (e.g. PlatformToken — a plain
+        // ERC20Burnable with no tax mechanism at all) doesn't implement
+        // either selector, so the call reverts. That's a real, distinct
+        // answer — "this contract has no platform tax" — not a failure to
+        // read the pool, so it must never fall into the outer catch below
+        // and disable the whole panel over it; untaxed is also just the
+        // correct assumption for a plain ERC20 like this.
+        try{
+          const [taxActiveHex, feeBpsHex] = await Promise.all([
+            ethCall(t.tokenAddress, "0x"+TOKEN_TAX_ACTIVE_SELECTOR),
+            ethCall(t.tokenAddress, "0x"+FEE_BPS_SELECTOR),
+          ]);
+          liveTaxActive = decodeUint256(taxActiveHex) === 1n;
+          liveFeeBps = decodeUint256(feeBpsHex);
+        }catch(e){
+          liveTaxActive = false;
+          liveFeeBps = 0n;
+        }
         defaultSlippagePct = liveTaxActive ? 2 : 1;
       } else {
         defaultSlippagePct = 5; // wider buffer — this token's full tax shape isn't modeled below
