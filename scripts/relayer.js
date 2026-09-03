@@ -47,7 +47,9 @@ const express = require("express");
 const hre = require("hardhat");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
 const { recordLaunch, readLedger, PUBLIC_FIELDS } = require("../lib/launchStore");
-const { getVoucher, upsertVoucher, getCursor, setCursor } = require("../lib/relayerStore");
+const { getVoucher, upsertVoucher, getCursor, setCursor, getActiveNetwork, setActiveNetwork } = require("../lib/relayerStore");
+const { appendPricePoint, readPriceHistory } = require("../lib/priceHistoryStore");
+const { appendActivity, readActivity } = require("../lib/activityStore");
 
 // Managed Node.js hosts (GoDaddy Node.js Hosting among them) inject the
 // port an app must listen on via the platform-standard PORT env var and
@@ -57,6 +59,55 @@ const { getVoucher, upsertVoucher, getCursor, setCursor } = require("../lib/rela
 const PORT = Number(process.env.PORT || process.env.RELAYER_PORT || 8787);
 const POLL_INTERVAL_MS = Number(process.env.RELAYER_POLL_INTERVAL_MS || 15_000);
 const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5_000);
+
+// ---- price history sampling ----
+// Same env var scripts/deploy.js already reads for this — reuse it here
+// rather than inventing a second name for the same Chainlink-style
+// AggregatorV3Interface address. Left unset, price sampling falls straight
+// to the public HTTP API below (see fetchEthUsdPrice).
+const PRICE_FEED_ADDRESS = process.env.PRICE_FEED_ADDRESS || null;
+const PRICE_POLL_INTERVAL_MS = Number(process.env.RELAYER_PRICE_POLL_INTERVAL_MS || 60_000);
+const FALLBACK_ETH_USD = 3000; // last-resort estimate, same one index.html itself falls back to
+const AGGREGATOR_V3_ABI = [
+  "function decimals() view returns (uint8)",
+  "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
+];
+const PAIR_ABI = [
+  "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
+  "function token0() view returns (address)",
+  "event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)",
+];
+
+// ---- platform-wide active network (admin-gated) ----
+// Purely a UI/display concern from here down — this never changes which
+// contracts THIS relayer instance itself talks to (that's fixed at process
+// start, via --network + TOKEN_FACTORY_ADDRESS/CUSTOM_TOKEN_FACTORY_ADDRESS,
+// same as always). It's the single source of truth index.html now reads to
+// decide which network *every visitor* sees as the platform's active one,
+// replacing what used to be each visitor's own private localStorage choice.
+// Same admin wallet address index.html's own ADMIN_WALLET constant already
+// gates the admin panel behind — but unlike that client-side check (which
+// the file's own comment is explicit is a UI convenience, not a security
+// boundary), this one actually matters: it decides what every visitor's
+// page shows, so it has to be enforced here, server-side, not just hidden
+// behind a button. Verified via a signed message (personal_sign) rather
+// than a shared secret, so there's nothing new to provision or leak.
+const ADMIN_WALLET_ADDRESS = (process.env.ADMIN_WALLET_ADDRESS || "0x64dEAAfEa8F9a7238bf3a8Af54863dC1C08386A3").toLowerCase();
+const ACTIVE_NETWORK_SIGNATURE_TTL_MS = 5 * 60 * 1000; // generous enough for a slow wallet popup; tight enough that a captured signature can't be replayed indefinitely
+const VALID_NETWORKS = ["demo", "live"];
+
+function activeNetworkMessage(network, timestamp) {
+  return `Hood Launch admin: set active network to ${network} at ${timestamp}`;
+}
+
+// ---- real trade activity sampler ----
+// Server-side replacement for index.html's old feedLine() — a fully
+// fabricated random-verb, random-token, random-fake-address generator on a
+// fixed timer. This instead watches each tracked pool's own Swap event
+// (Uniswap V2 emits one on every buy/sell) and records what actually
+// happened. Same scope as the price sampler above: any ledger entry with a
+// real, non-zero pairAddress.
+const ACTIVITY_POLL_INTERVAL_MS = Number(process.env.RELAYER_ACTIVITY_POLL_INTERVAL_MS || 20_000);
 
 const LAUNCH_VOUCHER_FIELDS = [
   "creator",
@@ -145,6 +196,37 @@ function sendJson(res, status, body) {
   res.status(status).type("application/json").send(
     JSON.stringify(body, (_key, value) => (typeof value === "bigint" ? value.toString() : value), 2)
   );
+}
+
+// Same on-chain-first, HTTP-API-fallback shape as index.html's own
+// refreshEthUsdPrice — this is the server-side twin of it, used only to
+// convert a pool's own token/ETH reserve ratio into a USD price for
+// recording (see pollTokenPrices below). Node's script context has no CSP
+// restriction the way the published front-end page does, so a plain public
+// API call as the fallback works fine here, same as scripts/deploy.js
+// already does for its own one-time fee-conversion fetch.
+async function fetchEthUsdPrice() {
+  if (PRICE_FEED_ADDRESS) {
+    try {
+      const feed = new hre.ethers.Contract(PRICE_FEED_ADDRESS, AGGREGATOR_V3_ABI, hre.ethers.provider);
+      const [decimals, roundData] = await Promise.all([feed.decimals(), feed.latestRoundData()]);
+      const price = Number(roundData.answer) / 10 ** Number(decimals);
+      if (Number.isFinite(price) && price > 0) return price;
+    } catch (err) {
+      // fall through to the HTTP API below
+    }
+  }
+  try {
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd");
+    if (res.ok) {
+      const data = await res.json();
+      const price = data && data.ethereum && data.ethereum.usd;
+      if (typeof price === "number" && price > 0) return price;
+    }
+  } catch (err) {
+    // offline, or the API's unreachable — fall through to the hardcoded estimate
+  }
+  return FALLBACK_ETH_USD;
 }
 
 async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementationAddress, creator, name, symbol, totalSupply, network, txHash, extra, mode }) {
@@ -349,6 +431,66 @@ async function main() {
     sendJson(res, 200, { network, launches });
   });
 
+  // Server-recorded chart history for one token's pool — see
+  // priceHistoryStore.js's own comment for why this exists (in short: it's
+  // what lets the same chart show up on every device, not just whichever
+  // browser happened to have the site open, and it works even for a viewer
+  // with no wallet extension installed at all, since it's a plain fetch()
+  // rather than a window.ethereum eth_call). Returns an empty history for
+  // an address that's never been sampled — a real token whose pool is just
+  // brand new looks the same over the wire as a typo'd address, and that's
+  // fine; the front end already renders a flat/empty chart the same way
+  // either way.
+  app.get("/price-history/:tokenAddress", (req, res) => {
+    const history = readPriceHistory(network, req.params.tokenAddress);
+    sendJson(res, 200, { network, tokenAddress: req.params.tokenAddress, history });
+  });
+
+  // Real, server-recorded trade activity for this network — see
+  // activityStore.js / pollTokenActivity below for how it's populated.
+  app.get("/activity", (_req, res) => {
+    sendJson(res, 200, { network, activity: readActivity(network) });
+  });
+
+  // Platform-wide active network — see this constant's own comment above
+  // for why GET is public but POST is verified server-side rather than
+  // trusted from the client.
+  app.get("/active-network", (_req, res) => {
+    sendJson(res, 200, { network: getActiveNetwork() });
+  });
+
+  app.post("/active-network", (req, res) => {
+    try {
+      const { network: targetNetwork, timestamp, signature } = req.body || {};
+      if (!VALID_NETWORKS.includes(targetNetwork)) {
+        return sendJson(res, 400, { error: `network must be one of ${VALID_NETWORKS.join(", ")}` });
+      }
+      if (!signature) return sendJson(res, 400, { error: "signature is required" });
+      const ts = Number(timestamp);
+      if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > ACTIVE_NETWORK_SIGNATURE_TTL_MS) {
+        return sendJson(res, 400, { error: "timestamp is missing, invalid, or too old — try again" });
+      }
+
+      const message = activeNetworkMessage(targetNetwork, ts);
+      let recovered;
+      try {
+        recovered = hre.ethers.verifyMessage(message, signature);
+      } catch (err) {
+        return sendJson(res, 400, { error: "couldn't verify that signature" });
+      }
+      if (recovered.toLowerCase() !== ADMIN_WALLET_ADDRESS) {
+        console.warn(`[active-network] rejected a set-network request signed by ${recovered}, which isn't the admin wallet.`);
+        return sendJson(res, 403, { error: "signature does not match the platform admin wallet" });
+      }
+
+      const stored = setActiveNetwork(targetNetwork);
+      console.log(`[active-network] admin (${recovered}) set the platform-wide active network to "${stored}".`);
+      sendJson(res, 200, { network: stored });
+    } catch (err) {
+      sendJson(res, 400, { error: err.message });
+    }
+  });
+
   async function handleVoucherSubmission(req, res, watcher) {
     try {
       const voucher = normalizeVoucher(req.body.voucher || {}, watcher.voucherFields, watcher.voucherUintFields);
@@ -446,10 +588,23 @@ async function main() {
     upsertVoucher(voucherHash, { status: "deposited" });
     console.log(`[${watcher.kind}] deposit confirmed for ${voucherHash}, relaying...`);
 
+    // Split in two on purpose. The first block is the only part that can
+    // make this launch not have happened — a revert, a missing event, an
+    // RPC error before confirmation. The second block (verification +
+    // ledger record-keeping) runs strictly after the on-chain transaction
+    // has already succeeded, so nothing in it is allowed to flip this
+    // voucher's status back to "failed" — a verify-API hiccup or a flatten
+    // error there does not mean the launch failed, and reporting it that
+    // way would be a real lie: the creator's token exists, is live, and
+    // (per handleDirectLaunch's own dedup check) will still get swept into
+    // the ledger on its own within one poll cycle even if recordLaunch
+    // never got to run here. See Finding: relayed launches misreported as
+    // "failed" — 2026-09-03.
+    let receipt, tokenAddress, pairAddress, implementationAddress, network;
     try {
       const tx = await watcher.relayFn(voucher, record.signature);
       console.log(`[${watcher.kind}] submitted relay tx ${tx.hash} for ${voucherHash}, waiting for confirmation...`);
-      const receipt = await tx.wait();
+      receipt = await tx.wait();
 
       const parsedLogs = receipt.logs.map((log) => {
         try {
@@ -461,11 +616,14 @@ async function main() {
       const created = parsedLogs.find((p) => p && p.name === watcher.createdEventName);
       if (!created) throw new Error(`${watcher.createdEventName} event not found in relay receipt`);
 
-      const tokenAddress = created.args.token;
-      const pairAddress = created.args.pair || hre.ethers.ZeroAddress;
-      const implementationAddress = await watcher.factory.tokenImplementation();
-      const network = hre.network.name;
+      tokenAddress = created.args.token;
+      pairAddress = created.args.pair || hre.ethers.ZeroAddress;
+      implementationAddress = await watcher.factory.tokenImplementation();
+      network = hre.network.name;
 
+      // The launch is real and done as of this line — recorded immediately,
+      // before verification/record-keeping even starts, so a failure below
+      // can never retroactively make this voucher look unrelayed.
       upsertVoucher(voucherHash, {
         status: "relayed",
         txHash: receipt.hash,
@@ -473,7 +631,15 @@ async function main() {
         pairAddress,
       });
       console.log(`[${watcher.kind}] relayed ${voucherHash} -> token ${tokenAddress} (tx ${receipt.hash}). Running verification + recordkeeping...`);
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      upsertVoucher(voucherHash, { status: "failed", error: message });
+      console.error(`[${watcher.kind}] relay failed for ${voucherHash}: ${message}`);
+      console.error(`  The creator's deposit is untouched and reclaimable once its deadline passes (reclaimDeposit).`);
+      return;
+    }
 
+    try {
       await postLaunchPipeline({
         kind: watcher.kind,
         tokenAddress,
@@ -489,9 +655,18 @@ async function main() {
       });
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
-      upsertVoucher(voucherHash, { status: "failed", error: message });
-      console.error(`[${watcher.kind}] relay failed for ${voucherHash}: ${message}`);
-      console.error(`  The creator's deposit is untouched and reclaimable once its deadline passes (reclaimDeposit).`);
+      // Deliberately does NOT touch `status` — it's still "relayed" from
+      // above, which is the truth. `recordWarning` is purely informational,
+      // surfaced on GET /status/:voucherHash for anyone debugging why a
+      // launch is slow to show up in the ledger.
+      upsertVoucher(voucherHash, { recordWarning: message });
+      console.error(
+        `[${watcher.kind}] relay for ${voucherHash} succeeded on-chain (token ${tokenAddress}, tx ${receipt.hash}), ` +
+          `but verification/record-keeping failed afterward: ${message}. The launch itself is real and live — this ` +
+          `only affects the verified/proxyVerified flags and how quickly it shows up in the ledger. The ` +
+          `direct-launch poller (see pollDirectLaunches below) will pick it up on its own within one poll cycle if ` +
+          `this ledger entry doesn't exist yet.`
+      );
     }
   }
 
@@ -578,8 +753,144 @@ async function main() {
     setTimeout(pollLoop, POLL_INTERVAL_MS);
   }
 
+  // ---- price history sampler ----
+  // Server-side counterpart to what index.html's refreshLiveTokenPrices
+  // used to do entirely in the browser — see priceHistoryStore.js's own
+  // comment for the full "why". Scope matches index.html's
+  // isLiveTrackedToken() exactly: any ledger entry with a real, non-zero
+  // pairAddress (that's every "taxed"/"graduated" token, whether it went
+  // through TokenFactory, CustomTokenFactory, or was recorded manually like
+  // the platform token — a UniswapV2Pair's reserves are read the same way
+  // regardless of which factory, if any, created the token sitting in it).
+  let cachedWethAddress = null;
+  async function wethAddress() {
+    if (cachedWethAddress) return cachedWethAddress;
+    const anyFactory = watchers[0] && watchers[0].factory;
+    if (!anyFactory) return null;
+    const routerAddress = await anyFactory.router();
+    const router = await hre.ethers.getContractAt(["function WETH() view returns (address)"], routerAddress);
+    cachedWethAddress = await router.WETH();
+    return cachedWethAddress;
+  }
+
+  async function pollTokenPrices() {
+    const liveEntries = readLedger(network).filter(
+      (entry) => entry.pairAddress && entry.pairAddress.toLowerCase() !== hre.ethers.ZeroAddress.toLowerCase()
+    );
+    if (!liveEntries.length) return;
+
+    const weth = await wethAddress().catch((err) => {
+      console.error(`[price] couldn't resolve WETH address: ${err.message}`);
+      return null;
+    });
+    if (!weth) return;
+    const ethUsdPrice = await fetchEthUsdPrice();
+
+    for (const entry of liveEntries) {
+      try {
+        const pair = new hre.ethers.Contract(entry.pairAddress, PAIR_ABI, hre.ethers.provider);
+        const [reserves, token0] = await Promise.all([pair.getReserves(), pair.token0()]);
+        const isToken0 = token0.toLowerCase() === entry.tokenAddress.toLowerCase();
+        const tokenReserve = isToken0 ? reserves.reserve0 : reserves.reserve1;
+        const wethReserve = isToken0 ? reserves.reserve1 : reserves.reserve0;
+        if (tokenReserve <= 0n || wethReserve <= 0n) continue; // pool exists but is empty/not yet seeded — nothing to price yet
+        const priceWeiPerToken = (wethReserve * 10n ** 18n) / tokenReserve;
+        const priceUsd = (Number(priceWeiPerToken) / 1e18) * ethUsdPrice;
+        appendPricePoint(network, entry.tokenAddress, { t: Date.now(), p: priceUsd });
+      } catch (err) {
+        console.error(`[price] couldn't sample ${entry.symbol || entry.tokenAddress}: ${err.message}`);
+      }
+    }
+  }
+
+  // ---- real trade activity sampler ----
+  // Server-side replacement for index.html's old feedLine() generator (see
+  // that constant's own comment above). Watches each tracked pool's own
+  // Swap event directly — real buys and sells, not a random-verb, random-
+  // fake-address timer. Uses a per-pair cursor (":activity" suffix, same
+  // convention as pollDirectLaunches' ":launches" cursor) so it never
+  // rescans from genesis and never shares state with any other poller.
+  async function pollTokenActivity() {
+    const liveEntries = readLedger(network).filter(
+      (entry) => entry.pairAddress && entry.pairAddress.toLowerCase() !== hre.ethers.ZeroAddress.toLowerCase()
+    );
+    if (!liveEntries.length) return;
+
+    const weth = await wethAddress().catch((err) => {
+      console.error(`[activity] couldn't resolve WETH address: ${err.message}`);
+      return null;
+    });
+    if (!weth) return;
+
+    const latestBlock = await hre.ethers.provider.getBlockNumber();
+    const blockTimeCache = new Map();
+    async function blockTime(blockNumber) {
+      if (!blockTimeCache.has(blockNumber)) {
+        const block = await hre.ethers.provider.getBlock(blockNumber);
+        blockTimeCache.set(blockNumber, block ? Number(block.timestamp) * 1000 : Date.now());
+      }
+      return blockTimeCache.get(blockNumber);
+    }
+
+    for (const entry of liveEntries) {
+      try {
+        const cursorKey = `${entry.pairAddress}:activity`;
+        const storedCursor = getCursor(cursorKey);
+        const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // first run: only watch new swaps from now on, same posture as every other poller here
+        if (fromBlock > latestBlock) continue;
+        const toBlock = Math.min(latestBlock, fromBlock + MAX_BLOCK_RANGE_PER_POLL);
+
+        const pair = new hre.ethers.Contract(entry.pairAddress, PAIR_ABI, hre.ethers.provider);
+        const token0 = await pair.token0();
+        const isToken0 = token0.toLowerCase() === entry.tokenAddress.toLowerCase();
+        const events = await pair.queryFilter(pair.filters.Swap(), fromBlock, toBlock);
+
+        for (const event of events) {
+          const { amount0In, amount1In, amount0Out, amount1Out, to } = event.args;
+          const tokenIn = isToken0 ? amount0In : amount1In;
+          const tokenOut = isToken0 ? amount0Out : amount1Out;
+          const wethIn = isToken0 ? amount1In : amount0In;
+          const wethOut = isToken0 ? amount1Out : amount0Out;
+
+          let side, tokenAmount;
+          if (wethIn > 0n && tokenOut > 0n) {
+            side = "buy";
+            tokenAmount = tokenOut;
+          } else if (tokenIn > 0n && wethOut > 0n) {
+            side = "sell";
+            tokenAmount = tokenIn;
+          } else {
+            continue; // neither a plain ETH-in-token-out nor token-in-ETH-out leg (e.g. a multi-hop router leg through this pair) — not something the feed can describe simply, skip it
+          }
+
+          appendActivity(network, {
+            t: await blockTime(event.blockNumber),
+            txHash: event.transactionHash,
+            logIndex: event.index != null ? event.index : null,
+            tokenAddress: entry.tokenAddress,
+            symbol: entry.symbol || null,
+            side,
+            wallet: to,
+            tokenAmount: tokenAmount.toString(),
+          });
+        }
+        setCursor(cursorKey, toBlock);
+      } catch (err) {
+        console.error(`[activity] couldn't poll swaps for ${entry.symbol || entry.tokenAddress}: ${err.message}`);
+      }
+    }
+  }
+
   console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits and on-chain launches (only activity from now on — see cursors.json).`);
   pollLoop();
+
+  console.log(`Sampling live pool prices every ${PRICE_POLL_INTERVAL_MS}ms for every launch with a real pair.`);
+  pollTokenPrices();
+  setInterval(pollTokenPrices, PRICE_POLL_INTERVAL_MS);
+
+  console.log(`Sampling real trade activity every ${ACTIVITY_POLL_INTERVAL_MS}ms for every launch with a real pair.`);
+  pollTokenActivity();
+  setInterval(pollTokenActivity, ACTIVITY_POLL_INTERVAL_MS);
 }
 
 main().catch((err) => {
