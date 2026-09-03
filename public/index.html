@@ -168,6 +168,7 @@
      control (switching app mode, not switching page views). Live carries a
      critical-red accent everywhere it's active, since it targets mainnet. */
   .mode-tabs{display:flex; gap:4px; background:var(--ink-900); border:1px solid var(--line); padding:4px; border-radius:3px;}
+  .mode-tabs[hidden]{display:none;}
   .mode-tab{
     appearance:none; border:1px solid transparent; background:transparent; color:var(--paper-500);
     font-family:var(--font-mono); font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; font-weight:600;
@@ -550,22 +551,22 @@
       <button class="tab" role="tab" aria-selected="false" data-view="admin" id="adminTabBtn" hidden>Admin</button>
     </div>
     <div class="hud-spacer"></div>
-    <div class="mode-tabs" role="group" aria-label="Demo or live mode">
-      <button class="mode-tab" id="modeDemoBtn" aria-pressed="true" data-mode="demo">Demo</button>
-      <button class="mode-tab live-tab" id="modeLiveBtn" aria-pressed="false" data-mode="live">Live</button>
+    <div class="mode-tabs" role="group" aria-label="Testnet or mainnet — platform admin only" id="modeTabsWrap" hidden>
+      <button class="mode-tab" id="modeDemoBtn" aria-pressed="true" data-mode="demo">Testnet</button>
+      <button class="mode-tab live-tab" id="modeLiveBtn" aria-pressed="false" data-mode="live">Mainnet</button>
     </div>
-    <div class="net-pill" id="netPill"><span class="net-dot" aria-hidden="true"></span><span id="netPillLabel">Robinhood Chain — Testnet (demo)</span></div>
+    <div class="net-pill" id="netPill"><span class="net-dot" aria-hidden="true"></span><span id="netPillLabel">Robinhood Chain — Testnet</span></div>
     <button class="wallet-btn" id="walletBtn">Connect Wallet</button>
   </div>
 </div>
 
 <div class="modal-overlay" id="modeConfirmOverlay" hidden>
   <div class="modal-card">
-    <h3>Switch to Live mode?</h3>
-    <p>Live mode points wallet connection at Robinhood Chain <strong>mainnet</strong> — your wallet will prompt for a real account and network switch. Launching, buying, and selling on this page stay <strong>simulated</strong> either way: Hood Launch has no deployed contracts to call, so no real tokens or funds ever move here.</p>
+    <h3>Switch the platform to Mainnet?</h3>
+    <p>This is a <strong>platform-wide</strong> switch, not just your own view — every visitor will see Robinhood Chain <strong>mainnet</strong> the next time their page checks in (within about a minute), and gasless launches/trades will start hitting real contracts with real funds. Make sure mainnet contracts and a mainnet relayer are actually deployed and configured before switching.</p>
     <div class="modal-actions">
-      <button class="btn btn-ghost" id="modeConfirmCancel">Stay in Demo</button>
-      <button class="btn btn-primary" id="modeConfirmOk">Switch to Live</button>
+      <button class="btn btn-ghost" id="modeConfirmCancel">Stay on Testnet</button>
+      <button class="btn btn-primary" id="modeConfirmOk">Switch to Mainnet</button>
     </div>
   </div>
 </div>
@@ -927,7 +928,6 @@
     }catch(e){ /* ignore persistence errors */ }
   }
 
-  const FEED_VERBS = ["bought into","sold out of","crossed $80K market cap on","crossed 500 holders on","hit a new high on"];
   const STATUS_LABEL = { taxed:"Taxed", graduated:"Graduated", "creator-held":"Creator-held", "live-pool":"Unlocked pool", "pool-detected":"Pool found" };
   const FEE_BPS = 25; // 0.25% transfer tax on buys and sells, matches LaunchedToken.sol — active only while status is "taxed"
 
@@ -971,7 +971,7 @@
   // *network switch* rather than this page making RPC calls itself.
   const NETWORKS = {
     demo: {
-      label: "Robinhood Chain — Testnet (demo)",
+      label: "Robinhood Chain — Testnet",
       chainName: "Robinhood Chain Testnet",
       chainIdHex: "0xb626",   // 46630
       rpcUrls: ["https://rpc.testnet.chain.robinhood.com"],
@@ -979,7 +979,7 @@
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }
     },
     live: {
-      label: "Robinhood Chain — Mainnet (live)",
+      label: "Robinhood Chain — Mainnet",
       chainName: "Robinhood Chain",
       chainIdHex: "0x1237",   // 4663
       rpcUrls: ["https://rpc.mainnet.chain.robinhood.com"],
@@ -1129,11 +1129,21 @@
   function rewardsDistributorAddress(mode){ return platformConfig.rewardsDistributor[mode || appMode] || null; }
   function priceFeedAddress(mode){ return platformConfig.priceFeed[mode || appMode] || null; }
 
+  // Which network the platform shows is no longer a personal, per-browser
+  // preference (it used to live in localStorage and any visitor could flip
+  // it themselves) — it's now one platform-wide value only the admin wallet
+  // can change, held server-side by the relayer (see GET/POST
+  // /active-network in scripts/relayer.js) and read by every visitor. "demo"
+  // starts as the synchronous default purely so the very first render has
+  // something valid to show — syncActiveNetworkFromServer() below overrides
+  // it with the real value within moments of load, and again on every
+  // periodic re-check, so a change the admin makes shows up for everyone
+  // without anyone needing to reload.
   let appMode = "demo";
-  try{ appMode = localStorage.getItem("hoodlaunch_mode")==="live" ? "live" : "demo"; }catch(e){}
 
   const netPill = document.getElementById("netPill");
   const netPillLabel = document.getElementById("netPillLabel");
+  const modeTabsWrap = document.getElementById("modeTabsWrap");
   const modeDemoBtn = document.getElementById("modeDemoBtn");
   const modeLiveBtn = document.getElementById("modeLiveBtn");
   const modeConfirmOverlay = document.getElementById("modeConfirmOverlay");
@@ -1144,20 +1154,79 @@
     modeDemoBtn.setAttribute("aria-pressed", String(appMode==="demo"));
     modeLiveBtn.setAttribute("aria-pressed", String(appMode==="live"));
   }
+  // Low-level: just applies a mode locally and refreshes everything that
+  // depends on it. Never calls out to change the platform-wide value itself
+  // — that's requestActiveNetworkChange() below. Used both when the
+  // server's value is first synced in (or changes later) and, for the
+  // admin, right after a successful POST /active-network.
   function setMode(mode){
     appMode = mode;
-    try{ localStorage.setItem("hoodlaunch_mode", appMode); }catch(e){}
     refreshModeUI();
     if(wallet) ensureNetwork(appMode);
     refreshOnChainDefaults();
     refreshEthUsdPrice();
-    // Pull whatever's been launched on the network just switched to —
-    // defined further down (shared launch feed section) but safe to call
-    // here since it's a plain function declaration and this only ever runs
-    // from a button click, well after the whole script has run once.
+    // Pull whatever's been launched on the network just switched to, and
+    // reset the live feed to that network's own activity — both are plain
+    // function declarations defined further down, safe to call here since
+    // this only ever runs well after the whole script has run once.
     refreshRemoteLaunches(appMode);
+    if(typeof seedFeed==="function") seedFeed();
   }
-  modeDemoBtn.addEventListener("click", ()=>{ if(appMode!=="demo") setMode("demo"); });
+
+  // Reads the platform-wide active network straight off the same relayer
+  // instance that serves this page (location.origin — same convention
+  // DEFAULT_CONFIG.relayerApiUrl.demo already uses, and deliberately not
+  // routed through relayerApiUrl()/platformConfig here, since this needs to
+  // work before platformConfig has necessarily finished loading).
+  async function fetchActiveNetwork(){
+    try{
+      const res = await fetch(`${location.origin}/active-network`);
+      if(!res.ok) return null;
+      const data = await res.json();
+      return (data && (data.network==="demo"||data.network==="live")) ? data.network : null;
+    }catch(e){ return null; }
+  }
+  async function syncActiveNetworkFromServer(){
+    const network = await fetchActiveNetwork();
+    if(network && network!==appMode) setMode(network);
+  }
+
+  // High-level: what the admin's own click on a mode tab actually does —
+  // sign a short message proving this is really the admin wallet, POST it
+  // to the relayer, and only apply the change locally once the server
+  // confirms it. Every other visitor picks up the result within one
+  // syncActiveNetworkFromServer() tick, not instantly — there's no push
+  // channel here, just polling.
+  async function requestActiveNetworkChange(targetNetwork){
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    const timestamp = Date.now();
+    const message = `Hood Launch admin: set active network to ${targetNetwork} at ${timestamp}`;
+    let signature;
+    try{
+      signature = await window.ethereum.request({
+        method: "personal_sign",
+        params: ["0x"+utf8Hex(message), wallet],
+      });
+    }catch(err){
+      toast("Signature was rejected — network not changed.");
+      return;
+    }
+    try{
+      const res = await fetch(`${location.origin}/active-network`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ network: targetNetwork, timestamp, signature }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't switch the active network."); return; }
+      setMode(data.network);
+      toast(`Platform-wide active network is now ${data.network==="live" ? "Mainnet" : "Testnet"} — every visitor picks this up shortly.`);
+    }catch(err){
+      toast("Couldn't reach the relayer to switch networks.");
+    }
+  }
+  modeDemoBtn.addEventListener("click", ()=>{ if(appMode!=="demo") requestActiveNetworkChange("demo"); });
   modeLiveBtn.addEventListener("click", ()=>{
     if(appMode==="live") return;
     modeConfirmOverlay.hidden = false;
@@ -1165,10 +1234,11 @@
   document.getElementById("modeConfirmCancel").addEventListener("click", ()=>{ modeConfirmOverlay.hidden = true; });
   document.getElementById("modeConfirmOk").addEventListener("click", ()=>{
     modeConfirmOverlay.hidden = true;
-    setMode("live");
-    toast("Live mode — wallet connection now targets Robinhood Chain mainnet.");
+    requestActiveNetworkChange("live");
   });
   refreshModeUI();
+  syncActiveNetworkFromServer();
+  setInterval(syncActiveNetworkFromServer, 60000);
 
   /* ---------------- live ETH/USD price ---------------- */
   // Powers the two USD-pegged launch fees below ($50 to Deploy Token, $100
@@ -1258,6 +1328,10 @@
   function refreshAdminTabVisibility(){
     const show = isAdminWallet(wallet);
     adminTabBtn.hidden = !show;
+    // The Testnet/Mainnet switcher is a platform-wide, admin-only control
+    // now (see requestActiveNetworkChange) — an ordinary visitor gets only
+    // the read-only net-pill next to it, never the buttons themselves.
+    modeTabsWrap.hidden = !show;
     // If the admin wallet disconnects/switches away while the admin tab is
     // open, don't leave a now-unauthorized-looking view on screen.
     if(!show && views.admin.classList.contains("active")) showView("explore");
@@ -3137,30 +3211,45 @@
     return (isLiveTrackedToken(t) && !t.change24hSpansFullDay) ? "since tracking began" : "24h";
   }
 
+  // Reads server-recorded history from the relayer (see priceHistoryStore.js
+  // / relayer.js's own pollTokenPrices) instead of sampling the pool's
+  // reserves itself via window.ethereum. Two things this fixes at once:
+  // (1) the exact same chart now shows up on every device, since it's the
+  // same recorded history every time, rather than each browser building its
+  // own from scratch; (2) a viewer with no wallet extension installed at
+  // all — most phones, a fresh browser, incognito — used to get a
+  // permanent $0/flat chart, because the old version bailed out entirely
+  // with no window.ethereum to call eth_call through. A plain fetch() needs
+  // no wallet, so this works everywhere the relayer itself is reachable.
   async function refreshLiveTokenPrices(){
-    if(!window.ethereum) return;
     const liveTokens = tokens.filter(isLiveTrackedToken);
     if(!liveTokens.length) return;
-    await refreshEthUsdPrice();
+    const url = relayerApiUrl(appMode);
+    if(!url) return; // no relayer configured for this network — nothing to fetch
     let changed = false;
     for(const t of liveTokens){
       try{
-        const { tokenReserve, wethReserve } = await getPairReserves(t.pairAddress, t.tokenAddress);
-        const priceUsd = computeTokenPriceUsd(tokenReserve, wethReserve, ethUsdPrice);
-        t.livePriceUsd = priceUsd;
+        const res = await fetch(`${url}/price-history/${t.tokenAddress}`);
+        if(!res.ok) continue;
+        const payload = await res.json();
+        const history = Array.isArray(payload && payload.history) ? payload.history : [];
+        if(!history.length) continue;
+        const prevLatestT = (t.livePriceHistory && t.livePriceHistory.length) ? t.livePriceHistory[t.livePriceHistory.length-1].t : null;
+        const latest = history[history.length-1];
+        t.livePriceHistory = history;
+        t.livePriceUsd = latest.p;
         t.livePriceUpdatedAt = Date.now();
-        const recorded = recordLivePricePoint(t, priceUsd);
-        const change = computeLiveChange(t.livePriceHistory);
+        const change = computeLiveChange(history);
         // Feed the existing display fields directly — tokenCardHTML/
         // openDetail already render price/hist/change24h for "taxed"/
         // "graduated" tokens, so no rendering code needs to branch on "is
         // this real" beyond the label swap above.
-        t.price = priceUsd;
+        t.price = latest.p;
         t.change24h = change.pct;
         t.change24hSpansFullDay = change.spansFullDay;
-        t.hist = t.livePriceHistory.length>=2 ? t.livePriceHistory.map(pt=>pt.p) : [priceUsd, priceUsd];
-        if(recorded) changed = true;
-      }catch(e){ /* transient RPC error — retried on the next poll tick */ }
+        t.hist = history.length>=2 ? history.map(pt=>pt.p) : [latest.p, latest.p];
+        if(latest.t !== prevLatestT) changed = true;
+      }catch(e){ /* offline, or the relayer's briefly unreachable — retried on the next poll tick */ }
     }
     if(changed){
       saveCustomTokens();
@@ -5439,8 +5528,8 @@
     const rows = CONFIG_KEYS.map(k=>{
       const isUrlField = k==="relayerApiUrl";
       const placeholder = isUrlField ? "https://… (unset — falls back to creator-pays-gas)" : "0x… (unset)";
-      const demoLabel = isUrlField ? "Testnet (demo) relayer URL" : "Testnet (demo) address";
-      const liveLabel = isUrlField ? "Mainnet (live) relayer URL" : "Mainnet (live) address";
+      const demoLabel = isUrlField ? "Testnet relayer URL" : "Testnet address";
+      const liveLabel = isUrlField ? "Mainnet relayer URL" : "Mainnet address";
       return `
         <div class="admin-section-label">${escapeHtml(CONFIG_LABELS[k])}</div>
         <p class="admin-empty" style="margin-bottom:10px;">${escapeHtml(CONFIG_HELP[k])}</p>
@@ -6002,47 +6091,82 @@
     if(views.portfolio.classList.contains("active")) renderPortfolio();
   });
 
-  /* ---------------- live feed ---------------- */
-  function feedLine(){
-    if(!tokens.length) return null;
-    const t = tokens[Math.floor(Math.random()*tokens.length)];
-    const verb = FEED_VERBS[Math.floor(Math.random()*FEED_VERBS.length)];
-    const now = new Date();
-    const time = now.toLocaleTimeString("en-US", {hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
-    const dotColor = verb.includes("$80K") ? "var(--good-500)" : verb.includes("high") ? "var(--signal-500)" : "var(--cyan-500)";
+  /* ---------------- live feed (real trade activity only) ---------------- */
+  // Replaces what used to be a fully fabricated feed: a random token, a
+  // random flavor-text verb, a random fake wallet address, on a fixed 4.2s
+  // timer — none of it real. This polls the relayer's own
+  // GET /activity (see pollTokenActivity in scripts/relayer.js), which
+  // watches real Swap events on every tracked pool — same "real Hood Launch
+  // pools only" scope the price charts already use. Whichever network is
+  // active (appMode) decides which relayer/ledger this reads, same as
+  // refreshRemoteLaunches/refreshLiveTokenPrices.
+  const LIVE_FEED_POLL_MS = 20000;
+  let seenActivityKeys = new Set();
+
+  function activityKey(entry){ return `${entry.txHash}:${entry.logIndex}`; }
+
+  function activityLineHTML(entry){
+    const time = new Date(entry.t).toLocaleTimeString("en-US", {hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
+    const verb = entry.side==="buy" ? "bought into" : "sold out of";
+    const dotColor = entry.side==="buy" ? "var(--good-500)" : "var(--cyan-500)";
+    const shortWallet = entry.wallet ? `${entry.wallet.slice(0,6)}…` : "0x????…";
+    const symbol = entry.symbol || "TOKEN";
     const div = document.createElement("div");
     div.className = "feed-line";
-    div.innerHTML = `<span class="t mono">${time}</span><span class="dot" style="background:${dotColor}"></span><span class="msg">Wallet <span class="tk">${randShortAddr()}</span> ${verb} <span class="tk">$${escapeHtml(t.ticker)}</span></span>`;
+    div.innerHTML = `<span class="t mono">${time}</span><span class="dot" style="background:${dotColor}"></span><span class="msg">Wallet <span class="tk">${escapeHtml(shortWallet)}</span> ${verb} <span class="tk">$${escapeHtml(symbol)}</span></span>`;
     return div;
   }
-  function randShortAddr(){
-    const chars="0123456789abcdef"; let s="0x";
-    for(let i=0;i<4;i++) s+=chars[Math.floor(Math.random()*16)];
-    return s+"…";
-  }
-  function seedFeed(){
+
+  async function refreshLiveFeed(){
+    const url = relayerApiUrl(appMode);
+    if(!url) return;
+    let payload;
+    try{
+      const res = await fetch(`${url}/activity`);
+      if(!res.ok) return;
+      payload = await res.json();
+    }catch(e){ return; }
+    const activity = Array.isArray(payload && payload.activity) ? payload.activity : [];
     const body = document.getElementById("feedBody");
-    if(!tokens.length){
-      body.innerHTML = `<div class="empty" style="padding:16px;">No launches yet — the feed lights up once tokens exist here.</div>`;
+    if(!body) return;
+    if(!activity.length){
+      if(!body.children.length || body.querySelector(".empty")){
+        body.innerHTML = `<div class="empty" style="padding:16px;">No trades yet on ${escapeHtml(NETWORKS[appMode].label)} — the feed lights up as real buys and sells happen.</div>`;
+      }
       return;
     }
-    for(let i=0;i<6;i++){ const line = feedLine(); if(line) body.appendChild(line); }
-  }
-  function pumpFeed(){
-    if(REDUCE_MOTION || !tokens.length) return;
-    const body = document.getElementById("feedBody");
-    const line = feedLine();
-    if(!line) return;
+    // Server returns oldest-first, capped — take the most recent slice and
+    // append only entries this browser hasn't already rendered, the same
+    // incremental-append feel the old timer-driven version had, just
+    // sourced from real data instead of a random generator.
+    const recent = activity.slice(-30);
+    const fresh = recent.filter(entry => !seenActivityKeys.has(activityKey(entry)));
+    if(!fresh.length) return;
     if(body.querySelector(".empty")) body.innerHTML = "";
-    body.appendChild(line);
+    for(const entry of fresh){
+      seenActivityKeys.add(activityKey(entry));
+      body.appendChild(activityLineHTML(entry));
+    }
     while(body.children.length>8) body.removeChild(body.firstChild);
+  }
+
+  function seedFeed(){
+    seenActivityKeys = new Set(); // switching networks (or a fresh load) starts the de-dupe set clean
+    const body = document.getElementById("feedBody");
+    if(!body) return;
+    if(!relayerApiUrl(appMode)){
+      body.innerHTML = `<div class="empty" style="padding:16px;">No relayer configured for ${escapeHtml(NETWORKS[appMode].label)} yet.</div>`;
+      return;
+    }
+    body.innerHTML = `<div class="empty" style="padding:16px;">Loading recent activity…</div>`;
+    refreshLiveFeed();
   }
 
   /* ---------------- init ---------------- */
   renderStats();
   renderGrid();
   seedFeed();
-  if(!REDUCE_MOTION) setInterval(pumpFeed, 4200);
+  setInterval(refreshLiveFeed, LIVE_FEED_POLL_MS);
   // "Check every once in awhile" for independently-added liquidity on Just
   // Launch tokens — see checkPendingLiquidity() above.
   setInterval(checkPendingLiquidity, 45000);
