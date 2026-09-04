@@ -1016,6 +1016,19 @@
   // rather than a second address that could drift out of sync with it.
   const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "priceFeed", "relayerApiUrl"];
   const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "priceFeed"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
+
+  // Must produce byte-identical output to relayer.js's own
+  // canonicalizePlatformConfig for the same input, or a signature made here
+  // won't verify there — see POST /platform-config's own comment. Kept in
+  // sync by hand; if either ever changes, change both together.
+  function canonicalizePlatformConfig(cfg){
+    const out = {};
+    for(const k of CONFIG_KEYS) out[k] = { demo: (cfg && cfg[k] && cfg[k].demo) || null, live: (cfg && cfg[k] && cfg[k].live) || null };
+    return out;
+  }
+  function platformConfigMessage(cfg, timestamp){
+    return `Hood Launch admin: update platform config to ${JSON.stringify(canonicalizePlatformConfig(cfg))} at ${timestamp}`;
+  }
   const CONFIG_LABELS = {
     tokenFactory: "TokenFactory",
     customTokenFactory: "CustomTokenFactory",
@@ -1090,10 +1103,21 @@
 
   let fetchedPlatformConfig = null; // raw parsed contents of config.json, once (if) it loads
   let configJsonLoadState = "loading"; // "loading" | "loaded" | "missing" | "error"
+  // Server-saved platform config (POST /platform-config, admin-signed —
+  // see requestPlatformConfigSave/platformContractsPanelHTML below). Sits
+  // above config.json in precedence: it reflects the most recent admin
+  // action with no manual deploy step needed, whereas config.json only
+  // updates when someone actually replaces that file on the host. Null
+  // until the relayer answers (or if nothing's ever been saved there),
+  // exactly like fetchedPlatformConfig above — mergeConfigLayer already
+  // treats a null layer as "skip it."
+  let serverPlatformConfig = null;
+  let serverConfigLoadState = "loading"; // "loading" | "loaded" | "unset" | "error"
   let platformConfig = mergeConfigLayer(cloneConfig(DEFAULT_CONFIG), loadLocalConfigOverrides());
 
   function rebuildPlatformConfig(){
     let merged = mergeConfigLayer(cloneConfig(DEFAULT_CONFIG), fetchedPlatformConfig);
+    merged = mergeConfigLayer(merged, serverPlatformConfig);
     merged = mergeConfigLayer(merged, loadLocalConfigOverrides());
     platformConfig = merged;
   }
@@ -1122,6 +1146,31 @@
     if(views.admin && views.admin.classList.contains("active")){ renderAdmin(); }
   }
   loadPlatformConfigFile();
+
+  // Fetched via location.origin directly, same as active-network — not
+  // through relayerApiUrl(appMode), since relayerApiUrl is itself one of
+  // the values this config supplies (asking it where to look before it's
+  // resolved would be circular). This page is always served by that same
+  // relayer process, so location.origin always reaches it.
+  async function fetchServerPlatformConfig(){
+    try{
+      const res = await fetch(`${location.origin}/platform-config`, { cache: "no-store" });
+      if(!res.ok){ serverConfigLoadState = "error"; return; }
+      const data = await res.json();
+      serverPlatformConfig = (data && data.config) || null;
+      serverConfigLoadState = serverPlatformConfig ? "loaded" : "unset";
+    }catch(e){
+      serverConfigLoadState = "error";
+    }
+    rebuildPlatformConfig();
+    if(views.create && views.create.classList.contains("active")){ renderWizard(); refreshOnChainDefaults(); refreshEthUsdPrice(); }
+    if(views.admin && views.admin.classList.contains("active")){ renderAdmin(); }
+  }
+  fetchServerPlatformConfig();
+  // Same 60s cadence as syncActiveNetworkFromServer — an admin's save
+  // reaches every OTHER open tab/visitor within a minute, not just on their
+  // next full page load.
+  setInterval(fetchServerPlatformConfig, 60000);
 
   function tokenFactoryAddress(mode){ return platformConfig.tokenFactory[mode || appMode] || null; }
   function customTokenFactoryAddress(mode){ return platformConfig.customTokenFactory[mode || appMode] || null; }
@@ -1224,6 +1273,43 @@
       toast(`Platform-wide active network is now ${data.network==="live" ? "Mainnet" : "Testnet"} — every visitor picks this up shortly.`);
     }catch(err){
       toast("Couldn't reach the relayer to switch networks.");
+    }
+  }
+
+  // Same admin-signed pattern as requestActiveNetworkChange above, for the
+  // "Platform contracts" admin panel — see POST /platform-config's own
+  // comment in relayer.js for why the message embeds the actual config
+  // rather than just a timestamp. `layer` is the same shape "Save (this
+  // browser)" already builds (all CONFIG_KEYS, each {demo, live}), so both
+  // buttons share one validated object — this one just also sends it to
+  // the relayer instead of (or as well as) localStorage.
+  async function requestPlatformConfigSave(layer){
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return null; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return null; }
+    const timestamp = Date.now();
+    const message = platformConfigMessage(layer, timestamp);
+    let signature;
+    try{
+      signature = await window.ethereum.request({
+        method: "personal_sign",
+        params: ["0x"+utf8Hex(message), wallet],
+      });
+    }catch(err){
+      toast("Signature was rejected — config not saved.");
+      return null;
+    }
+    try{
+      const res = await fetch(`${location.origin}/platform-config`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ config: layer, timestamp, signature }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't save the platform config."); return null; }
+      return data.config;
+    }catch(err){
+      toast("Couldn't reach the relayer to save the platform config.");
+      return null;
     }
   }
   modeDemoBtn.addEventListener("click", ()=>{ if(appMode!=="demo") requestActiveNetworkChange("demo"); });
@@ -3248,6 +3334,33 @@
         t.change24h = change.pct;
         t.change24hSpansFullDay = change.spansFullDay;
         t.hist = history.length>=2 ? history.map(pt=>pt.p) : [latest.p, latest.p];
+        // Market cap: relayer.js's pollTokenPrices now samples this
+        // alongside price (priceUsd * live totalSupply()), so it's already
+        // computed server-side and just needs picking up here — no wallet
+        // call needed, same as price itself. Older recorded points (from
+        // before this field existed) won't have it; leave t.mcap as-is
+        // until a fresh sample lands rather than flashing back to $0.
+        if(typeof latest.mcapUsd === "number" && isFinite(latest.mcapUsd)) t.mcap = latest.mcapUsd;
+        // Graduation: same idea. taxProgressPct is the real percentage
+        // toward this token's own graduationTargetUsd, computed server-side
+        // from the same sample; taxActive is the contract's own
+        // authoritative on/off switch (see LaunchedToken._maybeDisableTax /
+        // CustomToken._maybeDisablePlatformTax — a two-observation, 30-
+        // minute-apart confirmation, not a single instantaneous reading).
+        // Flipping status here is what actually turns on the "Graduated"
+        // badge/count/filter for a real token — previously nothing ever did
+        // that client-side, so a real graduation was invisible in this UI
+        // even though the contract itself had already turned the tax off.
+        if(typeof latest.taxProgressPct === "number" && isFinite(latest.taxProgressPct)) t.taxProgress = latest.taxProgressPct;
+        if(latest.taxActive === false && t.status==="taxed") t.status = "graduated";
+        else if(latest.taxActive === true && t.status==="graduated") t.status = "taxed"; // shouldn't happen (graduation is permanent on-chain) — corrects an earlier bad read rather than getting stuck wrong forever
+        // Holders: relayer.js now asks the block explorer for a real count
+        // (see fetchHolderCount there) instead of this staying the static
+        // 1/2 set at launch. Same "leave it as-is until a real number
+        // arrives" posture as mcap — an explorer hiccup on a given tick
+        // just means the number doesn't move this time, not that it
+        // flashes back to something wrong.
+        if(typeof latest.holders === "number" && isFinite(latest.holders)) t.holders = latest.holders;
         if(latest.t !== prevLatestT) changed = true;
       }catch(e){ /* offline, or the relayer's briefly unreachable — retried on the next poll tick */ }
     }
@@ -5523,6 +5636,13 @@
       : configJsonLoadState==="error"
       ? "Couldn't fetch ./config.json — expected if this page is open as a local file (fetch() of a sibling file needs a real web server, e.g. `npx serve .`) — using built-in defaults."
       : "Loading ./config.json…";
+    const serverStatusLine = serverConfigLoadState==="loaded"
+      ? " The relayer also has a saved platform-wide config, layered on top of that — it's what every visitor actually sees unless this browser has local overrides too."
+      : serverConfigLoadState==="unset"
+      ? " Nothing's been saved platform-wide on the relayer yet — \"Save (all visitors)\" below is what sets that for the first time."
+      : serverConfigLoadState==="error"
+      ? " Couldn't reach the relayer to check for a saved platform-wide config."
+      : "";
     const hasLocalOverrides = !!loadLocalConfigOverrides();
 
     const rows = CONFIG_KEYS.map(k=>{
@@ -5542,37 +5662,66 @@
     return `
       <div class="panel admin-panel" style="grid-column:1 / -1;">
         <div class="admin-panel-head"><h3>Platform contracts</h3></div>
-        <p class="admin-empty">${escapeHtml(statusLine)}${hasLocalOverrides ? " This browser also has saved local overrides layered on top of that — they win over both config.json and the defaults, and are what every field below, and every panel on this page, is currently showing." : ""}</p>
+        <p class="admin-empty">${escapeHtml(statusLine)}${serverStatusLine}${hasLocalOverrides ? " This browser also has saved local overrides layered on top of all of that — they win over everything else, and are what every field below, and every panel on this page, is currently showing." : ""}</p>
         ${rows}
         <div class="admin-action-row">
-          <button class="btn btn-primary btn-sm" data-cfg-action="save">Save (this browser)</button>
+          <button class="btn btn-primary btn-sm" data-cfg-action="savePlatformWide">Save (all visitors)</button>
+          <button class="btn btn-ghost btn-sm" data-cfg-action="save">Save (this browser)</button>
           <button class="btn btn-ghost btn-sm" data-cfg-action="download">Download config.json</button>
           ${hasLocalOverrides ? `<button class="btn btn-ghost btn-sm" data-cfg-action="reset">Clear local overrides</button>` : ""}
         </div>
-        <p class="admin-empty" style="margin-top:6px;">"Save" only affects this browser and takes effect immediately, everywhere this page uses these addresses. To make a change permanent for every visitor, click "Download config.json" and replace the config.json file that sits next to index.html on your web host — every browser that loads the page after that picks it up automatically, with no code edit.</p>
+        <p class="admin-empty" style="margin-top:6px;">"Save (all visitors)" signs the change with the connected admin wallet and sends it straight to the relayer — every visitor picks it up within about a minute, no manual step needed. "Save (this browser)" only affects this browser (handy for testing an address before committing it platform-wide) and takes effect immediately, but only here. "Download config.json" still works as a manual, git-trackable backup of whatever's currently shown above, independent of either save button.</p>
       </div>`;
+  }
+
+  // Shared by both "Save" buttons — reads and validates the form fields,
+  // returning null (after toasting which field's wrong) rather than a
+  // partial/invalid layer. Pulled out of runConfigAction so "Save (this
+  // browser)" and "Save (all visitors)" can't drift into checking these
+  // differently.
+  function gatherPlatformConfigLayerFromForm(){
+    const layer = {};
+    for(const k of CONFIG_KEYS){
+      const demoEl = document.getElementById(configFieldId(k,"demo"));
+      const liveEl = document.getElementById(configFieldId(k,"live"));
+      const demoV = demoEl ? demoEl.value.trim() : "";
+      const liveV = liveEl ? liveEl.value.trim() : "";
+      const isUrlField = !CONFIG_ADDRESS_KEYS.includes(k);
+      const validator = isUrlField ? isUrlLike : isAddressLike;
+      const kindNoun = isUrlField ? "URL" : "address";
+      if(demoV && !validator(demoV)){ toast(`${CONFIG_LABELS[k]} testnet ${kindNoun} doesn't look valid.`); return null; }
+      if(liveV && !validator(liveV)){ toast(`${CONFIG_LABELS[k]} mainnet ${kindNoun} doesn't look valid.`); return null; }
+      layer[k] = { demo: demoV || null, live: liveV || null };
+    }
+    return layer;
   }
 
   async function runConfigAction(action, btnEl){
     if(action==="save"){
-      const layer = {};
-      for(const k of CONFIG_KEYS){
-        const demoEl = document.getElementById(configFieldId(k,"demo"));
-        const liveEl = document.getElementById(configFieldId(k,"live"));
-        const demoV = demoEl ? demoEl.value.trim() : "";
-        const liveV = liveEl ? liveEl.value.trim() : "";
-        const isUrlField = !CONFIG_ADDRESS_KEYS.includes(k);
-        const validator = isUrlField ? isUrlLike : isAddressLike;
-        const kindNoun = isUrlField ? "URL" : "address";
-        if(demoV && !validator(demoV)){ toast(`${CONFIG_LABELS[k]} testnet ${kindNoun} doesn't look valid.`); return; }
-        if(liveV && !validator(liveV)){ toast(`${CONFIG_LABELS[k]} mainnet ${kindNoun} doesn't look valid.`); return; }
-        layer[k] = { demo: demoV || null, live: liveV || null };
-      }
+      const layer = gatherPlatformConfigLayerFromForm();
+      if(!layer) return;
       if(!saveLocalConfigOverrides(layer)){ toast("Couldn't save — this browser may be blocking local storage."); return; }
       rebuildPlatformConfig();
       toast("Saved. These addresses now apply everywhere on this page, in this browser.");
       renderAdmin();
       if(views.create && views.create.classList.contains("active")){ refreshOnChainDefaults(); refreshEthUsdPrice(); }
+    } else if(action==="savePlatformWide"){
+      const layer = gatherPlatformConfigLayerFromForm();
+      if(!layer) return;
+      const originalLabel = btnEl ? btnEl.textContent : "";
+      if(btnEl){ btnEl.disabled = true; btnEl.textContent = "Confirm in wallet…"; }
+      try{
+        const saved = await requestPlatformConfigSave(layer);
+        if(!saved) return; // requestPlatformConfigSave already toasted why
+        serverPlatformConfig = saved;
+        serverConfigLoadState = "loaded";
+        rebuildPlatformConfig();
+        toast("Saved platform-wide — every visitor picks this up within about a minute, no upload needed.");
+        if(views.create && views.create.classList.contains("active")){ refreshOnChainDefaults(); refreshEthUsdPrice(); }
+      } finally {
+        if(btnEl){ btnEl.disabled = false; btnEl.textContent = originalLabel; }
+        renderAdmin();
+      }
     } else if(action==="reset"){
       clearLocalConfigOverrides();
       rebuildPlatformConfig();
