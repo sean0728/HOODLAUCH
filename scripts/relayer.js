@@ -45,9 +45,12 @@ const path = require("path");
 const fs = require("fs");
 const express = require("express");
 const hre = require("hardhat");
-const { verifyContract, verifyProxyClone } = require("../lib/verify");
+const { verifyContract, verifyProxyClone, resolveExplorerApiUrl } = require("../lib/verify");
 const { recordLaunch, readLedger, PUBLIC_FIELDS } = require("../lib/launchStore");
-const { getVoucher, upsertVoucher, getCursor, setCursor, getActiveNetwork, setActiveNetwork } = require("../lib/relayerStore");
+const {
+  getVoucher, upsertVoucher, getCursor, setCursor, getActiveNetwork, setActiveNetwork,
+  getPlatformConfig, setPlatformConfig,
+} = require("../lib/relayerStore");
 const { appendPricePoint, readPriceHistory } = require("../lib/priceHistoryStore");
 const { appendActivity, readActivity } = require("../lib/activityStore");
 
@@ -77,6 +80,24 @@ const PAIR_ABI = [
   "function token0() view returns (address)",
   "event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)",
 ];
+// Just enough of ERC20 to price a token's market cap alongside its price —
+// see pollTokenPrices below. Read live (not the totalSupply recorded at
+// launch time) so a token with a burn tax shows a market cap that keeps
+// tracking its real, shrinking supply rather than quietly going stale.
+const ERC20_SUPPLY_ABI = ["function totalSupply() view returns (uint256)"];
+// Covers both LaunchedToken.sol (taxActive) and CustomToken.sol
+// (platformTaxActive) — same graduationTargetUsd field name on both, just a
+// differently-named on/off flag for the platform's own flat tax. See
+// pollTokenPrices: which boolean actually gets called depends on which kind
+// of token this is (entry.mode tells us). Both contracts' real
+// _maybeDisableTax()/_maybeDisablePlatformTax() logic run on-chain on every
+// taxed transfer — this is just reading the result of that, not
+// recalculating graduation ourselves.
+const GRADUATION_ABI = [
+  "function graduationTargetUsd() view returns (uint256)",
+  "function taxActive() view returns (bool)",
+  "function platformTaxActive() view returns (bool)",
+];
 
 // ---- platform-wide active network (admin-gated) ----
 // Purely a UI/display concern from here down — this never changes which
@@ -98,6 +119,81 @@ const VALID_NETWORKS = ["demo", "live"];
 
 function activeNetworkMessage(network, timestamp) {
   return `Hood Launch admin: set active network to ${network} at ${timestamp}`;
+}
+
+// ---- platform contracts config (admin-gated, same pattern as above) ----
+// Server-side counterpart to index.html's admin panel "Save (this browser)"
+// button, which only ever wrote to that one browser's localStorage — see
+// that panel's own comment in index.html for the gap this closes: an admin
+// changing an address there had no way to make it visible to any other
+// visitor without a manual config.json export/upload. This is the same
+// signed-message approach as active-network above, generalized to a
+// multi-field payload: the admin signs a message that embeds the exact
+// config being saved (via a canonical, fixed-key-order JSON encoding — see
+// canonicalizePlatformConfig), not just a timestamp, so a captured
+// signature can't later be replayed to push a *different* config within
+// the same TTL window.
+//
+// PLATFORM_CONFIG_KEYS/PLATFORM_CONFIG_ADDRESS_KEYS mirror index.html's own
+// CONFIG_KEYS/CONFIG_ADDRESS_KEYS exactly — kept in sync by hand, same as
+// canonicalizePlatformConfig itself (see that function's own comment).
+const PLATFORM_CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "priceFeed", "relayerApiUrl"];
+const PLATFORM_CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "priceFeed"];
+const PLATFORM_CONFIG_SIGNATURE_TTL_MS = 5 * 60 * 1000;
+const ADDRESS_LIKE_RE = /^0x[0-9a-fA-F]{40}$/;
+
+function isUrlLike(value) {
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch (err) {
+    return false;
+  }
+}
+
+// Must produce byte-identical output to index.html's own
+// canonicalizePlatformConfig for the same input, or a validly-signed save
+// from the admin panel will fail to verify here. Both sides build the
+// object by inserting keys in this exact fixed order (JS preserves string-
+// key insertion order in JSON.stringify, per spec — not an engine quirk),
+// so keep this in sync with index.html by hand if either ever changes.
+function canonicalizePlatformConfig(cfg) {
+  const out = {};
+  for (const k of PLATFORM_CONFIG_KEYS) {
+    const v = (cfg && cfg[k]) || {};
+    out[k] = { demo: v.demo || null, live: v.live || null };
+  }
+  return out;
+}
+
+function platformConfigMessage(cfg, timestamp) {
+  return `Hood Launch admin: update platform config to ${JSON.stringify(canonicalizePlatformConfig(cfg))} at ${timestamp}`;
+}
+
+// Rejects anything that doesn't match index.html's own client-side checks
+// (isAddressLike/isUrlLike in the admin "Save" handler) — that client
+// validation is a UX convenience, not something this endpoint can trust,
+// since it's the thing that actually persists what every visitor sees.
+function validatePlatformConfig(raw) {
+  if (!raw || typeof raw !== "object") return { error: "config must be an object" };
+  const cleaned = {};
+  for (const k of PLATFORM_CONFIG_KEYS) {
+    const entry = raw[k];
+    if (entry === undefined) continue; // omitted key: leave unset, don't force nulls over a value saved by a previous save
+    if (!entry || typeof entry !== "object") return { error: `${k} must be an object with demo/live fields` };
+    const isAddressField = PLATFORM_CONFIG_ADDRESS_KEYS.includes(k);
+    const validator = isAddressField ? (v) => ADDRESS_LIKE_RE.test(v) : isUrlLike;
+    const kindNoun = isAddressField ? "address" : "URL";
+    const out = { demo: null, live: null };
+    for (const net of ["demo", "live"]) {
+      const v = entry[net];
+      if (v === null || v === undefined || v === "") continue;
+      if (typeof v !== "string" || !validator(v)) return { error: `${k} ${net} doesn't look like a valid ${kindNoun}` };
+      out[net] = v.trim();
+    }
+    cleaned[k] = out;
+  }
+  return { cleaned };
 }
 
 // ---- real trade activity sampler ----
@@ -193,6 +289,14 @@ function expectedDepositForCustom(voucher) {
 // JSON.stringify chokes on BigInt — every response that might carry one
 // goes through this instead of res.json().
 function sendJson(res, status, body) {
+  // Every route on this server is either live relayer state or a plain
+  // read straight off a ledger file that changes as launches/trades/prices
+  // happen — none of it should ever be cached by a browser. Without an
+  // explicit header here, a browser is free to apply its own heuristic
+  // caching to a GET response (no Cache-Control, no ETag), which is exactly
+  // how a browser can end up showing a launches list from before a new
+  // token existed even though the server itself has long since moved on.
+  res.setHeader("Cache-Control", "no-store");
   res.status(status).type("application/json").send(
     JSON.stringify(body, (_key, value) => (typeof value === "bigint" ? value.toString() : value), 2)
   );
@@ -227,6 +331,73 @@ async function fetchEthUsdPrice() {
     // offline, or the API's unreachable — fall through to the hardcoded estimate
   }
   return FALLBACK_ETH_USD;
+}
+
+// Real per-token holder count — replaces what used to be a static number
+// set once at launch time and never touched again (either 1 or 2, baked
+// straight into the token object) plus a purely cosmetic, seeded-random
+// "holder distribution" breakdown in index.html's openDetail(). Neither of
+// those was ever real data. There's no on-chain way to get this cheaply for
+// an ordinary LaunchedToken/CustomToken clone — unlike PlatformToken.sol,
+// they don't maintain their own holder registry, and adding one now would
+// mean a contract change (same category of work as the liquidity-split
+// feature that's on hold). The block explorer already indexes every
+// Transfer event for every token on the chain, so it's the only source
+// that can answer "how many distinct addresses hold this right now"
+// without touching the contracts at all.
+//
+// Tries Blockscout's native v2 REST API first (documented, stable schema:
+// GET /api/v2/tokens/{address} returns a top-level "holders" field) and
+// falls back to the legacy Etherscan-compatible action this project's own
+// verify.js already targets (module=token&action=getToken), whose "result"
+// object commonly carries the same field on Blockscout deployments. Either
+// step failing (wrong field name for this particular explorer build, rate
+// limiting, a network hiccup) just means this tick doesn't update the
+// count — same "leave it as it was, retry next poll" posture as every
+// other best-effort read in this file. If holder counts never populate
+// after this ships, check a relayer log line starting with "[holders]" —
+// it'll say which step failed and what came back, which is enough to
+// adjust the field name here without guessing blind.
+async function fetchHolderCount(tokenAddress) {
+  const apiUrl = resolveExplorerApiUrl();
+  if (!apiUrl) return null;
+  let v2Failure = null;
+  let legacyFailure = null;
+
+  try {
+    const v2Base = apiUrl.replace(/\/api\/?$/, "/api/v2");
+    const res = await fetch(`${v2Base}/tokens/${tokenAddress}`);
+    if (res.ok) {
+      const data = await res.json();
+      const holders = Number(data && data.holders);
+      if (Number.isFinite(holders) && holders >= 0) return holders;
+      v2Failure = `no usable "holders" field (got ${JSON.stringify(data && data.holders)})`;
+    } else {
+      v2Failure = `HTTP ${res.status}`;
+    }
+  } catch (err) {
+    v2Failure = err.message;
+  }
+
+  try {
+    const url = `${apiUrl}?module=token&action=getToken&contractaddress=${tokenAddress}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      const holders = Number(data && data.result && data.result.holders);
+      if (Number.isFinite(holders) && holders >= 0) return holders;
+      legacyFailure = `no usable "holders" field (got ${JSON.stringify(data && data.result && data.result.holders)})`;
+    } else {
+      legacyFailure = `HTTP ${res.status}`;
+    }
+  } catch (err) {
+    legacyFailure = err.message;
+  }
+
+  // Logged once per failing tick, not thrown — see this function's own
+  // comment above for why a miss here just means "try again next poll."
+  console.warn(`[holders] couldn't get a holder count for ${tokenAddress} — v2 API: ${v2Failure}; legacy API: ${legacyFailure}`);
+  return null;
 }
 
 async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementationAddress, creator, name, symbol, totalSupply, network, txHash, extra, mode }) {
@@ -486,6 +657,65 @@ async function main() {
       const stored = setActiveNetwork(targetNetwork);
       console.log(`[active-network] admin (${recovered}) set the platform-wide active network to "${stored}".`);
       sendJson(res, 200, { network: stored });
+    } catch (err) {
+      sendJson(res, 400, { error: err.message });
+    }
+  });
+
+  // Platform contracts config — same public-GET/signed-POST split as
+  // active-network above, and the same reasoning: GET is just a read of a
+  // JSON file, POST is what every visitor's page ends up trusting, so it's
+  // verified server-side rather than taken on the client's word. Returns
+  // null when nothing's been saved here yet (index.html's own
+  // rebuildPlatformConfig already treats a null layer as "skip it, fall
+  // through to config.json / built-in defaults" — same as it already does
+  // for a browser with no localStorage override).
+  app.get("/platform-config", (_req, res) => {
+    sendJson(res, 200, { config: getPlatformConfig() });
+  });
+
+  app.post("/platform-config", (req, res) => {
+    try {
+      const { config: submittedConfig, timestamp, signature } = req.body || {};
+      if (!signature) return sendJson(res, 400, { error: "signature is required" });
+      const ts = Number(timestamp);
+      if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > PLATFORM_CONFIG_SIGNATURE_TTL_MS) {
+        return sendJson(res, 400, { error: "timestamp is missing, invalid, or too old — try again" });
+      }
+
+      const { cleaned, error } = validatePlatformConfig(submittedConfig);
+      if (error) return sendJson(res, 400, { error });
+
+      // Signed and verified against the exact submitted config (via the
+      // same canonical encoding on both ends) — not just a timestamp — so a
+      // captured signature can't be replayed later to push different
+      // addresses within the same TTL window. See platformConfigMessage's
+      // own comment.
+      const message = platformConfigMessage(submittedConfig, ts);
+      let recovered;
+      try {
+        recovered = hre.ethers.verifyMessage(message, signature);
+      } catch (err) {
+        return sendJson(res, 400, { error: "couldn't verify that signature" });
+      }
+      if (recovered.toLowerCase() !== ADMIN_WALLET_ADDRESS) {
+        console.warn(`[platform-config] rejected a config save signed by ${recovered}, which isn't the admin wallet.`);
+        return sendJson(res, 403, { error: "signature does not match the platform admin wallet" });
+      }
+
+      // Merge onto whatever's already saved rather than replacing it
+      // outright, so a caller that only sends a subset of keys can't
+      // accidentally wipe out the others — same merge-not-replace posture
+      // index.html's own config layering already uses everywhere else.
+      const existing = getPlatformConfig() || {};
+      const merged = { ...existing };
+      for (const k of PLATFORM_CONFIG_KEYS) {
+        if (cleaned[k] !== undefined) merged[k] = cleaned[k];
+      }
+
+      const stored = setPlatformConfig(merged);
+      console.log(`[platform-config] admin (${recovered}) updated the platform-wide contracts config.`);
+      sendJson(res, 200, { config: stored });
     } catch (err) {
       sendJson(res, 400, { error: err.message });
     }
@@ -789,14 +1019,67 @@ async function main() {
     for (const entry of liveEntries) {
       try {
         const pair = new hre.ethers.Contract(entry.pairAddress, PAIR_ABI, hre.ethers.provider);
-        const [reserves, token0] = await Promise.all([pair.getReserves(), pair.token0()]);
+        const token = new hre.ethers.Contract(entry.tokenAddress, ERC20_SUPPLY_ABI, hre.ethers.provider);
+        // Every launch that reaches liveEntries (real pairAddress on file)
+        // went through the platform's own "Deploy and Add Liquidity" flow,
+        // which always calls configureTax()/configurePlatformTax()
+        // atomically when the pool is seeded — so these reads are expected
+        // to succeed for every entry here, custom or plain. The .catch()s
+        // below are just defense-in-depth, not an expected path.
+        const isCustom = /custom/i.test(entry.mode || "");
+        const graduation = new hre.ethers.Contract(entry.tokenAddress, GRADUATION_ABI, hre.ethers.provider);
+        // holders comes from the block explorer, not the chain directly —
+        // see fetchHolderCount's own comment for why. Fetched alongside the
+        // on-chain reads rather than after them, so one slow HTTP call to
+        // the explorer doesn't add extra latency on top of the RPC calls.
+        const [reserves, token0, supply, graduationTargetUsd, taxActive, holders] = await Promise.all([
+          pair.getReserves(),
+          pair.token0(),
+          token.totalSupply(),
+          graduation.graduationTargetUsd().catch(() => null),
+          (isCustom ? graduation.platformTaxActive() : graduation.taxActive()).catch(() => null),
+          fetchHolderCount(entry.tokenAddress),
+        ]);
         const isToken0 = token0.toLowerCase() === entry.tokenAddress.toLowerCase();
         const tokenReserve = isToken0 ? reserves.reserve0 : reserves.reserve1;
         const wethReserve = isToken0 ? reserves.reserve1 : reserves.reserve0;
         if (tokenReserve <= 0n || wethReserve <= 0n) continue; // pool exists but is empty/not yet seeded — nothing to price yet
         const priceWeiPerToken = (wethReserve * 10n ** 18n) / tokenReserve;
         const priceUsd = (Number(priceWeiPerToken) / 1e18) * ethUsdPrice;
-        appendPricePoint(network, entry.tokenAddress, { t: Date.now(), p: priceUsd });
+        // Market cap rides along on the same sample rather than getting its
+        // own endpoint/poll loop — it's just priceUsd times whatever the
+        // token's live totalSupply() happens to be right now, read fresh
+        // every tick so a burn-tax token's market cap tracks its real,
+        // shrinking supply instead of the fixed amount it minted at launch.
+        const mcapUsd = priceUsd * (Number(supply) / 1e18);
+
+        // Graduation progress toward the platform's own flat tax cutoff
+        // (LaunchedToken._maybeDisableTax / CustomToken._maybeDisablePlatformTax
+        // — see those functions' own comments for the two-observation,
+        // 30-minute-apart confirmation window this is the result of).
+        // taxActive is the contract's own authoritative on/off switch, read
+        // straight off-chain — not recomputed here. taxProgressPct is just
+        // this same mcapUsd estimate expressed as a percentage of the
+        // token's own graduationTargetUsd, for the progress bar. Once the
+        // contract itself confirms graduation, pin the bar to 100 outright
+        // rather than whatever our own (slightly different price-source)
+        // mcapUsd estimate implies — a graduated token should never show a
+        // progress bar stuck at 97%.
+        let taxProgressPct = null;
+        if (taxActive === false) {
+          taxProgressPct = 100;
+        } else if (graduationTargetUsd != null && Number(graduationTargetUsd) > 0) {
+          taxProgressPct = Math.max(0, Math.min(100, Math.round((mcapUsd / Number(graduationTargetUsd)) * 100)));
+        }
+
+        appendPricePoint(network, entry.tokenAddress, {
+          t: Date.now(),
+          p: priceUsd,
+          mcapUsd,
+          ...(taxActive === null ? {} : { taxActive }),
+          ...(taxProgressPct === null ? {} : { taxProgressPct }),
+          ...(holders === null ? {} : { holders }),
+        });
       } catch (err) {
         console.error(`[price] couldn't sample ${entry.symbol || entry.tokenAddress}: ${err.message}`);
       }
