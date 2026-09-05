@@ -72,6 +72,18 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     /// identically here.
     uint256 public rewardBps = 10; // 0.10%
 
+    /// @notice CreatorRewardsDistributor's address — see
+    /// TokenFactory.creatorRewardsDistributor for the full explanation;
+    /// behaves identically here.
+    address public creatorRewardsDistributor;
+
+    /// @notice Out of feeBps, how much (absolute bps) gets diverted to
+    /// creatorRewardsDistributor instead of platformFeeWallet — carved OUT
+    /// OF feeBps, never added on top of it, and never overlapping
+    /// rewardBps above. See TokenFactory.creatorRewardBps for the full
+    /// explanation; behaves identically here.
+    uint256 public creatorRewardBps = 5; // 0.05%
+
     /// @notice Anti-rug ceiling on a creator's own same-transaction buy-in,
     /// in bps of totalSupply_ — identical safeguard to TokenFactory's
     /// maxCreatorBuyBps, checked against the actual net tokens received
@@ -229,6 +241,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     event BuyInSlippageBpsUpdated(uint256 newBps);
     event TaxDefaultsUpdated();
     event RewardsDistributorUpdated(address newDistributor);
+    event CreatorRewardsDistributorUpdated(address newDistributor);
     event TokenPriceFeedUpdated(address indexed token, address newPriceFeed, uint256 newMaxOracleStaleness);
 
     constructor(
@@ -453,8 +466,10 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         CustomToken(payable(token)).setPair(pair);
 
         uint256 effectiveRewardBps = rewardsDistributor != address(0) ? rewardBps : 0;
+        uint256 effectiveCreatorRewardBps = creatorRewardsDistributor != address(0) ? creatorRewardBps : 0;
         CustomToken(payable(token)).configurePlatformTax(
-            platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness, rewardsDistributor, effectiveRewardBps
+            platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness,
+            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps
         );
 
         uint256 unlockTime = block.timestamp + lpLockDuration;
@@ -692,8 +707,10 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         // set — see TokenFactory._launchWithLiquidity for the identical
         // reasoning on the simpler token path.
         uint256 effectiveRewardBps = rewardsDistributor != address(0) ? rewardBps : 0;
+        uint256 effectiveCreatorRewardBps = creatorRewardsDistributor != address(0) ? creatorRewardBps : 0;
         CustomToken(payable(token)).configurePlatformTax(
-            platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness, rewardsDistributor, effectiveRewardBps
+            platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness,
+            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps
         );
 
         uint256 unlockTime = block.timestamp + lpLockDuration;
@@ -796,6 +813,13 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         emit RewardsDistributorUpdated(newDistributor);
     }
 
+    /// @notice See TokenFactory.setCreatorRewardsDistributor — identical
+    /// behavior here.
+    function setCreatorRewardsDistributor(address newDistributor) external onlyOwner {
+        creatorRewardsDistributor = newDistributor;
+        emit CreatorRewardsDistributorUpdated(newDistributor);
+    }
+
     /// @notice See TokenFactory.setRelayer — identical behavior here.
     function setRelayer(address newRelayer) external onlyOwner {
         relayer = newRelayer;
@@ -832,18 +856,20 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         address priceFeed_,
         uint256 graduationTargetUsd_,
         uint256 maxOracleStaleness_,
-        uint256 rewardBps_
+        uint256 rewardBps_,
+        uint256 creatorRewardBps_
     ) external onlyOwner {
         require(feeBps_ <= 10_000, "CustomTokenFactory: feeBps cannot exceed 100%");
         require(graduationTargetUsd_ > 0, "CustomTokenFactory: graduation target must be > 0");
         require(maxOracleStaleness_ > 0, "CustomTokenFactory: oracle staleness must be > 0");
-        require(rewardBps_ <= feeBps_, "CustomTokenFactory: rewardBps cannot exceed feeBps");
+        require(rewardBps_ + creatorRewardBps_ <= feeBps_, "CustomTokenFactory: rewardBps+creatorRewardBps cannot exceed feeBps");
         platformFeeWallet = platformFeeWallet_;
         feeBps = feeBps_;
         priceFeed = priceFeed_;
         graduationTargetUsd = graduationTargetUsd_;
         maxOracleStaleness = maxOracleStaleness_;
         rewardBps = rewardBps_;
+        creatorRewardBps = creatorRewardBps_;
         emit TaxDefaultsUpdated();
     }
 

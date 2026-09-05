@@ -159,7 +159,23 @@ contract CustomToken is ERC20, ReentrancyGuard {
     // this is entirely inactive — 100% of platformFeeBps still goes to
     // platformFeeWallet, exactly as before this feature existed. ----
     address public rewardsDistributor;
-    uint256 public rewardBps; // absolute bps of transfer value diverted to rewardsDistributor, carved OUT OF platformFeeBps (never on top of it); always <= platformFeeBps
+    uint256 public rewardBps; // absolute bps of transfer value diverted to rewardsDistributor, carved OUT OF platformFeeBps (never on top of it); rewardBps + creatorRewardBps always <= platformFeeBps
+
+    // ---- creator rewards: a second, independent carve-out of the
+    // PLATFORM's own platformFeeBps, sent in-kind to
+    // CreatorRewardsDistributor on every taxed transfer — never stacked
+    // with rewardBps above (rewardBps + creatorRewardBps <= platformFeeBps
+    // is enforced once, in configurePlatformTax()), and never touching
+    // reflectionCut/marketingCut/liquidityCut/burnCut, which are the
+    // creator's own separately-capped fee config and have nothing to do
+    // with this feature. CreatorRewardsDistributor later swaps its
+    // accumulated balance of this token for ETH and credits this token's
+    // own creator, claimable through that contract — see
+    // CreatorRewardsDistributor.sol and LaunchedToken's identical mirror of
+    // this same feature. Same address(0)-means-inactive convention as
+    // rewardsDistributor. ----
+    address public creatorRewardsDistributor;
+    uint256 public creatorRewardBps; // absolute bps of transfer value diverted to creatorRewardsDistributor, carved OUT OF platformFeeBps (never on top of it, and never overlapping rewardBps)
 
     /// @notice Hard ceiling on totalSupply_, enforced once at initialize().
     /// See LaunchedToken.MAX_TOTAL_SUPPLY for the full reasoning — purely
@@ -436,12 +452,18 @@ contract CustomToken is ERC20, ReentrancyGuard {
         uint256 graduationTargetUsd_,
         uint256 maxOracleStaleness_,
         address rewardsDistributor_,
-        uint256 rewardBps_
+        uint256 rewardBps_,
+        address creatorRewardsDistributor_,
+        uint256 creatorRewardBps_
     ) external onlyFactory {
         require(!platformTaxConfigured, "CustomToken: platform tax already configured");
         require(pair != address(0), "CustomToken: pair not set yet");
-        require(rewardBps_ <= feeBps_, "CustomToken: rewardBps exceeds feeBps");
+        require(rewardBps_ + creatorRewardBps_ <= feeBps_, "CustomToken: rewardBps+creatorRewardBps exceeds feeBps");
         require(rewardsDistributor_ != address(0) || rewardBps_ == 0, "CustomToken: rewardBps requires a distributor");
+        require(
+            creatorRewardsDistributor_ != address(0) || creatorRewardBps_ == 0,
+            "CustomToken: creatorRewardBps requires a distributor"
+        );
         // Defends against the platform's own feeBps_ and this token's
         // already-locked-in creator-side tax (buyFees/sellFees, set back
         // at initialize()) summing past 100%. If they ever did,
@@ -467,6 +489,8 @@ contract CustomToken is ERC20, ReentrancyGuard {
         platformTaxActive = feeBps_ > 0 && feeWallet_ != address(0);
         rewardsDistributor = rewardsDistributor_;
         rewardBps = rewardBps_;
+        creatorRewardsDistributor = creatorRewardsDistributor_;
+        creatorRewardBps = creatorRewardBps_;
 
         emit PlatformTaxConfigured(feeWallet_, feeBps_, graduationTargetUsd_);
     }
@@ -728,20 +752,26 @@ contract CustomToken is ERC20, ReentrancyGuard {
             emit TokensBurned(cuts.burn);
         }
         if (cuts.platform > 0) {
-            // rewardCut is carved OUT OF cuts.platform, never added on top
-            // of it — the platform's total cut on this transfer stays
-            // exactly platformFeeBps. This never touches cuts.reflection/
-            // marketing/liquidity/burn above, which are the creator's own
-            // separately-capped fee config and have nothing to do with this
-            // feature. rewardBps <= platformFeeBps is enforced once, at
-            // configurePlatformTax(), so this can never underflow.
+            // rewardCut and creatorCut are both carved OUT OF cuts.platform,
+            // never added on top of it — the platform's total cut on this
+            // transfer stays exactly platformFeeBps. Neither touches
+            // cuts.reflection/marketing/liquidity/burn above, which are the
+            // creator's own separately-capped fee config and have nothing
+            // to do with this feature. rewardBps + creatorRewardBps <=
+            // platformFeeBps is enforced once, at configurePlatformTax(),
+            // so this can never underflow.
             uint256 rewardCut = (rewardsDistributor != address(0) && rewardBps > 0) ? (value * rewardBps) / 10_000 : 0;
-            uint256 toFeeWallet = cuts.platform - rewardCut;
+            uint256 creatorCut = (creatorRewardsDistributor != address(0) && creatorRewardBps > 0) ? (value * creatorRewardBps) / 10_000 : 0;
+            uint256 toFeeWallet = cuts.platform - rewardCut - creatorCut;
             if (rewardCut > 0) {
                 // In-kind, straight to the rewards contract — no swap, same
                 // as the rest of the platform tax.
                 super._update(from, rewardsDistributor, rewardCut);
                 _afterBalanceChange(from, rewardsDistributor, rewardCut);
+            }
+            if (creatorCut > 0) {
+                super._update(from, creatorRewardsDistributor, creatorCut);
+                _afterBalanceChange(from, creatorRewardsDistributor, creatorCut);
             }
             if (toFeeWallet > 0) {
                 super._update(from, platformFeeWallet, toFeeWallet);

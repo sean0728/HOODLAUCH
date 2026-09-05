@@ -57,7 +57,21 @@ contract LaunchedToken is ERC20 {
     // before this feature existed — 100% of feeBps still goes to
     // feeWallet. ----
     address public rewardsDistributor;
-    uint256 public rewardBps; // absolute bps of transfer value diverted to rewardsDistributor, carved OUT OF feeBps (never on top of it); always <= feeBps
+    uint256 public rewardBps; // absolute bps of transfer value diverted to rewardsDistributor, carved OUT OF feeBps (never on top of it); rewardBps + creatorRewardBps always <= feeBps
+
+    // ---- creator rewards: a second, independent carve-out of feeBps, sent
+    // in-kind to CreatorRewardsDistributor on every taxed transfer — never
+    // stacked with rewardBps above (rewardBps + creatorRewardBps <= feeBps
+    // is enforced once, in configureTax()). CreatorRewardsDistributor later
+    // swaps its accumulated balance of this token for ETH and credits this
+    // token's own creator, claimable through that contract (see
+    // CreatorRewardsDistributor.sol). Same address(0)-means-inactive
+    // convention as rewardsDistributor: creatorRewardsDistributor ==
+    // address(0) (the default) means this is entirely inactive and
+    // whatever feeBps isn't already carved to rewardsDistributor still
+    // goes to feeWallet in full. ----
+    address public creatorRewardsDistributor;
+    uint256 public creatorRewardBps; // absolute bps of transfer value diverted to creatorRewardsDistributor, carved OUT OF feeBps (never on top of it, and never overlapping rewardBps)
 
     /// @notice Hard ceiling on totalSupply_, enforced once at initialize().
     /// Purely defense-in-depth: currentMarketCapInFeedDecimals()'s own
@@ -153,12 +167,18 @@ contract LaunchedToken is ERC20 {
         uint256 graduationTargetUsd_,
         uint256 maxOracleStaleness_,
         address rewardsDistributor_,
-        uint256 rewardBps_
+        uint256 rewardBps_,
+        address creatorRewardsDistributor_,
+        uint256 creatorRewardBps_
     ) external onlyFactory {
         require(!taxConfigured, "LaunchedToken: tax already configured");
         require(pair_ != address(0), "LaunchedToken: invalid pair");
-        require(rewardBps_ <= feeBps_, "LaunchedToken: rewardBps exceeds feeBps");
+        require(rewardBps_ + creatorRewardBps_ <= feeBps_, "LaunchedToken: rewardBps+creatorRewardBps exceeds feeBps");
         require(rewardsDistributor_ != address(0) || rewardBps_ == 0, "LaunchedToken: rewardBps requires a distributor");
+        require(
+            creatorRewardsDistributor_ != address(0) || creatorRewardBps_ == 0,
+            "LaunchedToken: creatorRewardBps requires a distributor"
+        );
 
         taxConfigured = true;
         pair = pair_;
@@ -170,6 +190,8 @@ contract LaunchedToken is ERC20 {
         taxActive = feeBps_ > 0 && feeWallet_ != address(0);
         rewardsDistributor = rewardsDistributor_;
         rewardBps = rewardBps_;
+        creatorRewardsDistributor = creatorRewardsDistributor_;
+        creatorRewardBps = creatorRewardBps_;
 
         emit TaxConfigured(pair_, feeWallet_, feeBps_, graduationTargetUsd_);
     }
@@ -210,14 +232,17 @@ contract LaunchedToken is ERC20 {
         if (taxActive && value > 0 && (from == pair || to == pair)) {
             uint256 fee = (value * feeBps) / 10_000;
             if (fee > 0) {
-                // rewardCut is carved OUT OF fee, never added on top of it —
-                // the platform's total take on this transfer stays exactly
-                // feeBps, same as before this feature existed. rewardBps <=
-                // feeBps is enforced once, at configureTax(), so this can
-                // never underflow.
+                // rewardCut and creatorCut are both carved OUT OF fee, never
+                // added on top of it — the platform's total take on this
+                // transfer stays exactly feeBps, same as before either
+                // feature existed. rewardBps + creatorRewardBps <= feeBps is
+                // enforced once, at configureTax(), so this can never
+                // underflow.
                 uint256 rewardCut = (rewardsDistributor != address(0) && rewardBps > 0) ? (value * rewardBps) / 10_000 : 0;
-                uint256 toFeeWallet = fee - rewardCut;
+                uint256 creatorCut = (creatorRewardsDistributor != address(0) && creatorRewardBps > 0) ? (value * creatorRewardBps) / 10_000 : 0;
+                uint256 toFeeWallet = fee - rewardCut - creatorCut;
                 if (rewardCut > 0) super._update(from, rewardsDistributor, rewardCut);
+                if (creatorCut > 0) super._update(from, creatorRewardsDistributor, creatorCut);
                 if (toFeeWallet > 0) super._update(from, feeWallet, toFeeWallet);
                 super._update(from, to, value - fee);
             } else {
