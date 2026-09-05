@@ -1014,8 +1014,8 @@
   // the admin panel reads it live off the distributor's own
   // platformToken() (see rewardsDistributorPanelHTML/loadRewardsDistributorState)
   // rather than a second address that could drift out of sync with it.
-  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "priceFeed", "relayerApiUrl"];
-  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "priceFeed"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
+  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl"];
+  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
 
   // Must produce byte-identical output to relayer.js's own
   // canonicalizePlatformConfig for the same input, or a signature made here
@@ -1033,6 +1033,7 @@
     tokenFactory: "TokenFactory",
     customTokenFactory: "CustomTokenFactory",
     rewardsDistributor: "PlatformRewardsDistributor",
+    creatorRewardsDistributor: "CreatorRewardsDistributor",
     priceFeed: "Price feed (Chainlink AggregatorV3Interface)",
     relayerApiUrl: "Gasless relayer API",
   };
@@ -1040,8 +1041,9 @@
     tokenFactory: "TokenFactory address — fill in once scripts/deploy.js has run against this network. Left unset, the wizard falls back to a fully local, simulated launch instead of calling a contract that doesn't exist.",
     customTokenFactory: "CustomTokenFactory address — the separate contract behind “Custom Tax Token” launches. Same null-until-deployed convention as TokenFactory.",
     rewardsDistributor: "PlatformRewardsDistributor address — the platform's buyback/burn/holder-airdrop contract (see scripts/deploy.js's DEPLOY_PLATFORM_TOKEN flag). Stays unset until the platform token actually launches; until then both factories keep rewardsDistributor unset on-chain regardless of what's entered here.",
+    creatorRewardsDistributor: "CreatorRewardsDistributor address — pays each token's own creator() a per-token ETH share of the ongoing trading tax (see scripts/deployCreatorRewards.js). Stays unset until deployed; until then both factories keep creatorRewardBps effectively inactive on-chain regardless of what's entered here. Unlike PlatformRewardsDistributor, nothing pools across holders — every launched token gets its own independent claimable balance, read directly off this contract from each creator's Portfolio.",
     priceFeed: "Chainlink ETH/USD AggregatorV3Interface on Robinhood Chain, used only to display a live USD price for the ETH-denominated fees. Confirmed mainnet address ships as the default below; testnet is unconfirmed (Chainlink's address directory renders that table client-side) — the price fetcher falls back to a plain HTTP API and then a hardcoded estimate when this is unset for the current network.",
-    relayerApiUrl: "Base URL of a running scripts/relayer.js instance (see the contracts repo's README) — e.g. https://relayer.yourdomain.com. When set, the wizard offers a gasless launch: the creator signs a free EIP-712 voucher and sends one cheap ETH deposit, and the relayer submits the real deploy transaction and pays its own gas. Left unset, launches always fall back to the creator's wallet submitting (and paying gas for) the deploy transaction directly, exactly as before this feature existed.",
+    relayerApiUrl: "Base URL of a running scripts/relayer.js instance (see the contracts repo's README) — e.g. https://relayer.yourdomain.com. When set, the wizard offers a gasless launch: the creator signs a free EIP-712 voucher and sends one cheap ETH deposit, and the relayer submits the real deploy transaction and pays its own gas. Left unset, launches always fall back to the creator's wallet submitting (and paying gas for) the deploy transaction directly, exactly as before this feature existed. This same relayer instance, when given CREATOR_REWARDS_DISTRIBUTOR_ADDRESS in its own environment, also auto-sweeps creator rewards into ETH in the background — see scripts/relayer.js.",
   };
   const DEFAULT_CONFIG = {
     // Testnet (demo) values below are the actual TokenFactory/
@@ -1053,6 +1055,7 @@
     tokenFactory: { demo: "0x6e295099aFA9d88a27131674531A4e6D229e59BE", live: null },
     customTokenFactory: { demo: "0xA89F8446d3a119C4e3A3350D9633509e5679f80E", live: null },
     rewardsDistributor: { demo: null, live: null },
+    creatorRewardsDistributor: { demo: null, live: null },
     priceFeed: { demo: "0x96B1Ebd9daB675F41C6B5688F1601c2b0619e32f", live: "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9" }, // demo: MockAggregatorV3 deployed for robinhoodTestnet; live: Chainlink ETH/USD, Standard Proxy, Robinhood Chain Mainnet
     // demo: scripts/relayer.js published on GoDaddy Node.js Hosting (Airo AI
     // Builder), robinhoodTestnet, relayer wallet 0x1B40e4eC5DE62D301Fd7852FD5392eB0a609Cb9e
@@ -1176,6 +1179,7 @@
   function customTokenFactoryAddress(mode){ return platformConfig.customTokenFactory[mode || appMode] || null; }
   function relayerApiUrl(mode){ const v = platformConfig.relayerApiUrl[mode || appMode] || null; return v ? v.replace(/\/+$/, "") : null; }
   function rewardsDistributorAddress(mode){ return platformConfig.rewardsDistributor[mode || appMode] || null; }
+  function creatorRewardsDistributorAddress(mode){ return platformConfig.creatorRewardsDistributor[mode || appMode] || null; }
   function priceFeedAddress(mode){ return platformConfig.priceFeed[mode || appMode] || null; }
 
   // Which network the platform shows is no longer a personal, per-browser
@@ -1616,23 +1620,34 @@
   const SET_FEE_TREASURY_SELECTOR = "bfa37e37";      // setFeeTreasury(address)
   const SET_LP_LOCK_DURATION_SELECTOR = "97b83185";  // setLpLockDuration(uint256)
   const SET_MAX_CREATOR_BUY_BPS_SELECTOR = "ac37ddc6"; // setMaxCreatorBuyBps(uint256)
-  // setTaxDefaults(address,uint256,address,uint256,uint256,uint256) — a
-  // 6th argument (rewardBps_) was added when reward diversion shipped, so
-  // this selector changed from the earlier 5-argument version. Verified
-  // against the compiled TokenFactory/CustomTokenFactory ABI via
+  // setTaxDefaults(address,uint256,address,uint256,uint256,uint256,uint256) —
+  // a 7th argument (creatorRewardBps_) was added when per-token creator
+  // rewards shipped, so this selector changed again from the 6-argument
+  // version reward diversion introduced. Verified against the compiled
+  // TokenFactory/CustomTokenFactory ABI via
   // ethers.Interface(...).getFunction("setTaxDefaults").selector, same as
   // every other selector here.
-  const SET_TAX_DEFAULTS_SELECTOR = "2b4076e0";
-  const REWARDS_DISTRIBUTOR_SELECTOR = "3f2a5540";      // rewardsDistributor() — TokenFactory/CustomTokenFactory
-  const REWARD_BPS_SELECTOR = "82328ffc";               // rewardBps() — TokenFactory/CustomTokenFactory
+  const SET_TAX_DEFAULTS_SELECTOR = "0925cb22";
+  const REWARDS_DISTRIBUTOR_SELECTOR = "3f2a5540";      // rewardsDistributor() — TokenFactory/CustomTokenFactory/LaunchedToken/CustomToken
+  const REWARD_BPS_SELECTOR = "82328ffc";               // rewardBps() — TokenFactory/CustomTokenFactory/LaunchedToken/CustomToken
   const SET_REWARDS_DISTRIBUTOR_SELECTOR = "d1f5c33b";  // setRewardsDistributor(address)
+  // Per-token creator rewards — identical getter names/signatures live on
+  // TokenFactory/CustomTokenFactory (the platform-wide defaults new
+  // launches are configured with) AND on every already-launched
+  // LaunchedToken/CustomToken clone (the value actually snapshotted onto
+  // that specific token at launch time, which can differ from the current
+  // factory default) — one selector per name covers both call sites, same
+  // convention as REWARDS_DISTRIBUTOR_SELECTOR/REWARD_BPS_SELECTOR above.
+  const CREATOR_REWARDS_DISTRIBUTOR_SELECTOR = "0d0b866b"; // creatorRewardsDistributor()
+  const CREATOR_REWARD_BPS_SELECTOR = "7e5d936a";          // creatorRewardBps()
+  const SET_CREATOR_REWARDS_DISTRIBUTOR_SELECTOR = "9355cce7"; // setCreatorRewardsDistributor(address) — factories only
 
   // One-arg encoders for the admin setters above — every parameter in this
   // whole group is static (uint256 or address), so calldata is always
   // selector + N head words, no tails, no offsets.
   function encodeUint256Calldata(selector, value){ return "0x"+selector+toHex32(BigInt(value)); }
   function encodeAddressCalldata(selector, addr){ return "0x"+selector+encodeAddressParam(addr); }
-  function encodeSetTaxDefaultsCalldata(selector, {platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness, rewardBps}){
+  function encodeSetTaxDefaultsCalldata(selector, {platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness, rewardBps, creatorRewardBps}){
     return "0x"+selector+[
       encodeAddressParam(platformFeeWallet || ZERO_ADDRESS),
       toHex32(BigInt(feeBps)),
@@ -1640,6 +1655,7 @@
       toHex32(BigInt(graduationTargetUsd)),
       toHex32(BigInt(maxOracleStaleness)),
       toHex32(BigInt(rewardBps||0)),
+      toHex32(BigInt(creatorRewardBps||0)),
     ].join("");
   }
 
@@ -1666,6 +1682,19 @@
   const PT_HOLDER_COUNT_SELECTOR = "1aab9a9f";             // holderCount() — PlatformToken
   const PT_TOTAL_SUPPLY_SELECTOR = "18160ddd";             // totalSupply() — standard ERC20
   const PT_BALANCE_OF_SELECTOR = "70a08231";               // balanceOf(address) — standard ERC20
+
+  // ---- CreatorRewardsDistributor selectors — per-token ETH creator
+  // rewards, read/claimed straight from Portfolio (see loadCreatorRewards/
+  // renderPortfolio below) rather than through the admin panel's manual
+  // trigger buttons PlatformRewardsDistributor uses, since these balances
+  // are keyed per launched token rather than one platform-wide pool.
+  // Verified against the compiled ABI the same way as every other selector
+  // in this file. ----
+  const CRD_CLAIMABLE_ETH_SELECTOR = "4793dc40";        // claimableEth(address) — keyed by token address
+  const CRD_SWAP_THRESHOLD_SELECTOR = "0ae9b4f0";       // swapThreshold(address)
+  const CRD_SET_SWAP_THRESHOLD_SELECTOR = "db3e514c";   // setSwapThreshold(address,uint256)
+  const CRD_TRIGGER_CREATOR_SWAP_SELECTOR = "360f1b2c"; // triggerCreatorSwap(address,uint256) — permissionless
+  const CRD_CLAIM_CREATOR_REWARDS_SELECTOR = "bec3bbcc"; // claimCreatorRewards(address) — permissionless, pays token.creator()
 
   function encodeAddressUint256Calldata(selector, addr, value){
     return "0x"+selector+encodeAddressParam(addr)+toHex32(BigInt(value));
@@ -3759,6 +3788,47 @@
         }</div>
       </div>`;
   }
+
+  // Fetches the real top-holder breakdown from the relayer's own
+  // /holder-distribution/:tokenAddress (see computeHolderDistribution in
+  // scripts/relayer.js) and patches it into the #holderDistWrap placeholder
+  // openDetail() renders while this is in flight. Re-reads the wrap element
+  // fresh at write time (never the one captured before the await) so a
+  // stale response from a token the viewer has since navigated away from —
+  // or a since-replaced re-render of the same one — can't overwrite
+  // whatever's actually on screen now.
+  async function fetchAndRenderHolderDistribution(t){
+    const url = relayerApiUrl(t.networkMode || appMode);
+    const wrapNow = ()=> document.getElementById("holderDistWrap");
+    if(!wrapNow()) return;
+    if(!url){
+      const w = wrapNow();
+      if(w) w.innerHTML = `<div class="hint">No relayer configured for this network.</div>`;
+      return;
+    }
+    try{
+      const res = await fetch(`${url}/holder-distribution/${t.tokenAddress}`);
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      if(currentDetailTokenId !== t.id) return; // navigated away while this was in flight
+      const w = wrapNow();
+      if(!w) return;
+      const rows = Array.isArray(payload && payload.rows) ? payload.rows : null;
+      if(!rows || !rows.length){
+        w.innerHTML = `<div class="hint">Holder distribution isn't available right now — the block explorer didn't return holder data for this token.</div>`;
+        return;
+      }
+      w.innerHTML = rows.map(r=>{
+        const pct = Math.max(0, Math.min(100, Number(r.pct)||0));
+        return `<div class="holder-row"><span class="who">${escapeHtml(String(r.who))}</span><div class="bar"><span style="width:${pct}%"></span></div><span class="pct num">${pct.toFixed(1)}%</span></div>`;
+      }).join("");
+    }catch(e){
+      if(currentDetailTokenId !== t.id) return;
+      const w = wrapNow();
+      if(w) w.innerHTML = `<div class="hint">Couldn't load holder distribution — try again in a moment.</div>`;
+    }
+  }
+
   function openDetail(id){
     const t = tokens.find(x=>x.id===id);
     if(!t) return;
@@ -3787,18 +3857,14 @@
     const isOwner = !!(wallet && t.creatorWallet && wallet.toLowerCase()===t.creatorWallet.toLowerCase());
     const tokenNetwork = NETWORKS[t.networkMode] || NETWORKS[appMode];
     const explorerBase = (tokenNetwork.blockExplorerUrls && tokenNetwork.blockExplorerUrls[0]) || "";
-    const holderRnd = seededRandom(hashStr(t.ticker)+9);
     const hasCreatorBuyIn = t.mode==="liquidity" && t.creatorBuyInEth > 0;
-    const holderRows = ["Liquidity pool", hasCreatorBuyIn ? "Creator (bought in)" : "Top wallet", "Community pool", "Others"].map((who,i)=>{
-      if(hasCreatorBuyIn && i===1){
-        const pct = Math.max(2, Math.min(40, Math.round((t.creatorBuyInEth/((t.liquidityEth||1)+t.creatorBuyInEth))*100)));
-        return {who, pct};
-      }
-      const pct = i===0? Math.round(8+holderRnd()*14) : i===3 ? null : Math.round(3+holderRnd()*9);
-      return {who, pct};
-    });
-    let running = holderRows.slice(0,3).reduce((a,r)=>a+r.pct,0);
-    holderRows[3].pct = Math.max(4,100-running);
+    // Real distribution comes from fetchAndRenderHolderDistribution below,
+    // once the relayer's own explorer-backed lookup resolves — there's no
+    // synthetic fallback here any more (this used to be seededRandom() bars
+    // that looked stable across reloads but never reflected anything
+    // on-chain). A token with no real tokenAddress (never deployed —
+    // launched through the fully-simulated wizard path) has no chain data
+    // to ask for, so its panel says so instead of guessing.
 
     let progressHTML = "";
     if(isTaxed){
@@ -3944,8 +4010,10 @@
 
           <div style="margin-top:22px;">
             <div class="eyebrow" style="margin-bottom:10px;">Holder distribution</div>
-            <div class="holder-bars">
-              ${holderRows.map(r=>`<div class="holder-row"><span class="who">${r.who}</span><div class="bar"><span style="width:${r.pct}%"></span></div><span class="pct num">${r.pct}%</span></div>`).join("")}
+            <div class="holder-bars" id="holderDistWrap">
+              ${t.onChain && t.tokenAddress
+                ? `<div class="hint">Loading real holder distribution…</div>`
+                : `<div class="hint">Not available — this token was never deployed on-chain, so there's no real balance data to show.</div>`}
             </div>
           </div>`}
 
@@ -3974,6 +4042,8 @@
 
     const detailActivateBtn = document.getElementById("detailActivateBtn");
     if(detailActivateBtn) detailActivateBtn.addEventListener("click", ()=> activateCustomTokenTax(t.id, detailActivateBtn) );
+
+    if(!noSimulatedMarket && t.onChain && t.tokenAddress) fetchAndRenderHolderDistribution(t);
 
     if(!noSimulatedMarket){
       tradeSide = "buy";
@@ -5141,6 +5211,17 @@
           const unlockBtn = lpIsUnlockable(t)
             ? `<button class="btn btn-primary" style="padding:7px 12px; font-size:.8rem;" data-unlock-token="${t.id}">Unlock LP</button>`
             : "";
+          // Creator rewards are only ever real for a token that's actually
+          // on-chain — a simulated token has no contract to hold a
+          // creatorRewardsDistributor(), so this whole block is skipped for
+          // those rather than showing a permanently-zero readout.
+          // loadCreatorRewardsForMyTokens() (called after this markup is in
+          // the DOM, same pattern as loadRealPortfolio for holdings) fills
+          // this placeholder in with the token's real on-chain state.
+          const creatorRewardsRow = (t.onChain && t.tokenAddress) ? `
+            <div class="mtr-meta creator-rewards-line" data-creator-rewards-for="${t.tokenAddress}" style="margin-top:4px;">
+              Checking creator rewards…
+            </div>` : "";
           return `
           <div class="my-token-row">
             ${tcMarkHTML(t, "width:36px; height:36px; font-size:.85rem;")}
@@ -5148,6 +5229,7 @@
               <div class="mtr-name">${escapeHtml(t.name)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(t.ticker)}</span> <span class="tc-status ${t.status}" style="display:inline-block; margin-left:6px; vertical-align:middle;">${STATUS_LABEL[t.status]||t.status}</span></div>
               <div class="mtr-meta">${t.onChain && t.tokenAddress ? fmtAddrSafe(t.tokenAddress) : "Simulated — not deployed on-chain"}</div>
               ${lpMeta}
+              ${creatorRewardsRow}
             </div>
             <div class="mtr-actions">
               ${unlockBtn}
@@ -5192,6 +5274,7 @@
     wrap.querySelectorAll("[data-unlock-token]").forEach(b=> b.addEventListener("click", ()=> unlockLiquidity(b.dataset.unlockToken, b)) );
 
     loadRealPortfolio(wallet, myTokens);
+    loadCreatorRewardsForMyTokens(wallet, myTokens);
   }
 
   // Fills in the real numbers renderPortfolio() left as a loading state.
@@ -5314,6 +5397,126 @@
     }
   }
 
+  // Fills in the "Your launches" creator-rewards placeholder left by
+  // renderPortfolio() above, one token at a time. Reads straight off each
+  // token's OWN creatorRewardsDistributor()/creatorRewardBps() — the value
+  // actually snapshotted onto that specific token clone at launch time —
+  // rather than the current platform config, since a platform default can
+  // change after a token already launched without touching it. A token
+  // launched before this feature existed, or with the distributor unset at
+  // launch time, simply shows as not enabled; nothing here assumes every
+  // token has creator rewards.
+  async function loadCreatorRewardsForMyTokens(forWallet, myTokens){
+    const relevantTokens = myTokens.filter(t=> t.onChain && t.tokenAddress && t.networkMode===appMode);
+    const stillCurrent = () => wallet===forWallet && views.portfolio.classList.contains("active");
+
+    for(const t of relevantTokens){
+      const lineEl = document.querySelector(`[data-creator-rewards-for="${t.tokenAddress}"]`);
+      if(!lineEl) continue;
+      try{
+        const [distributorHex, bpsHex] = await Promise.all([
+          ethCall(t.tokenAddress, "0x"+CREATOR_REWARDS_DISTRIBUTOR_SELECTOR),
+          ethCall(t.tokenAddress, "0x"+CREATOR_REWARD_BPS_SELECTOR),
+        ]);
+        if(!stillCurrent()) return;
+        const distributorAddress = decodeAddress(distributorHex);
+        const bps = decodeUint256(bpsHex);
+        if(distributorAddress.toLowerCase()===ZERO_ADDRESS || bps===0n){
+          lineEl.textContent = "Creator rewards: not enabled for this token.";
+          continue;
+        }
+
+        const [claimableHex, pendingHex] = await Promise.all([
+          ethCall(distributorAddress, "0x"+CRD_CLAIMABLE_ETH_SELECTOR+encodeAddressParam(t.tokenAddress)),
+          ethCall(t.tokenAddress, "0x"+BALANCE_OF_SELECTOR+encodeAddressParam(distributorAddress)),
+        ]);
+        if(!stillCurrent()) return;
+        const claimableWei = decodeUint256(claimableHex);
+        const pendingWei = decodeUint256(pendingHex);
+
+        const claimableStr = `${weiToEtherString(claimableWei,6)} ETH claimable`;
+        const pendingStr = pendingWei>0n ? ` · ${weiToEtherString(pendingWei,4)} $${escapeHtml(t.ticker)} pending conversion to ETH` : "";
+        lineEl.innerHTML = `
+          <span>💰 ${claimableStr}${pendingStr}</span>
+          <span class="mtr-reward-actions" style="display:inline-flex; gap:6px; margin-left:8px;">
+            ${pendingWei>0n ? `<button class="btn btn-ghost" style="padding:3px 8px; font-size:.72rem;" data-convert-creator-rewards="${t.tokenAddress}" data-distributor="${distributorAddress}">Convert to ETH</button>` : ""}
+            <button class="btn btn-primary" style="padding:3px 8px; font-size:.72rem;" data-claim-creator-rewards="${t.tokenAddress}" data-distributor="${distributorAddress}" ${claimableWei>0n ? "" : "disabled"}>Claim</button>
+          </span>`;
+        lineEl.querySelectorAll("[data-claim-creator-rewards]").forEach(b=>
+          b.addEventListener("click", ()=> claimCreatorRewards(b.dataset.claimCreatorRewards, b.dataset.distributor, b))
+        );
+        lineEl.querySelectorAll("[data-convert-creator-rewards]").forEach(b=>
+          b.addEventListener("click", ()=> convertCreatorRewards(b.dataset.convertCreatorRewards, b.dataset.distributor, b))
+        );
+      }catch(e){
+        if(!stillCurrent()) return;
+        lineEl.textContent = "Creator rewards: couldn't read on-chain state.";
+      }
+    }
+  }
+
+  // Permissionless on-chain call, same as claimCreatorRewards below — any
+  // wallet can trigger the swap for any token, since it only ever converts
+  // the distributor's own already-collected balance and pays no one
+  // directly. Shown here because it's the connected wallet's own launch,
+  // but nothing about the contract restricts it to the creator.
+  async function convertCreatorRewards(tokenAddress, distributorAddress, btnEl){
+    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!wallet){ toast("Connect your wallet first."); return; }
+    const originalLabel = btnEl ? btnEl.textContent : "";
+    if(btnEl){ btnEl.disabled = true; btnEl.textContent = "Converting…"; }
+    try{
+      toast("Confirm the transaction in your wallet…");
+      const data = encodeAddressUint256Calldata(CRD_TRIGGER_CREATOR_SWAP_SELECTOR, tokenAddress, 0n);
+      const txHash = await window.ethereum.request({
+        method:"eth_sendTransaction",
+        params:[{ from: wallet, to: distributorAddress, data }],
+      });
+      toast("Transaction sent — waiting for confirmation…");
+      const receipt = await waitForReceipt(txHash);
+      if(receipt.status !== "0x1") throw new Error("The conversion transaction reverted on-chain.");
+      toast("Converted — claimable ETH balance updated.");
+    }catch(err){
+      console.error(err);
+      if(err && err.code===4001) toast("Transaction was rejected in your wallet.");
+      else toast("Conversion failed: " + ((err && err.message) ? err.message : String(err)));
+    }finally{
+      if(btnEl){ btnEl.disabled = false; btnEl.textContent = originalLabel; }
+      if(views.portfolio.classList.contains("active")) renderPortfolio();
+    }
+  }
+
+  // Also permissionless — claimCreatorRewards always pays the token's own
+  // live creator() regardless of who calls it (see CreatorRewardsDistributor.sol),
+  // so this button works even if a wallet other than the creator's happened
+  // to trigger it; it's only ever shown here under the creator's own
+  // Portfolio.
+  async function claimCreatorRewards(tokenAddress, distributorAddress, btnEl){
+    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!wallet){ toast("Connect your wallet first."); return; }
+    const originalLabel = btnEl ? btnEl.textContent : "";
+    if(btnEl){ btnEl.disabled = true; btnEl.textContent = "Claiming…"; }
+    try{
+      toast("Confirm the transaction in your wallet…");
+      const data = "0x"+CRD_CLAIM_CREATOR_REWARDS_SELECTOR+encodeAddressParam(tokenAddress);
+      const txHash = await window.ethereum.request({
+        method:"eth_sendTransaction",
+        params:[{ from: wallet, to: distributorAddress, data }],
+      });
+      toast("Transaction sent — waiting for confirmation…");
+      const receipt = await waitForReceipt(txHash);
+      if(receipt.status !== "0x1") throw new Error("The claim transaction reverted on-chain.");
+      toast("🎉 Creator rewards claimed — check your wallet's ETH balance.");
+    }catch(err){
+      console.error(err);
+      if(err && err.code===4001) toast("Transaction was rejected in your wallet.");
+      else toast("Claim failed: " + ((err && err.message) ? err.message : String(err)));
+    }finally{
+      if(btnEl){ btnEl.disabled = false; btnEl.textContent = originalLabel; }
+      if(views.portfolio.classList.contains("active")) renderPortfolio();
+    }
+  }
+
   /* ---------------- admin panel ---------------- */
   // Read-only state + owner-only setter forms for TokenFactory and
   // CustomTokenFactory, gated behind ADMIN_WALLET (see the "admin gate"
@@ -5331,7 +5534,7 @@
     const [
       ownerHex, pendingOwnerHex, deployFeeHex, launchFeeHex, feeTreasuryHex, lpLockDurationHex,
       maxCreatorBuyBpsHex, platformFeeWalletHex, feeBpsHex, priceFeedHex, graduationTargetUsdHex, maxOracleStalenessHex,
-      rewardsDistributorHex, rewardBpsHex,
+      rewardsDistributorHex, rewardBpsHex, creatorRewardsDistributorHex, creatorRewardBpsHex,
     ] = await Promise.all([
       ethCall(address, "0x"+OWNER_SELECTOR),
       ethCall(address, "0x"+PENDING_OWNER_SELECTOR),
@@ -5347,6 +5550,8 @@
       ethCall(address, "0x"+MAX_ORACLE_STALENESS_SELECTOR),
       ethCall(address, "0x"+REWARDS_DISTRIBUTOR_SELECTOR),
       ethCall(address, "0x"+REWARD_BPS_SELECTOR),
+      ethCall(address, "0x"+CREATOR_REWARDS_DISTRIBUTOR_SELECTOR),
+      ethCall(address, "0x"+CREATOR_REWARD_BPS_SELECTOR),
     ]);
     return {
       owner: decodeAddress(ownerHex),
@@ -5363,6 +5568,8 @@
       maxOracleStalenessSeconds: decodeUint256(maxOracleStalenessHex),
       rewardsDistributor: decodeAddress(rewardsDistributorHex),
       rewardBps: decodeUint256(rewardBpsHex),
+      creatorRewardsDistributor: decodeAddress(creatorRewardsDistributorHex),
+      creatorRewardBps: decodeUint256(creatorRewardBpsHex),
     };
   }
 
@@ -5406,6 +5613,8 @@
           <div class="admin-readout"><div class="l">Max oracle staleness</div><div class="v">${fmtInt(Number(state.maxOracleStalenessSeconds)/60)} min</div></div>
           <div class="admin-readout"><div class="l">Rewards distributor</div><div class="v">${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "Unset — 100% of fees stay platform profit" : escapeHtml(state.rewardsDistributor)}</div></div>
           <div class="admin-readout"><div class="l">Reward diversion</div><div class="v">${(Number(state.rewardBps)/100).toFixed(2)}% ${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "(inactive — no distributor set)" : `of the ${(Number(state.feeBps)/100).toFixed(2)}% platform tax`}</div></div>
+          <div class="admin-readout"><div class="l">Creator rewards distributor</div><div class="v">${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "Unset — no creator-reward cut is taken" : escapeHtml(state.creatorRewardsDistributor)}</div></div>
+          <div class="admin-readout"><div class="l">Creator reward diversion</div><div class="v">${(Number(state.creatorRewardBps)/100).toFixed(2)}% ${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "(inactive — no distributor set)" : `of the ${(Number(state.feeBps)/100).toFixed(2)}% platform tax`}</div></div>
         </div>
 
         <div class="admin-section-label">Update fees</div>
@@ -5438,9 +5647,10 @@
           <div class="field"><label>Graduation target (whole USD)</label><input type="number" step="1" min="1" id="admin_${key}_taxGrad" placeholder="${state.graduationTargetUsd}"></div>
           <div class="field"><label>Max oracle staleness (seconds)</label><input type="number" step="1" min="1" id="admin_${key}_taxStale" placeholder="${state.maxOracleStalenessSeconds}"></div>
           <div class="field"><label>Reward diversion (bps, out of the tax bps above)</label><input type="number" step="1" min="0" max="10000" id="admin_${key}_taxRewardBps" placeholder="${state.rewardBps}"></div>
+          <div class="field"><label>Creator reward diversion (bps, out of the tax bps above)</label><input type="number" step="1" min="0" max="10000" id="admin_${key}_taxCreatorRewardBps" placeholder="${state.creatorRewardBps}"></div>
         </div>
         <div class="admin-action-row">
-          <span class="hint" style="flex-basis:100%;">Leave the wallet/price-feed fields blank to set them to address(0) — the documented way to leave the platform tax unconfigured for future launches. Reward diversion bps is carved OUT OF the tax bps (never on top of it) and must not exceed it — it only actually takes effect on tokens launched once a rewards distributor is also set below.</span>
+          <span class="hint" style="flex-basis:100%;">Leave the wallet/price-feed fields blank to set them to address(0) — the documented way to leave the platform tax unconfigured for future launches. Reward diversion and creator reward diversion bps are both carved OUT OF the tax bps above (never on top of it, and never overlapping each other) — together they must not exceed it. Reward diversion only takes effect once a rewards distributor is set below; creator reward diversion only takes effect once a creator rewards distributor is set below that.</span>
           <button class="btn btn-primary btn-sm" data-admin-action="taxDefaults" data-factory-key="${key}">Update tax defaults</button>
         </div>
 
@@ -5449,6 +5659,16 @@
         <div class="admin-action-row">
           <div class="field"><label>Rewards distributor (address)</label><input type="text" id="admin_${key}_rewardsDistributor" placeholder="${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.rewardsDistributor}"></div>
           <button class="btn btn-primary btn-sm" data-admin-action="rewardsDistributor" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
+        </div>
+
+        <div class="admin-section-label">Creator rewards distributor · per-token ETH, claimable by each token's own creator</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Splits the creator-reward-diversion bps above out of the ongoing trading tax to a CreatorRewardsDistributor contract, in the launched token's own units. Unlike the rewards distributor above, nothing here pools across holders or across a creator's other launches — every token gets its own independently claimable ETH balance, visible to its creator from their Portfolio. Leaving this unset (the default) keeps creator reward diversion inactive — see scripts/deployCreatorRewards.js for how one gets deployed.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Creator rewards distributor (address)</label><input type="text" id="admin_${key}_creatorRewardsDistributor" placeholder="${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.creatorRewardsDistributor}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="creatorRewardsDistributor" data-factory-key="${key}">Update</button>
         </div>
         <div class="admin-action-row">
           <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
@@ -6012,12 +6232,16 @@
         const staleN = parseInt(field("taxStale").value, 10);
         const rewardBpsRaw = field("taxRewardBps").value.trim();
         const rewardBpsN = rewardBpsRaw === "" ? 0 : parseInt(rewardBpsRaw, 10);
+        const creatorRewardBpsRaw = field("taxCreatorRewardBps").value.trim();
+        const creatorRewardBpsN = creatorRewardBpsRaw === "" ? 0 : parseInt(creatorRewardBpsRaw, 10);
         if(walletVal && !isAddressLike(walletVal)) throw new Error("Platform fee wallet must be a valid address, or left blank to unset it.");
         if(feedVal && !isAddressLike(feedVal)) throw new Error("Price feed must be a valid address, or left blank to unset it.");
         if(isNaN(bpsN) || bpsN<0 || bpsN>10000) throw new Error("Tax bps must be between 0 and 10000.");
         if(isNaN(gradN) || gradN<=0) throw new Error("Graduation target must be a positive whole-dollar amount.");
         if(isNaN(staleN) || staleN<=0) throw new Error("Max oracle staleness must be a positive number of seconds.");
-        if(isNaN(rewardBpsN) || rewardBpsN<0 || rewardBpsN>bpsN) throw new Error("Reward diversion bps must be between 0 and the tax bps above (it's carved out of it, never added on top).");
+        if(isNaN(rewardBpsN) || rewardBpsN<0) throw new Error("Reward diversion bps must be 0 or more.");
+        if(isNaN(creatorRewardBpsN) || creatorRewardBpsN<0) throw new Error("Creator reward diversion bps must be 0 or more.");
+        if(rewardBpsN + creatorRewardBpsN > bpsN) throw new Error("Reward diversion plus creator reward diversion bps must not exceed the tax bps above (together they're carved out of it, never added on top).");
         data = encodeSetTaxDefaultsCalldata(SET_TAX_DEFAULTS_SELECTOR, {
           platformFeeWallet: walletVal || ZERO_ADDRESS,
           feeBps: BigInt(bpsN),
@@ -6025,6 +6249,7 @@
           graduationTargetUsd: BigInt(gradN),
           maxOracleStaleness: BigInt(staleN),
           rewardBps: BigInt(rewardBpsN),
+          creatorRewardBps: BigInt(creatorRewardBpsN),
         });
         successMsg = "Tax defaults updated.";
       } else if(action==="rewardsDistributor"){
@@ -6032,6 +6257,11 @@
         if(v && !isAddressLike(v)) throw new Error("Rewards distributor must be a valid address, or left blank to unset it.");
         data = encodeAddressCalldata(SET_REWARDS_DISTRIBUTOR_SELECTOR, v || ZERO_ADDRESS);
         successMsg = v ? "Rewards distributor updated." : "Rewards distributor cleared — 100% of fees now stay platform profit again.";
+      } else if(action==="creatorRewardsDistributor"){
+        const v = field("creatorRewardsDistributor").value.trim();
+        if(v && !isAddressLike(v)) throw new Error("Creator rewards distributor must be a valid address, or left blank to unset it.");
+        data = encodeAddressCalldata(SET_CREATOR_REWARDS_DISTRIBUTOR_SELECTOR, v || ZERO_ADDRESS);
+        successMsg = v ? "Creator rewards distributor updated." : "Creator rewards distributor cleared — creator reward diversion is inactive again.";
       } else if(action==="transferOwnership"){
         const v = field("newOwner").value.trim();
         if(!isAddressLike(v)) throw new Error("Enter a valid address to propose as the new owner.");
@@ -6266,6 +6496,54 @@
     return div;
   }
 
+  // How far back a trade still counts toward "24h volume" — see the
+  // volByToken loop below.
+  const VOLUME_WINDOW_MS = 24*60*60*1000;
+
+  // Real 24h volume per token, summed from the same real-activity feed this
+  // function already polls for the live trade ticker — replaces the old
+  // t.vol, which was either hardcoded to 0 for every real launch or a
+  // one-time synthetic guess (draft.liquidityEth*3000*0.1) for a simulated
+  // one that never moved again afterward. relayer.js's pollTokenActivity now
+  // stamps each real trade with usdValue (the ETH leg's value in USD at the
+  // moment it happened — see that field's own comment there), so this is a
+  // real sum of real trades, not an estimate reconstructed from today's
+  // price. Demo/simulated tokens (no t.tokenAddress) have no real trades to
+  // sum and keep whatever illustrative number they launched with.
+  //
+  // Caveat worth knowing if this platform ever gets busy: activity.json (and
+  // so payload.activity here) is capped at MAX_ENTRIES=500 total across
+  // every tracked token, not per-token or per-day — on a high-volume network
+  // that cap could roll 24h-old trades out before this ever sums them,
+  // undercounting volume. Fine for the traffic this platform sees today;
+  // revisit alongside any real activity-log persistence work.
+  function applyRealVolumes(activity){
+    const cutoff = Date.now() - VOLUME_WINDOW_MS;
+    const volByToken = new Map();
+    for(const entry of activity){
+      if(!entry.tokenAddress || !(entry.t >= cutoff)) continue;
+      const usd = Number(entry.usdValue);
+      if(!Number.isFinite(usd)) continue;
+      const key = entry.tokenAddress.toLowerCase();
+      volByToken.set(key, (volByToken.get(key)||0) + usd);
+    }
+    let changed = false;
+    for(const t of tokens){
+      if(!t.tokenAddress) continue;
+      const real = volByToken.get(t.tokenAddress.toLowerCase()) || 0;
+      if(t.vol !== real){ t.vol = real; changed = true; }
+    }
+    if(changed){
+      saveCustomTokens();
+      renderStats();
+      renderGrid();
+      if(views.detail.classList.contains("active") && currentDetailTokenId){
+        const dt = tokens.find(x=>x.id===currentDetailTokenId);
+        if(dt && dt.tokenAddress) openDetail(currentDetailTokenId);
+      }
+    }
+  }
+
   async function refreshLiveFeed(){
     const url = relayerApiUrl(appMode);
     if(!url) return;
@@ -6276,6 +6554,7 @@
       payload = await res.json();
     }catch(e){ return; }
     const activity = Array.isArray(payload && payload.activity) ? payload.activity : [];
+    applyRealVolumes(activity);
     const body = document.getElementById("feedBody");
     if(!body) return;
     if(!activity.length){
