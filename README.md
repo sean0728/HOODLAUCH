@@ -1,5 +1,10 @@
 # Hood Launch — token factory contracts
 
+For the wider system this repo is one part of — the relayer's live-data
+API, the front end, the admin panel, and production-operations notes from
+actually running this — see `PLATFORM_OVERVIEW.md`. This file stays
+focused on contract mechanics and the relayer's core gasless-launch role.
+
 Solidity contracts for the launch flow. A creator submits a token's
 identity (name, ticker, supply), then picks one of two paths for what
 happens next — each charging its own flat fee, in ETH:
@@ -76,10 +81,14 @@ then. That's what `LaunchedToken._update()` does, once `configureTax()` has
 pointed it at a pair:
 
 - Any transfer where `from == pair` (a buy) or `to == pair` (a sell) has
-  `feeBps` (default 25 = 0.25%) skimmed to `feeWallet`, and the remainder
-  goes through as normal. Every other transfer — wallet-to-wallet, the
-  factory's own one-time seeding transfer into the pair before the tax is
-  even configured — is untouched.
+  `feeBps` (default 25 = 0.25%) skimmed off, and the remainder goes through
+  as normal. That `feeBps` isn't always 100% `feeWallet`'s, though — a
+  configurable slice of it can be carved out (never added on top) to a
+  `rewardsDistributor` and/or a `creatorRewardsDistributor` on every single
+  taxed transfer; see "Creator rewards" below for the full mechanics of
+  that. Every other transfer — wallet-to-wallet, the factory's own
+  one-time seeding transfer into the pair before the tax is even
+  configured — is untouched.
 - After every taxed transfer, the token checks its pool's **live** market
   cap (current pair reserves × a Chainlink-style ETH/USD price feed × total
   supply) against `graduationTargetUsd` (default **$80,000**). Once the
@@ -142,6 +151,84 @@ above exactly — the same confirmation-window candidacy, the same
 `updatePriceFeed()` escape hatch (via `CustomTokenFactory.updateTokenPriceFeed`),
 the same `MAX_TOTAL_SUPPLY` cap — since both contracts read a pool's spot
 price the same way and are equally exposed to the same manipulation risk.
+Its `platformFeeBps` carries the exact same `rewardBps`/`creatorRewardBps`
+carve-out described below, too.
+
+## Creator rewards
+
+A slice of the ongoing trading tax (`feeBps` on `LaunchedToken`,
+`platformFeeBps` on `CustomToken`) can be diverted, per token, to that
+token's own creator — separately from `rewardsDistributor` (which pools a
+slice across every token into one shared platform-wide reward, see
+`PlatformRewardsDistributor.sol`). Both diversions come out of the same
+pool of platform tax and are carved **out of** `feeBps`, never added on top
+of it — the platform's total take on a taxed transfer never changes because
+of either feature.
+
+- **`creatorRewardBps`** (`TokenFactory`/`CustomTokenFactory`, default `5`
+  = 0.05%) and **`rewardBps`** (default `10` = 0.10%) are factory-level
+  settings, owner-adjustable via `setTaxDefaults()`, with `rewardBps +
+  creatorRewardBps <= feeBps` enforced at set-time so the split can never
+  exceed the tax itself.
+- **Whether either diversion is actually active on a given token is
+  snapshotted once, at that token's own launch**, based on whether
+  `rewardsDistributor`/`creatorRewardsDistributor` were already configured
+  (non-zero) on the factory at that exact moment:
+  `effectiveRewardBps = rewardsDistributor != address(0) ? rewardBps : 0`,
+  and the same pattern for `effectiveCreatorRewardBps`. This means turning
+  creator rewards on for the first time (deploying
+  `CreatorRewardsDistributor` and calling
+  `setCreatorRewardsDistributor()`) has **no effect on any token that
+  already exists** — including tokens deployed before the feature existed
+  at all, or before that particular launch's transaction. Every EIP-1167
+  clone is permanently locked to whatever configuration was live the moment
+  it launched; there is no way to retroactively turn rewards on (or off) for
+  a token after the fact.
+- On every taxed transfer, `LaunchedToken._update()`/`CustomToken._update()`
+  compute `rewardCut`/`creatorCut` (each `(value * bps) / 10_000`, using
+  that token's own locked-in bps) and route them to `rewardsDistributor`/
+  `creatorRewardsDistributor` respectively, in-kind, in whatever token the
+  trade itself was in — the remainder (`fee - rewardCut - creatorCut`)
+  still goes to `feeWallet` exactly as before.
+- **`CreatorRewardsDistributor.sol`** is where the creator-reward slice
+  actually lands. It accumulates in-kind (an ordinary ERC20 balance of that
+  specific token — no separate bookkeeping needed for that step), and pays
+  out in native ETH per token, entirely independently of every other
+  token's balance: `claimableEth` is keyed by **token address**, not
+  creator address, so a creator with several launches gets several
+  independent claimable balances, matching how a portfolio view naturally
+  lists them. Two permissionless functions, callable by literally anyone —
+  the destination is always fixed regardless of who calls them:
+  - `triggerCreatorSwap(token, minEthOut)` — swaps the contract's *entire*
+    current balance of `token` for ETH (via the router's
+    `...SupportingFeeOnTransferTokens` variant, since the token being sold
+    can itself carry a live transfer tax), once that balance clears the
+    owner-configurable `swapThreshold[token]` (default `0` — any nonzero
+    balance triggers until the owner sets one). Reads `creator()` off the
+    token itself at call time (`ICreatorAware`), so a `CustomToken` creator
+    transfer is always reflected correctly, never a stale snapshot.
+  - `claimCreatorRewards(token)` — pays out `claimableEth[token]` to that
+    token's own `creator()`. Checks-effects-interactions (balance zeroed
+    before the external ETH transfer) plus `nonReentrant`.
+- **Two ways this actually happens in practice**, both ending at the exact
+  same two functions above: `scripts/relayer.js`'s optional auto-sweep loop
+  calls `triggerCreatorSwap` (at the relayer's own gas cost) once a token's
+  balance crosses its threshold, as a convenience so creators don't have to
+  do anything themselves; or a creator (or literally anyone) can call
+  `triggerCreatorSwap`/`claimCreatorRewards` directly — which is exactly
+  what the front end's portfolio "Convert to ETH"/"Claim" buttons do,
+  straight from the creator's own wallet, with **no dependency on the
+  relayer at all**. If the relayer's auto-sweep is down, disabled, or was
+  never configured, manual claim/convert works identically regardless.
+- **`scripts/deployCreatorRewards.js`** deploys just this one contract
+  (given an already-deployed factory, so it can read that factory's
+  `router()`) — for wiring rewards onto an existing platform deployment
+  without redeploying the factories themselves. `scripts/deploy.js` can
+  also deploy it as part of a fresh platform deployment via its own env-var
+  gate. Either way, the deploying script prints the
+  `setCreatorRewardsDistributor(...)` call needed on each factory
+  afterward — that step is what actually turns the feature on for launches
+  from that point forward.
 
 Because the tax nets down what a taxed transfer actually delivers, any swap
 against a "Deploy and Add Liquidity (Launch)" token **must** use the
@@ -613,7 +700,43 @@ It exposes:
   different relayer instance (a different `relayerApiUrl` per mode — see the
   front end's admin panel), which is what actually changes which network's
   launches come back.
-- `GET /health` — liveness check.
+- `GET /activity` — real trade activity (buy/sell, wallet, USD value),
+  backed by a background loop watching `Swap` events on every discovered
+  token's own pool.
+- `GET /price-history/:tokenAddress` — sampled price/market-cap/tax-
+  progress/holder-count points over time, backed by a background loop
+  reading a pool's live reserves plus the token's price feed roughly every
+  45 seconds.
+- `GET /holder-distribution/:tokenAddress` — top-holder breakdown, computed
+  on demand from the network's Blockscout-compatible explorer API
+  cross-referenced against the token's own on-chain `totalSupply()`.
+- `GET /active-network` / `POST /active-network` and `GET /platform-config`
+  / `POST /platform-config` — the off-chain config layer behind the front
+  end's admin panel; the `POST` routes require a fresh, signed message from
+  the hardcoded admin wallet, verified server-side (`lib/adminAuth.js`) —
+  never trust the front end's own "is this the admin wallet" check as real
+  access control, it's a UI convenience only.
+- `GET /debug/token/:tokenAddress` — ground-truth diagnostic for one token:
+  whether it's been discovered yet, its pool address on file, how many
+  price points have been sampled, and how far each factory's discovery
+  scan is from the current chain tip. Exists specifically because a
+  hosting dashboard showing a config value as "saved" is not proof the
+  live process actually resolved it that way at startup.
+- `GET /health` — liveness check, plus the actual factory/distributor
+  addresses this *running* process resolved at startup (see the debug
+  endpoint above for why that distinction matters in practice).
+
+A background token-discovery loop (separate from the deposit-watching loop
+that powers gasless relaying) scans both factories' `TokenCreated`/
+`CustomTokenCreated` events forward from a stored cursor, independently of
+whether a given token ever went through this relayer's own gasless path —
+this is what the `/activity`, `/price-history`, and `/holder-distribution`
+endpoints above depend on to know what to watch in the first place. See
+`PLATFORM_OVERVIEW.md` for more on how these loops and endpoints fit into
+the platform as a whole, including a real production issue tuning them (a
+naive full-history backfill on a high-block-count chain taking far too
+long by default — `TOKEN_DISCOVERY_MAX_BLOCK_RANGE` is the env var to tune
+it).
 
 Its own bookkeeping (voucher lifecycle, block-scan cursors so a restart
 resumes instead of rescanning from genesis) lives in `relayer-data/<network>/`
@@ -720,10 +843,34 @@ one platform.
   Deployed as a cheap EIP-1167 clone per launch rather than a full
   contract.
 - **`TokenFactory.sol`** — the entry point; see "The launch flow" above.
+- **`CustomToken.sol`** — the ERC20 a "Custom Tax Token" launch deploys.
+  Same fixed-supply/EIP-1167-clone shape as `LaunchedToken`, but with a
+  creator-configurable buy/sell fee split (reflections, marketing paid out
+  in native ETH, auto-liquidity, burn) on top of the platform's own
+  graduating tax — see "CustomToken's swap-and-process pipeline" and the
+  reflections/rewards-blocking sections below, and `AUDIT-CustomToken.md`
+  for the full writeup.
+- **`CustomTokenFactory.sol`** — `CustomToken`'s entry point, mirroring
+  `TokenFactory.sol`'s launch flow, fee handling, and gasless relaying
+  exactly, with its own voucher type (`CustomLaunchVoucher`) and its own
+  `platformFeeBps`/tax-default settings.
 - **`LiquidityLocker.sol`** — holds LP tokens from a "Launch + Add
   Liquidity" launch until a configurable unlock time, then lets the
   original creator withdraw them. Generic timelock, not tied to any one
   token.
+- **`CreatorRewardsDistributor.sol`** — where a token's own creator-reward
+  diversion (`creatorRewardBps`) lands and gets converted to ETH/paid out.
+  See "Creator rewards" above for the full mechanics.
+- **`PlatformRewardsDistributor.sol`** — the platform-wide counterpart to
+  the contract above: pools every token's `rewardBps` diversion (plus 50%
+  of every `deployFee`/`launchFee`) into one shared stream, and turns it
+  into `PlatformToken` buyback + burn + batched holder airdrops, rather
+  than paying any one creator directly.
+- **`PlatformToken.sol`** — Hood Launch's own token, deployed once
+  alongside the platform. An ordinary fixed-supply `ERC20Burnable` in every
+  way a holder or a DEX sees it (no tax, no transfer restrictions), plus a
+  live enumerable holder registry so `PlatformRewardsDistributor` can walk
+  every current holder on-chain for airdrop batches.
 - **Gasless relaying** (`TokenFactory.sol` and `CustomTokenFactory.sol`
   both carry this, alongside their normal direct-pay flow) —
   `depositForRelayedLaunch()`, `reclaimDeposit()`,
@@ -742,6 +889,11 @@ one platform.
   check.
 - **`interfaces/IAggregatorV3.sol`** — the minimal Chainlink-style price
   feed interface `LaunchedToken` reads for the tax's graduation check.
+- **`interfaces/ICreatorAware.sol`** — the one thing
+  `CreatorRewardsDistributor` needs from a token it holds rewards for:
+  `creator()`. Both `LaunchedToken` and `CustomToken` already expose this
+  as a plain public getter, so a creator transfer is always reflected
+  live, never a stale snapshot.
 - **`mocks/`** — `MockRouter`, `MockLPToken` (doubles as the mock pair —
   real Uniswap V2 pairs are simultaneously the LP token and the reserve
   holder, and this mirrors that), `MockERC20`, `MockAggregatorV3`:
@@ -920,14 +1072,17 @@ philosophy as `lib/launchStore.js` and `lib/relayerStore.js`.
 
 ## What's not here yet
 
-- The off-chain **identity + dashboard backend** — where a creator drafts
-  name/ticker/description/socials before launching, logs in with their
-  wallet (Sign-In With Ethereum) to edit socials and check status, and
-  where the front end reads live token/price/pool data from. That's a
-  separate Node service (indexer + API + DB) that reads this contract's
-  events (`TokenCreated`, `LiquidityAdded`, `CreatorBought`, `TaxDisabled`)
-  — the ledger here is a starting point for that, not a replacement for
-  it.
+- The off-chain **identity + creator-profile backend** — where a creator
+  drafts name/ticker/description/socials before launching, and logs in
+  with their wallet (Sign-In With Ethereum) specifically to edit socials
+  or manage a profile. `scripts/relayer.js` already *does* now cover the
+  live-data half of what this bullet used to describe entirely as missing
+  — real trade activity, price/market-cap history, and holder distribution
+  are all served today via `GET /activity`, `/price-history/:tokenAddress`,
+  and `/holder-distribution/:tokenAddress` (see "Running the relayer
+  service" above) — so what's actually still missing is narrower: a
+  persistent creator identity/social-profile layer, not the live-chain-data
+  layer.
 - A **security audit**. Do not deploy this with real value at stake without
   one — a fee-on-transfer token interacting with a real AMM has real edge
   cases (front-running the tax-disable transaction, router compatibility,
