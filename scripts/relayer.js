@@ -469,7 +469,25 @@ async function main() {
   // humans and scripts.
   app.get("/", (_req, res) => sendJson(res, 200, { ok: true, service: "hoodlaunch-relayer" }));
 
-  app.get("/health", (_req, res) => sendJson(res, 200, { ok: true, relayer: relayerWallet.address }));
+  // Includes the actual factory addresses this RUNNING process resolved at
+  // startup — not what a host dashboard *shows* as configured, but what's
+  // really loaded in memory right now. This exists specifically because
+  // dashboard values and live process state have drifted apart more than
+  // once on this deploy (CREATOR_REWARDS_DISTRIBUTOR_ADDRESS showing
+  // "present" while the process still behaved as if unset, until a real
+  // restart picked it up) — hitting this endpoint answers "did my last
+  // restart actually take?" in one request instead of guessing from a
+  // dashboard screen or a startup log scrollback.
+  app.get("/health", (_req, res) =>
+    sendJson(res, 200, {
+      ok: true,
+      relayer: relayerWallet.address,
+      tokenFactoryAddress: tokenFactoryAddress || null,
+      customTokenFactoryAddress: customTokenFactoryAddress || null,
+      creatorRewardsDistributorAddress: CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null,
+      creatorRewardsAutoSweepEnabled: !!creatorRewardsDistributor,
+    })
+  );
 
   // Lets the front end pull "every launch on this network" instead of only
   // ever showing what a given browser happened to launch or see itself —
