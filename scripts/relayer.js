@@ -621,6 +621,45 @@ async function main() {
     sendJson(res, 200, { network, tokenAddress: req.params.tokenAddress, rows });
   });
 
+  // Ground-truth diagnostic for "why is this token's chart/market cap
+  // stuck at zero" — the honest answer is almost always "the background
+  // discovery/price-poll loops haven't caught this token yet," and that can
+  // happen for reasons invisible from the front end: deployed-contracts/
+  // (where trackedTokensStore/relayerStore write their JSON) lives inside
+  // the app's own git checkout rather than a separate persistent volume, so
+  // a fresh deploy/republish can reset discovery/price cursors back to
+  // whatever was last committed — meaning every republish potentially
+  // restarts the historical backfill from TOKEN_DISCOVERY_START_BLOCK
+  // rather than resuming near the chain tip. Hitting this tells you exactly
+  // where things stand instead of guessing from the UI alone: whether the
+  // token has been discovered at all, whether it has a pairAddress on file,
+  // how far each factory's discovery scan has actually gotten vs. the
+  // current chain tip, and how many price points have been sampled so far.
+  app.get("/debug/token/:tokenAddress", async (req, res) => {
+    const addr = req.params.tokenAddress.toLowerCase();
+    const tracked = readTrackedTokens(network)[addr] || null;
+    const latestBlock = await hre.ethers.provider.getBlockNumber();
+    const discovery = {};
+    for (const watcher of watchers) {
+      const factoryAddress = await watcher.factory.getAddress();
+      const cursor = getCursor(`${factoryAddress}:discovery`);
+      discovery[watcher.kind] = {
+        factoryAddress,
+        discoveryCursor: cursor,
+        latestBlock,
+        blocksBehind: cursor === null ? "never run — will start from TOKEN_DISCOVERY_START_BLOCK" : Math.max(0, latestBlock - cursor),
+      };
+    }
+    sendJson(res, 200, {
+      network,
+      tokenAddress: req.params.tokenAddress,
+      trackedAsOf: tracked ? { pairAddress: tracked.pairAddress || null, kind: tracked.kind || null, symbol: tracked.symbol || null } : null,
+      trackedTokenFound: !!tracked,
+      priceHistoryPointCount: readPriceHistory(network, req.params.tokenAddress).length,
+      discovery,
+    });
+  });
+
   if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
   if (customTokenFactoryAddress) app.post("/vouchers/custom", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom")));
 
