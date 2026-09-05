@@ -616,6 +616,11 @@ async function main() {
     });
   });
 
+  app.get("/holder-distribution/:tokenAddress", async (req, res) => {
+    const rows = await computeHolderDistribution(req.params.tokenAddress);
+    sendJson(res, 200, { network, tokenAddress: req.params.tokenAddress, rows });
+  });
+
   if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
   if (customTokenFactoryAddress) app.post("/vouchers/custom", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom")));
 
@@ -824,6 +829,57 @@ async function main() {
       return Number.isFinite(count) ? count : null;
     } catch (err) {
       return null;
+    }
+  }
+
+  // Backs GET /holder-distribution/:tokenAddress — index.html's own comment
+  // on fetchAndRenderHolderDistribution() names this function and that route
+  // as if both already existed; neither did until now. Same Blockscout-
+  // compatible explorer API as fetchHolderCount above (that one only reads
+  // back a single aggregate count field; this reads the actual per-holder
+  // breakdown), combined with the token's own on-chain totalSupply() so the
+  // percentages are exact rather than only relative to whatever page of
+  // holders the explorer happened to return. Blockscout's v2 holders listing
+  // is already sorted by balance descending, so the first page IS the top
+  // holders — no need to paginate through the rest just to find them.
+  // Returns [] (never throws) on anything from a missing explorer config to
+  // a malformed response — index.html already renders a friendly
+  // "not available right now" message for an empty rows array.
+  async function computeHolderDistribution(tokenAddress) {
+    const explorerApiUrl = (ROBINHOOD_NETWORKS[network] && ROBINHOOD_NETWORKS[network].explorerApiUrl) || null;
+    if (!explorerApiUrl || typeof fetch !== "function") return [];
+    try {
+      const base = explorerApiUrl.replace(/\/api\/?$/, "");
+      const [holdersRes, totalSupply] = await Promise.all([
+        fetch(`${base}/api/v2/tokens/${tokenAddress}/holders`),
+        hre.ethers
+          .getContractAt(["function totalSupply() view returns (uint256)"], tokenAddress, hre.ethers.provider)
+          .then((c) => c.totalSupply()),
+      ]);
+      if (!holdersRes.ok || totalSupply <= 0n) return [];
+      const data = await holdersRes.json();
+      const items = Array.isArray(data && data.items) ? data.items : [];
+      return items
+        .map((item) => {
+          const who = item && item.address && (item.address.hash || item.address);
+          let raw;
+          try {
+            raw = BigInt(item && item.value != null ? item.value : 0);
+          } catch (e) {
+            raw = 0n;
+          }
+          if (!who || raw <= 0n) return null;
+          // Basis-point-precision integer math, then back to a plain
+          // percentage — avoids float imprecision on the huge raw balances
+          // involved without needing a bignumber-aware rounding library.
+          const pct = Number((raw * 10000n) / totalSupply) / 100;
+          return { who, pct };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.pct - a.pct)
+        .slice(0, 10);
+    } catch (err) {
+      return [];
     }
   }
 
