@@ -344,14 +344,29 @@ async function main() {
     next();
   });
 
+  // The site itself (index.html, config.json, and anything else meant for
+  // browsers) lives in public/ right next to this script's own package.json
+  // — this IS the same process index.html's own comments assume is serving
+  // it ("this page is always served by that same relayer process"), so
+  // wherever this app's URL is reached from, GET / and GET /config.json
+  // resolve here. Registered before the API routes below so a real static
+  // file always wins over them; none of the API paths (/health, /launches,
+  // /vouchers/*, /status/*) collide with a file in public/, so this never
+  // shadows them.
+  app.use(express.static(path.join(__dirname, "..", "public")));
+
   // Some managed hosts (GoDaddy's Node.js Apps among them) run their own
   // platform-level health check against the bare site root before they'll
   // let you publish, separate from anything this app itself defines — with
   // no route here at all, that probe got a 404 and the host reported the
   // app as "unhealthy"/"unreachable" even while it was actually running
-  // fine (confirmed by this app's own startup logs). This just gives that
-  // probe a 200 to look at; it carries no other meaning; GET /health above
-  // remains the real liveness/diagnostic endpoint for humans and scripts.
+  // fine (confirmed by this app's own startup logs). The express.static
+  // mount above now serves the real site at "/" and already satisfies that
+  // probe with a normal 200; this stays only as a fallback for the rare
+  // case public/index.html is missing from a given deploy (a bad build, an
+  // empty public/ folder) so the probe still gets a 200 instead of a 404.
+  // GET /health above remains the real liveness/diagnostic endpoint for
+  // humans and scripts.
   app.get("/", (_req, res) => sendJson(res, 200, { ok: true, service: "hoodlaunch-relayer" }));
 
   app.get("/health", (_req, res) => sendJson(res, 200, { ok: true, relayer: relayerWallet.address }));
