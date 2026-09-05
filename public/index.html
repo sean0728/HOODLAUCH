@@ -3820,7 +3820,14 @@
       }
       w.innerHTML = rows.map(r=>{
         const pct = Math.max(0, Math.min(100, Number(r.pct)||0));
-        return `<div class="holder-row"><span class="who">${escapeHtml(String(r.who))}</span><div class="bar"><span style="width:${pct}%"></span></div><span class="pct num">${pct.toFixed(1)}%</span></div>`;
+        // The raw 42-char address doesn't fit the .who column's fixed
+        // 110px width (see the .holder-row CSS) — rendering it unshortened
+        // overflowed into the bar next to it instead of truncating, which
+        // is what actually produced the garbled/overlapping look. Same
+        // fmtAddrSafe() truncation ("0x1234…5678") used everywhere else
+        // addresses are shown in this UI; the full address is still
+        // available on hover via the title attribute.
+        return `<div class="holder-row"><span class="who" title="${escapeHtml(String(r.who))}">${fmtAddrSafe(r.who)}</span><div class="bar"><span style="width:${pct}%"></span></div><span class="pct num">${pct.toFixed(1)}%</span></div>`;
       }).join("");
     }catch(e){
       if(currentDetailTokenId !== t.id) return;
