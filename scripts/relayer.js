@@ -22,6 +22,14 @@
 //      (and best-effort the clone), generate a flattened source archive, and
 //      record the launch via lib/launchStore.
 //
+// Separately, and entirely optionally, this service can also auto-sweep
+// per-token creator rewards: set CREATOR_REWARDS_DISTRIBUTOR_ADDRESS and it
+// periodically calls CreatorRewardsDistributor.triggerCreatorSwap for every
+// launched token carrying enough accumulated in-kind reward balance, so a
+// creator's portfolio already shows a claimable ETH amount instead of
+// requiring a separate "convert to ETH" step before claimCreatorRewards.
+// See the CREATOR_REWARDS_* constants and creatorRewardsPollLoop below.
+//
 // GET /status/:voucherHash lets the front end poll a launch's progress
 // (received -> deposited -> relayed, or failed) — merged with a live
 // on-chain read of the matching deposit, so the front end can tell a
@@ -42,17 +50,11 @@
 // a stolen relayer key can do is waste its own ETH balance or simply stop
 // relaying, not touch anyone else's funds).
 const path = require("path");
-const fs = require("fs");
 const express = require("express");
 const hre = require("hardhat");
-const { verifyContract, verifyProxyClone, resolveExplorerApiUrl } = require("../lib/verify");
+const { verifyContract, verifyProxyClone } = require("../lib/verify");
 const { recordLaunch, readLedger, PUBLIC_FIELDS } = require("../lib/launchStore");
-const {
-  getVoucher, upsertVoucher, getCursor, setCursor, getActiveNetwork, setActiveNetwork,
-  getPlatformConfig, setPlatformConfig,
-} = require("../lib/relayerStore");
-const { appendPricePoint, readPriceHistory } = require("../lib/priceHistoryStore");
-const { appendActivity, readActivity } = require("../lib/activityStore");
+const { getVoucher, upsertVoucher, getCursor, setCursor } = require("../lib/relayerStore");
 
 // Managed Node.js hosts (GoDaddy Node.js Hosting among them) inject the
 // port an app must listen on via the platform-standard PORT env var and
@@ -63,147 +65,24 @@ const PORT = Number(process.env.PORT || process.env.RELAYER_PORT || 8787);
 const POLL_INTERVAL_MS = Number(process.env.RELAYER_POLL_INTERVAL_MS || 15_000);
 const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5_000);
 
-// ---- price history sampling ----
-// Same env var scripts/deploy.js already reads for this — reuse it here
-// rather than inventing a second name for the same Chainlink-style
-// AggregatorV3Interface address. Left unset, price sampling falls straight
-// to the public HTTP API below (see fetchEthUsdPrice).
-const PRICE_FEED_ADDRESS = process.env.PRICE_FEED_ADDRESS || null;
-const PRICE_POLL_INTERVAL_MS = Number(process.env.RELAYER_PRICE_POLL_INTERVAL_MS || 60_000);
-const FALLBACK_ETH_USD = 3000; // last-resort estimate, same one index.html itself falls back to
-const AGGREGATOR_V3_ABI = [
-  "function decimals() view returns (uint8)",
-  "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
-];
-const PAIR_ABI = [
-  "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
-  "function token0() view returns (address)",
-  "event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)",
-];
-// Just enough of ERC20 to price a token's market cap alongside its price —
-// see pollTokenPrices below. Read live (not the totalSupply recorded at
-// launch time) so a token with a burn tax shows a market cap that keeps
-// tracking its real, shrinking supply rather than quietly going stale.
-const ERC20_SUPPLY_ABI = ["function totalSupply() view returns (uint256)"];
-// Covers both LaunchedToken.sol (taxActive) and CustomToken.sol
-// (platformTaxActive) — same graduationTargetUsd field name on both, just a
-// differently-named on/off flag for the platform's own flat tax. See
-// pollTokenPrices: which boolean actually gets called depends on which kind
-// of token this is (entry.mode tells us). Both contracts' real
-// _maybeDisableTax()/_maybeDisablePlatformTax() logic run on-chain on every
-// taxed transfer — this is just reading the result of that, not
-// recalculating graduation ourselves.
-const GRADUATION_ABI = [
-  "function graduationTargetUsd() view returns (uint256)",
-  "function taxActive() view returns (bool)",
-  "function platformTaxActive() view returns (bool)",
-];
-
-// ---- platform-wide active network (admin-gated) ----
-// Purely a UI/display concern from here down — this never changes which
-// contracts THIS relayer instance itself talks to (that's fixed at process
-// start, via --network + TOKEN_FACTORY_ADDRESS/CUSTOM_TOKEN_FACTORY_ADDRESS,
-// same as always). It's the single source of truth index.html now reads to
-// decide which network *every visitor* sees as the platform's active one,
-// replacing what used to be each visitor's own private localStorage choice.
-// Same admin wallet address index.html's own ADMIN_WALLET constant already
-// gates the admin panel behind — but unlike that client-side check (which
-// the file's own comment is explicit is a UI convenience, not a security
-// boundary), this one actually matters: it decides what every visitor's
-// page shows, so it has to be enforced here, server-side, not just hidden
-// behind a button. Verified via a signed message (personal_sign) rather
-// than a shared secret, so there's nothing new to provision or leak.
-const ADMIN_WALLET_ADDRESS = (process.env.ADMIN_WALLET_ADDRESS || "0x64dEAAfEa8F9a7238bf3a8Af54863dC1C08386A3").toLowerCase();
-const ACTIVE_NETWORK_SIGNATURE_TTL_MS = 5 * 60 * 1000; // generous enough for a slow wallet popup; tight enough that a captured signature can't be replayed indefinitely
-const VALID_NETWORKS = ["demo", "live"];
-
-function activeNetworkMessage(network, timestamp) {
-  return `Hood Launch admin: set active network to ${network} at ${timestamp}`;
-}
-
-// ---- platform contracts config (admin-gated, same pattern as above) ----
-// Server-side counterpart to index.html's admin panel "Save (this browser)"
-// button, which only ever wrote to that one browser's localStorage — see
-// that panel's own comment in index.html for the gap this closes: an admin
-// changing an address there had no way to make it visible to any other
-// visitor without a manual config.json export/upload. This is the same
-// signed-message approach as active-network above, generalized to a
-// multi-field payload: the admin signs a message that embeds the exact
-// config being saved (via a canonical, fixed-key-order JSON encoding — see
-// canonicalizePlatformConfig), not just a timestamp, so a captured
-// signature can't later be replayed to push a *different* config within
-// the same TTL window.
-//
-// PLATFORM_CONFIG_KEYS/PLATFORM_CONFIG_ADDRESS_KEYS mirror index.html's own
-// CONFIG_KEYS/CONFIG_ADDRESS_KEYS exactly — kept in sync by hand, same as
-// canonicalizePlatformConfig itself (see that function's own comment).
-const PLATFORM_CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "priceFeed", "relayerApiUrl"];
-const PLATFORM_CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "priceFeed"];
-const PLATFORM_CONFIG_SIGNATURE_TTL_MS = 5 * 60 * 1000;
-const ADDRESS_LIKE_RE = /^0x[0-9a-fA-F]{40}$/;
-
-function isUrlLike(value) {
-  try {
-    const u = new URL(value);
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch (err) {
-    return false;
-  }
-}
-
-// Must produce byte-identical output to index.html's own
-// canonicalizePlatformConfig for the same input, or a validly-signed save
-// from the admin panel will fail to verify here. Both sides build the
-// object by inserting keys in this exact fixed order (JS preserves string-
-// key insertion order in JSON.stringify, per spec — not an engine quirk),
-// so keep this in sync with index.html by hand if either ever changes.
-function canonicalizePlatformConfig(cfg) {
-  const out = {};
-  for (const k of PLATFORM_CONFIG_KEYS) {
-    const v = (cfg && cfg[k]) || {};
-    out[k] = { demo: v.demo || null, live: v.live || null };
-  }
-  return out;
-}
-
-function platformConfigMessage(cfg, timestamp) {
-  return `Hood Launch admin: update platform config to ${JSON.stringify(canonicalizePlatformConfig(cfg))} at ${timestamp}`;
-}
-
-// Rejects anything that doesn't match index.html's own client-side checks
-// (isAddressLike/isUrlLike in the admin "Save" handler) — that client
-// validation is a UX convenience, not something this endpoint can trust,
-// since it's the thing that actually persists what every visitor sees.
-function validatePlatformConfig(raw) {
-  if (!raw || typeof raw !== "object") return { error: "config must be an object" };
-  const cleaned = {};
-  for (const k of PLATFORM_CONFIG_KEYS) {
-    const entry = raw[k];
-    if (entry === undefined) continue; // omitted key: leave unset, don't force nulls over a value saved by a previous save
-    if (!entry || typeof entry !== "object") return { error: `${k} must be an object with demo/live fields` };
-    const isAddressField = PLATFORM_CONFIG_ADDRESS_KEYS.includes(k);
-    const validator = isAddressField ? (v) => ADDRESS_LIKE_RE.test(v) : isUrlLike;
-    const kindNoun = isAddressField ? "address" : "URL";
-    const out = { demo: null, live: null };
-    for (const net of ["demo", "live"]) {
-      const v = entry[net];
-      if (v === null || v === undefined || v === "") continue;
-      if (typeof v !== "string" || !validator(v)) return { error: `${k} ${net} doesn't look like a valid ${kindNoun}` };
-      out[net] = v.trim();
-    }
-    cleaned[k] = out;
-  }
-  return { cleaned };
-}
-
-// ---- real trade activity sampler ----
-// Server-side replacement for index.html's old feedLine() — a fully
-// fabricated random-verb, random-token, random-fake-address generator on a
-// fixed timer. This instead watches each tracked pool's own Swap event
-// (Uniswap V2 emits one on every buy/sell) and records what actually
-// happened. Same scope as the price sampler above: any ledger entry with a
-// real, non-zero pairAddress.
-const ACTIVITY_POLL_INTERVAL_MS = Number(process.env.RELAYER_ACTIVITY_POLL_INTERVAL_MS || 20_000);
+// Entirely optional: leaving CREATOR_REWARDS_DISTRIBUTOR_ADDRESS unset means
+// this service does nothing extra, same as before this feature existed. When
+// it IS set, this service periodically sweeps every launched token's
+// accumulated in-kind creatorRewardBps cut into ETH on the creator's behalf
+// (CreatorRewardsDistributor.triggerCreatorSwap is permissionless and needs
+// no special key — the creator, or anyone, could call it themselves), so a
+// creator visiting their portfolio finds a claimable ETH balance already
+// waiting rather than needing to send a "convert to ETH" transaction before
+// they can claim. This is a background convenience, not a trust
+// requirement: claimCreatorRewards always pays the token's live creator()
+// regardless of who (or what) triggered the swap. A much longer default
+// interval than the deposit poll above is intentional — unlike a pending
+// gasless launch, an uncoverted reward balance costs nothing by sitting a
+// while longer, and sweeping every launched token on every tick would waste
+// gas for no benefit.
+const CREATOR_REWARDS_DISTRIBUTOR_ADDRESS = process.env.CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null;
+const CREATOR_REWARDS_POLL_INTERVAL_MS = Number(process.env.CREATOR_REWARDS_POLL_INTERVAL_MS || 5 * 60_000);
+const ERC20_BALANCE_OF_ABI = ["function balanceOf(address) view returns (uint256)"];
 
 const LAUNCH_VOUCHER_FIELDS = [
   "creator",
@@ -289,118 +168,12 @@ function expectedDepositForCustom(voucher) {
 // JSON.stringify chokes on BigInt — every response that might carry one
 // goes through this instead of res.json().
 function sendJson(res, status, body) {
-  // Every route on this server is either live relayer state or a plain
-  // read straight off a ledger file that changes as launches/trades/prices
-  // happen — none of it should ever be cached by a browser. Without an
-  // explicit header here, a browser is free to apply its own heuristic
-  // caching to a GET response (no Cache-Control, no ETag), which is exactly
-  // how a browser can end up showing a launches list from before a new
-  // token existed even though the server itself has long since moved on.
-  res.setHeader("Cache-Control", "no-store");
   res.status(status).type("application/json").send(
     JSON.stringify(body, (_key, value) => (typeof value === "bigint" ? value.toString() : value), 2)
   );
 }
 
-// Same on-chain-first, HTTP-API-fallback shape as index.html's own
-// refreshEthUsdPrice — this is the server-side twin of it, used only to
-// convert a pool's own token/ETH reserve ratio into a USD price for
-// recording (see pollTokenPrices below). Node's script context has no CSP
-// restriction the way the published front-end page does, so a plain public
-// API call as the fallback works fine here, same as scripts/deploy.js
-// already does for its own one-time fee-conversion fetch.
-async function fetchEthUsdPrice() {
-  if (PRICE_FEED_ADDRESS) {
-    try {
-      const feed = new hre.ethers.Contract(PRICE_FEED_ADDRESS, AGGREGATOR_V3_ABI, hre.ethers.provider);
-      const [decimals, roundData] = await Promise.all([feed.decimals(), feed.latestRoundData()]);
-      const price = Number(roundData.answer) / 10 ** Number(decimals);
-      if (Number.isFinite(price) && price > 0) return price;
-    } catch (err) {
-      // fall through to the HTTP API below
-    }
-  }
-  try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd");
-    if (res.ok) {
-      const data = await res.json();
-      const price = data && data.ethereum && data.ethereum.usd;
-      if (typeof price === "number" && price > 0) return price;
-    }
-  } catch (err) {
-    // offline, or the API's unreachable — fall through to the hardcoded estimate
-  }
-  return FALLBACK_ETH_USD;
-}
-
-// Real per-token holder count — replaces what used to be a static number
-// set once at launch time and never touched again (either 1 or 2, baked
-// straight into the token object) plus a purely cosmetic, seeded-random
-// "holder distribution" breakdown in index.html's openDetail(). Neither of
-// those was ever real data. There's no on-chain way to get this cheaply for
-// an ordinary LaunchedToken/CustomToken clone — unlike PlatformToken.sol,
-// they don't maintain their own holder registry, and adding one now would
-// mean a contract change (same category of work as the liquidity-split
-// feature that's on hold). The block explorer already indexes every
-// Transfer event for every token on the chain, so it's the only source
-// that can answer "how many distinct addresses hold this right now"
-// without touching the contracts at all.
-//
-// Tries Blockscout's native v2 REST API first (documented, stable schema:
-// GET /api/v2/tokens/{address} returns a top-level "holders" field) and
-// falls back to the legacy Etherscan-compatible action this project's own
-// verify.js already targets (module=token&action=getToken), whose "result"
-// object commonly carries the same field on Blockscout deployments. Either
-// step failing (wrong field name for this particular explorer build, rate
-// limiting, a network hiccup) just means this tick doesn't update the
-// count — same "leave it as it was, retry next poll" posture as every
-// other best-effort read in this file. If holder counts never populate
-// after this ships, check a relayer log line starting with "[holders]" —
-// it'll say which step failed and what came back, which is enough to
-// adjust the field name here without guessing blind.
-async function fetchHolderCount(tokenAddress) {
-  const apiUrl = resolveExplorerApiUrl();
-  if (!apiUrl) return null;
-  let v2Failure = null;
-  let legacyFailure = null;
-
-  try {
-    const v2Base = apiUrl.replace(/\/api\/?$/, "/api/v2");
-    const res = await fetch(`${v2Base}/tokens/${tokenAddress}`);
-    if (res.ok) {
-      const data = await res.json();
-      const holders = Number(data && data.holders);
-      if (Number.isFinite(holders) && holders >= 0) return holders;
-      v2Failure = `no usable "holders" field (got ${JSON.stringify(data && data.holders)})`;
-    } else {
-      v2Failure = `HTTP ${res.status}`;
-    }
-  } catch (err) {
-    v2Failure = err.message;
-  }
-
-  try {
-    const url = `${apiUrl}?module=token&action=getToken&contractaddress=${tokenAddress}`;
-    const res = await fetch(url);
-    if (res.ok) {
-      const data = await res.json();
-      const holders = Number(data && data.result && data.result.holders);
-      if (Number.isFinite(holders) && holders >= 0) return holders;
-      legacyFailure = `no usable "holders" field (got ${JSON.stringify(data && data.result && data.result.holders)})`;
-    } else {
-      legacyFailure = `HTTP ${res.status}`;
-    }
-  } catch (err) {
-    legacyFailure = err.message;
-  }
-
-  // Logged once per failing tick, not thrown — see this function's own
-  // comment above for why a miss here just means "try again next poll."
-  console.warn(`[holders] couldn't get a holder count for ${tokenAddress} — v2 API: ${v2Failure}; legacy API: ${legacyFailure}`);
-  return null;
-}
-
-async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementationAddress, creator, name, symbol, totalSupply, network, txHash, extra, mode }) {
+async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementationAddress, creator, name, symbol, totalSupply, network, txHash, extra }) {
   const implVerification = await verifyContract(implementationAddress, []);
   const proxyVerification = await verifyProxyClone(tokenAddress, implementationAddress);
 
@@ -416,7 +189,7 @@ async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementat
   const record = {
     name,
     symbol,
-    mode: mode || `relayed-${kind}`,
+    mode: `relayed-${kind}`,
     tokenAddress,
     pairAddress: pairAddress && pairAddress !== hre.ethers.ZeroAddress ? pairAddress : null,
     creator,
@@ -431,12 +204,12 @@ async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementat
       : null,
     flattenedSource: flattenedSource
       ? [
-          `// Deployment record for ${name} ($${symbol}) — ${mode || `relayed-${kind}`}`,
+          `// Deployment record for ${name} ($${symbol}) — relayed gasless launch`,
           `// Token address (EIP-1167 proxy clone): ${tokenAddress}`,
           `// Implementation address (this is what's actually verified on-chain): ${implementationAddress}`,
           `// Creator: ${creator}`,
           `// Network: ${network}`,
-          `// Deployment tx: ${txHash}`,
+          `// Relayed deployment tx: ${txHash}`,
           `// Recorded: ${new Date().toISOString()}`,
           "",
           flattenedSource,
@@ -450,17 +223,36 @@ async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementat
   console.log(`  recorded: ${paths.metaPath}`);
   return { implVerification, proxyVerification };
 }
+
+// Reports which required env vars this process can actually see — never
+// the values themselves, just presence and length — printed unconditionally
+// at startup, before any of the "missing X" throws below. Purely a
+// diagnostic aid for exactly the situation this comment is near: a host's
+// dashboard shows a variable as configured/"deployed", but the process
+// still behaves as if it's unset. That gap is otherwise invisible from the
+// outside — this makes it visible in the one place that's actually
+// authoritative, the process's own process.env, without ever leaking a
+// secret into the logs.
 function logEnvVarPresence() {
-  const names = ["RELAYER_PRIVATE_KEY", "TOKEN_FACTORY_ADDRESS", "CUSTOM_TOKEN_FACTORY_ADDRESS", "HARDHAT_NETWORK", "PORT", "RELAYER_PORT"];
+  const names = [
+    "RELAYER_PRIVATE_KEY",
+    "TOKEN_FACTORY_ADDRESS",
+    "CUSTOM_TOKEN_FACTORY_ADDRESS",
+    "CREATOR_REWARDS_DISTRIBUTOR_ADDRESS",
+    "HARDHAT_NETWORK",
+    "PORT",
+    "RELAYER_PORT",
+  ];
   console.log("Env var check (name: present/length only, never the value):");
   for (const name of names) {
     const value = process.env[name];
     console.log(`  ${name}: ${value ? `present (${value.length} chars)` : "MISSING"}`);
   }
 }
+
 async function main() {
- logEnvVarPresence();
- const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
+  logEnvVarPresence();
+  const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
   if (!relayerPrivateKey) {
     throw new Error(
       "Set RELAYER_PRIVATE_KEY to the relayer's own funded hot-wallet key before running this service. " +
@@ -522,6 +314,16 @@ async function main() {
     });
   }
 
+  let creatorRewardsDistributor = null;
+  if (CREATOR_REWARDS_DISTRIBUTOR_ADDRESS) {
+    creatorRewardsDistributor = await hre.ethers.getContractAt(
+      "CreatorRewardsDistributor",
+      CREATOR_REWARDS_DISTRIBUTOR_ADDRESS,
+      relayerWallet
+    );
+    console.log(`Creator-reward auto-sweep enabled against distributor ${CREATOR_REWARDS_DISTRIBUTOR_ADDRESS}.`);
+  }
+
   // ---- HTTP API ----
   const app = express();
   app.use(express.json());
@@ -544,46 +346,15 @@ async function main() {
 
   // Some managed hosts (GoDaddy's Node.js Apps among them) run their own
   // platform-level health check against the bare site root before they'll
-  // let you publish, separate from anything this app itself defines — a
-  // 200 there was all that check ever needed, and the real frontend below
-  // now serves that same "/" route with an actual page, which satisfies it
-  // just as well. GET /health remains the real liveness/diagnostic endpoint
-  // for humans and scripts (it reports the relayer wallet address, which a
-  // static page load can't).
-  app.get("/health", (_req, res) => sendJson(res, 200, { ok: true, relayer: relayerWallet.address }));
+  // let you publish, separate from anything this app itself defines — with
+  // no route here at all, that probe got a 404 and the host reported the
+  // app as "unhealthy"/"unreachable" even while it was actually running
+  // fine (confirmed by this app's own startup logs). This just gives that
+  // probe a 200 to look at; it carries no other meaning; GET /health above
+  // remains the real liveness/diagnostic endpoint for humans and scripts.
+  app.get("/", (_req, res) => sendJson(res, 200, { ok: true, service: "hoodlaunch-relayer" }));
 
-  // Serves the front end (public/index.html and anything else in that
-  // folder) directly at the site root — not nested under /app or /site —
-  // so there both the exact same origin as this API AND the only frontend
-  // in play, with no separate copy elsewhere (e.g. a GoDaddy Website
-  // Builder page) for users to land on by mistake. Browsers apply a page's
-  // Content-Security-Policy connect-src allowlist to every fetch() it
-  // makes; a frontend hosted on a different domain (e.g. that Website
-  // Builder product, which sends its own restrictive CSP header) can have
-  // its fetch() calls to this API blocked by that policy no matter what
-  // CORS headers this server sends — CORS and CSP are enforced
-  // independently, and loosening one does nothing for the other. Serving
-  // the front end from here, as this exact app's root, sidesteps the whole
-  // problem: same origin is always implicitly allowed, so there's nothing
-  // for a CSP to block.
-  //
-  // (Earlier attempts mounted this under /app, then /site, as sub-paths —
-  // /app kept 404ing even once a diagnostic (fs.existsSync) proved
-  // public/index.html genuinely existed on disk on the deployed instance,
-  // which pointed at GoDaddy's own platform routing reserving /app for
-  // something of its own. Serving at the bare root sidesteps that guesswork
-  // entirely — there's no sub-path left for anything to collide with.)
-  const publicDir = path.join(__dirname, "..", "public");
-  try {
-    const dirExists = fs.existsSync(publicDir);
-    console.log(
-      `Static frontend check — publicDir=${publicDir} exists=${dirExists}` +
-        (dirExists ? ` contents=${JSON.stringify(fs.readdirSync(publicDir))}` : "")
-    );
-  } catch (e) {
-    console.log(`Static frontend check failed: ${e.message}`);
-  }
-  app.use(express.static(publicDir));
+  app.get("/health", (_req, res) => sendJson(res, 200, { ok: true, relayer: relayerWallet.address }));
 
   // Lets the front end pull "every launch on this network" instead of only
   // ever showing what a given browser happened to launch or see itself —
@@ -600,125 +371,6 @@ async function main() {
       return publicEntry;
     });
     sendJson(res, 200, { network, launches });
-  });
-
-  // Server-recorded chart history for one token's pool — see
-  // priceHistoryStore.js's own comment for why this exists (in short: it's
-  // what lets the same chart show up on every device, not just whichever
-  // browser happened to have the site open, and it works even for a viewer
-  // with no wallet extension installed at all, since it's a plain fetch()
-  // rather than a window.ethereum eth_call). Returns an empty history for
-  // an address that's never been sampled — a real token whose pool is just
-  // brand new looks the same over the wire as a typo'd address, and that's
-  // fine; the front end already renders a flat/empty chart the same way
-  // either way.
-  app.get("/price-history/:tokenAddress", (req, res) => {
-    const history = readPriceHistory(network, req.params.tokenAddress);
-    sendJson(res, 200, { network, tokenAddress: req.params.tokenAddress, history });
-  });
-
-  // Real, server-recorded trade activity for this network — see
-  // activityStore.js / pollTokenActivity below for how it's populated.
-  app.get("/activity", (_req, res) => {
-    sendJson(res, 200, { network, activity: readActivity(network) });
-  });
-
-  // Platform-wide active network — see this constant's own comment above
-  // for why GET is public but POST is verified server-side rather than
-  // trusted from the client.
-  app.get("/active-network", (_req, res) => {
-    sendJson(res, 200, { network: getActiveNetwork() });
-  });
-
-  app.post("/active-network", (req, res) => {
-    try {
-      const { network: targetNetwork, timestamp, signature } = req.body || {};
-      if (!VALID_NETWORKS.includes(targetNetwork)) {
-        return sendJson(res, 400, { error: `network must be one of ${VALID_NETWORKS.join(", ")}` });
-      }
-      if (!signature) return sendJson(res, 400, { error: "signature is required" });
-      const ts = Number(timestamp);
-      if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > ACTIVE_NETWORK_SIGNATURE_TTL_MS) {
-        return sendJson(res, 400, { error: "timestamp is missing, invalid, or too old — try again" });
-      }
-
-      const message = activeNetworkMessage(targetNetwork, ts);
-      let recovered;
-      try {
-        recovered = hre.ethers.verifyMessage(message, signature);
-      } catch (err) {
-        return sendJson(res, 400, { error: "couldn't verify that signature" });
-      }
-      if (recovered.toLowerCase() !== ADMIN_WALLET_ADDRESS) {
-        console.warn(`[active-network] rejected a set-network request signed by ${recovered}, which isn't the admin wallet.`);
-        return sendJson(res, 403, { error: "signature does not match the platform admin wallet" });
-      }
-
-      const stored = setActiveNetwork(targetNetwork);
-      console.log(`[active-network] admin (${recovered}) set the platform-wide active network to "${stored}".`);
-      sendJson(res, 200, { network: stored });
-    } catch (err) {
-      sendJson(res, 400, { error: err.message });
-    }
-  });
-
-  // Platform contracts config — same public-GET/signed-POST split as
-  // active-network above, and the same reasoning: GET is just a read of a
-  // JSON file, POST is what every visitor's page ends up trusting, so it's
-  // verified server-side rather than taken on the client's word. Returns
-  // null when nothing's been saved here yet (index.html's own
-  // rebuildPlatformConfig already treats a null layer as "skip it, fall
-  // through to config.json / built-in defaults" — same as it already does
-  // for a browser with no localStorage override).
-  app.get("/platform-config", (_req, res) => {
-    sendJson(res, 200, { config: getPlatformConfig() });
-  });
-
-  app.post("/platform-config", (req, res) => {
-    try {
-      const { config: submittedConfig, timestamp, signature } = req.body || {};
-      if (!signature) return sendJson(res, 400, { error: "signature is required" });
-      const ts = Number(timestamp);
-      if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > PLATFORM_CONFIG_SIGNATURE_TTL_MS) {
-        return sendJson(res, 400, { error: "timestamp is missing, invalid, or too old — try again" });
-      }
-
-      const { cleaned, error } = validatePlatformConfig(submittedConfig);
-      if (error) return sendJson(res, 400, { error });
-
-      // Signed and verified against the exact submitted config (via the
-      // same canonical encoding on both ends) — not just a timestamp — so a
-      // captured signature can't be replayed later to push different
-      // addresses within the same TTL window. See platformConfigMessage's
-      // own comment.
-      const message = platformConfigMessage(submittedConfig, ts);
-      let recovered;
-      try {
-        recovered = hre.ethers.verifyMessage(message, signature);
-      } catch (err) {
-        return sendJson(res, 400, { error: "couldn't verify that signature" });
-      }
-      if (recovered.toLowerCase() !== ADMIN_WALLET_ADDRESS) {
-        console.warn(`[platform-config] rejected a config save signed by ${recovered}, which isn't the admin wallet.`);
-        return sendJson(res, 403, { error: "signature does not match the platform admin wallet" });
-      }
-
-      // Merge onto whatever's already saved rather than replacing it
-      // outright, so a caller that only sends a subset of keys can't
-      // accidentally wipe out the others — same merge-not-replace posture
-      // index.html's own config layering already uses everywhere else.
-      const existing = getPlatformConfig() || {};
-      const merged = { ...existing };
-      for (const k of PLATFORM_CONFIG_KEYS) {
-        if (cleaned[k] !== undefined) merged[k] = cleaned[k];
-      }
-
-      const stored = setPlatformConfig(merged);
-      console.log(`[platform-config] admin (${recovered}) updated the platform-wide contracts config.`);
-      sendJson(res, 200, { config: stored });
-    } catch (err) {
-      sendJson(res, 400, { error: err.message });
-    }
   });
 
   async function handleVoucherSubmission(req, res, watcher) {
@@ -818,23 +470,10 @@ async function main() {
     upsertVoucher(voucherHash, { status: "deposited" });
     console.log(`[${watcher.kind}] deposit confirmed for ${voucherHash}, relaying...`);
 
-    // Split in two on purpose. The first block is the only part that can
-    // make this launch not have happened — a revert, a missing event, an
-    // RPC error before confirmation. The second block (verification +
-    // ledger record-keeping) runs strictly after the on-chain transaction
-    // has already succeeded, so nothing in it is allowed to flip this
-    // voucher's status back to "failed" — a verify-API hiccup or a flatten
-    // error there does not mean the launch failed, and reporting it that
-    // way would be a real lie: the creator's token exists, is live, and
-    // (per handleDirectLaunch's own dedup check) will still get swept into
-    // the ledger on its own within one poll cycle even if recordLaunch
-    // never got to run here. See Finding: relayed launches misreported as
-    // "failed" — 2026-09-03.
-    let receipt, tokenAddress, pairAddress, implementationAddress, network;
     try {
       const tx = await watcher.relayFn(voucher, record.signature);
       console.log(`[${watcher.kind}] submitted relay tx ${tx.hash} for ${voucherHash}, waiting for confirmation...`);
-      receipt = await tx.wait();
+      const receipt = await tx.wait();
 
       const parsedLogs = receipt.logs.map((log) => {
         try {
@@ -846,14 +485,11 @@ async function main() {
       const created = parsedLogs.find((p) => p && p.name === watcher.createdEventName);
       if (!created) throw new Error(`${watcher.createdEventName} event not found in relay receipt`);
 
-      tokenAddress = created.args.token;
-      pairAddress = created.args.pair || hre.ethers.ZeroAddress;
-      implementationAddress = await watcher.factory.tokenImplementation();
-      network = hre.network.name;
+      const tokenAddress = created.args.token;
+      const pairAddress = created.args.pair || hre.ethers.ZeroAddress;
+      const implementationAddress = await watcher.factory.tokenImplementation();
+      const network = hre.network.name;
 
-      // The launch is real and done as of this line — recorded immediately,
-      // before verification/record-keeping even starts, so a failure below
-      // can never retroactively make this voucher look unrelayed.
       upsertVoucher(voucherHash, {
         status: "relayed",
         txHash: receipt.hash,
@@ -861,15 +497,7 @@ async function main() {
         pairAddress,
       });
       console.log(`[${watcher.kind}] relayed ${voucherHash} -> token ${tokenAddress} (tx ${receipt.hash}). Running verification + recordkeeping...`);
-    } catch (err) {
-      const message = err && err.message ? err.message : String(err);
-      upsertVoucher(voucherHash, { status: "failed", error: message });
-      console.error(`[${watcher.kind}] relay failed for ${voucherHash}: ${message}`);
-      console.error(`  The creator's deposit is untouched and reclaimable once its deadline passes (reclaimDeposit).`);
-      return;
-    }
 
-    try {
       await postLaunchPipeline({
         kind: watcher.kind,
         tokenAddress,
@@ -885,295 +513,69 @@ async function main() {
       });
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
-      // Deliberately does NOT touch `status` — it's still "relayed" from
-      // above, which is the truth. `recordWarning` is purely informational,
-      // surfaced on GET /status/:voucherHash for anyone debugging why a
-      // launch is slow to show up in the ledger.
-      upsertVoucher(voucherHash, { recordWarning: message });
-      console.error(
-        `[${watcher.kind}] relay for ${voucherHash} succeeded on-chain (token ${tokenAddress}, tx ${receipt.hash}), ` +
-          `but verification/record-keeping failed afterward: ${message}. The launch itself is real and live — this ` +
-          `only affects the verified/proxyVerified flags and how quickly it shows up in the ledger. The ` +
-          `direct-launch poller (see pollDirectLaunches below) will pick it up on its own within one poll cycle if ` +
-          `this ledger entry doesn't exist yet.`
-      );
+      upsertVoucher(voucherHash, { status: "failed", error: message });
+      console.error(`[${watcher.kind}] relay failed for ${voucherHash}: ${message}`);
+      console.error(`  The creator's deposit is untouched and reclaimable once its deadline passes (reclaimDeposit).`);
     }
-  }
-
-  // ---- direct (non-relayed) launch poller ----
-  // TokenCreated/CustomTokenCreated fire from the exact same internal
-  // finalize step regardless of whether createToken()/createCustomToken()
-  // was called directly by the creator's own wallet or by this relayer's
-  // own relayedCreateToken()/relayedCreateCustomToken() — so this is a
-  // reliable, chain-level way to catch launches the relayer never
-  // submitted itself and therefore never ran postLaunchPipeline for. A
-  // direct launch's ledger entry would otherwise only ever exist in the
-  // launching creator's own browser localStorage (see saveCustomTokens()
-  // in index.html) — invisible to GET /launches, to anyone else's
-  // browser, and to the "creator-held, watched for a later liquidity add"
-  // flow that only works for tokens the front end actually knows about.
-  //
-  // Uses its own cursor (":launches" suffix) so it never shares state with
-  // pollWatcher's deposit cursor above — the two track completely
-  // different event types read at different cadences. On first run for a
-  // given factory this only watches launches from that moment forward,
-  // same "don't rescan from genesis" posture as the deposit poller; this
-  // session's own manual backfill (see deployed-contracts/robinhoodTestnet/
-  // launched-tokens.json) already covers what existed before this shipped.
-  async function pollDirectLaunches(watcher) {
-    const factoryAddress = await watcher.factory.getAddress();
-    const cursorKey = `${factoryAddress}:launches`;
-    const latestBlock = await hre.ethers.provider.getBlockNumber();
-    const storedCursor = getCursor(cursorKey);
-    const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock;
-    if (fromBlock > latestBlock) return;
-    const toBlock = Math.min(latestBlock, fromBlock + MAX_BLOCK_RANGE_PER_POLL);
-
-    const events = await watcher.factory.queryFilter(watcher.factory.filters[watcher.createdEventName](), fromBlock, toBlock);
-    for (const event of events) {
-      await handleDirectLaunch(watcher, event).catch((err) =>
-        console.error(`[${watcher.kind}] error recording on-chain launch in tx ${event.transactionHash}: ${err.message}`)
-      );
-    }
-    setCursor(cursorKey, toBlock);
-  }
-
-  async function handleDirectLaunch(watcher, event) {
-    const network = hre.network.name;
-    const tokenAddress = event.args.token;
-
-    // Already on file — either postLaunchPipeline recorded it moments ago
-    // via the relayed path above (relayedCreateToken/relayedCreateCustomToken
-    // also emit this same event), or a previous poll already caught it.
-    // Either way, recording it twice would duplicate it in the CSV/JSON
-    // ledger, so this is the one check that keeps the two recording paths
-    // from stepping on each other.
-    const alreadyRecorded = readLedger(network).some(
-      (entry) => entry.tokenAddress && entry.tokenAddress.toLowerCase() === tokenAddress.toLowerCase()
-    );
-    if (alreadyRecorded) return;
-
-    const pairAddress = event.args.pair || hre.ethers.ZeroAddress;
-    const implementationAddress = await watcher.factory.tokenImplementation();
-    console.log(
-      `[${watcher.kind}] found an on-chain launch this relayer never submitted itself: token ${tokenAddress} ` +
-        `(tx ${event.transactionHash}) — recording it as a direct launch.`
-    );
-
-    await postLaunchPipeline({
-      kind: watcher.kind,
-      tokenAddress,
-      pairAddress,
-      implementationAddress,
-      creator: event.args.creator,
-      name: event.args.name,
-      symbol: event.args.symbol,
-      totalSupply: event.args.totalSupply,
-      network,
-      txHash: event.transactionHash,
-      mode: `direct-${watcher.kind}`,
-    });
   }
 
   async function pollLoop() {
     for (const watcher of watchers) {
       await pollWatcher(watcher).catch((err) => console.error(`[${watcher.kind}] poll error: ${err.message}`));
-      await pollDirectLaunches(watcher).catch((err) => console.error(`[${watcher.kind}] direct-launch poll error: ${err.message}`));
     }
     setTimeout(pollLoop, POLL_INTERVAL_MS);
   }
 
-  // ---- price history sampler ----
-  // Server-side counterpart to what index.html's refreshLiveTokenPrices
-  // used to do entirely in the browser — see priceHistoryStore.js's own
-  // comment for the full "why". Scope matches index.html's
-  // isLiveTrackedToken() exactly: any ledger entry with a real, non-zero
-  // pairAddress (that's every "taxed"/"graduated" token, whether it went
-  // through TokenFactory, CustomTokenFactory, or was recorded manually like
-  // the platform token — a UniswapV2Pair's reserves are read the same way
-  // regardless of which factory, if any, created the token sitting in it).
-  let cachedWethAddress = null;
-  async function wethAddress() {
-    if (cachedWethAddress) return cachedWethAddress;
-    const anyFactory = watchers[0] && watchers[0].factory;
-    if (!anyFactory) return null;
-    const routerAddress = await anyFactory.router();
-    const router = await hre.ethers.getContractAt(["function WETH() view returns (address)"], routerAddress);
-    cachedWethAddress = await router.WETH();
-    return cachedWethAddress;
-  }
+  // ---- creator-reward auto-sweep (optional) ----
+  // Walks every token this relayer has ever recorded a launch for (across
+  // both the plain and custom flows — creatorRewardBps applies identically
+  // to both) and, for each one that's carrying more than its own
+  // swapThreshold in accumulated in-kind balance on the distributor, calls
+  // triggerCreatorSwap on the relayer's own dime. Each token is handled
+  // independently and a failure on one (no pool yet, a threshold that
+  // hasn't been reached, a token that predates this feature and has no
+  // creator()) is logged and skipped rather than aborting the sweep,
+  // mirroring handleDeposit's per-event error isolation above.
+  async function sweepCreatorRewardsOnce() {
+    const network = hre.network.name;
+    const ledger = readLedger(network);
+    const distributorAddress = await creatorRewardsDistributor.getAddress();
+    const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
 
-  async function pollTokenPrices() {
-    const liveEntries = readLedger(network).filter(
-      (entry) => entry.pairAddress && entry.pairAddress.toLowerCase() !== hre.ethers.ZeroAddress.toLowerCase()
-    );
-    if (!liveEntries.length) return;
-
-    const weth = await wethAddress().catch((err) => {
-      console.error(`[price] couldn't resolve WETH address: ${err.message}`);
-      return null;
-    });
-    if (!weth) return;
-    const ethUsdPrice = await fetchEthUsdPrice();
-
-    for (const entry of liveEntries) {
+    for (const tokenAddress of tokenAddresses) {
       try {
-        const pair = new hre.ethers.Contract(entry.pairAddress, PAIR_ABI, hre.ethers.provider);
-        const token = new hre.ethers.Contract(entry.tokenAddress, ERC20_SUPPLY_ABI, hre.ethers.provider);
-        // Every launch that reaches liveEntries (real pairAddress on file)
-        // went through the platform's own "Deploy and Add Liquidity" flow,
-        // which always calls configureTax()/configurePlatformTax()
-        // atomically when the pool is seeded — so these reads are expected
-        // to succeed for every entry here, custom or plain. The .catch()s
-        // below are just defense-in-depth, not an expected path.
-        const isCustom = /custom/i.test(entry.mode || "");
-        const graduation = new hre.ethers.Contract(entry.tokenAddress, GRADUATION_ABI, hre.ethers.provider);
-        // holders comes from the block explorer, not the chain directly —
-        // see fetchHolderCount's own comment for why. Fetched alongside the
-        // on-chain reads rather than after them, so one slow HTTP call to
-        // the explorer doesn't add extra latency on top of the RPC calls.
-        const [reserves, token0, supply, graduationTargetUsd, taxActive, holders] = await Promise.all([
-          pair.getReserves(),
-          pair.token0(),
-          token.totalSupply(),
-          graduation.graduationTargetUsd().catch(() => null),
-          (isCustom ? graduation.platformTaxActive() : graduation.taxActive()).catch(() => null),
-          fetchHolderCount(entry.tokenAddress),
-        ]);
-        const isToken0 = token0.toLowerCase() === entry.tokenAddress.toLowerCase();
-        const tokenReserve = isToken0 ? reserves.reserve0 : reserves.reserve1;
-        const wethReserve = isToken0 ? reserves.reserve1 : reserves.reserve0;
-        if (tokenReserve <= 0n || wethReserve <= 0n) continue; // pool exists but is empty/not yet seeded — nothing to price yet
-        const priceWeiPerToken = (wethReserve * 10n ** 18n) / tokenReserve;
-        const priceUsd = (Number(priceWeiPerToken) / 1e18) * ethUsdPrice;
-        // Market cap rides along on the same sample rather than getting its
-        // own endpoint/poll loop — it's just priceUsd times whatever the
-        // token's live totalSupply() happens to be right now, read fresh
-        // every tick so a burn-tax token's market cap tracks its real,
-        // shrinking supply instead of the fixed amount it minted at launch.
-        const mcapUsd = priceUsd * (Number(supply) / 1e18);
+        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
+        const balance = await token.balanceOf(distributorAddress);
+        if (balance === 0n) continue;
 
-        // Graduation progress toward the platform's own flat tax cutoff
-        // (LaunchedToken._maybeDisableTax / CustomToken._maybeDisablePlatformTax
-        // — see those functions' own comments for the two-observation,
-        // 30-minute-apart confirmation window this is the result of).
-        // taxActive is the contract's own authoritative on/off switch, read
-        // straight off-chain — not recomputed here. taxProgressPct is just
-        // this same mcapUsd estimate expressed as a percentage of the
-        // token's own graduationTargetUsd, for the progress bar. Once the
-        // contract itself confirms graduation, pin the bar to 100 outright
-        // rather than whatever our own (slightly different price-source)
-        // mcapUsd estimate implies — a graduated token should never show a
-        // progress bar stuck at 97%.
-        let taxProgressPct = null;
-        if (taxActive === false) {
-          taxProgressPct = 100;
-        } else if (graduationTargetUsd != null && Number(graduationTargetUsd) > 0) {
-          taxProgressPct = Math.max(0, Math.min(100, Math.round((mcapUsd / Number(graduationTargetUsd)) * 100)));
-        }
+        const threshold = await creatorRewardsDistributor.swapThreshold(tokenAddress);
+        if (balance < threshold) continue;
 
-        appendPricePoint(network, entry.tokenAddress, {
-          t: Date.now(),
-          p: priceUsd,
-          mcapUsd,
-          ...(taxActive === null ? {} : { taxActive }),
-          ...(taxProgressPct === null ? {} : { taxProgressPct }),
-          ...(holders === null ? {} : { holders }),
-        });
+        const tx = await creatorRewardsDistributor.triggerCreatorSwap(tokenAddress, 0);
+        const receipt = await tx.wait();
+        console.log(`[creator-rewards] swept ${tokenAddress} (balance ${balance}) in tx ${receipt.hash}.`);
       } catch (err) {
-        console.error(`[price] couldn't sample ${entry.symbol || entry.tokenAddress}: ${err.message}`);
+        // Expected/benign cases include: no pool for this token yet,
+        // ICreatorAware(token).creator() reverting on a pre-feature token,
+        // or another caller having already swept it between our balance
+        // read and our tx landing. Log and move on to the next token.
+        console.warn(`[creator-rewards] skip ${tokenAddress}: ${err.message}`);
       }
     }
   }
 
-  // ---- real trade activity sampler ----
-  // Server-side replacement for index.html's old feedLine() generator (see
-  // that constant's own comment above). Watches each tracked pool's own
-  // Swap event directly — real buys and sells, not a random-verb, random-
-  // fake-address timer. Uses a per-pair cursor (":activity" suffix, same
-  // convention as pollDirectLaunches' ":launches" cursor) so it never
-  // rescans from genesis and never shares state with any other poller.
-  async function pollTokenActivity() {
-    const liveEntries = readLedger(network).filter(
-      (entry) => entry.pairAddress && entry.pairAddress.toLowerCase() !== hre.ethers.ZeroAddress.toLowerCase()
-    );
-    if (!liveEntries.length) return;
-
-    const weth = await wethAddress().catch((err) => {
-      console.error(`[activity] couldn't resolve WETH address: ${err.message}`);
-      return null;
-    });
-    if (!weth) return;
-
-    const latestBlock = await hre.ethers.provider.getBlockNumber();
-    const blockTimeCache = new Map();
-    async function blockTime(blockNumber) {
-      if (!blockTimeCache.has(blockNumber)) {
-        const block = await hre.ethers.provider.getBlock(blockNumber);
-        blockTimeCache.set(blockNumber, block ? Number(block.timestamp) * 1000 : Date.now());
-      }
-      return blockTimeCache.get(blockNumber);
-    }
-
-    for (const entry of liveEntries) {
-      try {
-        const cursorKey = `${entry.pairAddress}:activity`;
-        const storedCursor = getCursor(cursorKey);
-        const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // first run: only watch new swaps from now on, same posture as every other poller here
-        if (fromBlock > latestBlock) continue;
-        const toBlock = Math.min(latestBlock, fromBlock + MAX_BLOCK_RANGE_PER_POLL);
-
-        const pair = new hre.ethers.Contract(entry.pairAddress, PAIR_ABI, hre.ethers.provider);
-        const token0 = await pair.token0();
-        const isToken0 = token0.toLowerCase() === entry.tokenAddress.toLowerCase();
-        const events = await pair.queryFilter(pair.filters.Swap(), fromBlock, toBlock);
-
-        for (const event of events) {
-          const { amount0In, amount1In, amount0Out, amount1Out, to } = event.args;
-          const tokenIn = isToken0 ? amount0In : amount1In;
-          const tokenOut = isToken0 ? amount0Out : amount1Out;
-          const wethIn = isToken0 ? amount1In : amount0In;
-          const wethOut = isToken0 ? amount1Out : amount0Out;
-
-          let side, tokenAmount;
-          if (wethIn > 0n && tokenOut > 0n) {
-            side = "buy";
-            tokenAmount = tokenOut;
-          } else if (tokenIn > 0n && wethOut > 0n) {
-            side = "sell";
-            tokenAmount = tokenIn;
-          } else {
-            continue; // neither a plain ETH-in-token-out nor token-in-ETH-out leg (e.g. a multi-hop router leg through this pair) — not something the feed can describe simply, skip it
-          }
-
-          appendActivity(network, {
-            t: await blockTime(event.blockNumber),
-            txHash: event.transactionHash,
-            logIndex: event.index != null ? event.index : null,
-            tokenAddress: entry.tokenAddress,
-            symbol: entry.symbol || null,
-            side,
-            wallet: to,
-            tokenAmount: tokenAmount.toString(),
-          });
-        }
-        setCursor(cursorKey, toBlock);
-      } catch (err) {
-        console.error(`[activity] couldn't poll swaps for ${entry.symbol || entry.tokenAddress}: ${err.message}`);
-      }
-    }
+  async function creatorRewardsPollLoop() {
+    await sweepCreatorRewardsOnce().catch((err) => console.error(`[creator-rewards] sweep error: ${err.message}`));
+    setTimeout(creatorRewardsPollLoop, CREATOR_REWARDS_POLL_INTERVAL_MS);
   }
 
-  console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits and on-chain launches (only activity from now on — see cursors.json).`);
+  console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits (only deposits made from now on — see cursors.json).`);
   pollLoop();
 
-  console.log(`Sampling live pool prices every ${PRICE_POLL_INTERVAL_MS}ms for every launch with a real pair.`);
-  pollTokenPrices();
-  setInterval(pollTokenPrices, PRICE_POLL_INTERVAL_MS);
-
-  console.log(`Sampling real trade activity every ${ACTIVITY_POLL_INTERVAL_MS}ms for every launch with a real pair.`);
-  pollTokenActivity();
-  setInterval(pollTokenActivity, ACTIVITY_POLL_INTERVAL_MS);
+  if (creatorRewardsDistributor) {
+    console.log(`Sweeping creator rewards every ${CREATOR_REWARDS_POLL_INTERVAL_MS}ms.`);
+    creatorRewardsPollLoop();
+  }
 }
 
 main().catch((err) => {

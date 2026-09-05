@@ -381,6 +381,43 @@ async function main() {
     console.log(`TokenFactory and CustomTokenFactory both wired to PlatformRewardsDistributor at ${rewardsDistributorAddress}.`);
   }
 
+  // ---- Creator rewards (per-token ETH, claimable by the token's own
+  // creator) — entirely optional, and off by default. Leaving
+  // CREATOR_REWARDS_DISTRIBUTOR_ADDRESS unset leaves creatorRewardBps
+  // effectively inactive on both factories (LaunchedToken/CustomToken both
+  // require a nonzero distributor before crediting a nonzero bps at
+  // configureTax/configurePlatformTax time), so trading tax stays 100%
+  // unchanged until this is wired in deliberately. Unlike
+  // PlatformRewardsDistributor, this one pools nothing across holders —
+  // it swaps each token's own accumulated cut for ETH and lets that
+  // token's creator claim it individually, so it needs no PlatformToken
+  // reference and no separate "seed a token" step.
+  let creatorRewardsDistributorAddress = process.env.CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null;
+
+  if (!creatorRewardsDistributorAddress && process.env.DEPLOY_CREATOR_REWARDS === "true") {
+    const creatorRewardsDistributorOwner = process.env.CREATOR_REWARDS_DISTRIBUTOR_OWNER_ADDRESS || deployer.address;
+
+    const CreatorRewardsDistributor = await hre.ethers.getContractFactory("CreatorRewardsDistributor");
+    const creatorDistributor = await CreatorRewardsDistributor.deploy(routerAddress, creatorRewardsDistributorOwner);
+    await creatorDistributor.waitForDeployment();
+    creatorRewardsDistributorAddress = await creatorDistributor.getAddress();
+    console.log(
+      `CreatorRewardsDistributor deployed at ${creatorRewardsDistributorAddress}, owned by ${creatorRewardsDistributorOwner}.`
+    );
+  } else if (creatorRewardsDistributorAddress) {
+    console.log(`Reusing already-deployed CreatorRewardsDistributor at ${creatorRewardsDistributorAddress}.`);
+  }
+
+  if (creatorRewardsDistributorAddress) {
+    const setCreatorRewardsTx1 = await factory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
+    await setCreatorRewardsTx1.wait();
+    const setCreatorRewardsTx2 = await customFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
+    await setCreatorRewardsTx2.wait();
+    console.log(
+      `TokenFactory and CustomTokenFactory both wired to CreatorRewardsDistributor at ${creatorRewardsDistributorAddress}.`
+    );
+  }
+
   const deploymentSummary = {
     tokenImplementation: await tokenImplementation.getAddress(),
     liquidityLocker: await locker.getAddress(),
@@ -399,6 +436,8 @@ async function main() {
     platformFeeWallet,
     platformToken: platformTokenAddress || "(not deployed — set DEPLOY_PLATFORM_TOKEN=true to launch it)",
     rewardsDistributor: rewardsDistributorAddress || "(not deployed — factories keep their pre-existing behavior)",
+    creatorRewardsDistributor:
+      creatorRewardsDistributorAddress || "(not deployed — creatorRewardBps stays effectively inactive)",
   };
 
   console.log("\nDeployment summary:");
