@@ -391,12 +391,37 @@ async function main() {
 
   let creatorRewardsDistributor = null;
   if (CREATOR_REWARDS_DISTRIBUTOR_ADDRESS) {
-    creatorRewardsDistributor = await hre.ethers.getContractAt(
-      "CreatorRewardsDistributor",
-      CREATOR_REWARDS_DISTRIBUTOR_ADDRESS,
-      relayerWallet
-    );
-    console.log(`Creator-reward auto-sweep enabled against distributor ${CREATOR_REWARDS_DISTRIBUTOR_ADDRESS}.`);
+    // Wrapped in try/catch deliberately: this is an optional convenience
+    // feature (see the module comment above), and the most likely failure
+    // here — a missing/stale build artifact for CreatorRewardsDistributor on
+    // whatever host this is running on (HH700) — has nothing to do with
+    // whether the core relayer (vouchers, deposits, the API, the site
+    // itself) can run correctly. Before this guard, any failure loading this
+    // one optional contract crashed the ENTIRE process before it ever
+    // reached app.listen() below, taking the whole site down over a feature
+    // nobody was actively using yet. Now it just disables auto-sweep for
+    // this run and logs why — manual "Convert to ETH"/"Claim" from the
+    // portfolio UI still work regardless, since those are separate,
+    // permissionless calls made directly from the browser's own wallet, not
+    // routed through this relayer process at all.
+    try {
+      creatorRewardsDistributor = await hre.ethers.getContractAt(
+        "CreatorRewardsDistributor",
+        CREATOR_REWARDS_DISTRIBUTOR_ADDRESS,
+        relayerWallet
+      );
+      console.log(`Creator-reward auto-sweep enabled against distributor ${CREATOR_REWARDS_DISTRIBUTOR_ADDRESS}.`);
+    } catch (err) {
+      console.error(
+        `Could not load CreatorRewardsDistributor at ${CREATOR_REWARDS_DISTRIBUTOR_ADDRESS} (${err.message}). ` +
+          "Creator-reward auto-sweep is DISABLED for this run — everything else (vouchers, deposits, the API, " +
+          "the site, activity/price polling) starts normally regardless. This specific error usually means the " +
+          "contract's build artifact wasn't included in this deploy (a stale/cached build) — a clean rebuild " +
+          "that actually recompiles contracts/CreatorRewardsDistributor.sol should fix it; set " +
+          "CREATOR_REWARDS_DISTRIBUTOR_ADDRESS again afterward to re-enable auto-sweep."
+      );
+      creatorRewardsDistributor = null;
+    }
   }
 
   // ---- HTTP API ----
