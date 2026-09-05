@@ -17,9 +17,11 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
   const ETH_USD_PRICE = 3000n * 10n ** 8n;
   const FEE_BPS = 25n; // 0.25%
   const REWARD_BPS = 10n; // 0.10% — the default
+  const CREATOR_REWARD_BPS = 5n; // 0.05% — the default
 
   async function deployTokenFactoryStack() {
-    const [deployer, creator, treasury, platformFeeWallet, rewardsDistributor, buyer] = await ethers.getSigners();
+    const [deployer, creator, treasury, platformFeeWallet, rewardsDistributor, buyer, creatorRewardsDistributor] =
+      await ethers.getSigners();
 
     const LaunchedToken = await ethers.getContractFactory("LaunchedToken");
     const tokenImplementation = await LaunchedToken.deploy();
@@ -50,7 +52,19 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
     );
     await locker.setFactory(await factory.getAddress());
 
-    return { factory, locker, router, priceFeed, deployer, creator, treasury, platformFeeWallet, rewardsDistributor, buyer };
+    return {
+      factory,
+      locker,
+      router,
+      priceFeed,
+      deployer,
+      creator,
+      treasury,
+      platformFeeWallet,
+      rewardsDistributor,
+      buyer,
+      creatorRewardsDistributor,
+    };
   }
 
   async function launchWithLiquidity(factory, creator, overrides = {}) {
@@ -123,8 +137,8 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       await expect(
         factory
           .connect(deployer)
-          .setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, 26)
-      ).to.be.revertedWith("TokenFactory: rewardBps cannot exceed feeBps");
+          .setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, 26, 0)
+      ).to.be.revertedWith("TokenFactory: rewardBps+creatorRewardBps cannot exceed feeBps");
     });
 
     it("setTaxDefaults allows rewardBps_ exactly equal to feeBps_ (the ceiling itself is not rejected)", async function () {
@@ -132,7 +146,7 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       await expect(
         factory
           .connect(deployer)
-          .setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, 25)
+          .setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, 25, 0)
       ).to.not.be.reverted;
       expect(await factory.rewardBps()).to.equal(25n);
     });
@@ -175,6 +189,72 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       expect(rewardsDelta).to.be.gt(0n);
       expect(feeWalletDelta).to.be.gt(0n);
     });
+
+    it("setCreatorRewardsDistributor is owner-only", async function () {
+      const { factory, creator, creatorRewardsDistributor } = await deployTokenFactoryStack();
+      await expect(
+        factory.connect(creator).setCreatorRewardsDistributor(creatorRewardsDistributor.address)
+      ).to.be.revertedWithCustomError(factory, "OwnableUnauthorizedAccount");
+    });
+
+    it("configures a freshly launched token with creatorRewardBps == 0 while creatorRewardsDistributor is unset, even though the factory default is nonzero", async function () {
+      const { factory, creator } = await deployTokenFactoryStack();
+      expect(await factory.creatorRewardBps()).to.equal(CREATOR_REWARD_BPS); // the stored default is nonzero...
+      const { token } = await launchWithLiquidity(factory, creator);
+      expect(await token.creatorRewardsDistributor()).to.equal(ethers.ZeroAddress);
+      expect(await token.creatorRewardBps()).to.equal(0n); // ...but never applied until a distributor exists
+    });
+
+    it("snapshots the live creatorRewardsDistributor/creatorRewardBps onto the token once a distributor is configured", async function () {
+      const { factory, deployer, creator, creatorRewardsDistributor } = await deployTokenFactoryStack();
+      await factory.connect(deployer).setCreatorRewardsDistributor(creatorRewardsDistributor.address);
+      const { token } = await launchWithLiquidity(factory, creator);
+
+      expect(await token.creatorRewardsDistributor()).to.equal(creatorRewardsDistributor.address);
+      expect(await token.creatorRewardBps()).to.equal(CREATOR_REWARD_BPS);
+    });
+
+    it("a taxed buy carves BOTH rewardBps and creatorRewardBps out of feeBps together — the three cuts always sum back to the same total tax", async function () {
+      const { factory, deployer, creator, platformFeeWallet, rewardsDistributor, creatorRewardsDistributor, buyer, router } =
+        await deployTokenFactoryStack();
+      await factory.connect(deployer).setRewardsDistributor(rewardsDistributor.address);
+      await factory.connect(deployer).setCreatorRewardsDistributor(creatorRewardsDistributor.address);
+      const { token } = await launchWithLiquidity(factory, creator, { liquidityEth: ethers.parseEther("10") });
+
+      const buyAmount = ethers.parseEther("1");
+      const path = [await router.WETH(), await token.getAddress()];
+
+      const feeWalletBefore = await token.balanceOf(platformFeeWallet.address);
+      const rewardsBefore = await token.balanceOf(rewardsDistributor.address);
+      const creatorRewardsBefore = await token.balanceOf(creatorRewardsDistributor.address);
+      const buyerBefore = await token.balanceOf(buyer.address);
+
+      await router
+        .connect(buyer)
+        .swapExactETHForTokensSupportingFeeOnTransferTokens(0, path, buyer.address, (await ethers.provider.getBlock("latest")).timestamp + 900, {
+          value: buyAmount,
+        });
+
+      const feeWalletDelta = (await token.balanceOf(platformFeeWallet.address)) - feeWalletBefore;
+      const rewardsDelta = (await token.balanceOf(rewardsDistributor.address)) - rewardsBefore;
+      const creatorRewardsDelta = (await token.balanceOf(creatorRewardsDistributor.address)) - creatorRewardsBefore;
+      const buyerDelta = (await token.balanceOf(buyer.address)) - buyerBefore;
+
+      // 0.10% to the platform rewards distributor, 0.05% to the creator
+      // rewards distributor, the remainder of feeBps (0.10%) to the fee
+      // wallet — same 0.25% total tax as before this feature existed,
+      // just split three ways instead of two.
+      const grossOut = buyerDelta + feeWalletDelta + rewardsDelta + creatorRewardsDelta;
+      const fee = (grossOut * FEE_BPS) / 10_000n;
+      const rewardCut = (grossOut * REWARD_BPS) / 10_000n;
+      const creatorCut = (grossOut * CREATOR_REWARD_BPS) / 10_000n;
+      expect(rewardsDelta).to.equal(rewardCut);
+      expect(creatorRewardsDelta).to.equal(creatorCut);
+      expect(feeWalletDelta).to.equal(fee - rewardCut - creatorCut);
+      expect(rewardsDelta).to.be.gt(0n);
+      expect(creatorRewardsDelta).to.be.gt(0n);
+      expect(feeWalletDelta).to.be.gt(0n);
+    });
   });
 
   describe("LaunchedToken.configureTax bounds", function () {
@@ -209,8 +289,8 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
     it("rejects rewardBps_ above feeBps_", async function () {
       const { token, factorySigner, deployer } = await deployUnconfiguredToken();
       await expect(
-        token.connect(factorySigner).configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 26)
-      ).to.be.revertedWith("LaunchedToken: rewardBps exceeds feeBps");
+        token.connect(factorySigner).configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 26, ethers.ZeroAddress, 0)
+      ).to.be.revertedWith("LaunchedToken: rewardBps+creatorRewardBps exceeds feeBps");
     });
 
     it("rejects a nonzero rewardBps_ with no distributor address", async function () {
@@ -218,22 +298,45 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       await expect(
         token
           .connect(factorySigner)
-          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, ethers.ZeroAddress, 10)
+          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, ethers.ZeroAddress, 10, ethers.ZeroAddress, 0)
       ).to.be.revertedWith("LaunchedToken: rewardBps requires a distributor");
     });
 
     it("accepts rewardBps_ exactly equal to feeBps_ with a real distributor address", async function () {
       const { token, factorySigner, deployer } = await deployUnconfiguredToken();
       await expect(
-        token.connect(factorySigner).configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 25)
+        token.connect(factorySigner).configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 25, ethers.ZeroAddress, 0)
       ).to.not.be.reverted;
       expect(await token.rewardBps()).to.equal(25n);
+    });
+
+    it("rejects a nonzero creatorRewardBps_ with no creator distributor address", async function () {
+      const { token, factorySigner, deployer } = await deployUnconfiguredToken();
+      await expect(
+        token
+          .connect(factorySigner)
+          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, ethers.ZeroAddress, 0, ethers.ZeroAddress, 5)
+      ).to.be.revertedWith("LaunchedToken: creatorRewardBps requires a distributor");
+    });
+
+    it("accepts rewardBps_ + creatorRewardBps_ summing exactly to feeBps_, each with its own real distributor", async function () {
+      const { token, factorySigner, deployer } = await deployUnconfiguredToken();
+      const [, , , anotherDistributor] = await ethers.getSigners();
+      await expect(
+        token
+          .connect(factorySigner)
+          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 20, anotherDistributor.address, 5)
+      ).to.not.be.reverted;
+      expect(await token.rewardBps()).to.equal(20n);
+      expect(await token.creatorRewardBps()).to.equal(5n);
+      expect(await token.creatorRewardsDistributor()).to.equal(anotherDistributor.address);
     });
   });
 
   describe("CustomTokenFactory / CustomToken", function () {
     async function deployCustomStack() {
-      const [deployer, creator, treasury, platformFeeWallet, rewardsDistributor, buyer] = await ethers.getSigners();
+      const [deployer, creator, treasury, platformFeeWallet, rewardsDistributor, buyer, creatorRewardsDistributor] =
+        await ethers.getSigners();
 
       const CustomToken = await ethers.getContractFactory("CustomToken");
       const tokenImplementation = await CustomToken.deploy();
@@ -264,7 +367,18 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       );
       await locker.setFactory(await factory.getAddress());
 
-      return { factory, router, priceFeed, deployer, creator, treasury, platformFeeWallet, rewardsDistributor, buyer };
+      return {
+        factory,
+        router,
+        priceFeed,
+        deployer,
+        creator,
+        treasury,
+        platformFeeWallet,
+        rewardsDistributor,
+        buyer,
+        creatorRewardsDistributor,
+      };
     }
 
     async function launchCustom(factory, creator, overrides = {}) {
@@ -320,8 +434,8 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       await expect(
         factory
           .connect(deployer)
-          .setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, 30)
-      ).to.be.revertedWith("CustomTokenFactory: rewardBps cannot exceed feeBps");
+          .setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, 30, 0)
+      ).to.be.revertedWith("CustomTokenFactory: rewardBps+creatorRewardBps cannot exceed feeBps");
     });
 
     it("carves rewardBps out of the platform's own cut, and never touches the creator's own buy/sell fees", async function () {
@@ -368,6 +482,58 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       expect(feeWalletDelta).to.equal(platformCut - rewardCut);
       expect(burnedDelta).to.equal(expectedBurn); // creator's own burnBps, untouched by this feature
       expect(rewardsDelta).to.be.gt(0n);
+      expect(burnedDelta).to.be.gt(0n);
+    });
+
+    it("setCreatorRewardsDistributor is owner-only", async function () {
+      const { factory, creator, creatorRewardsDistributor } = await deployCustomStack();
+      await expect(
+        factory.connect(creator).setCreatorRewardsDistributor(creatorRewardsDistributor.address)
+      ).to.be.revertedWithCustomError(factory, "OwnableUnauthorizedAccount");
+    });
+
+    it("carves BOTH rewardBps and creatorRewardBps out of the platform's own cut together, and never touches the creator's own buy/sell fees", async function () {
+      const { factory, deployer, creator, platformFeeWallet, rewardsDistributor, creatorRewardsDistributor, buyer, router } =
+        await deployCustomStack();
+      await factory.connect(deployer).setRewardsDistributor(rewardsDistributor.address);
+      await factory.connect(deployer).setCreatorRewardsDistributor(creatorRewardsDistributor.address);
+
+      const creatorFees = { reflectionBps: 0, marketingBps: 0, liquidityBps: 0, burnBps: 500 };
+      const { token } = await launchCustom(factory, creator, { buyFees: creatorFees, liquidityEth: ethers.parseEther("10") });
+
+      const buyAmount = ethers.parseEther("1");
+      const path = [await router.WETH(), await token.getAddress()];
+
+      const feeWalletBefore = await token.balanceOf(platformFeeWallet.address);
+      const rewardsBefore = await token.balanceOf(rewardsDistributor.address);
+      const creatorRewardsBefore = await token.balanceOf(creatorRewardsDistributor.address);
+      const buyerBefore = await token.balanceOf(buyer.address);
+      const supplyBefore = await token.totalSupply();
+
+      await router
+        .connect(buyer)
+        .swapExactETHForTokensSupportingFeeOnTransferTokens(0, path, buyer.address, (await ethers.provider.getBlock("latest")).timestamp + 900, {
+          value: buyAmount,
+        });
+
+      const feeWalletDelta = (await token.balanceOf(platformFeeWallet.address)) - feeWalletBefore;
+      const rewardsDelta = (await token.balanceOf(rewardsDistributor.address)) - rewardsBefore;
+      const creatorRewardsDelta = (await token.balanceOf(creatorRewardsDistributor.address)) - creatorRewardsBefore;
+      const buyerDelta = (await token.balanceOf(buyer.address)) - buyerBefore;
+      const burnedDelta = supplyBefore - (await token.totalSupply());
+
+      const grossOut = buyerDelta + feeWalletDelta + rewardsDelta + creatorRewardsDelta + burnedDelta;
+      const platformCut = (grossOut * FEE_BPS) / 10_000n;
+      const rewardCut = (grossOut * REWARD_BPS) / 10_000n;
+      const creatorCut = (grossOut * CREATOR_REWARD_BPS) / 10_000n;
+      const expectedBurn = (grossOut * 500n) / 10_000n;
+      expect(feeWalletDelta + rewardsDelta + creatorRewardsDelta).to.equal(platformCut);
+      expect(rewardsDelta).to.equal(rewardCut);
+      expect(creatorRewardsDelta).to.equal(creatorCut);
+      expect(feeWalletDelta).to.equal(platformCut - rewardCut - creatorCut);
+      expect(burnedDelta).to.equal(expectedBurn); // creator's own burnBps, untouched by this feature
+      expect(rewardsDelta).to.be.gt(0n);
+      expect(creatorRewardsDelta).to.be.gt(0n);
       expect(burnedDelta).to.be.gt(0n);
     });
   });

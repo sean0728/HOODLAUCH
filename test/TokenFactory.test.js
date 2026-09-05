@@ -583,7 +583,7 @@ describe("TokenFactory", function () {
     it("only the owner can update tax defaults", async function () {
       const { factory, otherAccount, platformFeeWallet, priceFeed } = await deployStack();
       await expect(
-        factory.connect(otherAccount).setTaxDefaults(platformFeeWallet.address, 50, await priceFeed.getAddress(), 100_000, 3600, 0)
+        factory.connect(otherAccount).setTaxDefaults(platformFeeWallet.address, 50, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
       ).to.be.revertedWithCustomError(factory, "OwnableUnauthorizedAccount");
     });
 
@@ -592,7 +592,7 @@ describe("TokenFactory", function () {
       const { token: tokenBefore } = await createWithLiquidity(factory, creator, { name: "First", symbol: "FRST" });
       const feeBpsBefore = await tokenBefore.feeBps();
 
-      await factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 100, await priceFeed.getAddress(), 100_000, 3600, 0);
+      await factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 100, await priceFeed.getAddress(), 100_000, 3600, 0, 0);
 
       const { token: tokenAfter } = await createWithLiquidity(factory, creator, { name: "Second", symbol: "SCND" });
 
@@ -604,35 +604,35 @@ describe("TokenFactory", function () {
     it("rejects a feeBps default above 100%", async function () {
       const { factory, deployer, platformFeeWallet, priceFeed } = await deployStack();
       await expect(
-        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 10_001, await priceFeed.getAddress(), 100_000, 3600, 0)
+        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 10_001, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
       ).to.be.revertedWith("TokenFactory: feeBps cannot exceed 100%");
     });
 
     it("allows a feeBps default of exactly 100% (the ceiling itself is not rejected)", async function () {
       const { factory, deployer, platformFeeWallet, priceFeed } = await deployStack();
       await expect(
-        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 10_000, await priceFeed.getAddress(), 100_000, 3600, 0)
+        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 10_000, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
       ).to.not.be.reverted;
     });
 
     it("rejects a zero graduation target — it would defeat the tax from block one", async function () {
       const { factory, deployer, platformFeeWallet, priceFeed } = await deployStack();
       await expect(
-        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 0, 3600, 0)
+        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 0, 3600, 0, 0)
       ).to.be.revertedWith("TokenFactory: graduation target must be > 0");
     });
 
     it("rejects a zero oracle staleness tolerance", async function () {
       const { factory, deployer, platformFeeWallet, priceFeed } = await deployStack();
       await expect(
-        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 100_000, 0, 0)
+        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 25, await priceFeed.getAddress(), 100_000, 0, 0, 0)
       ).to.be.revertedWith("TokenFactory: oracle staleness must be > 0");
     });
 
     it("still allows platformFeeWallet/priceFeed to be cleared to address(0) — the documented way to pause new liquidity launches", async function () {
       const { factory, deployer } = await deployStack();
       await expect(
-        factory.connect(deployer).setTaxDefaults(ethers.ZeroAddress, 25, ethers.ZeroAddress, 100_000, 3600, 0)
+        factory.connect(deployer).setTaxDefaults(ethers.ZeroAddress, 25, ethers.ZeroAddress, 100_000, 3600, 0, 0)
       ).to.not.be.reverted;
       expect(await factory.platformFeeWallet()).to.equal(ethers.ZeroAddress);
       expect(await factory.priceFeed()).to.equal(ethers.ZeroAddress);

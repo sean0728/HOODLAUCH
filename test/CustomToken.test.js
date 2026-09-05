@@ -1487,7 +1487,7 @@ describe("CustomToken / CustomTokenFactory", function () {
       it("only the owner can update tax defaults", async function () {
         const { factory, otherAccount, treasury, priceFeed } = await deployStack();
         await expect(
-          factory.connect(otherAccount).setTaxDefaults(treasury.address, 50, await priceFeed.getAddress(), 100_000, 3600, 0)
+          factory.connect(otherAccount).setTaxDefaults(treasury.address, 50, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
         ).to.be.revertedWithCustomError(factory, "OwnableUnauthorizedAccount");
       });
 
@@ -1496,7 +1496,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         const { token: tokenBefore } = await createCustomToken(factory, creator, { name: "First", symbol: "FRST" });
         expect(await tokenBefore.platformFeeBps()).to.equal(25n);
 
-        await factory.connect(deployer).setTaxDefaults(treasury.address, 100, await priceFeed.getAddress(), 50_000, 7200, 0);
+        await factory.connect(deployer).setTaxDefaults(treasury.address, 100, await priceFeed.getAddress(), 50_000, 7200, 0, 0);
 
         const { token: tokenAfter } = await createCustomToken(factory, creator, { name: "Second", symbol: "SCND" });
         expect(await tokenAfter.platformFeeBps()).to.equal(100n);
@@ -1510,35 +1510,35 @@ describe("CustomToken / CustomTokenFactory", function () {
       it("rejects a feeBps default above 100%", async function () {
         const { factory, deployer, treasury, priceFeed } = await deployStack();
         await expect(
-          factory.connect(deployer).setTaxDefaults(treasury.address, 10_001, await priceFeed.getAddress(), 100_000, 3600, 0)
+          factory.connect(deployer).setTaxDefaults(treasury.address, 10_001, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
         ).to.be.revertedWith("CustomTokenFactory: feeBps cannot exceed 100%");
       });
 
       it("allows a feeBps default of exactly 100% (the ceiling itself is not rejected)", async function () {
         const { factory, deployer, treasury, priceFeed } = await deployStack();
         await expect(
-          factory.connect(deployer).setTaxDefaults(treasury.address, 10_000, await priceFeed.getAddress(), 100_000, 3600, 0)
+          factory.connect(deployer).setTaxDefaults(treasury.address, 10_000, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
         ).to.not.be.reverted;
       });
 
       it("rejects a zero graduation target — it would defeat the platform tax from block one", async function () {
         const { factory, deployer, treasury, priceFeed } = await deployStack();
         await expect(
-          factory.connect(deployer).setTaxDefaults(treasury.address, 25, await priceFeed.getAddress(), 0, 3600, 0)
+          factory.connect(deployer).setTaxDefaults(treasury.address, 25, await priceFeed.getAddress(), 0, 3600, 0, 0)
         ).to.be.revertedWith("CustomTokenFactory: graduation target must be > 0");
       });
 
       it("rejects a zero oracle staleness tolerance", async function () {
         const { factory, deployer, treasury, priceFeed } = await deployStack();
         await expect(
-          factory.connect(deployer).setTaxDefaults(treasury.address, 25, await priceFeed.getAddress(), 100_000, 0, 0)
+          factory.connect(deployer).setTaxDefaults(treasury.address, 25, await priceFeed.getAddress(), 100_000, 0, 0, 0)
         ).to.be.revertedWith("CustomTokenFactory: oracle staleness must be > 0");
       });
 
       it("still allows platformFeeWallet/priceFeed to be cleared to address(0) — the documented way to leave the platform tax permanently inactive", async function () {
         const { factory, deployer } = await deployStack();
         await expect(
-          factory.connect(deployer).setTaxDefaults(ethers.ZeroAddress, 25, ethers.ZeroAddress, 100_000, 3600, 0)
+          factory.connect(deployer).setTaxDefaults(ethers.ZeroAddress, 25, ethers.ZeroAddress, 100_000, 3600, 0, 0)
         ).to.not.be.reverted;
         expect(await factory.platformFeeWallet()).to.equal(ethers.ZeroAddress);
         expect(await factory.priceFeed()).to.equal(ethers.ZeroAddress);
@@ -1819,7 +1819,7 @@ describe("CustomToken / CustomTokenFactory", function () {
       it("cannot be called by anyone other than the factory", async function () {
         const { token, otherAccount, platformFeeWallet, priceFeed } = await deployWithPlatformTax();
         await expect(
-          token.connect(otherAccount).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0)
+          token.connect(otherAccount).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
         ).to.be.revertedWith("CustomToken: caller is not the factory");
       });
 
@@ -1829,7 +1829,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         await ethers.provider.send("hardhat_setBalance", [await factory.getAddress(), "0x56BC75E2D63100000"]);
 
         await expect(
-          token.connect(factorySigner).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0)
+          token.connect(factorySigner).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
         ).to.be.revertedWith("CustomToken: platform tax already configured");
       });
     });
@@ -1952,7 +1952,7 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         await token.connect(deployer).setPair(await badPair.getAddress());
         await token.connect(deployer).configurePlatformTax(
-          feeWallet.address, PLATFORM_FEE_BPS, await priceFeed.getAddress(), GRADUATION_TARGET_USD, 3600, ethers.ZeroAddress, 0
+          feeWallet.address, PLATFORM_FEE_BPS, await priceFeed.getAddress(), GRADUATION_TARGET_USD, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0
         );
 
         expect(await token.platformTaxActive()).to.equal(true);
@@ -2086,11 +2086,11 @@ describe("CustomToken / CustomTokenFactory", function () {
         await token.connect(deployer).setPair(await pair.getAddress());
 
         await expect(
-          token.connect(deployer).configurePlatformTax(feeWallet.address, 9_501, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0)
+          token.connect(deployer).configurePlatformTax(feeWallet.address, 9_501, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
         ).to.be.revertedWith("CustomToken: combined platform and creator tax exceeds 100%");
 
         await expect(
-          token.connect(deployer).configurePlatformTax(feeWallet.address, 9_500, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0)
+          token.connect(deployer).configurePlatformTax(feeWallet.address, 9_500, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
         ).to.not.be.reverted; // 9,500 + 500 == 10,000 exactly — the ceiling itself is not rejected
       });
     });
