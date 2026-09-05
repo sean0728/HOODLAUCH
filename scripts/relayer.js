@@ -54,7 +54,23 @@ const express = require("express");
 const hre = require("hardhat");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
 const { recordLaunch, readLedger, PUBLIC_FIELDS } = require("../lib/launchStore");
-const { getVoucher, upsertVoucher, getCursor, setCursor } = require("../lib/relayerStore");
+const {
+  getVoucher,
+  upsertVoucher,
+  getCursor,
+  setCursor,
+  getActiveNetwork,
+  setActiveNetwork,
+  getPlatformConfig,
+  setPlatformConfig,
+} = require("../lib/relayerStore");
+const { verifyAdminSignature, isFreshTimestamp } = require("../lib/adminAuth");
+const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
+const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
+const { readTrackedTokens, upsertTrackedToken } = require("../lib/trackedTokensStore");
+const { readActivity, appendActivity } = require("../lib/activityStore");
+const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore");
+const { ROBINHOOD_NETWORKS } = require("../lib/networks");
 
 // Managed Node.js hosts (GoDaddy Node.js Hosting among them) inject the
 // port an app must listen on via the platform-standard PORT env var and
@@ -83,6 +99,65 @@ const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5
 const CREATOR_REWARDS_DISTRIBUTOR_ADDRESS = process.env.CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null;
 const CREATOR_REWARDS_POLL_INTERVAL_MS = Number(process.env.CREATOR_REWARDS_POLL_INTERVAL_MS || 5 * 60_000);
 const ERC20_BALANCE_OF_ABI = ["function balanceOf(address) view returns (uint256)"];
+
+// ---- token discovery / activity / price polling (backs GET /activity and
+// GET /price-history/:tokenAddress) ----
+// Independent of the voucher/deposit poller above: this watches
+// TokenCreated/CustomTokenCreated directly off both factories, so it finds
+// every launched token on this network — including ones launched directly
+// against the factory rather than through this relayer's own gasless-launch
+// flow — not just what lib/launchStore's relay-only ledger happens to know
+// about. See lib/trackedTokensStore.js's own comment for why this is a
+// separate registry from that ledger.
+//
+// TOKEN_DISCOVERY_START_BLOCK lets a first run backfill every historical
+// launch (default: from block 0) rather than only ones from the moment this
+// feature was turned on — unlike the deposit poller above, which
+// deliberately only watches new deposits going forward. Backfilling can take
+// many poll ticks to catch up on a chain with a lot of history; that's fine,
+// since nothing here is time-sensitive the way a pending gasless launch is.
+const TOKEN_DISCOVERY_START_BLOCK = Number(process.env.TOKEN_DISCOVERY_START_BLOCK || 0);
+const TOKEN_DISCOVERY_MAX_BLOCK_RANGE = Number(process.env.TOKEN_DISCOVERY_MAX_BLOCK_RANGE || 20_000);
+const TOKEN_DISCOVERY_POLL_INTERVAL_MS = Number(process.env.TOKEN_DISCOVERY_POLL_INTERVAL_MS || POLL_INTERVAL_MS);
+const ACTIVITY_MAX_BLOCK_RANGE = Number(process.env.ACTIVITY_MAX_BLOCK_RANGE || 5_000);
+const TOKEN_ACTIVITY_POLL_INTERVAL_MS = Number(process.env.TOKEN_ACTIVITY_POLL_INTERVAL_MS || 20_000);
+const TOKEN_PRICE_POLL_INTERVAL_MS = Number(process.env.TOKEN_PRICE_POLL_INTERVAL_MS || 45_000);
+
+const ERC20_META_ABI = ["function totalSupply() view returns (uint256)"];
+// Standard Uniswap V2 pair ABI — not declared anywhere else in this repo
+// (contracts/interfaces/IUniswapV2Pair.sol only has the minimal surface
+// TokenFactory itself needs), so it's supplied inline here. Every pool this
+// platform creates is a real token/WETH Uniswap V2 pair once deployed for
+// real (see MockRouter.sol's own comment: the mock used in tests doesn't
+// emit Swap at all, so local test coverage of pollTokenActivity isn't
+// possible without a real or upgraded mock — out of scope here).
+const UNIV2_PAIR_ABI = [
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+  "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
+  "event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)",
+];
+const AGGREGATOR_V3_ABI = [
+  "function decimals() view returns (uint8)",
+  "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
+];
+// LaunchedToken and CustomToken expose the same tax-progress fields under
+// different getter names (taxActive vs platformTaxActive — see the module
+// comment in lib/priceMath.js and CustomToken.sol/LaunchedToken.sol
+// themselves), so pollTokenPrices picks the right ABI per tracked token's
+// own `kind`.
+const TOKEN_STATE_ABI = [
+  ...ERC20_META_ABI,
+  "function priceFeed() view returns (address)",
+  "function graduationTargetUsd() view returns (uint256)",
+  "function taxActive() view returns (bool)",
+];
+const CUSTOM_TOKEN_STATE_ABI = [
+  ...ERC20_META_ABI,
+  "function priceFeed() view returns (address)",
+  "function graduationTargetUsd() view returns (uint256)",
+  "function platformTaxActive() view returns (bool)",
+];
 
 const LAUNCH_VOUCHER_FIELDS = [
   "creator",
@@ -414,6 +489,90 @@ async function main() {
     }
   }
 
+  // ---- platform-wide active network (admin-gated, see lib/adminAuth.js)
+  // ----
+  // Read by every visitor (index.html's fetchActiveNetwork/
+  // syncActiveNetworkFromServer, polled every 60s) so which network the
+  // whole platform shows is one server-held value, not a per-browser
+  // localStorage setting anyone could flip.
+  app.get("/active-network", (_req, res) => {
+    sendJson(res, 200, { network: getActiveNetwork() });
+  });
+
+  // Body: { network: "demo"|"live", timestamp, signature }. `signature` must
+  // be a personal_sign signature (from ADMIN_WALLET) of the exact string
+  // `Hood Launch admin: set active network to ${network} at ${timestamp}` —
+  // this MUST stay byte-identical to the message index.html's own
+  // requestActiveNetworkChange() builds, or a real admin's signature will
+  // simply fail to verify here (see lib/adminAuth.js's own comment on why
+  // that's the safe failure direction).
+  app.post("/active-network", (req, res) => {
+    const { network: targetNetwork, timestamp, signature } = req.body || {};
+    if (targetNetwork !== "demo" && targetNetwork !== "live") {
+      return sendJson(res, 400, { error: 'network must be "demo" or "live"' });
+    }
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    }
+    const message = `Hood Launch admin: set active network to ${targetNetwork} at ${timestamp}`;
+    if (!verifyAdminSignature(message, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
+    setActiveNetwork(targetNetwork);
+    console.log(`[admin] active network set to "${targetNetwork}".`);
+    sendJson(res, 200, { network: targetNetwork });
+  });
+
+  // ---- platform contracts config (admin-gated) ----
+  // Mirrors index.html's own config.json/localStorage layering — this is
+  // the layer that reaches every visitor within a minute of an admin's save,
+  // with no manual redeploy step. `config` returned here is always the
+  // canonicalized shape (every CONFIG_KEYS entry, {demo,live}, missing
+  // values as null) — never raw, unvalidated input.
+  app.get("/platform-config", (_req, res) => {
+    sendJson(res, 200, { config: getPlatformConfig() });
+  });
+
+  // Body: { config, timestamp, signature }. `signature` must be a
+  // personal_sign signature (from ADMIN_WALLET) of
+  // platformConfigMessage(config, timestamp) — the message embeds the
+  // canonicalized config itself (not just a timestamp) so a signature can't
+  // be replayed to save a DIFFERENT config than the one actually reviewed
+  // and signed. lib/platformConfig.js's canonicalizePlatformConfig MUST stay
+  // byte-identical to index.html's own copy or this will never verify a
+  // real admin's signature (see that module's own comment).
+  app.post("/platform-config", (req, res) => {
+    const { config, timestamp, signature } = req.body || {};
+    if (!config || typeof config !== "object") {
+      return sendJson(res, 400, { error: "config is required" });
+    }
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    }
+    const message = platformConfigMessage(config, timestamp);
+    if (!verifyAdminSignature(message, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
+    const canonical = canonicalizePlatformConfig(config);
+    setPlatformConfig(canonical);
+    console.log("[admin] platform config saved.");
+    sendJson(res, 200, { config: canonical });
+  });
+
+  // ---- real trade activity / price history (see pollTokenActivity /
+  // pollTokenPrices below for what populates these) ----
+  app.get("/activity", (_req, res) => {
+    sendJson(res, 200, { network, activity: readActivity(network) });
+  });
+
+  app.get("/price-history/:tokenAddress", (req, res) => {
+    sendJson(res, 200, {
+      network,
+      tokenAddress: req.params.tokenAddress,
+      history: readPriceHistory(network, req.params.tokenAddress),
+    });
+  });
+
   if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
   if (customTokenFactoryAddress) app.post("/vouchers/custom", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom")));
 
@@ -541,6 +700,236 @@ async function main() {
     setTimeout(pollLoop, POLL_INTERVAL_MS);
   }
 
+  // ---- token discovery ----
+  // Scans one factory's TokenCreated/CustomTokenCreated events for every
+  // token ever launched against it, recording each into
+  // lib/trackedTokensStore so pollTokenActivity/pollTokenPrices below know
+  // what to watch. Uses its own cursor key (factoryAddress + ":discovery")
+  // rather than the bare factory-address key pollWatcher/handleDeposit
+  // already use for LaunchDeposited scanning — same factory, two independent
+  // scans over two different event types, each needing its own "how far have
+  // I gotten" bookmark.
+  async function discoverLaunchedTokens(watcher) {
+    const factoryAddress = await watcher.factory.getAddress();
+    const cursorKey = `${factoryAddress}:discovery`;
+    const latestBlock = await hre.ethers.provider.getBlockNumber();
+    const storedCursor = getCursor(cursorKey);
+    const fromBlock = storedCursor !== null ? storedCursor + 1 : TOKEN_DISCOVERY_START_BLOCK;
+    if (fromBlock > latestBlock) return;
+    const toBlock = Math.min(latestBlock, fromBlock + TOKEN_DISCOVERY_MAX_BLOCK_RANGE);
+
+    const filter = watcher.kind === "token" ? watcher.factory.filters.TokenCreated() : watcher.factory.filters.CustomTokenCreated();
+    const events = await watcher.factory.queryFilter(filter, fromBlock, toBlock);
+    for (const event of events) {
+      const { token, creator, name, symbol, pair } = event.args;
+      const pairAddress = pair && pair !== hre.ethers.ZeroAddress ? pair : null;
+      upsertTrackedToken(network, token, {
+        kind: watcher.kind,
+        creator,
+        name,
+        symbol,
+        pairAddress,
+        discoveredAt: new Date().toISOString(),
+      });
+      console.log(`[discovery] tracking ${watcher.kind} token $${symbol} (${token})${pairAddress ? ` with pair ${pairAddress}` : ""}.`);
+    }
+    setCursor(cursorKey, toBlock);
+  }
+
+  async function tokenDiscoveryPollLoop() {
+    for (const watcher of watchers) {
+      await discoverLaunchedTokens(watcher).catch((err) => console.error(`[discovery] ${watcher.kind} poll error: ${err.message}`));
+    }
+    setTimeout(tokenDiscoveryPollLoop, TOKEN_DISCOVERY_POLL_INTERVAL_MS);
+  }
+
+  // Best-effort ETH/USD, read from a token's own Chainlink-style price feed
+  // — same on-chain source and same decoding index.html's own
+  // fetchEthUsdPriceOnChain uses, just called from server-side ethers
+  // instead of a wallet's eth_call. Falls back to FALLBACK_ETH_USD (never
+  // throws) since a stale/misconfigured feed shouldn't stop activity/price
+  // recording altogether, only make its USD figures a rough estimate for
+  // that tick.
+  async function fetchEthUsdFromFeed(feedAddress) {
+    if (!feedAddress || feedAddress === hre.ethers.ZeroAddress) return FALLBACK_ETH_USD;
+    try {
+      const feed = await hre.ethers.getContractAt(AGGREGATOR_V3_ABI, feedAddress, hre.ethers.provider);
+      const [decimals, roundData] = await Promise.all([feed.decimals(), feed.latestRoundData()]);
+      const price = Number(roundData.answer) / 10 ** Number(decimals);
+      return Number.isFinite(price) && price > 0 ? price : FALLBACK_ETH_USD;
+    } catch (err) {
+      return FALLBACK_ETH_USD;
+    }
+  }
+
+  // Best-effort holder count via the network's Blockscout-compatible
+  // explorer API (lib/networks.js) — there is no on-chain holder-count
+  // getter on either token contract (see LaunchedToken.sol/CustomToken.sol),
+  // so this is the only source for the figure at all. Returns null (never
+  // throws) on anything from a missing explorer config to a malformed
+  // response, same "leave it as-is until a real number arrives" posture
+  // index.html's own refreshLiveTokenPrices already expects.
+  async function fetchHolderCount(tokenAddress) {
+    const explorerApiUrl = (ROBINHOOD_NETWORKS[network] && ROBINHOOD_NETWORKS[network].explorerApiUrl) || null;
+    if (!explorerApiUrl || typeof fetch !== "function") return null;
+    try {
+      const base = explorerApiUrl.replace(/\/api\/?$/, "");
+      const res = await fetch(`${base}/api/v2/tokens/${tokenAddress}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const count = Number(data && data.holders);
+      return Number.isFinite(count) ? count : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // ---- real trade activity (backs GET /activity) ----
+  // Watches real Swap events on every tracked token's own pool. Only tokens
+  // that already have a pairAddress on file are watched (a "Just Launch"
+  // token with no pool yet has nothing to swap against); pollTokenPrices
+  // below is what notices a pool showing up later and backfills
+  // pairAddress, so this picks it up on its next tick automatically. Unlike
+  // discovery above, this deliberately does NOT backfill historical trades
+  // on a token's first tick (fromBlock defaults to latestBlock, same
+  // skip-history convention pollWatcher already uses for deposits) — trade
+  // history before this feature existed was never recorded and isn't worth
+  // a potentially enormous one-time backscan.
+  async function pollTokenActivity() {
+    const tracked = readTrackedTokens(network);
+    const existing = readActivity(network);
+    const seen = new Set(existing.map((e) => `${e.txHash}:${e.logIndex}`));
+    const blockTimestampCache = new Map();
+
+    async function blockTimestampMs(blockNumber) {
+      if (!blockTimestampCache.has(blockNumber)) {
+        const block = await hre.ethers.provider.getBlock(blockNumber);
+        blockTimestampCache.set(blockNumber, block ? block.timestamp * 1000 : Date.now());
+      }
+      return blockTimestampCache.get(blockNumber);
+    }
+
+    for (const entry of Object.values(tracked)) {
+      if (!entry.pairAddress) continue;
+      try {
+        const pair = await hre.ethers.getContractAt(UNIV2_PAIR_ABI, entry.pairAddress, hre.ethers.provider);
+        let wethIsToken0 = entry.wethIsToken0;
+        if (wethIsToken0 === undefined) {
+          const token0 = await pair.token0();
+          wethIsToken0 = token0.toLowerCase() !== entry.tokenAddress.toLowerCase();
+          upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
+        }
+
+        const cursorKey = `${entry.pairAddress}:activity`;
+        const latestBlock = await hre.ethers.provider.getBlockNumber();
+        const storedCursor = getCursor(cursorKey);
+        const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // skip pre-existing history, same as pollWatcher
+        if (fromBlock > latestBlock) continue;
+        const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
+
+        const events = await pair.queryFilter(pair.filters.Swap(), fromBlock, toBlock);
+        for (const event of events) {
+          const key = `${event.transactionHash}:${event.index}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          const { amount0In, amount1In, amount0Out, amount1Out, to } = event.args;
+          const wethIn = wethIsToken0 ? amount0In : amount1In;
+          const wethOut = wethIsToken0 ? amount0Out : amount1Out;
+          const tokenIn = wethIsToken0 ? amount1In : amount0In;
+          const tokenOut = wethIsToken0 ? amount1Out : amount0Out;
+          const side = wethIn > 0n ? "buy" : "sell"; // WETH in => buying the token; WETH out => selling it
+          const ethAmount = side === "buy" ? wethIn : wethOut;
+          const tokenAmount = side === "buy" ? tokenOut : tokenIn;
+
+          const ethUsd = await fetchEthUsdFromFeed(entry.priceFeed);
+          const usdValue = (Number(ethAmount) / 1e18) * ethUsd;
+          const t = await blockTimestampMs(event.blockNumber);
+
+          appendActivity(network, {
+            t,
+            txHash: event.transactionHash,
+            logIndex: event.index,
+            tokenAddress: entry.tokenAddress,
+            symbol: entry.symbol || null,
+            side,
+            wallet: to,
+            tokenAmount: tokenAmount.toString(),
+            usdValue,
+          });
+        }
+        setCursor(cursorKey, toBlock);
+      } catch (err) {
+        console.warn(`[activity] skip ${entry.tokenAddress}: ${err.message}`);
+      }
+    }
+  }
+
+  async function tokenActivityPollLoop() {
+    await pollTokenActivity().catch((err) => console.error(`[activity] poll error: ${err.message}`));
+    setTimeout(tokenActivityPollLoop, TOKEN_ACTIVITY_POLL_INTERVAL_MS);
+  }
+
+  // ---- live price / market cap / graduation sampling (backs
+  // GET /price-history/:tokenAddress) ----
+  async function pollTokenPrices() {
+    const tracked = readTrackedTokens(network);
+    for (const entry of Object.values(tracked)) {
+      try {
+        // A "Just Launch" token can gain a pool later via independently-
+        // added liquidity (see index.html's checkPendingLiquidity) — recheck
+        // the owning factory's own pairOf mapping each tick until one shows
+        // up, same on-chain source of truth TokenFactory/CustomTokenFactory
+        // themselves use.
+        if (!entry.pairAddress) {
+          const watcher = watchers.find((w) => w.kind === entry.kind);
+          if (watcher) {
+            const onChainPair = await watcher.factory.pairOf(entry.tokenAddress);
+            if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
+              entry.pairAddress = onChainPair;
+              upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
+            }
+          }
+        }
+        if (!entry.pairAddress) continue; // still no pool — nothing to sample yet
+
+        const pair = await hre.ethers.getContractAt(UNIV2_PAIR_ABI, entry.pairAddress, hre.ethers.provider);
+        const [reserves, token0] = await Promise.all([pair.getReserves(), pair.token0()]);
+        const wethIsToken0 = token0.toLowerCase() !== entry.tokenAddress.toLowerCase();
+        if (entry.wethIsToken0 !== wethIsToken0) upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
+        const tokenReserve = wethIsToken0 ? reserves.reserve1 : reserves.reserve0;
+        const wethReserve = wethIsToken0 ? reserves.reserve0 : reserves.reserve1;
+
+        const stateAbi = entry.kind === "custom" ? CUSTOM_TOKEN_STATE_ABI : TOKEN_STATE_ABI;
+        const token = await hre.ethers.getContractAt(stateAbi, entry.tokenAddress, hre.ethers.provider);
+        const [totalSupply, feedAddress, graduationTargetUsd, taxActive] = await Promise.all([
+          token.totalSupply(),
+          token.priceFeed(),
+          token.graduationTargetUsd(),
+          entry.kind === "custom" ? token.platformTaxActive() : token.taxActive(),
+        ]);
+        if (entry.priceFeed !== feedAddress) upsertTrackedToken(network, entry.tokenAddress, { priceFeed: feedAddress });
+
+        const ethUsd = await fetchEthUsdFromFeed(feedAddress);
+        const priceUsd = computeTokenPriceUsd(tokenReserve, wethReserve, ethUsd);
+        const mcapUsd = computeMarketCapUsd(priceUsd, totalSupply);
+        const taxProgressPct = computeTaxProgressPct(mcapUsd, graduationTargetUsd);
+        const holders = await fetchHolderCount(entry.tokenAddress);
+
+        const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive };
+        if (holders !== null) point.holders = holders;
+        appendPricePoint(network, entry.tokenAddress, point);
+      } catch (err) {
+        console.warn(`[price] skip ${entry.tokenAddress}: ${err.message}`);
+      }
+    }
+  }
+
+  async function tokenPricePollLoop() {
+    await pollTokenPrices().catch((err) => console.error(`[price] poll error: ${err.message}`));
+    setTimeout(tokenPricePollLoop, TOKEN_PRICE_POLL_INTERVAL_MS);
+  }
+
   // ---- creator-reward auto-sweep (optional) ----
   // Walks every token this relayer has ever recorded a launch for (across
   // both the plain and custom flows — creatorRewardBps applies identically
@@ -586,6 +975,14 @@ async function main() {
 
   console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits (only deposits made from now on — see cursors.json).`);
   pollLoop();
+
+  console.log(
+    `Discovering launched tokens every ${TOKEN_DISCOVERY_POLL_INTERVAL_MS}ms (backfilling from block ${TOKEN_DISCOVERY_START_BLOCK}), ` +
+      `polling trade activity every ${TOKEN_ACTIVITY_POLL_INTERVAL_MS}ms, and sampling price/market-cap every ${TOKEN_PRICE_POLL_INTERVAL_MS}ms.`
+  );
+  tokenDiscoveryPollLoop();
+  tokenActivityPollLoop();
+  tokenPricePollLoop();
 
   if (creatorRewardsDistributor) {
     console.log(`Sweeping creator rewards every ${CREATOR_REWARDS_POLL_INTERVAL_MS}ms.`);
