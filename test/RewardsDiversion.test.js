@@ -255,6 +255,52 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       expect(creatorRewardsDelta).to.be.gt(0n);
       expect(feeWalletDelta).to.be.gt(0n);
     });
+
+    it("setFeeWalletDistributor is owner-only", async function () {
+      const { factory, creator } = await deployTokenFactoryStack();
+      const [, , , , , , , feeWalletDistributor] = await ethers.getSigners();
+      await expect(
+        factory.connect(creator).setFeeWalletDistributor(feeWalletDistributor.address)
+      ).to.be.revertedWithCustomError(factory, "OwnableUnauthorizedAccount");
+    });
+
+    it("configures a freshly launched token with feeWalletDistributor unset by default, and a taxed buy's remainder still goes straight to platformFeeWallet (unchanged behavior)", async function () {
+      const { factory, creator, platformFeeWallet, buyer, router } = await deployTokenFactoryStack();
+      const { token } = await launchWithLiquidity(factory, creator, { liquidityEth: ethers.parseEther("10") });
+      expect(await token.feeWalletDistributor()).to.equal(ethers.ZeroAddress);
+
+      const path = [await router.WETH(), await token.getAddress()];
+      const feeWalletBefore = await token.balanceOf(platformFeeWallet.address);
+      await router
+        .connect(buyer)
+        .swapExactETHForTokensSupportingFeeOnTransferTokens(0, path, buyer.address, (await ethers.provider.getBlock("latest")).timestamp + 900, {
+          value: ethers.parseEther("1"),
+        });
+      expect(await token.balanceOf(platformFeeWallet.address)).to.be.gt(feeWalletBefore);
+    });
+
+    it("snapshots the live feeWalletDistributor onto the token once configured, and routes the fee-wallet remainder there in-kind instead of platformFeeWallet", async function () {
+      const { factory, deployer, creator, platformFeeWallet, buyer, router } = await deployTokenFactoryStack();
+      const [, , , , , , , feeWalletDistributor] = await ethers.getSigners();
+      await factory.connect(deployer).setFeeWalletDistributor(feeWalletDistributor.address);
+      const { token } = await launchWithLiquidity(factory, creator, { liquidityEth: ethers.parseEther("10") });
+      expect(await token.feeWalletDistributor()).to.equal(feeWalletDistributor.address);
+
+      const path = [await router.WETH(), await token.getAddress()];
+      const feeWalletBefore = await token.balanceOf(platformFeeWallet.address);
+      const distributorBefore = await token.balanceOf(feeWalletDistributor.address);
+      await router
+        .connect(buyer)
+        .swapExactETHForTokensSupportingFeeOnTransferTokens(0, path, buyer.address, (await ethers.provider.getBlock("latest")).timestamp + 900, {
+          value: ethers.parseEther("1"),
+        });
+
+      // The whole remainder (feeBps minus rewardBps/creatorRewardBps, both
+      // unset/zero here) lands on feeWalletDistributor instead — plain
+      // platformFeeWallet balance is untouched.
+      expect(await token.balanceOf(feeWalletDistributor.address)).to.be.gt(distributorBefore);
+      expect(await token.balanceOf(platformFeeWallet.address)).to.equal(feeWalletBefore);
+    });
   });
 
   describe("LaunchedToken.configureTax bounds", function () {
@@ -289,7 +335,7 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
     it("rejects rewardBps_ above feeBps_", async function () {
       const { token, factorySigner, deployer } = await deployUnconfiguredToken();
       await expect(
-        token.connect(factorySigner).configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 26, ethers.ZeroAddress, 0)
+        token.connect(factorySigner).configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 26, ethers.ZeroAddress, 0, ethers.ZeroAddress)
       ).to.be.revertedWith("LaunchedToken: rewardBps+creatorRewardBps exceeds feeBps");
     });
 
@@ -298,14 +344,14 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       await expect(
         token
           .connect(factorySigner)
-          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, ethers.ZeroAddress, 10, ethers.ZeroAddress, 0)
+          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, ethers.ZeroAddress, 10, ethers.ZeroAddress, 0, ethers.ZeroAddress)
       ).to.be.revertedWith("LaunchedToken: rewardBps requires a distributor");
     });
 
     it("accepts rewardBps_ exactly equal to feeBps_ with a real distributor address", async function () {
       const { token, factorySigner, deployer } = await deployUnconfiguredToken();
       await expect(
-        token.connect(factorySigner).configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 25, ethers.ZeroAddress, 0)
+        token.connect(factorySigner).configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 25, ethers.ZeroAddress, 0, ethers.ZeroAddress)
       ).to.not.be.reverted;
       expect(await token.rewardBps()).to.equal(25n);
     });
@@ -315,7 +361,7 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       await expect(
         token
           .connect(factorySigner)
-          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, ethers.ZeroAddress, 0, ethers.ZeroAddress, 5)
+          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, ethers.ZeroAddress, 0, ethers.ZeroAddress, 5, ethers.ZeroAddress)
       ).to.be.revertedWith("LaunchedToken: creatorRewardBps requires a distributor");
     });
 
@@ -325,7 +371,7 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       await expect(
         token
           .connect(factorySigner)
-          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 20, anotherDistributor.address, 5)
+          .configureTax(deployer.address, deployer.address, 25, ethers.ZeroAddress, 1, 1, deployer.address, 20, anotherDistributor.address, 5, ethers.ZeroAddress)
       ).to.not.be.reverted;
       expect(await token.rewardBps()).to.equal(20n);
       expect(await token.creatorRewardBps()).to.equal(5n);
@@ -535,6 +581,42 @@ describe("Reward diversion (launch-fee split + trading-tax carve-out)", function
       expect(rewardsDelta).to.be.gt(0n);
       expect(creatorRewardsDelta).to.be.gt(0n);
       expect(burnedDelta).to.be.gt(0n);
+    });
+
+    it("setFeeWalletDistributor is owner-only", async function () {
+      const { factory, creator } = await deployCustomStack();
+      const [, , , , , , , feeWalletDistributor] = await ethers.getSigners();
+      await expect(
+        factory.connect(creator).setFeeWalletDistributor(feeWalletDistributor.address)
+      ).to.be.revertedWithCustomError(factory, "OwnableUnauthorizedAccount");
+    });
+
+    it("snapshots the live feeWalletDistributor onto the token once configured, and routes the platform fee-wallet remainder there in-kind instead of platformFeeWallet — the creator's own buy/sell fees are untouched", async function () {
+      const { factory, deployer, creator, platformFeeWallet, buyer, router } = await deployCustomStack();
+      const [, , , , , , , feeWalletDistributor] = await ethers.getSigners();
+      await factory.connect(deployer).setFeeWalletDistributor(feeWalletDistributor.address);
+
+      const creatorFees = { reflectionBps: 0, marketingBps: 0, liquidityBps: 0, burnBps: 500 };
+      const { token } = await launchCustom(factory, creator, { buyFees: creatorFees, liquidityEth: ethers.parseEther("10") });
+      expect(await token.feeWalletDistributor()).to.equal(feeWalletDistributor.address);
+
+      const path = [await router.WETH(), await token.getAddress()];
+      const feeWalletBefore = await token.balanceOf(platformFeeWallet.address);
+      const distributorBefore = await token.balanceOf(feeWalletDistributor.address);
+      const supplyBefore = await token.totalSupply();
+
+      await router
+        .connect(buyer)
+        .swapExactETHForTokensSupportingFeeOnTransferTokens(0, path, buyer.address, (await ethers.provider.getBlock("latest")).timestamp + 900, {
+          value: ethers.parseEther("1"),
+        });
+
+      // The whole platform-tax remainder lands on feeWalletDistributor
+      // instead — plain platformFeeWallet balance is untouched, and the
+      // creator's own 5% burn-on-buy still fires normally.
+      expect(await token.balanceOf(feeWalletDistributor.address)).to.be.gt(distributorBefore);
+      expect(await token.balanceOf(platformFeeWallet.address)).to.equal(feeWalletBefore);
+      expect(supplyBefore - (await token.totalSupply())).to.be.gt(0n);
     });
   });
 });

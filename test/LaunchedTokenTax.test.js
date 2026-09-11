@@ -475,7 +475,7 @@ describe("LaunchedToken — transfer tax", function () {
       await expect(
         token
           .connect(otherAccount)
-          .configureTax(await pair.getAddress(), platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
+          .configureTax(await pair.getAddress(), platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
       ).to.be.revertedWith("LaunchedToken: caller is not the factory");
     });
 
@@ -489,7 +489,7 @@ describe("LaunchedToken — transfer tax", function () {
       await expect(
         token
           .connect(factorySigner)
-          .configureTax(await pair.getAddress(), platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
+          .configureTax(await pair.getAddress(), platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
       ).to.be.revertedWith("LaunchedToken: tax already configured");
     });
   });
@@ -625,7 +625,8 @@ describe("LaunchedToken — transfer tax", function () {
         ethers.ZeroAddress,
         0,
         ethers.ZeroAddress,
-        0
+        0,
+        ethers.ZeroAddress
       );
 
       expect(await token.taxActive()).to.equal(true);
