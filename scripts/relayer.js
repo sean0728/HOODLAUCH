@@ -30,6 +30,15 @@
 // requiring a separate "convert to ETH" step before claimCreatorRewards.
 // See the CREATOR_REWARDS_* constants and creatorRewardsPollLoop below.
 //
+// A third, identically-optional sweep does the same thing for the platform's
+// own fee-wallet slice: set FEE_WALLET_DISTRIBUTOR_ADDRESS and this service
+// periodically calls FeeWalletDistributor.triggerFeeWalletSwap for every
+// launched token carrying enough accumulated in-kind balance there, so that
+// slice sits as spendable ETH (claimable via claimFeeWalletRewards) instead
+// of a pile of whatever token it was taxed in. See the FEE_WALLET_* constants
+// and feeWalletPollLoop below — same shape as the creator-rewards sweep,
+// just a different distributor and a fixed, single recipient.
+//
 // GET /status/:voucherHash lets the front end poll a launch's progress
 // (received -> deposited -> relayed, or failed) — merged with a live
 // on-chain read of the matching deposit, so the front end can tell a
@@ -98,6 +107,15 @@ const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5
 // gas for no benefit.
 const CREATOR_REWARDS_DISTRIBUTOR_ADDRESS = process.env.CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null;
 const CREATOR_REWARDS_POLL_INTERVAL_MS = Number(process.env.CREATOR_REWARDS_POLL_INTERVAL_MS || 5 * 60_000);
+
+// Same optionality and reasoning as CREATOR_REWARDS_* above, for
+// FeeWalletDistributor instead — leaving FEE_WALLET_DISTRIBUTOR_ADDRESS unset
+// means this service does nothing extra here either. Defaults to the same
+// 5-minute cadence: an unconverted fee-wallet balance costs nothing by
+// sitting a while longer, same reasoning as the creator-reward sweep.
+const FEE_WALLET_DISTRIBUTOR_ADDRESS = process.env.FEE_WALLET_DISTRIBUTOR_ADDRESS || null;
+const FEE_WALLET_POLL_INTERVAL_MS = Number(process.env.FEE_WALLET_POLL_INTERVAL_MS || 5 * 60_000);
+
 const ERC20_BALANCE_OF_ABI = ["function balanceOf(address) view returns (uint256)"];
 
 // ---- token discovery / activity / price polling (backs GET /activity and
@@ -314,6 +332,7 @@ function logEnvVarPresence() {
     "TOKEN_FACTORY_ADDRESS",
     "CUSTOM_TOKEN_FACTORY_ADDRESS",
     "CREATOR_REWARDS_DISTRIBUTOR_ADDRESS",
+    "FEE_WALLET_DISTRIBUTOR_ADDRESS",
     "HARDHAT_NETWORK",
     "PORT",
     "RELAYER_PORT",
@@ -424,6 +443,31 @@ async function main() {
     }
   }
 
+  let feeWalletDistributor = null;
+  if (FEE_WALLET_DISTRIBUTOR_ADDRESS) {
+    // Same try/catch reasoning as CreatorRewardsDistributor above: an
+    // optional convenience feature whose load failure should never take the
+    // core relayer down with it.
+    try {
+      feeWalletDistributor = await hre.ethers.getContractAt(
+        "FeeWalletDistributor",
+        FEE_WALLET_DISTRIBUTOR_ADDRESS,
+        relayerWallet
+      );
+      console.log(`Fee-wallet auto-sweep enabled against distributor ${FEE_WALLET_DISTRIBUTOR_ADDRESS}.`);
+    } catch (err) {
+      console.error(
+        `Could not load FeeWalletDistributor at ${FEE_WALLET_DISTRIBUTOR_ADDRESS} (${err.message}). ` +
+          "Fee-wallet auto-sweep is DISABLED for this run — everything else (vouchers, deposits, the API, " +
+          "the site, activity/price polling, creator-reward auto-sweep) starts normally regardless. This " +
+          "specific error usually means the contract's build artifact wasn't included in this deploy (a " +
+          "stale/cached build) — a clean rebuild that actually recompiles contracts/FeeWalletDistributor.sol " +
+          "should fix it; set FEE_WALLET_DISTRIBUTOR_ADDRESS again afterward to re-enable auto-sweep."
+      );
+      feeWalletDistributor = null;
+    }
+  }
+
   // ---- HTTP API ----
   const app = express();
   app.use(express.json());
@@ -486,6 +530,8 @@ async function main() {
       customTokenFactoryAddress: customTokenFactoryAddress || null,
       creatorRewardsDistributorAddress: CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null,
       creatorRewardsAutoSweepEnabled: !!creatorRewardsDistributor,
+      feeWalletDistributorAddress: FEE_WALLET_DISTRIBUTOR_ADDRESS || null,
+      feeWalletAutoSweepEnabled: !!feeWalletDistributor,
     })
   );
 
@@ -1111,6 +1157,46 @@ async function main() {
     setTimeout(creatorRewardsPollLoop, CREATOR_REWARDS_POLL_INTERVAL_MS);
   }
 
+  // ---- fee-wallet auto-sweep (optional) ----
+  // Identical shape to sweepCreatorRewardsOnce above, against
+  // FeeWalletDistributor instead of CreatorRewardsDistributor — walks every
+  // token this relayer has ever recorded a launch for and, for each one
+  // carrying more than its own swapThreshold in accumulated in-kind balance
+  // there, calls triggerFeeWalletSwap on the relayer's own dime. Same
+  // per-token error isolation: a failure on one token is logged and skipped
+  // rather than aborting the sweep.
+  async function sweepFeeWalletRewardsOnce() {
+    const network = hre.network.name;
+    const ledger = readLedger(network);
+    const distributorAddress = await feeWalletDistributor.getAddress();
+    const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
+
+    for (const tokenAddress of tokenAddresses) {
+      try {
+        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
+        const balance = await token.balanceOf(distributorAddress);
+        if (balance === 0n) continue;
+
+        const threshold = await feeWalletDistributor.swapThreshold(tokenAddress);
+        if (balance < threshold) continue;
+
+        const tx = await feeWalletDistributor.triggerFeeWalletSwap(tokenAddress, 0);
+        const receipt = await tx.wait();
+        console.log(`[fee-wallet] swept ${tokenAddress} (balance ${balance}) in tx ${receipt.hash}.`);
+      } catch (err) {
+        // Expected/benign cases include: no pool for this token yet, a
+        // threshold that hasn't been reached, or another caller having
+        // already swept it between our balance read and our tx landing.
+        console.warn(`[fee-wallet] skip ${tokenAddress}: ${err.message}`);
+      }
+    }
+  }
+
+  async function feeWalletPollLoop() {
+    await sweepFeeWalletRewardsOnce().catch((err) => console.error(`[fee-wallet] sweep error: ${err.message}`));
+    setTimeout(feeWalletPollLoop, FEE_WALLET_POLL_INTERVAL_MS);
+  }
+
   console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits (only deposits made from now on — see cursors.json).`);
   pollLoop();
 
@@ -1125,6 +1211,11 @@ async function main() {
   if (creatorRewardsDistributor) {
     console.log(`Sweeping creator rewards every ${CREATOR_REWARDS_POLL_INTERVAL_MS}ms.`);
     creatorRewardsPollLoop();
+  }
+
+  if (feeWalletDistributor) {
+    console.log(`Sweeping fee-wallet rewards every ${FEE_WALLET_POLL_INTERVAL_MS}ms.`);
+    feeWalletPollLoop();
   }
 }
 
