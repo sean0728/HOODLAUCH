@@ -105,6 +105,21 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// same as every other tax default here.
     uint256 public creatorRewardBps = 5; // 0.05%
 
+    /// @notice FeeWalletDistributor's address — automatically converts the
+    /// remainder of feeBps that would otherwise sit at platformFeeWallet as
+    /// a plain token balance into ETH instead (see FeeWalletDistributor.sol
+    /// and LaunchedToken.configureTax). address(0) (the default) disables
+    /// this entirely: every launch from here on configures its token with
+    /// no fee-wallet diversion at all, and that remainder goes straight to
+    /// platformFeeWallet exactly as it always has. Set once, via
+    /// setFeeWalletDistributor — nothing about flipping this on ever
+    /// touches a token or launch that already happened, same convention as
+    /// rewardsDistributor/creatorRewardsDistributor above. Unlike those two,
+    /// there's no companion bps to configure here — the amount routed is
+    /// simply whatever's left of feeBps after rewardBps/creatorRewardBps,
+    /// so there's nothing for setTaxDefaults to validate a bound on.
+    address public feeWalletDistributor;
+
     // ---- anti-rug safeguard on the creator's own same-transaction buy-in
     // (see _launchWithLiquidity) ----
     uint256 public maxCreatorBuyBps = 500; // 5.00% of totalSupply_ by default
@@ -327,6 +342,7 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     event BuyInSlippageBpsUpdated(uint256 newBps);
     event RewardsDistributorUpdated(address newDistributor);
     event CreatorRewardsDistributorUpdated(address newDistributor);
+    event FeeWalletDistributorUpdated(address newDistributor);
     event TokenPriceFeedUpdated(address indexed token, address newPriceFeed, uint256 newMaxOracleStaleness);
 
     constructor(
@@ -643,7 +659,8 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         uint256 effectiveCreatorRewardBps = creatorRewardsDistributor != address(0) ? creatorRewardBps : 0;
         LaunchedToken(token).configureTax(
             pair, platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness,
-            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps
+            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps,
+            feeWalletDistributor
         );
 
         uint256 unlockTime = block.timestamp + lpLockDuration;
@@ -762,7 +779,8 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         uint256 effectiveCreatorRewardBps = creatorRewardsDistributor != address(0) ? creatorRewardBps : 0;
         LaunchedToken(token).configureTax(
             pair, platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness,
-            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps
+            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps,
+            feeWalletDistributor
         );
 
         uint256 unlockTime = block.timestamp + lpLockDuration;
@@ -891,6 +909,15 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     function setCreatorRewardsDistributor(address newDistributor) external onlyOwner {
         creatorRewardsDistributor = newDistributor;
         emit CreatorRewardsDistributorUpdated(newDistributor);
+    }
+
+    /// @notice See setRewardsDistributor above — identical convention,
+    /// separate distributor. Wired once, whenever FeeWalletDistributor is
+    /// deployed; nothing about flipping this on ever touches a token or
+    /// launch that already happened.
+    function setFeeWalletDistributor(address newDistributor) external onlyOwner {
+        feeWalletDistributor = newDistributor;
+        emit FeeWalletDistributorUpdated(newDistributor);
     }
 
     /// @notice Points relayedCreateToken's onlyRelayer gate at the

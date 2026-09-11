@@ -62,7 +62,26 @@ contract CreatorRewardsDistributor is Ownable2Step, ReentrancyGuard {
     /// nonzero balance triggers) until the owner sets one for a given token.
     mapping(address => uint256) public swapThreshold;
 
+    /// @notice Caps how much of `token`'s balance a single
+    /// triggerCreatorSwap(token) call is allowed to sell — the anti-dump
+    /// knob. Before this existed, an infrequently-triggered token could
+    /// accumulate a large balance and then have its *entire* pile sold in
+    /// one swap the moment someone finally called triggerCreatorSwap,
+    /// showing up as a single visible dump against that token's own pool.
+    /// Defaults to 0, meaning "uncapped" (the original all-at-once
+    /// behavior) until the owner sets one. Once set, a balance above the
+    /// cap is drained across multiple separate calls instead of one — each
+    /// individual swap stays small and proportional, at the cost of taking
+    /// more calls (and, if swapThreshold is also set, more time re-crossing
+    /// it between partial drains) to fully clear a large backlog. See
+    /// scripts/relayer.js's creator-rewards sweep loop, which already calls
+    /// this on a recurring schedule and so naturally keeps re-draining a
+    /// capped balance over successive ticks without any changes needed
+    /// there.
+    mapping(address => uint256) public maxSwapAmount;
+
     event SwapThresholdUpdated(address indexed token, uint256 newThreshold);
+    event MaxSwapAmountUpdated(address indexed token, uint256 newMax);
     event CreatorSwapTriggered(address indexed token, address indexed creator, uint256 amountIn, uint256 ethOut);
     event CreatorRewardsClaimed(address indexed token, address indexed creator, address indexed caller, uint256 amount);
 
@@ -81,21 +100,30 @@ contract CreatorRewardsDistributor is Ownable2Step, ReentrancyGuard {
         emit SwapThresholdUpdated(token, newThreshold);
     }
 
-    /// @notice Swaps this contract's entire balance of `token` for ETH
-    /// (routed straight through WETH — path = [token, router.WETH()]) and
-    /// credits the proceeds to that token's own creator via
-    /// claimableEth[token]. Permissionless, like every trigger in
-    /// PlatformRewardsDistributor — the destination (this exact token's own
-    /// creator) never depends on who calls it. Reads creator() off the
-    /// token itself at call time (ICreatorAware — both LaunchedToken and
-    /// CustomToken expose it as a plain public getter), so a creator
-    /// transfer on CustomToken (transferCreator/acceptCreator) is always
-    /// reflected in whatever swap happens after it goes through, never a
-    /// stale snapshot taken here.
+    /// @notice See maxSwapAmount's own comment above. 0 means uncapped.
+    function setMaxSwapAmount(address token, uint256 newMax) external onlyOwner {
+        maxSwapAmount[token] = newMax;
+        emit MaxSwapAmountUpdated(token, newMax);
+    }
+
+    /// @notice Swaps up to maxSwapAmount[token] of this contract's balance
+    /// of `token` for ETH (the entire balance, if no cap is set — see
+    /// maxSwapAmount above), routed straight through WETH
+    /// (path = [token, router.WETH()]), and credits the proceeds to that
+    /// token's own creator via claimableEth[token]. Permissionless, like
+    /// every trigger in PlatformRewardsDistributor — the destination (this
+    /// exact token's own creator) never depends on who calls it. Reads
+    /// creator() off the token itself at call time (ICreatorAware — both
+    /// LaunchedToken and CustomToken expose it as a plain public getter),
+    /// so a creator transfer on CustomToken (transferCreator/acceptCreator)
+    /// is always reflected in whatever swap happens after it goes through,
+    /// never a stale snapshot taken here.
     function triggerCreatorSwap(address token, uint256 minEthOut) external nonReentrant returns (uint256 ethOut) {
         require(token != address(0), "CreatorRewardsDistributor: invalid token");
-        uint256 amountIn = IERC20(token).balanceOf(address(this));
-        require(amountIn > 0 && amountIn >= swapThreshold[token], "CreatorRewardsDistributor: below threshold");
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        require(balance > 0 && balance >= swapThreshold[token], "CreatorRewardsDistributor: below threshold");
+        uint256 cap = maxSwapAmount[token];
+        uint256 amountIn = (cap > 0 && balance > cap) ? cap : balance;
 
         address creator = ICreatorAware(token).creator();
         require(creator != address(0), "CreatorRewardsDistributor: token has no creator");

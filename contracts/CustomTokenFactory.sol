@@ -84,6 +84,13 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     /// explanation; behaves identically here.
     uint256 public creatorRewardBps = 5; // 0.05%
 
+    /// @notice FeeWalletDistributor's address — see
+    /// TokenFactory.feeWalletDistributor for the full explanation; behaves
+    /// identically here. address(0) (the default) disables it entirely, and
+    /// the platform-fee remainder goes straight to platformFeeWallet exactly
+    /// as it always has.
+    address public feeWalletDistributor;
+
     /// @notice Anti-rug ceiling on a creator's own same-transaction buy-in,
     /// in bps of totalSupply_ — identical safeguard to TokenFactory's
     /// maxCreatorBuyBps, checked against the actual net tokens received
@@ -242,6 +249,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     event TaxDefaultsUpdated();
     event RewardsDistributorUpdated(address newDistributor);
     event CreatorRewardsDistributorUpdated(address newDistributor);
+    event FeeWalletDistributorUpdated(address newDistributor);
     event TokenPriceFeedUpdated(address indexed token, address newPriceFeed, uint256 newMaxOracleStaleness);
 
     constructor(
@@ -469,7 +477,8 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         uint256 effectiveCreatorRewardBps = creatorRewardsDistributor != address(0) ? creatorRewardBps : 0;
         CustomToken(payable(token)).configurePlatformTax(
             platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness,
-            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps
+            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps,
+            feeWalletDistributor
         );
 
         uint256 unlockTime = block.timestamp + lpLockDuration;
@@ -710,7 +719,8 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         uint256 effectiveCreatorRewardBps = creatorRewardsDistributor != address(0) ? creatorRewardBps : 0;
         CustomToken(payable(token)).configurePlatformTax(
             platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness,
-            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps
+            rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps,
+            feeWalletDistributor
         );
 
         uint256 unlockTime = block.timestamp + lpLockDuration;
@@ -818,6 +828,13 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     function setCreatorRewardsDistributor(address newDistributor) external onlyOwner {
         creatorRewardsDistributor = newDistributor;
         emit CreatorRewardsDistributorUpdated(newDistributor);
+    }
+
+    /// @notice See TokenFactory.setFeeWalletDistributor — identical
+    /// behavior here.
+    function setFeeWalletDistributor(address newDistributor) external onlyOwner {
+        feeWalletDistributor = newDistributor;
+        emit FeeWalletDistributorUpdated(newDistributor);
     }
 
     /// @notice See TokenFactory.setRelayer — identical behavior here.

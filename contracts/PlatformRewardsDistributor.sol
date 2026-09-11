@@ -65,6 +65,23 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     /// sets one.
     mapping(address => uint256) public tokenBuybackThreshold;
 
+    /// @notice Caps how much of this contract's ETH balance a single
+    /// triggerEthBuyback call is allowed to spend — same anti-dump purpose
+    /// as CreatorRewardsDistributor.maxSwapAmount, applied to the buy side
+    /// here (a large single buy is a visible pump on platformToken's own
+    /// chart, the mirror image of a large single sell dumping a launched
+    /// token's chart). Defaults to 0, meaning "uncapped" (the original
+    /// spend-it-all behavior). Once set, a balance above the cap is spent
+    /// down across multiple separate calls instead of one.
+    uint256 public maxEthBuybackAmount;
+
+    /// @notice Same as maxEthBuybackAmount, but per input token, for
+    /// triggerTokenBuyback — the sell-side counterpart (selling `token` for
+    /// platformToken is a sell against `token`'s own pool, same dump risk
+    /// CreatorRewardsDistributor.maxSwapAmount exists to bound). Defaults to
+    /// 0 (uncapped) per token until the owner sets one.
+    mapping(address => uint256) public maxTokenBuybackAmount;
+
     /// @notice PlatformToken sitting here, already bought back and already
     /// split, awaiting its turn in the next airdrop round. Frozen into
     /// roundAmount the moment startAirdropRound() runs.
@@ -78,6 +95,8 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     event PlatformTokenSet(address indexed newToken);
     event EthBuybackThresholdUpdated(uint256 newThreshold);
     event TokenBuybackThresholdUpdated(address indexed token, uint256 newThreshold);
+    event MaxEthBuybackAmountUpdated(uint256 newMax);
+    event MaxTokenBuybackAmountUpdated(address indexed token, uint256 newMax);
     event EthBuybackTriggered(uint256 ethIn, uint256 tokensOut, uint256 burned, uint256 toAirdrop);
     event TokenBuybackTriggered(address indexed token, uint256 amountIn, uint256 tokensOut, uint256 burned, uint256 toAirdrop);
     event DirectPlatformTokensProcessed(uint256 amountIn, uint256 burned, uint256 toAirdrop);
@@ -123,18 +142,33 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         emit TokenBuybackThresholdUpdated(token, newThreshold);
     }
 
+    /// @notice See maxEthBuybackAmount's own comment above. 0 means uncapped.
+    function setMaxEthBuybackAmount(uint256 newMax) external onlyOwner {
+        maxEthBuybackAmount = newMax;
+        emit MaxEthBuybackAmountUpdated(newMax);
+    }
+
+    /// @notice See maxTokenBuybackAmount's own comment above. 0 means uncapped.
+    function setMaxTokenBuybackAmount(address token, uint256 newMax) external onlyOwner {
+        maxTokenBuybackAmount[token] = newMax;
+        emit MaxTokenBuybackAmountUpdated(token, newMax);
+    }
+
     // ---------------------------------------------------------------
     // Buyback triggers — permissionless once the relevant threshold is met
     // ---------------------------------------------------------------
 
-    /// @notice Swaps this contract's entire ETH balance for platformToken
-    /// and splits the result 50% burned / 50% into the airdrop pool.
-    /// Anyone can call this (e.g. a scheduled keeper) — the destination of
-    /// the funds never depends on who calls it.
+    /// @notice Swaps up to maxEthBuybackAmount of this contract's ETH
+    /// balance for platformToken (the entire balance, if no cap is set) and
+    /// splits the result 50% burned / 50% into the airdrop pool. Anyone can
+    /// call this (e.g. a scheduled keeper) — the destination of the funds
+    /// never depends on who calls it.
     function triggerEthBuyback(uint256 minTokensOut) external nonReentrant returns (uint256 tokensOut) {
         require(address(platformToken) != address(0), "PlatformRewardsDistributor: platform token not set");
-        uint256 ethIn = address(this).balance;
-        require(ethIn > 0 && ethIn >= ethBuybackThreshold, "PlatformRewardsDistributor: below threshold");
+        uint256 balance = address(this).balance;
+        require(balance > 0 && balance >= ethBuybackThreshold, "PlatformRewardsDistributor: below threshold");
+        uint256 cap = maxEthBuybackAmount;
+        uint256 ethIn = (cap > 0 && balance > cap) ? cap : balance;
 
         address[] memory path = new address[](2);
         path[0] = router.WETH();
@@ -153,25 +187,31 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         emit EthBuybackTriggered(ethIn, tokensOut, burned, toAirdrop);
     }
 
-    /// @notice Swaps this contract's entire balance of `token` for
-    /// platformToken (routed through WETH — see
+    /// @notice Swaps up to maxTokenBuybackAmount[token] of this contract's
+    /// balance of `token` for platformToken (the entire balance, if no cap
+    /// is set — routed through WETH, see
     /// IUniswapV2Router02.swapExactTokensForTokensSupportingFeeOnTransferTokens)
     /// and splits the result 50/50, same as triggerEthBuyback. If `token`
-    /// happens to already be platformToken itself, no swap is needed —
-    /// it's processed directly. Anyone can call this once the token's
-    /// balance clears its configured threshold.
+    /// happens to already be platformToken itself, no swap is needed — it's
+    /// processed directly, uncapped (a burn/airdrop-pool credit isn't a
+    /// trade, so it carries none of the price-impact risk the cap exists
+    /// for). Anyone can call this once the token's balance clears its
+    /// configured threshold.
     function triggerTokenBuyback(address token, uint256 minTokensOut) external nonReentrant returns (uint256 tokensOut) {
         require(address(platformToken) != address(0), "PlatformRewardsDistributor: platform token not set");
         require(token != address(0), "PlatformRewardsDistributor: invalid token");
 
-        uint256 amountIn = IERC20(token).balanceOf(address(this));
-        require(amountIn > 0 && amountIn >= tokenBuybackThreshold[token], "PlatformRewardsDistributor: below threshold");
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        require(balance > 0 && balance >= tokenBuybackThreshold[token], "PlatformRewardsDistributor: below threshold");
 
         if (token == address(platformToken)) {
-            (uint256 burnedDirect, uint256 toAirdropDirect) = _splitAndProcess(amountIn);
-            emit DirectPlatformTokensProcessed(amountIn, burnedDirect, toAirdropDirect);
-            return amountIn;
+            (uint256 burnedDirect, uint256 toAirdropDirect) = _splitAndProcess(balance);
+            emit DirectPlatformTokensProcessed(balance, burnedDirect, toAirdropDirect);
+            return balance;
         }
+
+        uint256 cap = maxTokenBuybackAmount[token];
+        uint256 amountIn = (cap > 0 && balance > cap) ? cap : balance;
 
         address[] memory path = new address[](3);
         path[0] = token;

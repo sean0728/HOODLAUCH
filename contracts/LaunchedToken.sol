@@ -73,6 +73,19 @@ contract LaunchedToken is ERC20 {
     address public creatorRewardsDistributor;
     uint256 public creatorRewardBps; // absolute bps of transfer value diverted to creatorRewardsDistributor, carved OUT OF feeBps (never on top of it, and never overlapping rewardBps)
 
+    // ---- fee-wallet auto-conversion: redirects the REMAINDER of feeBps
+    // (fee - rewardCut - creatorCut, i.e. whatever wasn't already carved off
+    // to rewardsDistributor/creatorRewardsDistributor above) to
+    // FeeWalletDistributor in-kind, instead of straight to feeWallet.
+    // Unlike rewardBps/creatorRewardBps this has no bps of its own to
+    // configure — it's just a different destination for the same
+    // remainder — so it's a single address, snapshotted once in
+    // configureTax() like every other distributor here.
+    // feeWalletDistributor == address(0) (the default) means this is
+    // entirely inactive and the remainder still goes straight to feeWallet
+    // as a plain token transfer, exactly as it always has. ----
+    address public feeWalletDistributor;
+
     /// @notice Hard ceiling on totalSupply_, enforced once at initialize().
     /// Purely defense-in-depth: currentMarketCapInFeedDecimals()'s own
     /// arithmetic (usdPerToken * totalSupply()) would need a totalSupply in
@@ -169,7 +182,8 @@ contract LaunchedToken is ERC20 {
         address rewardsDistributor_,
         uint256 rewardBps_,
         address creatorRewardsDistributor_,
-        uint256 creatorRewardBps_
+        uint256 creatorRewardBps_,
+        address feeWalletDistributor_
     ) external onlyFactory {
         require(!taxConfigured, "LaunchedToken: tax already configured");
         require(pair_ != address(0), "LaunchedToken: invalid pair");
@@ -192,6 +206,7 @@ contract LaunchedToken is ERC20 {
         rewardBps = rewardBps_;
         creatorRewardsDistributor = creatorRewardsDistributor_;
         creatorRewardBps = creatorRewardBps_;
+        feeWalletDistributor = feeWalletDistributor_;
 
         emit TaxConfigured(pair_, feeWallet_, feeBps_, graduationTargetUsd_);
     }
@@ -243,7 +258,13 @@ contract LaunchedToken is ERC20 {
                 uint256 toFeeWallet = fee - rewardCut - creatorCut;
                 if (rewardCut > 0) super._update(from, rewardsDistributor, rewardCut);
                 if (creatorCut > 0) super._update(from, creatorRewardsDistributor, creatorCut);
-                if (toFeeWallet > 0) super._update(from, feeWallet, toFeeWallet);
+                // Routes to FeeWalletDistributor in-kind when set, for later
+                // automatic ETH conversion (see FeeWalletDistributor.sol);
+                // otherwise falls straight to feeWallet exactly as before
+                // this feature existed.
+                if (toFeeWallet > 0) {
+                    super._update(from, feeWalletDistributor != address(0) ? feeWalletDistributor : feeWallet, toFeeWallet);
+                }
                 super._update(from, to, value - fee);
             } else {
                 super._update(from, to, value);

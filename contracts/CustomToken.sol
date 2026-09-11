@@ -177,6 +177,19 @@ contract CustomToken is ERC20, ReentrancyGuard {
     address public creatorRewardsDistributor;
     uint256 public creatorRewardBps; // absolute bps of transfer value diverted to creatorRewardsDistributor, carved OUT OF platformFeeBps (never on top of it, and never overlapping rewardBps)
 
+    // ---- fee-wallet auto-conversion: redirects the REMAINDER of
+    // platformFeeBps (cuts.platform - rewardCut - creatorCut, i.e. whatever
+    // wasn't already carved off to rewardsDistributor/
+    // creatorRewardsDistributor above) to FeeWalletDistributor in-kind,
+    // instead of straight to platformFeeWallet. Mirrors LaunchedToken's
+    // identical feature exactly — see that contract's comment. No bps of
+    // its own; just a different destination for the same remainder.
+    // feeWalletDistributor == address(0) (the default) means this is
+    // entirely inactive and the remainder still goes straight to
+    // platformFeeWallet as a plain token transfer, exactly as it always
+    // has. ----
+    address public feeWalletDistributor;
+
     /// @notice Hard ceiling on totalSupply_, enforced once at initialize().
     /// See LaunchedToken.MAX_TOTAL_SUPPLY for the full reasoning — purely
     /// defense-in-depth against currentMarketCapInFeedDecimals()'s own
@@ -454,7 +467,8 @@ contract CustomToken is ERC20, ReentrancyGuard {
         address rewardsDistributor_,
         uint256 rewardBps_,
         address creatorRewardsDistributor_,
-        uint256 creatorRewardBps_
+        uint256 creatorRewardBps_,
+        address feeWalletDistributor_
     ) external onlyFactory {
         require(!platformTaxConfigured, "CustomToken: platform tax already configured");
         require(pair != address(0), "CustomToken: pair not set yet");
@@ -491,6 +505,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
         rewardBps = rewardBps_;
         creatorRewardsDistributor = creatorRewardsDistributor_;
         creatorRewardBps = creatorRewardBps_;
+        feeWalletDistributor = feeWalletDistributor_;
 
         emit PlatformTaxConfigured(feeWallet_, feeBps_, graduationTargetUsd_);
     }
@@ -774,8 +789,13 @@ contract CustomToken is ERC20, ReentrancyGuard {
                 _afterBalanceChange(from, creatorRewardsDistributor, creatorCut);
             }
             if (toFeeWallet > 0) {
-                super._update(from, platformFeeWallet, toFeeWallet);
-                _afterBalanceChange(from, platformFeeWallet, toFeeWallet);
+                // Routes to FeeWalletDistributor in-kind when set, for later
+                // automatic ETH conversion (see FeeWalletDistributor.sol);
+                // otherwise falls straight to platformFeeWallet exactly as
+                // before this feature existed.
+                address toFeeWalletRecipient = feeWalletDistributor != address(0) ? feeWalletDistributor : platformFeeWallet;
+                super._update(from, toFeeWalletRecipient, toFeeWallet);
+                _afterBalanceChange(from, toFeeWalletRecipient, toFeeWallet);
             }
         }
         super._update(from, to, value - cuts.total);
