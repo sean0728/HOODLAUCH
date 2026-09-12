@@ -1,10 +1,10 @@
 {
   "tokenFactory": {
-    "demo": "0x6e295099aFA9d88a27131674531A4e6D229e59BE",
+    "demo": "0xdb58b8277D4Db96297376AdfC75f03680EC03699",
     "live": null
   },
   "customTokenFactory": {
-    "demo": "0xA89F8446d3a119C4e3A3350D9633509e5679f80E",
+    "demo": "0xD8D05537AC87E9003a0fb8e003766226F0e51675",
     "live": null
   },
   "rewardsDistributor": {
