@@ -3,7 +3,7 @@ node_modules
 /cache
 .env
 coverage
-coverage.json
+deployed-contracts/
 
 # deployed-contracts/ (the per-network launch ledgers scripts/launch.js
 # writes to) and deployments/ (the per-network platform-contract addresses
