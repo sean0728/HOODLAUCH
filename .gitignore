@@ -1,6 +1,4 @@
 node_modules
-artifacts/
-cache/
 .env
 coverage
 deployed-contracts/
