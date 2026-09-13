@@ -2176,7 +2176,9 @@
     if(secs<60) return `${secs}s ago`;
     const mins = Math.round(secs/60);
     if(mins<60) return `${mins}m ago`;
-    return `${Math.round(mins/60)}h ago`;
+    const hrs = Math.round(mins/60);
+    if(hrs<24) return `${hrs}h ago`;
+    return `${Math.round(hrs/24)}d ago`;
   }
   function lpIsUnlockable(t){
     return t.mode==="liquidity" && !t.lpWithdrawn && t.unlockAt!=null && Date.now()>=t.unlockAt;
@@ -4327,6 +4329,11 @@
     if(!svg) return;
     const w=600,h=220; const min=Math.min(...hist), max=Math.max(...hist); const range=(max-min)||1;
     const pts = hist.map((v,i)=>[ (i/(hist.length-1))*w, h - ((v-min)/range)*h*0.82 - h*0.09 ]);
+    // Real per-point timestamps, when available, so the tooltip can show
+    // genuine elapsed time instead of mislabeling "how many samples back
+    // this point is" as if each sample were a day apart (samples are taken
+    // every ~45s server-side, not daily — see priceHistoryStore.js).
+    const times = Array.isArray(t.livePriceHistory) && t.livePriceHistory.length===hist.length ? t.livePriceHistory : null;
 
     function onMove(evt){
       const rect = svg.getBoundingClientRect();
@@ -4340,8 +4347,8 @@
       const pctX = p[0]/w*100;
       tip.style.left = pctX+"%"; tip.style.top = (p[1]/h*100)+"%"; tip.style.opacity="1";
       tip.querySelector(".p").textContent = fmtUSD(hist[idx]);
-      const daysAgo = hist.length-1-idx;
-      tip.querySelector(".d").textContent = daysAgo===0 ? "now" : daysAgo+"d ago";
+      const sampleT = times ? times[idx].t : null;
+      tip.querySelector(".d").textContent = sampleT!=null ? fmtAgo(Date.now()-sampleT) : (idx===hist.length-1 ? "now" : "");
     }
     function onLeave(){ cross.style.opacity="0"; tip.style.opacity="0"; }
     svg.addEventListener("mousemove", onMove);
