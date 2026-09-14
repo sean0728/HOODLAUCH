@@ -1,6 +1,5 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 /// Covers CreatorRewardsDistributor's own internals in isolation: swapping
 /// an accumulated in-kind cut of ONE token for ETH, and letting that
@@ -65,7 +64,6 @@ describe("CreatorRewardsDistributor", function () {
       const { distributor, token } = await deployStack();
       expect(await distributor.claimableEth(await token.getAddress())).to.equal(0);
       expect(await distributor.swapThreshold(await token.getAddress())).to.equal(0);
-      expect(await distributor.maxSwapAmount(await token.getAddress())).to.equal(0);
     });
   });
 
@@ -83,21 +81,6 @@ describe("CreatorRewardsDistributor", function () {
         .to.emit(distributor, "SwapThresholdUpdated")
         .withArgs(await token.getAddress(), ethers.parseEther("1000"));
       expect(await distributor.swapThreshold(await token.getAddress())).to.equal(ethers.parseEther("1000"));
-    });
-
-    it("setMaxSwapAmount is owner-only", async function () {
-      const { distributor, other, token } = await deployStack();
-      await expect(
-        distributor.connect(other).setMaxSwapAmount(await token.getAddress(), 1)
-      ).to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount");
-    });
-
-    it("setMaxSwapAmount succeeds for the owner and emits an event", async function () {
-      const { distributor, owner, token } = await deployStack();
-      await expect(distributor.connect(owner).setMaxSwapAmount(await token.getAddress(), ethers.parseEther("100")))
-        .to.emit(distributor, "MaxSwapAmountUpdated")
-        .withArgs(await token.getAddress(), ethers.parseEther("100"));
-      expect(await distributor.maxSwapAmount(await token.getAddress())).to.equal(ethers.parseEther("100"));
     });
   });
 
@@ -171,74 +154,6 @@ describe("CreatorRewardsDistributor", function () {
       expect(ethOut).to.equal(evt.args.ethOut);
       expect(await token.balanceOf(await distributor.getAddress())).to.equal(0);
       expect(await distributor.claimableEth(await token.getAddress())).to.equal(ethOut);
-    });
-
-    // Anti-dump: a token that's accumulated a large balance (an
-    // infrequently-triggered sweep, or just heavy trading volume) must not
-    // have its ENTIRE pile sold in one swap once a cap is configured — that
-    // single large sale is exactly the visible chart-dump this knob exists
-    // to prevent. See maxSwapAmount's own contract-level comment.
-    it("caps a single call's swap size to maxSwapAmount, leaving the remainder on the contract's balance", async function () {
-      const { distributor, owner, deployer, token } = await deployStack();
-      const cap = ethers.parseEther("100");
-      const pile = ethers.parseEther("1000"); // 10x the cap
-      await distributor.connect(owner).setMaxSwapAmount(await token.getAddress(), cap);
-      await token.connect(deployer).transfer(await distributor.getAddress(), pile);
-
-      const tx = await distributor.triggerCreatorSwap(await token.getAddress(), 0);
-      await expect(tx).to.emit(distributor, "CreatorSwapTriggered").withArgs(
-        await token.getAddress(),
-        (await ethers.getSigners())[2].address, // creator, per deployStack()
-        cap,
-        anyValue
-      );
-
-      // Only the capped amount left the contract's token balance — the rest
-      // of the pile is still sitting there, untouched, for a later call.
-      expect(await token.balanceOf(await distributor.getAddress())).to.equal(pile - cap);
-    });
-
-    it("drains a large pile across multiple capped calls instead of one, crediting claimableEth cumulatively", async function () {
-      const { distributor, owner, deployer, token } = await deployStack();
-      const cap = ethers.parseEther("250");
-      const pile = ethers.parseEther("1000"); // exactly 4x the cap
-      await distributor.connect(owner).setMaxSwapAmount(await token.getAddress(), cap);
-      await token.connect(deployer).transfer(await distributor.getAddress(), pile);
-
-      for (let i = 0; i < 4; i++) {
-        await distributor.triggerCreatorSwap(await token.getAddress(), 0);
-      }
-
-      // Fully drained after exactly pile/cap calls, and every partial swap's
-      // ETH proceeds accumulated into the same claimableEth balance rather
-      // than overwriting each other.
-      expect(await token.balanceOf(await distributor.getAddress())).to.equal(0);
-      expect(await distributor.claimableEth(await token.getAddress())).to.be.gt(0n);
-
-      // A 5th call has nothing left to swap.
-      await expect(distributor.triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
-        "CreatorRewardsDistributor: below threshold"
-      );
-    });
-
-    it("a cap larger than the actual balance swaps only what's there (no revert, no over-swap)", async function () {
-      const { distributor, owner, deployer, token } = await deployStack();
-      const amount = ethers.parseEther("50");
-      await distributor.connect(owner).setMaxSwapAmount(await token.getAddress(), ethers.parseEther("100000"));
-      await token.connect(deployer).transfer(await distributor.getAddress(), amount);
-
-      const tx = await distributor.triggerCreatorSwap(await token.getAddress(), 0);
-      await expect(tx).to.emit(distributor, "CreatorSwapTriggered");
-      expect(await token.balanceOf(await distributor.getAddress())).to.equal(0);
-    });
-
-    it("leaving maxSwapAmount at its default (0) preserves the original uncapped, swap-everything behavior", async function () {
-      const { distributor, deployer, token } = await deployStack();
-      const amount = ethers.parseEther("5000");
-      await token.connect(deployer).transfer(await distributor.getAddress(), amount);
-
-      await distributor.triggerCreatorSwap(await token.getAddress(), 0);
-      expect(await token.balanceOf(await distributor.getAddress())).to.equal(0);
     });
   });
 

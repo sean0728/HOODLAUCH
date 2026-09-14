@@ -92,30 +92,6 @@ describe("PlatformRewardsDistributor", function () {
       ).to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount");
     });
 
-    it("setMaxEthBuybackAmount / setMaxTokenBuybackAmount are owner-only", async function () {
-      const { distributor, other, feeToken } = await deployStack();
-      await expect(distributor.connect(other).setMaxEthBuybackAmount(1)).to.be.revertedWithCustomError(
-        distributor,
-        "OwnableUnauthorizedAccount"
-      );
-      await expect(
-        distributor.connect(other).setMaxTokenBuybackAmount(await feeToken.getAddress(), 1)
-      ).to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount");
-    });
-
-    it("setMaxEthBuybackAmount / setMaxTokenBuybackAmount succeed for the owner and emit events", async function () {
-      const { distributor, owner, feeToken } = await deployStack();
-      await expect(distributor.connect(owner).setMaxEthBuybackAmount(ethers.parseEther("1")))
-        .to.emit(distributor, "MaxEthBuybackAmountUpdated")
-        .withArgs(ethers.parseEther("1"));
-      expect(await distributor.maxEthBuybackAmount()).to.equal(ethers.parseEther("1"));
-
-      await expect(distributor.connect(owner).setMaxTokenBuybackAmount(await feeToken.getAddress(), ethers.parseEther("100")))
-        .to.emit(distributor, "MaxTokenBuybackAmountUpdated")
-        .withArgs(await feeToken.getAddress(), ethers.parseEther("100"));
-      expect(await distributor.maxTokenBuybackAmount(await feeToken.getAddress())).to.equal(ethers.parseEther("100"));
-    });
-
     it("setPlatformToken succeeds while idle and emits an event", async function () {
       const { distributor, owner, platformToken } = await deployStack();
       await expect(distributor.connect(owner).setPlatformToken(await platformToken.getAddress()))
@@ -201,56 +177,6 @@ describe("PlatformRewardsDistributor", function () {
       expect(await platformToken.balanceOf(await distributor.getAddress())).to.equal(toAirdrop);
       expect(await ethers.provider.getBalance(await distributor.getAddress())).to.equal(0);
     });
-
-    // Anti-dump on the buy side: a single large buyback is a visible pump
-    // on platformToken's own chart, same underlying concern as
-    // CreatorRewardsDistributor's maxSwapAmount on the sell side — see that
-    // contract's tests for the sell-side equivalent of these cases.
-    it("caps a single call's spend to maxEthBuybackAmount, leaving the remainder as ETH on the contract", async function () {
-      const { distributor, owner, platformToken } = await deployStack();
-      await distributor.connect(owner).setPlatformToken(await platformToken.getAddress());
-      const cap = ethers.parseEther("1");
-      await distributor.connect(owner).setMaxEthBuybackAmount(cap);
-      await owner.sendTransaction({ to: await distributor.getAddress(), value: ethers.parseEther("10") }); // 10x the cap
-
-      const tx = await distributor.triggerEthBuyback(0);
-      await expect(tx).to.emit(distributor, "EthBuybackTriggered");
-      const receipt = await tx.wait();
-      const evt = receipt.logs.map((l) => {
-        try {
-          return distributor.interface.parseLog(l);
-        } catch {
-          return null;
-        }
-      }).find((p) => p && p.name === "EthBuybackTriggered");
-      expect(evt.args.ethIn).to.equal(cap);
-
-      expect(await ethers.provider.getBalance(await distributor.getAddress())).to.equal(ethers.parseEther("9"));
-    });
-
-    it("drains a large ETH balance across multiple capped calls instead of one", async function () {
-      const { distributor, owner, platformToken } = await deployStack();
-      await distributor.connect(owner).setPlatformToken(await platformToken.getAddress());
-      const cap = ethers.parseEther("2");
-      await distributor.connect(owner).setMaxEthBuybackAmount(cap);
-      await owner.sendTransaction({ to: await distributor.getAddress(), value: ethers.parseEther("8") }); // exactly 4x the cap
-
-      for (let i = 0; i < 4; i++) {
-        await distributor.triggerEthBuyback(0);
-      }
-
-      expect(await ethers.provider.getBalance(await distributor.getAddress())).to.equal(0);
-      await expect(distributor.triggerEthBuyback(0)).to.be.revertedWith("PlatformRewardsDistributor: below threshold");
-    });
-
-    it("leaving maxEthBuybackAmount at its default (0) preserves the original uncapped, spend-everything behavior", async function () {
-      const { distributor, owner, platformToken } = await deployStack();
-      await distributor.connect(owner).setPlatformToken(await platformToken.getAddress());
-      await owner.sendTransaction({ to: await distributor.getAddress(), value: ethers.parseEther("3") });
-
-      await distributor.triggerEthBuyback(0);
-      expect(await ethers.provider.getBalance(await distributor.getAddress())).to.equal(0);
-    });
   });
 
   describe("triggerTokenBuyback", function () {
@@ -308,71 +234,6 @@ describe("PlatformRewardsDistributor", function () {
         .withArgs(amount, amount / 2n, amount - amount / 2n);
 
       expect(await distributor.pendingAirdropTokens()).to.equal(amount - amount / 2n);
-    });
-
-    // Anti-dump on the sell side: selling a large accumulated pile of a
-    // launched token for platformToken is a sell against THAT token's own
-    // pool — same dump risk (and same fix) as
-    // CreatorRewardsDistributor.maxSwapAmount.
-    it("caps a single call's swap size to maxTokenBuybackAmount, leaving the remainder on the contract's balance", async function () {
-      const { distributor, owner, deployer, platformToken, feeToken } = await deployStack();
-      await distributor.connect(owner).setPlatformToken(await platformToken.getAddress());
-      const cap = ethers.parseEther("100");
-      await distributor.connect(owner).setMaxTokenBuybackAmount(await feeToken.getAddress(), cap);
-      await feeToken.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("1000")); // 10x the cap
-
-      const tx = await distributor.triggerTokenBuyback(await feeToken.getAddress(), 0);
-      const receipt = await tx.wait();
-      const evt = receipt.logs
-        .map((l) => {
-          try {
-            return distributor.interface.parseLog(l);
-          } catch {
-            return null;
-          }
-        })
-        .find((p) => p && p.name === "TokenBuybackTriggered");
-      expect(evt.args.amountIn).to.equal(cap);
-
-      expect(await feeToken.balanceOf(await distributor.getAddress())).to.equal(ethers.parseEther("900"));
-    });
-
-    it("drains a large token pile across multiple capped calls instead of one", async function () {
-      const { distributor, owner, deployer, platformToken, feeToken } = await deployStack();
-      await distributor.connect(owner).setPlatformToken(await platformToken.getAddress());
-      const cap = ethers.parseEther("250");
-      await distributor.connect(owner).setMaxTokenBuybackAmount(await feeToken.getAddress(), cap);
-      await feeToken.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("1000")); // exactly 4x the cap
-
-      for (let i = 0; i < 4; i++) {
-        await distributor.triggerTokenBuyback(await feeToken.getAddress(), 0);
-      }
-
-      expect(await feeToken.balanceOf(await distributor.getAddress())).to.equal(0);
-      await expect(distributor.triggerTokenBuyback(await feeToken.getAddress(), 0)).to.be.revertedWith(
-        "PlatformRewardsDistributor: below threshold"
-      );
-    });
-
-    it("does not cap the direct-platformToken shortcut, since it never swaps (a burn/airdrop credit isn't a trade)", async function () {
-      const { distributor, owner, deployer, platformToken } = await deployStack();
-      await distributor.connect(owner).setPlatformToken(await platformToken.getAddress());
-      await distributor.connect(owner).setMaxTokenBuybackAmount(await platformToken.getAddress(), ethers.parseEther("1"));
-      const amount = ethers.parseEther("1000"); // far more than the "cap" above
-      await platformToken.connect(deployer).transfer(await distributor.getAddress(), amount);
-
-      await expect(distributor.triggerTokenBuyback(await platformToken.getAddress(), 0))
-        .to.emit(distributor, "DirectPlatformTokensProcessed")
-        .withArgs(amount, amount / 2n, amount - amount / 2n);
-    });
-
-    it("leaving maxTokenBuybackAmount at its default (0) preserves the original uncapped, swap-everything behavior", async function () {
-      const { distributor, owner, deployer, platformToken, feeToken } = await deployStack();
-      await distributor.connect(owner).setPlatformToken(await platformToken.getAddress());
-      await feeToken.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("500"));
-
-      await distributor.triggerTokenBuyback(await feeToken.getAddress(), 0);
-      expect(await feeToken.balanceOf(await distributor.getAddress())).to.equal(0);
     });
   });
 
