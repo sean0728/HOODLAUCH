@@ -1546,6 +1546,7 @@
   const NAME_SELECTOR = "06fdde03";        // name()
   const SYMBOL_SELECTOR = "95d89b41";      // symbol()
   const TOTAL_SUPPLY_SELECTOR = "18160ddd"; // totalSupply()
+  const DECIMALS_SELECTOR = "313ce567";     // decimals() — same selector on every standard ERC20, reused below for the custom reflections-asset lookup
 
   // ---- CustomTokenFactory / CustomToken selectors — "Custom Tax Token"
   // launches. deployFee()/lpLockDuration()/maxCreatorBuyBps()/pairOf(address)/
@@ -2176,9 +2177,7 @@
     if(secs<60) return `${secs}s ago`;
     const mins = Math.round(secs/60);
     if(mins<60) return `${mins}m ago`;
-    const hrs = Math.round(mins/60);
-    if(hrs<24) return `${hrs}h ago`;
-    return `${Math.round(hrs/24)}d ago`;
+    return `${Math.round(mins/60)}h ago`;
   }
   function lpIsUnlockable(t){
     return t.mode==="liquidity" && !t.lpWithdrawn && t.unlockAt!=null && Date.now()>=t.unlockAt;
@@ -2820,6 +2819,13 @@
     // words 2/3/4/5 regardless of the strings' actual tail content.
     const createdWords = splitWords(createdLog.data);
     const pairAddress = decodeAddress("0x"+createdWords[3]);
+    // The factory resolves CustomTokenFactory.SELF_REFLECTION_ASSET (see
+    // that constant's comment) to the real clone address before this event
+    // is ever emitted, so reading it straight off the log — rather than
+    // trusting whatever draft.customFees.reflectionAsset happened to hold
+    // client-side — is what lets "This Token" ever get labeled correctly
+    // afterward (reflectionAssetLabel compares against this real value).
+    const reflectionAssetResolved = decodeAddress("0x"+createdWords[4]);
     onStep("deploy", "done", `Contract deployed at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · tx <span class="num">${fmtAddrSafe(txHash)}</span>`);
 
     const { lockId, unlockAt } = await finishCustomTokenFactoryVerification({
@@ -2828,6 +2834,7 @@
 
     return {
       txHash, tokenAddress, pairAddress: addLiquidity ? pairAddress : null, lockId, unlockAt,
+      reflectionAsset: reflectionAssetResolved,
       lpLockDurationDays: Math.round(Number(lpLockDurationSeconds) / 86400),
       liquidityEth: addLiquidity ? Number(draft.liquidityEth) : 0, buyInEth: addLiquidity ? Number(draft.buyInEth) : 0,
     };
@@ -3044,15 +3051,20 @@
     // straight from its own CustomTokenCreated decode (see scripts/relayer.js) —
     // fall back to re-deriving it from the log here if an older relayer
     // build doesn't send it, so this still works without a lockstep upgrade.
-    if(!pairAddress && addLiquidity){
-      const createdLog = (receipt.logs||[]).find(l =>
-        l.address && l.address.toLowerCase()===factoryAddress.toLowerCase() &&
-        l.topics && l.topics[0] && l.topics[0].toLowerCase()===CUSTOM_TOKEN_CREATED_TOPIC0.toLowerCase()
-      );
-      if(createdLog){
-        const createdWords = splitWords(createdLog.data);
-        pairAddress = decodeAddress("0x"+createdWords[3]);
-      }
+    // reflectionAsset isn't in that /status response at all yet, so it's
+    // always read straight off this log — see performOnChainCustomLaunch's
+    // matching comment for why the resolved on-chain value (not the raw
+    // draft/voucher value, which may still be the SELF_REFLECTION_ASSET
+    // sentinel) is what reflectionAssetLabel needs.
+    let reflectionAssetResolved = null;
+    const createdLog = (receipt.logs||[]).find(l =>
+      l.address && l.address.toLowerCase()===factoryAddress.toLowerCase() &&
+      l.topics && l.topics[0] && l.topics[0].toLowerCase()===CUSTOM_TOKEN_CREATED_TOPIC0.toLowerCase()
+    );
+    if(createdLog){
+      const createdWords = splitWords(createdLog.data);
+      if(!pairAddress && addLiquidity) pairAddress = decodeAddress("0x"+createdWords[3]);
+      reflectionAssetResolved = decodeAddress("0x"+createdWords[4]);
     }
     const { lockId, unlockAt } = await finishCustomTokenFactoryVerification({
       factoryAddress, tokenAddress, pairAddress, receipt, addLiquidity, buyInWei, lpLockDurationSeconds, onStep,
@@ -3060,6 +3072,7 @@
 
     return {
       txHash: relayedTxHash, tokenAddress, pairAddress: addLiquidity ? pairAddress : null, lockId, unlockAt,
+      reflectionAsset: reflectionAssetResolved,
       lpLockDurationDays: Math.round(Number(lpLockDurationSeconds) / 86400),
       liquidityEth: addLiquidity ? Number(draft.liquidityEth) : 0, buyInEth: addLiquidity ? Number(draft.buyInEth) : 0,
     };
@@ -3099,7 +3112,15 @@
         lockId: result.lockId, unlockAt: result.unlockAt, lpLockDurationDays: result.lpLockDurationDays,
         lpWithdrawn:false, factoryAddress,
         customTax:true, buyFees: {...draft.customFees.buy}, sellFees: {...draft.customFees.sell},
-        reflectionAsset: draft.customFees.reflectionAsset || null, marketingWallet: draft.customFees.marketingWallet || null,
+        // Prefer the real on-chain-resolved value the CustomTokenCreated
+        // event carried back (see performOnChainCustomLaunch/
+        // performRelayedCustomLaunch) over the raw draft value, which for
+        // "This Token" is still just the SELF_REFLECTION_ASSET sentinel —
+        // reflectionAssetLabel needs the real address to match it against
+        // tokenAddress. Falls back to the draft value only if an older
+        // relayer build didn't hand one back.
+        reflectionAsset: (result.reflectionAsset!=null ? result.reflectionAsset : draft.customFees.reflectionAsset) || null,
+        marketingWallet: draft.customFees.marketingWallet || null,
         networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
       } : {
         id: result.tokenAddress, name: draft.name, ticker: draft.ticker,
@@ -3109,7 +3130,8 @@
         catColor:"var(--signal-500)", mode:"just", status:"creator-held", createdCustom:true,
         onChain:true, tokenAddress: result.tokenAddress, txHash: result.txHash, factoryAddress,
         customTax:true, buyFees: {...draft.customFees.buy}, sellFees: {...draft.customFees.sell},
-        reflectionAsset: draft.customFees.reflectionAsset || null, marketingWallet: draft.customFees.marketingWallet || null,
+        reflectionAsset: (result.reflectionAsset!=null ? result.reflectionAsset : draft.customFees.reflectionAsset) || null,
+        marketingWallet: draft.customFees.marketingWallet || null,
         networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
       };
       tokens.unshift(newToken);
@@ -3158,6 +3180,16 @@
   const ROUTER_WETH_SELECTOR = "ad5c4648";       // IUniswapV2Router02.WETH()
   const FACTORY_GET_PAIR_SELECTOR = "e6a43905";  // IUniswapV2Factory.getPair(address,address)
   const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+  // Sentinel CustomTokenFactory.SELF_REFLECTION_ASSET() reports on-chain —
+  // pass this as the reflections asset to mean "pay reflections in the
+  // token being launched itself." The clone's real address doesn't exist
+  // yet at the point this wizard builds calldata (or, for a relayed
+  // launch, at the point the creator signs their voucher, well before any
+  // contract call happens), so there's no way to send the real address
+  // directly — the factory resolves this placeholder to the freshly-
+  // cloned token's own address right after creating it. Lowercase because
+  // every comparison against it below normalizes to lowercase first.
+  const SELF_REFLECTION_ASSET = "0x0000000000000000000000000000000000000001";
   // Selectors for reading real wallet/pool state in the Portfolio tab
   // (below) — computed via ethers.Interface the same way as the selectors
   // above, not guessed.
@@ -3779,7 +3811,7 @@
         <div class="review-list">
           <div class="review-row"><span class="k">Buy tax</span><span class="v num">${customTaxSummaryLine(t.buyFees)}</span></div>
           <div class="review-row"><span class="k">Sell tax</span><span class="v num">${customTaxSummaryLine(t.sellFees)}</span></div>
-          <div class="review-row"><span class="k">Reflections asset</span><span class="v">${t.reflectionAsset ? fmtAddrSafe(t.reflectionAsset) : "Native ETH"}</span></div>
+          <div class="review-row"><span class="k">Reflections asset</span><span class="v">${reflectionAssetLabel(t.reflectionAsset, t.ticker, t.tokenAddress)}</span></div>
           <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${t.marketingWallet ? fmtAddrSafe(t.marketingWallet) : "—"}</span></div>
         </div>
         <div class="hint" style="margin-top:8px;">${!inactive
@@ -4329,11 +4361,6 @@
     if(!svg) return;
     const w=600,h=220; const min=Math.min(...hist), max=Math.max(...hist); const range=(max-min)||1;
     const pts = hist.map((v,i)=>[ (i/(hist.length-1))*w, h - ((v-min)/range)*h*0.82 - h*0.09 ]);
-    // Real per-point timestamps, when available, so the tooltip can show
-    // genuine elapsed time instead of mislabeling "how many samples back
-    // this point is" as if each sample were a day apart (samples are taken
-    // every ~45s server-side, not daily — see priceHistoryStore.js).
-    const times = Array.isArray(t.livePriceHistory) && t.livePriceHistory.length===hist.length ? t.livePriceHistory : null;
 
     function onMove(evt){
       const rect = svg.getBoundingClientRect();
@@ -4347,8 +4374,8 @@
       const pctX = p[0]/w*100;
       tip.style.left = pctX+"%"; tip.style.top = (p[1]/h*100)+"%"; tip.style.opacity="1";
       tip.querySelector(".p").textContent = fmtUSD(hist[idx]);
-      const sampleT = times ? times[idx].t : null;
-      tip.querySelector(".d").textContent = sampleT!=null ? fmtAgo(Date.now()-sampleT) : (idx===hist.length-1 ? "now" : "");
+      const daysAgo = hist.length-1-idx;
+      tip.querySelector(".d").textContent = daysAgo===0 ? "now" : daysAgo+"d ago";
     }
     function onLeave(){ cross.style.opacity="0"; tip.style.opacity="0"; }
     svg.addEventListener("mousemove", onMove);
@@ -4397,21 +4424,12 @@
     if(draft.buyInEth > buyInSliderMax) draft.buyInEth = Math.round(buyInSliderMax*1e6)/1e6;
     const reflectionOn = draft.customFees.buy.reflectionBps>0 || draft.customFees.sell.reflectionBps>0;
     const marketingOn = draft.customFees.buy.marketingBps>0 || draft.customFees.sell.marketingBps>0;
-    const usingCustomReflectionAsset = !!draft.customFees.reflectionAsset;
     return `
       <h3 style="margin-bottom:6px;">Custom tax configuration</h3>
       <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 18px;">Buy and sell tax are configured independently, each capped at 5% total. Every rate locks in permanently at launch — only the marketing wallet address can ever be changed afterward.</p>
       ${feeSideHTML("buy","Buy")}
       ${feeSideHTML("sell","Sell")}
-      <div class="field">
-        <label style="margin-bottom:8px; display:block;">Reflections payout asset</label>
-        <div style="display:flex; gap:16px; margin-bottom:8px;">
-          <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectNative" ${usingCustomReflectionAsset?"":"checked"}> Native ETH</label>
-          <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectCustom" ${usingCustomReflectionAsset?"checked":""}> Custom ERC20</label>
-        </div>
-        <input id="fReflectionAsset" type="text" placeholder="0x… token address" value="${escapeHtml(draft.customFees.reflectionAsset)}" ${usingCustomReflectionAsset?"":"disabled"}>
-        <div class="hint" style="margin-top:6px;">${reflectionOn ? "Holders accrue their share automatically as trades happen and get paid out automatically too, in batches, with no action needed from them — anyone can also claim their own share immediately at any time, if they don't want to wait." : "Only matters once a reflection % is set above, on either side."}</div>
-      </div>
+      ${reflectionAssetFieldHTML(reflectionOn ? "Holders accrue their share automatically as trades happen and get paid out automatically too, in batches, with no action needed from them — anyone can also claim their own share immediately at any time, if they don't want to wait." : "Only matters once a reflection % is set above, on either side.")}
       <div class="field">
         <label for="fMarketingWallet">Marketing wallet ${marketingOn ? "(required — a marketing % is set above)" : "(optional — only needed if you set a marketing % above)"}</label>
         <input id="fMarketingWallet" type="text" placeholder="0x… wallet address" value="${escapeHtml(draft.customFees.marketingWallet)}">
@@ -4450,21 +4468,12 @@
   function customDeployFeeStepHTML(){
     const reflectionOn = draft.customFees.buy.reflectionBps>0 || draft.customFees.sell.reflectionBps>0;
     const marketingOn = draft.customFees.buy.marketingBps>0 || draft.customFees.sell.marketingBps>0;
-    const usingCustomReflectionAsset = !!draft.customFees.reflectionAsset;
     return `
       <h3 style="margin-bottom:6px;">Custom tax configuration</h3>
       <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 18px;">These rates are recorded on the token's contract now, but stay inactive until a pool exists — this mode never creates one. Add liquidity yourself later (e.g. on Uniswap) to switch them on.</p>
       ${feeSideHTML("buy","Buy")}
       ${feeSideHTML("sell","Sell")}
-      <div class="field">
-        <label style="margin-bottom:8px; display:block;">Reflections payout asset</label>
-        <div style="display:flex; gap:16px; margin-bottom:8px;">
-          <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectNative" ${usingCustomReflectionAsset?"":"checked"}> Native ETH</label>
-          <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectCustom" ${usingCustomReflectionAsset?"checked":""}> Custom ERC20</label>
-        </div>
-        <input id="fReflectionAsset" type="text" placeholder="0x… token address" value="${escapeHtml(draft.customFees.reflectionAsset)}" ${usingCustomReflectionAsset?"":"disabled"}>
-        <div class="hint" style="margin-top:6px;">${reflectionOn ? "Only takes effect once a pool exists and holders start trading against it." : "Only matters once a reflection % is set above, on either side."}</div>
-      </div>
+      ${reflectionAssetFieldHTML(reflectionOn ? "Only takes effect once a pool exists and holders start trading against it." : "Only matters once a reflection % is set above, on either side.")}
       <div class="field">
         <label for="fMarketingWallet">Marketing wallet ${marketingOn ? "(required — a marketing % is set above)" : "(optional — only needed if you set a marketing % above)"}</label>
         <input id="fMarketingWallet" type="text" placeholder="0x… wallet address" value="${escapeHtml(draft.customFees.marketingWallet)}">
@@ -4612,7 +4621,7 @@
         <div class="review-row"><span class="k">Pool</span><span class="v">None — 100% to your wallet</span></div>
         <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")} (recorded, inactive)</span></div>
         <div class="review-row"><span class="k">Sell tax</span><span class="v num">${feeSideSummaryText("sell")} (recorded, inactive)</span></div>
-        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draft.customFees.reflectionAsset ? fmtAddrSafe(draft.customFees.reflectionAsset) : "Native ETH"}</span></div>
+        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
         <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${draft.customFees.marketingWallet ? fmtAddrSafe(draft.customFees.marketingWallet) : "—"}</span></div>
         <div class="review-row"><span class="k">Platform tax</span><span class="v">None — requires a live pool</span></div>
       `;
@@ -4623,7 +4632,7 @@
         ${draft.buyInEth>0 ? `<div class="review-row"><span class="k">Your buy-in</span><span class="v num">${draft.buyInEth} ETH, same transaction</span></div>` : ""}
         <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")}</span></div>
         <div class="review-row"><span class="k">Sell tax</span><span class="v num">${feeSideSummaryText("sell")}</span></div>
-        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draft.customFees.reflectionAsset ? fmtAddrSafe(draft.customFees.reflectionAsset) : "Native ETH"}</span></div>
+        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
         <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${draft.customFees.marketingWallet ? fmtAddrSafe(draft.customFees.marketingWallet) : "—"}</span></div>
         <div class="review-row"><span class="k">Plus platform tax</span><span class="v num">0.25% until $80,000 MC</span></div>
         <div class="review-row"><span class="k">LP lock</span><span class="v num">${lpLockDaysDisplay()} days</span></div>
@@ -4737,13 +4746,49 @@
         renderPreview();
       });
     });
+    // Native Token and This Token both lock the address input closed —
+    // there's nothing to type for either, so any address a creator had
+    // typed while on Custom Token is discarded the moment they leave it.
     if(byId("fReflectNative")) byId("fReflectNative").addEventListener("change", e=>{
-      if(e.target.checked){ draft.customFees.reflectionAsset=""; const inp=byId("fReflectionAsset"); if(inp){ inp.value=""; inp.disabled=true; } }
+      if(e.target.checked){
+        draft.customFees.reflectionAsset="";
+        const inp=byId("fReflectionAsset"); if(inp){ inp.value=""; inp.disabled=true; }
+        reflectionTokenCheck = { address:"", status:"idle", info:null };
+        renderReflectionTokenInfo();
+      }
+    });
+    if(byId("fReflectSelf")) byId("fReflectSelf").addEventListener("change", e=>{
+      if(e.target.checked){
+        draft.customFees.reflectionAsset=SELF_REFLECTION_ASSET;
+        const inp=byId("fReflectionAsset"); if(inp){ inp.value=""; inp.disabled=true; }
+        reflectionTokenCheck = { address:"", status:"idle", info:null };
+        renderReflectionTokenInfo();
+      }
     });
     if(byId("fReflectCustom")) byId("fReflectCustom").addEventListener("change", e=>{
-      if(e.target.checked){ const inp=byId("fReflectionAsset"); if(inp) inp.disabled=false; }
+      if(e.target.checked){
+        draft.customFees.reflectionAsset="";
+        const inp=byId("fReflectionAsset"); if(inp){ inp.disabled=false; inp.value=""; inp.focus(); }
+        reflectionTokenCheck = { address:"", status:"idle", info:null };
+        renderReflectionTokenInfo();
+      }
     });
-    if(byId("fReflectionAsset")) byId("fReflectionAsset").addEventListener("input", e=>{ draft.customFees.reflectionAsset = e.target.value.trim(); });
+    if(byId("fReflectionAsset")) byId("fReflectionAsset").addEventListener("input", e=>{
+      draft.customFees.reflectionAsset = e.target.value.trim();
+      scheduleReflectionTokenLookup();
+    });
+    // Restores whatever this address's check already found (or kicks off a
+    // fresh lookup if it hasn't been checked yet) every time this step
+    // re-renders — a full step re-render always creates a brand new
+    // #reflectionAssetInfo element, which otherwise starts back at blank.
+    if(byId("fReflectionAsset")){
+      const raw = (draft.customFees.reflectionAsset||"").trim();
+      if(reflectionAssetMode(raw)==="custom" && raw.toLowerCase()!==reflectionTokenCheck.address.toLowerCase()){
+        scheduleReflectionTokenLookup();
+      } else {
+        renderReflectionTokenInfo();
+      }
+    }
     if(byId("fMarketingWallet")) byId("fMarketingWallet").addEventListener("input", e=>{ draft.customFees.marketingWallet = e.target.value.trim(); });
     if(byId("wizNext")) byId("wizNext").addEventListener("click", ()=>{ wizStep=Math.min(4,wizStep+1); renderWizard(); });
     if(byId("wizBack")) byId("wizBack").addEventListener("click", ()=>{ wizStep=Math.max(1,wizStep-1); renderWizard(); });
@@ -4792,6 +4837,177 @@
   // right before either the real or simulated flow below.
   function isAddressLike(s){ return /^0x[0-9a-fA-F]{40}$/.test(s||""); }
   function isUrlLike(s){ try{ const u = new URL(s); return u.protocol==="http:"||u.protocol==="https:"; }catch(e){ return false; } }
+
+  // ---- Reflections payout asset: Native Token / This Token / Custom Token ----
+  // draft.customFees.reflectionAsset is the single source of truth for all
+  // three choices: "" means Native Token, SELF_REFLECTION_ASSET means This
+  // Token (the token being launched itself — see that constant's comment),
+  // and anything else is a creator-typed Custom Token address. Kept as one
+  // field (rather than a separate mode flag) so every existing call site
+  // that already sends this value straight to the contract or into a
+  // signed voucher needs no change at all — the sentinel is just another
+  // address as far as encoding is concerned.
+  function reflectionAssetMode(raw){
+    if(!raw) return "native";
+    return raw.toLowerCase()===SELF_REFLECTION_ASSET ? "self" : "custom";
+  }
+  // Human label for a reflections asset value, used both for the
+  // in-progress draft (no tokenAddress yet — labeled against the ticker
+  // being typed) and for an already-launched token (tokenAddress known, so
+  // an on-chain-resolved reflectionAsset that happens to equal the token's
+  // own address is recognized as "This token" too, not just the raw
+  // sentinel — see performOnChainCustomLaunch/performRelayedCustomLaunch,
+  // which read the real resolved value back off the CustomTokenCreated
+  // event rather than re-guessing it).
+  function reflectionAssetLabel(raw, ticker, tokenAddress){
+    if(!raw) return "Native Token";
+    const a = String(raw).toLowerCase();
+    const isSelf = a===SELF_REFLECTION_ASSET || (tokenAddress && a===String(tokenAddress).toLowerCase());
+    if(isSelf) return `This token ($${escapeHtml(ticker||"TOKEN")})`;
+    return fmtAddrSafe(raw);
+  }
+  // Formats a raw (base-unit) token amount using ITS OWN decimals — unlike
+  // weiToEtherString elsewhere in this file, which always assumes 18 (safe
+  // for this platform's own launches, but a creator-supplied custom
+  // reflections token can use any decimals() it wants). Bigint arithmetic
+  // throughout, then comma-grouped as a string, so a huge meme-token supply
+  // never round-trips through a floating-point Number and loses precision.
+  function formatRawTokenAmount(raw, decimals){
+    const d = Number.isFinite(decimals) && decimals>=0 && decimals<=36 ? decimals : 18;
+    const denom = 10n ** BigInt(d);
+    const whole = raw / denom;
+    const frac = raw % denom;
+    const wholeStr = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    const fracStr = d>0 ? frac.toString().padStart(d,"0").slice(0,4).replace(/0+$/,"") : "";
+    return wholeStr + (fracStr ? "."+fracStr : "");
+  }
+  // Debounced on-chain validity check for a creator-typed "Custom Token"
+  // reflections address — confirms there's a real ERC20 there
+  // (name()/symbol()/decimals()/totalSupply() all answer) before the
+  // wizard ever lets this launch, and shows what it found right next to
+  // the field so a typo or a wrong-network address gets caught before a
+  // creator signs anything. Purely a UX safety net: the contract itself
+  // doesn't care whether reflectionAsset is a "real" ERC20 (that's the
+  // creator's own problem if reflections are even turned on), this just
+  // protects against launching with a broken one by mistake. Cached by
+  // address in reflectionTokenCheck, which survives wizard re-renders
+  // (module-level, not reset per render) so navigating away and back to
+  // this step doesn't lose an already-confirmed result.
+  let reflectionTokenCheck = { address:"", status:"idle", info:null }; // status: idle | checking | valid | invalid | offline
+  let reflectionTokenCheckSeq = 0;
+  let reflectionTokenCheckTimer = null;
+  // Single source of truth for what the #reflectionAssetInfo line should
+  // say right now, driven entirely off draft.customFees.reflectionAsset +
+  // reflectionTokenCheck — used both by reflectionAssetFieldHTML (so a
+  // fresh render of this step, e.g. navigating back to it, starts already
+  // showing the right thing) and by renderReflectionTokenInfo (so a radio
+  // click or a keystroke updates that same line in place afterward,
+  // without needing a full step re-render).
+  function reflectionInfoDisplay(){
+    const raw = (draft.customFees.reflectionAsset||"").trim();
+    const mode = reflectionAssetMode(raw);
+    if(mode==="native") return { color:"var(--paper-500)", text:"" };
+    if(mode==="self") return { color:"var(--good-500)", text:`Reflections pay out directly in $${draft.ticker||"this token"} — no swap needed, holders just receive more of it.` };
+    // mode === "custom" from here on.
+    if(raw.toLowerCase() !== reflectionTokenCheck.address.toLowerCase()){
+      // Not checked yet for this exact address (a fresh keystroke, or a
+      // step re-render for an address typed before this cache existed) —
+      // scheduleReflectionTokenLookup (called from bindWizardFields, and
+      // from the input's own "input" handler) is what kicks off a real
+      // check; this is just the blank interim state until it reports back.
+      return { color:"var(--paper-500)", text:"" };
+    }
+    const { status, info } = reflectionTokenCheck;
+    if(status==="checking") return { color:"var(--paper-500)", text:"Checking this address on-chain…" };
+    if(status==="offline") return { color:"var(--paper-500)", text:"Connect a wallet to verify this token on-chain before launching." };
+    if(status==="invalid") return { color:"var(--critical-500)", text:"No ERC20 token found at this address on the current network — double-check it before launching." };
+    if(status==="valid" && info){
+      return { color:"var(--good-500)", text:`✓ ${info.name} ($${info.symbol}) · ${info.decimals} decimals · supply ${formatRawTokenAmount(info.totalSupply, info.decimals)}` };
+    }
+    return { color:"var(--paper-500)", text:"" };
+  }
+  function renderReflectionTokenInfo(){
+    // Plain getElementById here, not the byId() shorthand — that's local
+    // to bindWizardFields' own scope, and this function is called from
+    // scheduleReflectionTokenLookup's setTimeout callback too, which runs
+    // well outside it.
+    const el = document.getElementById("reflectionAssetInfo");
+    if(!el) return;
+    const { color, text } = reflectionInfoDisplay();
+    el.style.color = color;
+    // textContent, never innerHTML — info.name/info.symbol came back from
+    // an arbitrary creator-supplied contract's name()/symbol() and must
+    // never be parsed as markup, even though nothing here is attacker-
+    // reachable beyond this browser tab's own wizard state.
+    el.textContent = text;
+  }
+  function scheduleReflectionTokenLookup(){
+    const raw = (draft.customFees.reflectionAsset||"").trim();
+    clearTimeout(reflectionTokenCheckTimer);
+    if(!isAddressLike(raw)){
+      reflectionTokenCheck = { address: raw, status: "idle", info: null };
+      renderReflectionTokenInfo();
+      return;
+    }
+    reflectionTokenCheck = { address: raw, status: "checking", info: null };
+    renderReflectionTokenInfo();
+    const mySeq = ++reflectionTokenCheckSeq;
+    reflectionTokenCheckTimer = setTimeout(async()=>{
+      if(!window.ethereum){
+        if(mySeq!==reflectionTokenCheckSeq) return;
+        reflectionTokenCheck = { address: raw, status: "offline", info: null };
+        renderReflectionTokenInfo();
+        return;
+      }
+      try{
+        const [nameHex, symbolHex, decimalsHex, supplyHex] = await Promise.all([
+          ethCall(raw, "0x"+NAME_SELECTOR),
+          ethCall(raw, "0x"+SYMBOL_SELECTOR),
+          ethCall(raw, "0x"+DECIMALS_SELECTOR),
+          ethCall(raw, "0x"+TOTAL_SUPPLY_SELECTOR),
+        ]);
+        const info = {
+          name: decodeAbiString(nameHex),
+          symbol: decodeAbiString(symbolHex),
+          decimals: Number(decodeUint256(decimalsHex)),
+          totalSupply: decodeUint256(supplyHex),
+        };
+        if(mySeq!==reflectionTokenCheckSeq) return; // a newer keystroke superseded this lookup
+        reflectionTokenCheck = { address: raw, status: "valid", info };
+      }catch(err){
+        // No code at this address, or it doesn't implement one of the four
+        // calls above (reverts/decodes garbage either way) — either way,
+        // not something this contract can safely be told to pay
+        // reflections in.
+        if(mySeq!==reflectionTokenCheckSeq) return;
+        reflectionTokenCheck = { address: raw, status: "invalid", info: null };
+      }
+      renderReflectionTokenInfo();
+    }, 500);
+  }
+  // Builds the shared "Reflections payout asset" field for both custom-tax
+  // wizard steps (customFeeStepHTML/customDeployFeeStepHTML) — Native
+  // Token and This Token both lock the address input closed (there's
+  // nothing to type for either), and only Custom Token opens it, with the
+  // on-chain validity check above surfacing right underneath it.
+  function reflectionAssetFieldHTML(reflectionOnHint){
+    const raw = draft.customFees.reflectionAsset || "";
+    const mode = reflectionAssetMode(raw);
+    const initialInfo = reflectionInfoDisplay();
+    return `
+      <div class="field">
+        <label style="margin-bottom:8px; display:block;">Reflections payout asset</label>
+        <div style="display:flex; gap:16px; margin-bottom:8px; flex-wrap:wrap;">
+          <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectNative" ${mode==="native"?"checked":""}> Native Token</label>
+          <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectSelf" ${mode==="self"?"checked":""}> This Token</label>
+          <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectCustom" ${mode==="custom"?"checked":""}> Custom Token</label>
+        </div>
+        <input id="fReflectionAsset" type="text" placeholder="0x… token address" value="${mode==="custom"?escapeHtml(raw):""}" ${mode==="custom"?"":"disabled"}>
+        <div id="reflectionAssetInfo" class="hint" style="margin-top:6px; color:${initialInfo.color};">${escapeHtml(initialInfo.text)}</div>
+        <div class="hint" style="margin-top:6px;">${reflectionOnHint}</div>
+      </div>
+    `;
+  }
   function validateCustomFeesOrToast(){
     const buyTotal = feeSideTotalBps("buy");
     const sellTotal = feeSideTotalBps("sell");
@@ -4807,9 +5023,30 @@
       return false;
     }
     if(draft.customFees.reflectionAsset && !isAddressLike(draft.customFees.reflectionAsset)){
-      toast("That doesn't look like a valid ERC20 address for reflections — use a 0x… address, or switch back to Native ETH.");
+      toast("That doesn't look like a valid ERC20 address for reflections — use a 0x… address, or switch back to Native Token.");
       wizStep=3; renderWizard();
       return false;
+    }
+    // Custom Token specifically (Native Token and This Token both skip
+    // this — see reflectionAssetMode) must have already come back as a
+    // real, on-chain ERC20 from scheduleReflectionTokenLookup before this
+    // wizard lets it launch. "offline" (no injected wallet at all) is left
+    // to fail at launchDraftToken's own wallet checks instead of blocked
+    // here, since it isn't specific to this address.
+    if(reflectionAssetMode(draft.customFees.reflectionAsset)==="custom"){
+      const raw = draft.customFees.reflectionAsset.trim();
+      const stale = reflectionTokenCheck.address.toLowerCase() !== raw.toLowerCase();
+      const status = stale ? "idle" : reflectionTokenCheck.status;
+      if(status==="checking" || stale){
+        toast("Still checking that reflections token address on-chain — wait a moment and try again.");
+        wizStep=3; renderWizard();
+        return false;
+      }
+      if(status==="invalid"){
+        toast("No ERC20 token was found at that reflections address on the current network — fix it, or switch to Native Token / This Token.");
+        wizStep=3; renderWizard();
+        return false;
+      }
     }
     if(draft.mode==="custom" && !(draft.liquidityEth>0)){
       toast("Set an ETH amount to pair against the supply before launching.");
