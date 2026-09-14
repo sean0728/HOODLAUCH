@@ -16,13 +16,27 @@ contract MaliciousReflectionReceiver {
         Revert, // reverts unconditionally on receiving ETH
         ReenterPush, // calls token.pushReflections() from inside receive()
         ReenterClaim, // calls token.claimReflections() from inside receive()
-        GasGuzzle // burns gas in a storage-writing loop, deliberately never returning cleanly
+        GasGuzzle, // burns gas in a storage-writing loop, deliberately never returning cleanly
+        SelfDump // AUDIT PoC: plain token.transfer()'s its entire balance away from inside receive(), to test whether _reflectionHolders mutating mid-_pushReflectionBatch (via _afterBalanceChange's registry removal) can panic a later iteration of the same batch
     }
 
     CustomToken public token;
     Mode public mode;
     uint256 public receiveCount;
     uint256 private _sink; // written to in GasGuzzle mode purely to burn gas
+    address public dumpTarget; // SelfDump mode: who receives the dumped balance
+    event DumpAttempt(bool success, uint256 gasBeforeCall, uint256 gasLeftAfterEntry);
+
+    function setDumpTarget(address target) external {
+        dumpTarget = target;
+    }
+
+    /// AUDIT PoC helper: same dump, called directly (full gas, no reentrancy,
+    /// no stipend) to establish the baseline cost of the token.transfer()
+    /// call in isolation.
+    function dumpNow() external {
+        token.transfer(dumpTarget, token.balanceOf(address(this)));
+    }
 
     constructor(address token_) {
         token = CustomToken(payable(token_));
@@ -75,6 +89,17 @@ contract MaliciousReflectionReceiver {
             // caller's whole batch either.
             while (true) {
                 _sink += 1;
+            }
+        } else if (mode == Mode.SelfDump) {
+            // Wrapped in try/catch purely for diagnostics (to emit whether
+            // it succeeded and how much gas was left) — the attack itself
+            // doesn't need the catch, a bare call works identically for
+            // the outer .call's success/failure either way.
+            uint256 gasBefore = gasleft();
+            try token.transfer(dumpTarget, token.balanceOf(address(this))) returns (bool) {
+                emit DumpAttempt(true, gasBefore, gasleft());
+            } catch {
+                emit DumpAttempt(false, gasBefore, gasleft());
             }
         }
         // Mode.Accept: do nothing further, plain successful receipt.
