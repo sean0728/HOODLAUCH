@@ -15,25 +15,42 @@ import "./interfaces/IAggregatorV3.sol";
 /// creator picks a tax rate (0% is a valid choice, same contract either
 /// way) split across up to four fee types, each independently on or off:
 ///
-///  - reflections: a share of every buy/sell is swapped and distributed to
-///    every holder, proportional to their balance, in either the chain's
-///    native ETH or a specific ERC20 the creator names at launch. Every
-///    holder's claimable balance grows on its own, proportional to their
+///  - reflections: a share of every buy/sell is distributed to every
+///    holder, proportional to their balance, in one of three assets the
+///    creator picks at launch: the chain's native ETH, this token itself
+///    (reflectionAsset == address(this) — no swap needed at all, the
+///    collected fee cut already IS this token, so it's distributed
+///    directly), or a specific other ERC20 the creator names (swapped for
+///    via router, routed through WETH). Every holder's claimable balance
+///    grows on its own, proportional to their
 ///    holdings, the moment a distribution happens — no action needed from
-///    them at all. Payout itself has two paths, both drawing from the exact
-///    same accounting so nobody can ever be paid twice for one
-///    distribution: anyone can call pushReflections() to sweep a batch of
-///    holders and pay each one directly (this is what makes payout
-///    "automatic" — it doesn't require this specific holder to lift a
-///    finger, only *someone* to call it, e.g. an off-chain keeper on a
-///    schedule — see scripts/pushReflections.js), and a holder who'd rather
-///    not wait for the sweep to reach them can still call
-///    claimReflections() themselves at any time. Deliberately NOT done by
-///    looping over holders inside the transfer itself — that's exactly how
-///    fee tokens end up with a transfer that can be gas-griefed into
-///    failing, so pushReflections() is a separate, gas-bounded,
-///    caller-chosen batch instead (same anti-griefing shape as
-///    PlatformRewardsDistributor.processAirdropBatch).
+///    them at all. Payout is genuinely automatic, not just accrual: the
+///    same swap-and-process cycle that funds a distribution also sweeps a
+///    bounded batch of holders (autoDistributeBatchSize, creator-tunable,
+///    see that field's own comment) and pays each one directly, right
+///    inside that same transaction — no separate keeper call, cron job, or
+///    off-chain script is required for ordinary payout to happen anymore.
+///    That automatic sweep and the permissionless pushReflections() below
+///    share one internal batch routine (_pushReflectionBatch) and one
+///    cursor, so whichever one runs picks up where the other left off
+///    instead of restarting at holder zero — pushReflections() (and
+///    scripts/pushReflections.js, still shipped) remain useful for
+///    catching a large holder base up faster than the per-trade batch size
+///    alone would. A holder who'd rather not wait for either can still call
+///    claimReflections() themselves at any time — all three paths draw
+///    from the exact same accounting, so nobody can ever be paid twice for
+///    one distribution. Deliberately NOT done by looping over the FULL
+///    holder list inside the transfer itself — that's exactly how fee
+///    tokens end up with a transfer that can be gas-griefed into failing,
+///    so every push (automatic or manual) is a separate, gas-bounded,
+///    size-capped batch instead (same anti-griefing shape as
+///    PlatformRewardsDistributor.processAirdropBatch). One real tradeoff
+///    worth knowing: the batch's gas cost is now paid by whichever ordinary
+///    seller's transaction happens to cross swapThreshold, not by a
+///    separate keeper transaction — the same tradeoff WaterToken's
+///    autoDistribute()-on-every-sell design makes, and why the batch size
+///    stays small and creator-tunable rather than sized to clear the whole
+///    holder registry at once.
 ///  - marketing: a share is swapped for ETH and sent to marketingWallet,
 ///    which the creator (and only the creator) can repoint later via
 ///    setMarketingWallet().
@@ -53,7 +70,8 @@ import "./interfaces/IAggregatorV3.sol";
 /// for any of them anywhere below. What CAN change after launch is
 /// operational, never the rate itself: the marketing wallet address, the
 /// swap-threshold batching knob, the processing-slippage tolerance, the
-/// rewards-blocked list, and a tax-exemption whitelist (isTaxExempt /
+/// automatic-distribution batch size, the rewards-blocked list, and a
+/// tax-exemption whitelist (isTaxExempt /
 /// setTaxExempt — bypasses tax entirely for a specific address, but never
 /// changes what rate anyone else pays). All of those, plus the creator
 /// role itself, go permanently dark the moment the creator calls
@@ -120,8 +138,16 @@ contract CustomToken is ERC20, ReentrancyGuard {
     FeeSet public sellFees;
 
     /// @notice address(0) means reflections pay out in the chain's native
-    /// ETH; any other address is the ERC20 reflections pay out in instead
-    /// (swapped for via router, routed through WETH). Fixed at launch.
+    /// ETH; address(this) means reflections pay out in the token being
+    /// launched itself (the collected fee cut is already this token, so
+    /// _processReflections skips the swap entirely and distributes it
+    /// directly — see that function); any other address is a different
+    /// ERC20 reflections pay out in instead (swapped for via router, routed
+    /// through WETH). Fixed at launch. CustomTokenFactory resolves its own
+    /// SELF_REFLECTION_ASSET sentinel to the freshly-cloned token's real
+    /// address before ever calling initialize() with it, so this field
+    /// itself never needs to know about that sentinel — by the time
+    /// initialize() runs, it's always a concrete, final address.
     address public reflectionAsset;
 
     /// @notice Where the marketing fee's swapped ETH goes. The only
@@ -319,10 +345,29 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// consume the batch caller's entire remaining gas.
     uint256 public constant PUSH_GAS_STIPEND = 50_000;
 
+    /// @notice How many holders _processReflections() automatically sweeps
+    /// (via _pushReflectionBatch, same routine pushReflections() below
+    /// uses) every single time a swap-and-process cycle actually funds a
+    /// reflection distribution — this is what makes payout happen without
+    /// anyone ever having to call pushReflections() or run a keeper script.
+    /// Bounded the same way processingSlippageBps/swapThreshold are: high
+    /// enough to make real progress on a holder base, low enough that the
+    /// seller whose transaction happened to cross swapThreshold isn't stuck
+    /// paying gas to sweep hundreds of holders in one go. Defaulted inside
+    /// initialize() rather than as an inline field initializer — this is a
+    /// clone, and an inline initializer only ever runs in the
+    /// implementation contract's own constructor, never on a clone (see
+    /// swapThreshold's own comment for the same reasoning) — and
+    /// creator-adjustable afterwards via setAutoDistributeBatchSize().
+    uint256 public autoDistributeBatchSize;
+    uint256 public constant MIN_AUTO_DISTRIBUTE_BATCH_SIZE = 1;
+    uint256 public constant MAX_AUTO_DISTRIBUTE_BATCH_SIZE = 50;
+
     event TokenInitialized(string name, string symbol, uint256 totalSupply, address indexed creator);
     event PairSet(address indexed pair);
     event MarketingWalletUpdated(address indexed newWallet);
     event SwapThresholdUpdated(uint256 newThreshold);
+    event AutoDistributeBatchSizeUpdated(uint256 newSize);
     event RewardsAccessUpdated(address indexed account, bool blocked);
     event DividendsDistributed(uint256 amount);
     event DividendWithdrawn(address indexed to, uint256 amount);
@@ -371,7 +416,15 @@ contract CustomToken is ERC20, ReentrancyGuard {
         require(mintTo_ != address(0), "CustomToken: invalid mint recipient");
         require(factory_ != address(0), "CustomToken: invalid factory");
         require(router_ != address(0), "CustomToken: invalid router");
-        require(reflectionAsset_ != address(this), "CustomToken: reflection asset cannot be this token");
+        // reflectionAsset_ == address(this) is a deliberate, fully-supported
+        // configuration — "reflections paid in the token being launched
+        // itself" — not the confusing self-referential-swap misconfiguration
+        // Finding 6 in AUDIT-CustomToken.md originally flagged. What made
+        // that finding real was _processReflections swapping this token for
+        // itself through the router; _processReflections now special-cases
+        // reflectionAsset == address(this) and skips the swap entirely
+        // (the collected fee cut already IS this token), so there is no
+        // broken path left to reject here.
 
         uint256 buyTotal = uint256(buyFees_.reflectionBps) + buyFees_.marketingBps + buyFees_.liquidityBps + buyFees_.burnBps;
         uint256 sellTotal = uint256(sellFees_.reflectionBps) + sellFees_.marketingBps + sellFees_.liquidityBps + sellFees_.burnBps;
@@ -394,6 +447,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
         marketingWallet = marketingWallet_;
         swapThreshold = totalSupply_ / 1000; // 0.1% default; see setSwapThreshold()
         processingSlippageBps = 600; // 6.00% default; see setProcessingSlippageBps()
+        autoDistributeBatchSize = 10; // default; see setAutoDistributeBatchSize()
         reflectionsEnabled = buyFees_.reflectionBps > 0 || sellFees_.reflectionBps > 0;
 
         _mint(mintTo_, totalSupply_); // "deploy + liquidity": mints to the factory, which pairs it into the pool. "deploy only": mints straight to the creator — see CustomTokenFactory.createCustomToken.
@@ -563,6 +617,20 @@ contract CustomToken is ERC20, ReentrancyGuard {
         emit ProcessingSlippageBpsUpdated(newBps);
     }
 
+    /// @notice Retune how many holders each automatic post-swap sweep pays
+    /// out (see autoDistributeBatchSize's own comment) — a purely
+    /// operational knob, not a fee rate, so letting the creator tune it
+    /// doesn't reopen the "rates are locked forever" guarantee above.
+    /// Raising it pays more holders per cycle but costs the triggering
+    /// seller more gas; lowering it does the opposite. Bounded 1-50, same
+    /// range WaterToken's identical setAutoDistributeBatchSize() uses.
+    function setAutoDistributeBatchSize(uint256 newSize) external onlyCreator {
+        require(newSize >= MIN_AUTO_DISTRIBUTE_BATCH_SIZE, "CustomToken: batch size below minimum");
+        require(newSize <= MAX_AUTO_DISTRIBUTE_BATCH_SIZE, "CustomToken: batch size above maximum");
+        autoDistributeBatchSize = newSize;
+        emit AutoDistributeBatchSizeUpdated(newSize);
+    }
+
     /// @notice Step 1 of a two-step creator handoff — see pendingCreator
     /// above and Finding 5 of AUDIT-CustomToken.md. Does nothing to the
     /// live `creator` role until the proposed address calls
@@ -577,8 +645,8 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// handoff, proving it controls that address before every
     /// onlyCreator-gated function (setMarketingWallet, setSwapThreshold,
     /// setRewardsBlocked, activateIndependentPair, setProcessingSlippageBps,
-    /// rescueToken, rescueEth) starts listening to it instead of the old
-    /// creator.
+    /// setAutoDistributeBatchSize, setTaxExempt, rescueToken, rescueEth)
+    /// starts listening to it instead of the old creator.
     function acceptCreator() external {
         require(msg.sender == pendingCreator, "CustomToken: caller is not the pending creator");
         address previousCreator = creator;
@@ -592,9 +660,9 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// on-chain. Sets `creator` (and any in-flight `pendingCreator`) to
     /// address(0) forever, with no recovery path by design. The instant
     /// this is called, every onlyCreator-gated function on this contract
-    /// — setMarketingWallet, setSwapThreshold, setRewardsBlocked,
-    /// activateIndependentPair, setProcessingSlippageBps, setTaxExempt,
-    /// rescueToken, rescueEth, transferCreator — becomes permanently
+    /// — setMarketingWallet, setSwapThreshold, setProcessingSlippageBps,
+    /// setAutoDistributeBatchSize, setRewardsBlocked, activateIndependentPair,
+    /// setTaxExempt, rescueToken, rescueEth, transferCreator — becomes permanently
     /// uncallable by anyone, including the address that just called this.
     /// Note what this does NOT touch: buyFees, sellFees, and
     /// platformFeeBps were never mutable in the first place (no function
@@ -998,16 +1066,57 @@ contract CustomToken is ERC20, ReentrancyGuard {
 
     function pushReflections(uint256 maxHolders) external nonReentrant returns (uint256 holdersPaid, uint256 totalPaid) {
         require(maxHolders > 0, "CustomToken: maxHolders must be > 0");
-        uint256 total = _reflectionHolders.length;
-        if (total == 0) return (0, 0);
+        (holdersPaid, totalPaid) = _pushReflectionBatch(maxHolders);
+    }
+
+    /// @dev The actual batch-payout loop, shared by two callers: the manual/
+    /// keeper-facing pushReflections() just above, and _processReflections()
+    /// below, which calls this automatically at the end of every
+    /// swap-and-process cycle that funds a distribution (with
+    /// autoDistributeBatchSize instead of a caller-supplied maxHolders).
+    /// Both paths read and advance the exact same reflectionPushCursor, so
+    /// an automatic sweep and a manual/keeper call interleave cleanly —
+    /// whichever runs next just keeps covering fresh holders — and both
+    /// emit the identical ReflectionsPushed event, so nothing downstream
+    /// (indexers, the front end, a block explorer) needs to know or care
+    /// which path actually paid a given holder. Pulled out of
+    /// pushReflections() itself only so _processReflections() can reuse it
+    /// without re-entering a nonReentrant-guarded external function from
+    /// inside another one.
+    function _pushReflectionBatch(uint256 maxHolders) private returns (uint256 holdersPaid, uint256 totalPaid) {
+        uint256 totalAtStart = _reflectionHolders.length;
+        if (totalAtStart == 0 || maxHolders == 0) return (0, 0);
 
         uint256 cursor = reflectionPushCursor;
-        if (cursor >= total) cursor = 0;
+        // Only bounds the ITERATION COUNT (a gas/efficiency cap so a
+        // maxHolders larger than the registry doesn't spin through empty
+        // wraparound revisits) — never used below to bound an array index.
+        uint256 steps = maxHolders < totalAtStart ? maxHolders : totalAtStart;
 
-        uint256 steps = maxHolders < total ? maxHolders : total;
         for (uint256 visited = 0; visited < steps; visited++) {
+            // Re-read the LIVE length every iteration, not the snapshot
+            // above: each holder's payout below is an external call (an
+            // ETH send with receive()/fallback code, or a nonstandard
+            // token's transfer()), and a holder that reentrantly transfers
+            // their own balance to zero mid-batch shrinks
+            // _reflectionHolders via _afterBalanceChange's swap-and-pop —
+            // indexing with a cursor bounded by the STALE totalAtStart
+            // could then read a slot the array no longer has, reverting
+            // with an out-of-bounds panic (and, for the automatic
+            // caller here, silently losing that entire distribution cycle
+            // to _swapAndProcess's catch block). Empirically, a real
+            // reentrant self-transfer doesn't fit inside PUSH_GAS_STIPEND
+            // today (a full _update + registry removal costs more than
+            // 50,000 gas in every configuration tested), so this isn't
+            // currently reachable — but nothing about that margin is
+            // guaranteed to hold if PUSH_GAS_STIPEND or _afterBalanceChange
+            // ever change, so bound against the live length regardless.
+            uint256 liveTotal = _reflectionHolders.length;
+            if (liveTotal == 0) break;
+            if (cursor >= liveTotal) cursor = 0;
+
             address holder = _reflectionHolders[cursor];
-            cursor = cursor + 1 == total ? 0 : cursor + 1;
+            cursor = cursor + 1 == liveTotal ? 0 : cursor + 1;
 
             if (holder == address(this) || holder == pair || isBlockedFromRewards[holder]) continue;
             uint256 amount = withdrawableDividendOf(holder);
@@ -1244,19 +1353,57 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// @dev External purely so _swapAndProcess can wrap it in try/catch —
     /// see that function's own comment; not meant to be called by
     /// anything but this contract itself.
-    function _processReflections(uint256 amount) external {
+    /// @dev nonReentrant here (new, unlike _processLiquidity/_processMarketing
+    /// above) because this function, as of the automatic-payout sweep below,
+    /// now sends funds directly to arbitrary holder addresses — the exact
+    /// same external-call exposure pushReflections()/claimReflections()
+    /// already guard against, and this function shares their guard (one
+    /// ReentrancyGuard per contract). A reentrant call in from a malicious
+    /// holder's receive() during the sweep just fails that one holder's
+    /// send (handled the same as any other failed send — see
+    /// _pushReflectionBatch) rather than risking a double-payment.
+    function _processReflections(uint256 amount) external nonReentrant {
         require(msg.sender == address(this), "CustomToken: internal only");
         if (reflectionAsset == address(0)) {
             uint256 ethBefore = address(this).balance;
             _swapTokensForEth(amount);
             uint256 ethOut = address(this).balance - ethBefore;
             _distributeDividends(ethOut);
+        } else if (reflectionAsset == address(this)) {
+            // Reflections paid in the token being launched itself: `amount`
+            // (pendingReflectionTokens) is already this token, already
+            // sitting in this contract's own balance — there's nothing to
+            // swap, unlike the native-ETH and other-ERC20 branches. Swapping
+            // this token for itself through the router would be exactly the
+            // broken self-referential path AUDIT-CustomToken.md Finding 6
+            // originally flagged (`[address(this), WETH, address(this)]`);
+            // this branch is what makes that swap unnecessary rather than
+            // just forbidding the configuration outright. _pushReflectionBatch
+            // below pays each holder via IERC20(reflectionAsset).transfer(...)
+            // exactly like the other-ERC20 branch — since reflectionAsset is
+            // this token, that resolves to this contract's own transfer(),
+            // a plain in-kind send. It runs while _inSwap is still true (set
+            // by _swapAndProcess's lockTheSwap, still held for the rest of
+            // this call), so _update() takes its untaxed, non-recursive path
+            // for that send exactly the same way every other internal
+            // fee-cut transfer inside _update() already does — no tax is
+            // skimmed off a reflection payout, and it can never re-trigger
+            // _maybeSwapAndProcess().
+            _distributeDividends(amount);
         } else {
             uint256 balBefore = IERC20(reflectionAsset).balanceOf(address(this));
             _swapTokensForToken(amount, reflectionAsset);
             uint256 received = IERC20(reflectionAsset).balanceOf(address(this)) - balBefore;
             _distributeDividends(received);
         }
+        // Automatic payout: right inside this same transaction, sweep a
+        // bounded batch of holders and pay them directly — see
+        // autoDistributeBatchSize's own comment. This is the piece that
+        // makes "reflections are automatically distributed" literally
+        // true, rather than only the accrual/accounting being automatic
+        // while payout waits on a manual pushReflections() call or an
+        // off-chain keeper.
+        _pushReflectionBatch(autoDistributeBatchSize);
     }
 
     /// @dev Standard Uniswap V2 constant-product quote (0.30% swap fee

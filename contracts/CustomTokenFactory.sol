@@ -39,6 +39,22 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     IUniswapV2Router02 public immutable router;
     LiquidityLocker public immutable locker;
 
+    /// @notice Pass this as reflectionAsset_ (createCustomToken) or
+    /// voucher.reflectionAsset (relayedCreateCustomToken) to mean "pay
+    /// reflections out in the token being launched itself." The clone's own
+    /// address doesn't exist yet at the point a caller builds that calldata
+    /// — or, for a relayed launch, at the point the creator signs their
+    /// voucher, well before this factory ever runs — so there's no way to
+    /// pass the real address directly. This well-known placeholder stands
+    /// in for it instead: both creation paths below resolve it to the
+    /// freshly-cloned token's real address immediately after Clones.clone()
+    /// runs, before ever calling initialize() with it — CustomToken itself
+    /// never sees or needs to know about this sentinel. It's the ecrecover
+    /// precompile's address: precompiles hold no code and are never a real
+    /// ERC20, so there's no ambiguity with a creator's genuine choice of
+    /// another token to reflect in.
+    address public constant SELF_REFLECTION_ASSET = address(1);
+
     uint256 public deployFee; // "Deploy Custom Tax Token" — create + verify only, no liquidity, no tax of any kind
     uint256 public launchFee; // "Deploy and Add Liquidity (Live)" — atomic creation + pool + creator tax + platform tax
     address public feeTreasury;
@@ -390,6 +406,12 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         d.settled = true; // effects before interactions
 
         token = Clones.clone(tokenImplementation);
+        // See SELF_REFLECTION_ASSET's own comment — the creator signed
+        // voucher.reflectionAsset before this token existed, so a request
+        // for "reflect in the token itself" necessarily arrives as that
+        // sentinel rather than a real address; resolve it now that the
+        // clone's address finally exists.
+        address resolvedReflectionAsset = voucher.reflectionAsset == SELF_REFLECTION_ASSET ? token : voucher.reflectionAsset;
 
         if (!voucher.addLiquidity) {
             require(
@@ -406,7 +428,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
                 address(router),
                 voucher.buyFees,
                 voucher.sellFees,
-                voucher.reflectionAsset,
+                resolvedReflectionAsset,
                 voucher.marketingWallet
             );
         } else {
@@ -421,7 +443,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
                 address(router),
                 voucher.buyFees,
                 voucher.sellFees,
-                voucher.reflectionAsset,
+                resolvedReflectionAsset,
                 voucher.marketingWallet
             );
 
@@ -441,7 +463,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         _tokenList.push(token);
 
         emit CustomTokenCreated(
-            token, voucher.creator, voucher.name, voucher.symbol, voucher.totalSupply, pair, voucher.reflectionAsset, voucher.marketingWallet
+            token, voucher.creator, voucher.name, voucher.symbol, voucher.totalSupply, pair, resolvedReflectionAsset, voucher.marketingWallet
         );
 
         _settleRelayedFee(voucherHash, token, voucher.fee, gasStart);
@@ -554,8 +576,10 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     /// 5% total (see CustomToken.MAX_TOTAL_BPS) — passing all-zero fees is
     /// exactly how you get a 0%-tax token through this same path.
     /// reflectionAsset_ == address(0) means reflections pay out in native
-    /// ETH; any other address is the ERC20 they pay out in instead.
-    /// marketingWallet_ is required only if either side's marketingBps is
+    /// ETH; SELF_REFLECTION_ASSET means they pay out in the token being
+    /// launched itself (resolved to the real clone address right after it's
+    /// created, below); any other address is the ERC20 they pay out in
+    /// instead. marketingWallet_ is required only if either side's marketingBps is
     /// nonzero. creatorBuyEthAmount is optional (0 skips it entirely) — an
     /// ordinary swap against the pool just created, in this same
     /// transaction, guaranteed to be its first trade, but capped at
@@ -580,6 +604,13 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         require(totalSupply_ > 0, "CustomTokenFactory: supply must be > 0");
 
         token = Clones.clone(tokenImplementation);
+        // Resolve the "pay reflections in the token itself" sentinel now
+        // that the clone's real address finally exists — see
+        // SELF_REFLECTION_ASSET's own comment. Every use of the creator's
+        // reflection-asset choice from here on (both initialize() calls
+        // below and the emitted event) uses this resolved value, never the
+        // raw parameter.
+        address resolvedReflectionAsset = reflectionAsset_ == SELF_REFLECTION_ASSET ? token : reflectionAsset_;
         uint256 feeCollected;
 
         if (!addLiquidity) {
@@ -605,7 +636,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
                 address(router),
                 buyFees_,
                 sellFees_,
-                reflectionAsset_,
+                resolvedReflectionAsset,
                 marketingWallet_
             );
         } else {
@@ -630,7 +661,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
                 address(router),
                 buyFees_,
                 sellFees_,
-                reflectionAsset_,
+                resolvedReflectionAsset,
                 marketingWallet_
             );
 
@@ -675,7 +706,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
             }
         }
 
-        emit CustomTokenCreated(token, msg.sender, name_, symbol_, totalSupply_, pair, reflectionAsset_, marketingWallet_);
+        emit CustomTokenCreated(token, msg.sender, name_, symbol_, totalSupply_, pair, resolvedReflectionAsset, marketingWallet_);
     }
 
     /// @dev Everything specific to seeding the pool and the optional
