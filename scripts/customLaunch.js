@@ -131,11 +131,17 @@ async function main() {
   // Mine a CREATE2 salt so this launch's clone address lands ending in
   // VANITY_SUFFIX (see lib/vanitySalt.js and CustomTokenFactory.
   // createCustomToken's own doc comment) — pure off-chain computation, no
-  // extra transaction.
+  // extra transaction. The mined salt is only valid for signer.address as
+  // the caller (see CustomTokenFactory._deriveTokenSalt) — this is the
+  // address that submits the createCustomToken transaction below.
   const tokenImplementationForMining = await factory.tokenImplementation();
-  const { salt, address: predictedAddress, attempts } = mineVanitySalt(factoryAddress, tokenImplementationForMining);
+  const { salt, address: predictedAddress, attempts } = mineVanitySalt(
+    factoryAddress,
+    tokenImplementationForMining,
+    signer.address
+  );
   console.log(`Mined a salt for an address ending in "${VANITY_SUFFIX}" in ${attempts} attempts: ${predictedAddress}`);
-  const onChainPrediction = await factory.predictTokenAddress(salt);
+  const onChainPrediction = await factory.predictTokenAddress(signer.address, salt);
   if (onChainPrediction.toLowerCase() !== predictedAddress.toLowerCase()) {
     throw new Error(
       `Vanity address prediction mismatch (off-chain ${predictedAddress} vs on-chain ${onChainPrediction}) — ` +
