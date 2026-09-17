@@ -116,6 +116,7 @@ describe("Relayed (gasless) launches", function () {
         await priceFeed.getAddress()
       );
       await locker.setFactory(await factory.getAddress());
+      await factory.connect(deployer).setMaxRelayerGasReimbursement(ethers.parseEther("1"));
       await factory.connect(deployer).setRelayer(relayerAcct.address);
 
       return {
@@ -502,6 +503,7 @@ describe("Relayed (gasless) launches", function () {
         await priceFeed.getAddress()
       );
       await locker.setFactory(await factory.getAddress());
+      await factory.connect(deployer).setMaxRelayerGasReimbursement(ethers.parseEther("1"));
       await factory.connect(deployer).setRelayer(relayerAcct.address);
 
       return {

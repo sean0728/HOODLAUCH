@@ -66,7 +66,7 @@ describe("LaunchedToken — transfer tax", function () {
 
     const tx = await factory
       .connect(creator)
-      .createToken("Aurora Ledger", "AURA", totalSupply, true, liquidityEth, 0, 0, {
+      .createToken("Aurora Ledger", "AURA", totalSupply, true, liquidityEth, 0, 0, 0n, {
         value: LAUNCH_FEE + liquidityEth,
       });
     const receipt = await tx.wait();
@@ -475,7 +475,7 @@ describe("LaunchedToken — transfer tax", function () {
       await expect(
         token
           .connect(otherAccount)
-          .configureTax(await pair.getAddress(), platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
+          .configureTax(await pair.getAddress(), platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
       ).to.be.revertedWith("LaunchedToken: caller is not the factory");
     });
 
@@ -489,7 +489,7 @@ describe("LaunchedToken — transfer tax", function () {
       await expect(
         token
           .connect(factorySigner)
-          .configureTax(await pair.getAddress(), platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
+          .configureTax(await pair.getAddress(), platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
       ).to.be.revertedWith("LaunchedToken: tax already configured");
     });
   });
@@ -532,7 +532,7 @@ describe("LaunchedToken — transfer tax", function () {
     });
 
     it("lets the factory owner recover a token whose original feed is permanently stale, via TokenFactory.updateTokenPriceFeed, without touching fee config", async function () {
-      const { factory, token, deployer, trader } = await deployStack({ liquidityEth: ethers.parseEther("0.001") });
+      const { factory, token, deployer, trader, priceFeed } = await deployStack({ liquidityEth: ethers.parseEther("0.001") });
 
       const feeBpsBefore = await token.feeBps();
       const feeWalletBefore = await token.feeWallet();
@@ -540,7 +540,14 @@ describe("LaunchedToken — transfer tax", function () {
 
       // Original feed is dead — stale forever, no owner action can fix the
       // feed itself. Trading must still work (see oracle resilience above);
-      // it's graduation specifically that's permanently stuck.
+      // it's graduation specifically that's permanently stuck. updatePriceFeed
+      // now also requires the CURRENT feed to already be non-fresh before it
+      // can be repointed (see LaunchedToken.updatePriceFeed's freshness
+      // guard, added post-audit) — so the token's original feed must
+      // actually go stale first, rather than merely being replaced with one
+      // that already is.
+      await priceFeed.setStale(1);
+
       const MockAggregatorV3 = await ethers.getContractFactory("MockAggregatorV3");
       const deadFeed = await MockAggregatorV3.deploy(8, ETH_USD_PRICE);
       await deadFeed.setStale(1);
@@ -625,7 +632,8 @@ describe("LaunchedToken — transfer tax", function () {
         ethers.ZeroAddress,
         0,
         ethers.ZeroAddress,
-        0
+        0,
+        ethers.ZeroAddress
       );
 
       expect(await token.taxActive()).to.equal(true);

@@ -33,6 +33,12 @@ describe("CustomToken / CustomTokenFactory", function () {
 
   const ETH_USD_PRICE = 3000n * 10n ** 8n; // $3000, 8 decimals — used only by tests that turn the platform tax on
 
+  // Distinct CREATE2 salts across calls to createCustomToken below —
+  // several tests deploy more than one token against the same factory
+  // instance, and Clones.cloneDeterministic reverts on a reused
+  // (implementation, deployer, salt) tuple.
+  let nextSalt = 0n;
+
   async function deployStack(overrides = {}) {
     const [deployer, creator, buyer, buyer2, otherAccount, treasury, marketingWallet, platformFeeWallet] = await ethers.getSigners();
 
@@ -106,6 +112,7 @@ describe("CustomToken / CustomTokenFactory", function () {
     const creatorBuyEthAmount = addLiquidity ? overrides.creatorBuyEthAmount ?? 0n : 0n;
     const minCreatorTokensOut = overrides.minCreatorTokensOut ?? 0n;
     const fee = overrides.fee ?? (addLiquidity ? LAUNCH_FEE : DEPLOY_FEE);
+    const salt = overrides.salt !== undefined ? overrides.salt : nextSalt++;
 
     const tx = await factory
       .connect(creator)
@@ -121,6 +128,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         marketingWallet,
         creatorBuyEthAmount,
         minCreatorTokensOut,
+        salt,
         { value: fee + liquidityEth + creatorBuyEthAmount }
       );
     const receipt = await tx.wait();
@@ -1175,7 +1183,7 @@ describe("CustomToken / CustomTokenFactory", function () {
       const { factory, creator } = await deployStack();
       await expect(
         factory.connect(creator).createCustomToken(
-          "A", "A", TOTAL_SUPPLY, true, LIQUIDITY_ETH, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, {
+          "A", "A", TOTAL_SUPPLY, true, LIQUIDITY_ETH, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, 0n, {
             value: LAUNCH_FEE - 1n, // less than the launch fee alone, regardless of liquidity
           }
         )
@@ -1186,7 +1194,7 @@ describe("CustomToken / CustomTokenFactory", function () {
       const { factory, creator } = await deployStack();
       await expect(
         factory.connect(creator).createCustomToken(
-          "A", "A", TOTAL_SUPPLY, true, LIQUIDITY_ETH, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, {
+          "A", "A", TOTAL_SUPPLY, true, LIQUIDITY_ETH, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, 0n, {
             value: LIQUIDITY_ETH, // launch fee met on its own, but doesn't leave LIQUIDITY_ETH remaining
           }
         )
@@ -1197,7 +1205,7 @@ describe("CustomToken / CustomTokenFactory", function () {
       const { factory, creator } = await deployStack();
       await expect(
         factory.connect(creator).createCustomToken(
-          "A", "A", TOTAL_SUPPLY, true, 0, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, {
+          "A", "A", TOTAL_SUPPLY, true, 0, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, 0n, {
             value: LAUNCH_FEE,
           }
         )
@@ -1239,7 +1247,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         // second, deploy-only-specific guard.
         await expect(
           factory.connect(creator).createCustomToken(
-            "A", "A", TOTAL_SUPPLY, false, LIQUIDITY_ETH, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, {
+            "A", "A", TOTAL_SUPPLY, false, LIQUIDITY_ETH, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, 0n, {
               value: DEPLOY_FEE,
             }
           )
@@ -1250,7 +1258,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         const { factory, creator } = await deployStack();
         await expect(
           factory.connect(creator).createCustomToken(
-            "A", "A", TOTAL_SUPPLY, false, 0, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, {
+            "A", "A", TOTAL_SUPPLY, false, 0, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, 0n, {
               value: DEPLOY_FEE - 1n,
             }
           )
@@ -1507,17 +1515,19 @@ describe("CustomToken / CustomTokenFactory", function () {
         expect(await tokenBefore.platformFeeBps()).to.equal(25n);
       });
 
-      it("rejects a feeBps default above 100%", async function () {
+      it("rejects a feeBps default above the MAX_FEE_BPS ceiling", async function () {
         const { factory, deployer, treasury, priceFeed } = await deployStack();
+        const maxFeeBps = await factory.MAX_FEE_BPS();
         await expect(
-          factory.connect(deployer).setTaxDefaults(treasury.address, 10_001, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
-        ).to.be.revertedWith("CustomTokenFactory: feeBps cannot exceed 100%");
+          factory.connect(deployer).setTaxDefaults(treasury.address, maxFeeBps + 1n, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
+        ).to.be.revertedWith("CustomTokenFactory: feeBps exceeds MAX_FEE_BPS ceiling");
       });
 
-      it("allows a feeBps default of exactly 100% (the ceiling itself is not rejected)", async function () {
+      it("allows a feeBps default of exactly MAX_FEE_BPS (the ceiling itself is not rejected)", async function () {
         const { factory, deployer, treasury, priceFeed } = await deployStack();
+        const maxFeeBps = await factory.MAX_FEE_BPS();
         await expect(
-          factory.connect(deployer).setTaxDefaults(treasury.address, 10_000, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
+          factory.connect(deployer).setTaxDefaults(treasury.address, maxFeeBps, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
         ).to.not.be.reverted;
       });
 
@@ -1819,7 +1829,7 @@ describe("CustomToken / CustomTokenFactory", function () {
       it("cannot be called by anyone other than the factory", async function () {
         const { token, otherAccount, platformFeeWallet, priceFeed } = await deployWithPlatformTax();
         await expect(
-          token.connect(otherAccount).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
+          token.connect(otherAccount).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
         ).to.be.revertedWith("CustomToken: caller is not the factory");
       });
 
@@ -1829,7 +1839,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         await ethers.provider.send("hardhat_setBalance", [await factory.getAddress(), "0x56BC75E2D63100000"]);
 
         await expect(
-          token.connect(factorySigner).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
+          token.connect(factorySigner).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
         ).to.be.revertedWith("CustomToken: platform tax already configured");
       });
     });
@@ -1874,11 +1884,16 @@ describe("CustomToken / CustomTokenFactory", function () {
       });
 
       it("lets the factory owner recover a token whose original feed is permanently stale, via CustomTokenFactory.updateTokenPriceFeed, without touching fee config", async function () {
-        const { factory, token, deployer, otherAccount } = await deployWithPlatformTax({ liquidityEth: ethers.parseEther("0.001") });
+        const { factory, token, deployer, otherAccount, priceFeed } = await deployWithPlatformTax({ liquidityEth: ethers.parseEther("0.001") });
 
         const feeBpsBefore = await token.platformFeeBps();
         const feeWalletBefore = await token.platformFeeWallet();
         const pairBefore = await token.pair();
+
+        // updatePriceFeed now requires the CURRENT feed to already be
+        // non-fresh before it can be repointed (see CustomToken.
+        // updatePriceFeed's freshness guard, added post-audit).
+        await priceFeed.setStale(1);
 
         const MockAggregatorV3 = await ethers.getContractFactory("MockAggregatorV3");
         const deadFeed = await MockAggregatorV3.deploy(8, ETH_USD_PRICE);
@@ -1952,7 +1967,7 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         await token.connect(deployer).setPair(await badPair.getAddress());
         await token.connect(deployer).configurePlatformTax(
-          feeWallet.address, PLATFORM_FEE_BPS, await priceFeed.getAddress(), GRADUATION_TARGET_USD, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0
+          feeWallet.address, PLATFORM_FEE_BPS, await priceFeed.getAddress(), GRADUATION_TARGET_USD, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress
         );
 
         expect(await token.platformTaxActive()).to.equal(true);
@@ -2086,11 +2101,11 @@ describe("CustomToken / CustomTokenFactory", function () {
         await token.connect(deployer).setPair(await pair.getAddress());
 
         await expect(
-          token.connect(deployer).configurePlatformTax(feeWallet.address, 9_501, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
+          token.connect(deployer).configurePlatformTax(feeWallet.address, 9_501, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
         ).to.be.revertedWith("CustomToken: combined platform and creator tax exceeds 100%");
 
         await expect(
-          token.connect(deployer).configurePlatformTax(feeWallet.address, 9_500, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0)
+          token.connect(deployer).configurePlatformTax(feeWallet.address, 9_500, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
         ).to.not.be.reverted; // 9,500 + 500 == 10,000 exactly — the ceiling itself is not rejected
       });
     });

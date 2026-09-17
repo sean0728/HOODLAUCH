@@ -10,6 +10,12 @@ describe("TokenFactory", function () {
   const ETH_USD_PRICE = 3000n * 10n ** 8n; // $3000, 8 decimals
   const FEE_BPS = 25n; // 0.25%
 
+  // Distinct CREATE2 salts across calls to the helpers below — several
+  // tests deploy more than one token against the very same factory
+  // instance, and Clones.cloneDeterministic reverts on a reused
+  // (implementation, deployer, salt) tuple.
+  let nextSalt = 0n;
+
   async function deployStack() {
     const [deployer, creator, otherAccount, treasury, platformFeeWallet] = await ethers.getSigners();
 
@@ -62,8 +68,9 @@ describe("TokenFactory", function () {
     const symbol = overrides.symbol || "AURA";
     const supply = overrides.supply || TOTAL_SUPPLY;
     const fee = overrides.fee !== undefined ? overrides.fee : DEPLOY_FEE;
+    const salt = overrides.salt !== undefined ? overrides.salt : nextSalt++;
 
-    const tx = await factory.connect(creator).createToken(name, symbol, supply, false, 0, 0, 0, { value: fee });
+    const tx = await factory.connect(creator).createToken(name, symbol, supply, false, 0, 0, 0, salt, { value: fee });
     const receipt = await tx.wait();
     const event = receipt.logs
       .map((log) => {
@@ -88,10 +95,11 @@ describe("TokenFactory", function () {
     const creatorBuyEth = overrides.creatorBuyEth !== undefined ? overrides.creatorBuyEth : 0n;
     const minCreatorTokensOut = overrides.minCreatorTokensOut !== undefined ? overrides.minCreatorTokensOut : 0n;
     const value = fee + liquidityEth + creatorBuyEth;
+    const salt = overrides.salt !== undefined ? overrides.salt : nextSalt++;
 
     const tx = await factory
       .connect(creator)
-      .createToken(name, symbol, supply, true, liquidityEth, creatorBuyEth, minCreatorTokensOut, { value });
+      .createToken(name, symbol, supply, true, liquidityEth, creatorBuyEth, minCreatorTokensOut, salt, { value });
     const receipt = await tx.wait();
     const parsed = receipt.logs.map((log) => {
       try {
@@ -159,7 +167,7 @@ describe("TokenFactory", function () {
       );
 
       await expect(
-        factoryNoFeed.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, false, 0, 0, 0, { value: DEPLOY_FEE })
+        factoryNoFeed.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, false, 0, 0, 0, 0n, { value: DEPLOY_FEE })
       ).to.not.be.reverted;
     });
 
@@ -168,14 +176,14 @@ describe("TokenFactory", function () {
       await expect(
         factory
           .connect(creator)
-          .createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, false, 0, 0, 0, { value: DEPLOY_FEE + 1n })
+          .createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, false, 0, 0, 0, 0n, { value: DEPLOY_FEE + 1n })
       ).to.be.revertedWith("TokenFactory: incorrect ETH sent for Deploy Token");
     });
 
     it("reverts if the deploy fee isn't met exactly", async function () {
       const { factory, creator } = await deployStack();
       await expect(
-        factory.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, false, 0, 0, 0, { value: DEPLOY_FEE - 1n })
+        factory.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, false, 0, 0, 0, 0n, { value: DEPLOY_FEE - 1n })
       ).to.be.revertedWith("TokenFactory: incorrect ETH sent for Deploy Token");
     });
   });
@@ -306,7 +314,7 @@ describe("TokenFactory", function () {
       await expect(
         factoryNoFeed
           .connect(creator)
-          .createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, true, liquidityEth, 0, 0, {
+          .createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, true, liquidityEth, 0, 0, 0n, {
             value: LAUNCH_FEE + liquidityEth,
           })
       ).to.be.revertedWith("TokenFactory: platform fee wallet not configured");
@@ -316,7 +324,7 @@ describe("TokenFactory", function () {
       const { factory, creator } = await deployStack();
       const liquidityEth = ethers.parseEther("1");
       await expect(
-        factory.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, true, liquidityEth, 0, 0, {
+        factory.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, true, liquidityEth, 0, 0, 0n, {
           value: LAUNCH_FEE + liquidityEth - 1n,
         })
       ).to.be.revertedWith("TokenFactory: msg.value doesn't match liquidity + buy-in");
@@ -326,7 +334,7 @@ describe("TokenFactory", function () {
       const { factory, creator } = await deployStack();
       const liquidityEth = ethers.parseEther("1");
       await expect(
-        factory.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, true, liquidityEth, 0, 0, {
+        factory.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, true, liquidityEth, 0, 0, 0n, {
           value: LAUNCH_FEE - 1n,
         })
       ).to.be.revertedWith("TokenFactory: launch fee not met");
@@ -335,7 +343,7 @@ describe("TokenFactory", function () {
     it("reverts with no liquidity ETH specified", async function () {
       const { factory, creator } = await deployStack();
       await expect(
-        factory.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, true, 0, 0, 0, { value: LAUNCH_FEE })
+        factory.connect(creator).createToken("Aurora Ledger", "AURA", TOTAL_SUPPLY, true, 0, 0, 0, 0n, { value: LAUNCH_FEE })
       ).to.be.revertedWith("TokenFactory: no ETH sent for liquidity");
     });
 
@@ -427,12 +435,12 @@ describe("TokenFactory", function () {
     it("reverts on a zero total supply in either mode", async function () {
       const { factory, creator } = await deployStack();
       await expect(
-        factory.connect(creator).createToken("Aurora Ledger", "AURA", 0, false, 0, 0, 0, { value: DEPLOY_FEE })
+        factory.connect(creator).createToken("Aurora Ledger", "AURA", 0, false, 0, 0, 0, 0n, { value: DEPLOY_FEE })
       ).to.be.revertedWith("TokenFactory: supply must be > 0");
       await expect(
         factory
           .connect(creator)
-          .createToken("Aurora Ledger", "AURA", 0, true, ethers.parseEther("1"), 0, 0, { value: LAUNCH_FEE + ethers.parseEther("1") })
+          .createToken("Aurora Ledger", "AURA", 0, true, ethers.parseEther("1"), 0, 0, 1n, { value: LAUNCH_FEE + ethers.parseEther("1") })
       ).to.be.revertedWith("TokenFactory: supply must be > 0");
     });
   });
@@ -601,17 +609,19 @@ describe("TokenFactory", function () {
       expect(await tokenAfter.feeBps()).to.equal(100n); // picked up the new default
     });
 
-    it("rejects a feeBps default above 100%", async function () {
+    it("rejects a feeBps default above the MAX_FEE_BPS ceiling", async function () {
       const { factory, deployer, platformFeeWallet, priceFeed } = await deployStack();
+      const maxFeeBps = await factory.MAX_FEE_BPS();
       await expect(
-        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 10_001, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
-      ).to.be.revertedWith("TokenFactory: feeBps cannot exceed 100%");
+        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, maxFeeBps + 1n, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
+      ).to.be.revertedWith("TokenFactory: feeBps exceeds MAX_FEE_BPS ceiling");
     });
 
-    it("allows a feeBps default of exactly 100% (the ceiling itself is not rejected)", async function () {
+    it("allows a feeBps default of exactly MAX_FEE_BPS (the ceiling itself is not rejected)", async function () {
       const { factory, deployer, platformFeeWallet, priceFeed } = await deployStack();
+      const maxFeeBps = await factory.MAX_FEE_BPS();
       await expect(
-        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 10_000, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
+        factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, maxFeeBps, await priceFeed.getAddress(), 100_000, 3600, 0, 0)
       ).to.not.be.reverted;
     });
 
