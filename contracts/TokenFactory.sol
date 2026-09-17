@@ -274,7 +274,14 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         uint256 creatorBuyEthAmount;
         uint256 minCreatorTokensOut;
         uint256 fee; // deployFee or launchFee the creator locked in and escrowed at deposit time
-        uint256 salt; // front-end-generated randomness, purely to keep two otherwise-identical vouchers from hashing the same
+        // Doubles as the CREATE2 salt relayedCreateToken deploys the clone
+        // with (see Clones.cloneDeterministic there) — originally just
+        // "front-end-generated randomness to keep two otherwise-identical
+        // vouchers from hashing the same," which a mined-for-a-chosen-
+        // address-suffix value still satisfies (each mined salt is
+        // effectively unique), so no new voucher field or signature format
+        // was needed to add vanity addresses to the relayed path.
+        uint256 salt;
         uint256 deadline; // both the voucher's and the matching deposit's expiry
     }
 
@@ -393,6 +400,18 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// liquidityEthAmount + creatorBuyEthAmount for "Deploy and Add
     /// Liquidity (Launch)" — liquidityEthAmount and creatorBuyEthAmount are
     /// both ignored (and must be 0) in "Deploy Token" mode.
+    ///
+    /// @param salt Caller-chosen CREATE2 salt for the clone's address (see
+    /// predictTokenAddress below to preview it before sending this
+    /// transaction). Deployed via Clones.cloneDeterministic rather than the
+    /// old plain Clones.clone specifically so the front end can pick a
+    /// salt that lands on a chosen address suffix (the platform mines one
+    /// ending in its own chain ID) — any salt works, including 0; this
+    /// contract places no meaning on the value itself, only on the address
+    /// it produces. Reusing a salt already used with this same
+    /// implementation simply reverts (CREATE2 to an already-deployed
+    /// address always does), so a caller that wants a specific suffix picks
+    /// a fresh salt and tries again rather than resubmitting the same one.
     function createToken(
         string calldata name_,
         string calldata symbol_,
@@ -400,13 +419,14 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         bool addLiquidityAtLaunch,
         uint256 liquidityEthAmount,
         uint256 creatorBuyEthAmount,
-        uint256 minCreatorTokensOut
+        uint256 minCreatorTokensOut,
+        uint256 salt
     ) external payable nonReentrant returns (address token, uint256 lpAmount, uint256 lockId, uint256 creatorTokensBought) {
         require(bytes(name_).length > 0, "TokenFactory: name required");
         require(bytes(symbol_).length > 0, "TokenFactory: symbol required");
         require(totalSupply_ > 0, "TokenFactory: supply must be > 0");
 
-        token = Clones.clone(tokenImplementation);
+        token = Clones.cloneDeterministic(tokenImplementation, bytes32(salt));
         address pair;
         uint256 feeCollected;
 
@@ -594,7 +614,7 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
 
         d.settled = true; // effects before interactions, same discipline as _finalizeLaunch
 
-        token = Clones.clone(tokenImplementation);
+        token = Clones.cloneDeterministic(tokenImplementation, bytes32(voucher.salt));
         address pair;
 
         if (!voucher.addLiquidityAtLaunch) {
@@ -828,6 +848,18 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
 
     function allTokens() external view returns (address[] memory) {
         return _tokenList;
+    }
+
+    /// @notice Previews the address createToken()/relayedCreateToken() will
+    /// deploy to for a given `salt`, without spending any gas or sending a
+    /// transaction — a pure function of (this factory's own address,
+    /// tokenImplementation, salt). The front end (and scripts/launch.js)
+    /// use this only to double-check an off-chain-mined salt actually
+    /// produces the expected address before submitting the real
+    /// transaction; the deploy itself never calls this, it just runs the
+    /// identical CREATE2 computation inline via Clones.cloneDeterministic.
+    function predictTokenAddress(uint256 salt) external view returns (address) {
+        return Clones.predictDeterministicAddress(tokenImplementation, bytes32(salt), address(this));
     }
 
     // ---- admin ----
