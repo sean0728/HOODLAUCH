@@ -1528,7 +1528,7 @@
   const LAUNCH_FEE_SELECTOR = "cf3cf573";        // launchFee() — "Deploy and Add Liquidity (Launch)"
   const LP_LOCK_DURATION_SELECTOR = "de35eb24";  // lpLockDuration()
   const TOKEN_IMPLEMENTATION_SELECTOR = "2f3a3d5d"; // tokenImplementation() — identical on TokenFactory and CustomTokenFactory, needed to mine/predict a vanity clone address
-  const PREDICT_TOKEN_ADDRESS_SELECTOR = "257db5de"; // predictTokenAddress(uint256) — identical on both factories, previews the CREATE2 address a given salt will deploy to
+  const PREDICT_TOKEN_ADDRESS_SELECTOR = "70e4e6e4"; // predictTokenAddress(address,uint256) — identical on both factories, previews the CREATE2 address a given (creator, salt) pair will deploy to. Post-audit fix: was predictTokenAddress(uint256) ("257db5de") before the CREATE2 salt was bound to the creator's address — see the vanity-address section below.
   const MAX_CREATOR_BUY_BPS_SELECTOR = "f010bfa3"; // maxCreatorBuyBps() — anti-rug cap on the creator's own buy-in, in bps of totalSupply
   const PAIR_OF_SELECTOR = "a7465bdb";           // pairOf(address)
   const LOCKER_SELECTOR = "d7b96d4e";            // locker() on TokenFactory — the LiquidityLocker address
@@ -1948,7 +1948,30 @@
      performRelayedCustomLaunch below also re-check the on-chain
      predictTokenAddress() call against this file's own prediction before
      ever submitting a transaction, and abort rather than deploy somewhere
-     unexpected if the two ever disagree. */
+     unexpected if the two ever disagree.
+
+     POST-AUDIT FIX: TokenFactory.sol/CustomTokenFactory.sol no longer use
+     the caller-chosen `salt` value directly as the CREATE2 salt. A salt
+     (and the calldata carrying it) sitting in the public mempool could
+     previously be copied verbatim by a third party and resubmitted with
+     higher gas, letting them land first and permanently claim the
+     predicted address for a token of their own choosing, while the
+     original submitter's transaction reverted. The contracts now derive
+     the actual CREATE2 salt as keccak256(abi.encode(creator, salt)) —
+     binding the resulting address to the wallet that will actually submit
+     the transaction (or, for a relayed launch, the voucher's own `creator`
+     field) — see TokenFactory._deriveTokenSalt / CustomTokenFactory.
+     _deriveTokenSalt. mineVanitySalt/predictCloneAddress below, and every
+     predictTokenAddress() call in this file, now take that creator address
+     (always `wallet`, the connected wallet, at every call site in this
+     file — the same address that goes on to sign or submit the actual
+     transaction) and derive the same way, via deriveTokenSaltBytes. This
+     was re-verified the same way as the original vanity-address feature:
+     byte-for-byte against an equivalent ethers.js computation, plus a live
+     Hardhat deploy confirming the mined salt, the on-chain
+     predictTokenAddress(creator, salt) call, and the actual deployed
+     address all agree — and that a different creator address mining the
+     same raw salt produces a different (and no longer colliding) address. */
   const VANITY_SUFFIX = "4663"; // Robinhood Chain's own chain ID — every launched token's address now ends in this
 
   // ---- Keccak-256 (the ORIGINAL Keccak padding Ethereum uses, 0x01/0x80 —
@@ -2045,28 +2068,58 @@
       _vanityHexToBytes("5af43d82803e903d91602b57fd5bf3")
     );
   }
-  // Predicts the address Clones.cloneDeterministic(implementation, salt)
-  // deploys to when called by `deployer` (the factory contract itself,
-  // i.e. address(this) inside cloneDeterministic — not the creator's own
-  // wallet). saltBytes32 is a 32-byte Uint8Array.
-  function predictCloneAddress(deployer, saltBytes32, implementation){
+  // Predicts the address Clones.cloneDeterministic(implementation,
+  // actualSalt) deploys to when called by `deployer` (the factory contract
+  // itself, i.e. address(this) inside cloneDeterministic — not the
+  // creator's own wallet). actualSaltBytes32 is a 32-byte Uint8Array — the
+  // REAL, already-derived CREATE2 salt (see deriveTokenSaltBytes below),
+  // not the raw caller-chosen salt value.
+  function predictCloneAddress(deployer, actualSaltBytes32, implementation){
     const initCodeHash = keccak256Bytes(_minimalProxyInitCode(implementation));
-    const preimage = _vanityConcatBytes(_vanityHexToBytes("ff"), _vanityHexToBytes(deployer), saltBytes32, initCodeHash);
+    const preimage = _vanityConcatBytes(_vanityHexToBytes("ff"), _vanityHexToBytes(deployer), actualSaltBytes32, initCodeHash);
     const hash = keccak256Bytes(preimage);
     return "0x" + Array.from(hash.slice(12)).map(b=>b.toString(16).padStart(2,"0")).join("");
   }
-  // Mines a salt whose resulting clone address ends in `suffix` (default:
-  // VANITY_SUFFIX). Expected attempts for a 4-hex-char suffix: ~65,536
-  // (average ~32,768) — sub-second even at pure-JS BigInt hashing speed.
-  // maxAttempts is a sanity backstop only; it should never come close to
-  // being hit.
-  function mineVanitySalt(deployerAddress, implementationAddress, suffix = VANITY_SUFFIX, maxAttempts = 5_000_000){
+  // Mirrors TokenFactory._deriveTokenSalt / CustomTokenFactory.
+  // _deriveTokenSalt exactly: keccak256(abi.encode(creator, salt)) — a
+  // 32-byte left-padded address followed by the raw 32-byte salt word,
+  // hashed. This is what binds a launch's resulting clone address to the
+  // wallet that will actually submit the transaction (or, for a relayed
+  // launch, the voucher's own creator field), so a salt visible in the
+  // public mempool can't be copied and front-run by a third party.
+  // rawSaltBytes32 is a 32-byte Uint8Array (the caller-chosen `salt`
+  // parameter, big-endian); returns a 32-byte Uint8Array (the actual
+  // CREATE2 salt).
+  function deriveTokenSaltBytes(creatorAddress, rawSaltBytes32){
+    const addrBytes = _vanityHexToBytes(creatorAddress);
+    const addrWord = new Uint8Array(32);
+    addrWord.set(addrBytes, 32 - addrBytes.length); // left-pad the 20-byte address into a 32-byte word
+    const preimage = _vanityConcatBytes(addrWord, rawSaltBytes32);
+    return keccak256Bytes(preimage);
+  }
+  // Mines a raw `salt` value — the exact input createToken()/
+  // createCustomToken()'s own `salt` parameter expects — such that the
+  // resulting clone address (after the on-chain _deriveTokenSalt binding
+  // above) ends in `suffix` (default: VANITY_SUFFIX). Expected attempts for
+  // a 4-hex-char suffix: ~65,536 (average ~32,768) — sub-second even at
+  // pure-JS BigInt hashing speed. maxAttempts is a sanity backstop only; it
+  // should never come close to being hit.
+  //
+  // `creatorAddress` must be the wallet that will actually submit the
+  // transaction (createToken()'s msg.sender) or, for a relayed launch, the
+  // voucher's own `creator` field — every call site in this file passes
+  // `wallet`, the connected wallet, since that's the address that goes on
+  // to sign or submit the real transaction either way. A salt mined for one
+  // creator address only produces the intended vanity address when
+  // submitted by that exact address.
+  function mineVanitySalt(creatorAddress, deployerAddress, implementationAddress, suffix = VANITY_SUFFIX, maxAttempts = 5_000_000){
     const suffixLower = suffix.toLowerCase();
     const cryptoObj = (window.crypto || window.msCrypto);
     for(let attempt=0; attempt<maxAttempts; attempt++){
       const saltBytes = new Uint8Array(32);
       cryptoObj.getRandomValues(saltBytes);
-      const address = predictCloneAddress(deployerAddress, saltBytes, implementationAddress);
+      const actualSaltBytes = deriveTokenSaltBytes(creatorAddress, saltBytes);
+      const address = predictCloneAddress(deployerAddress, actualSaltBytes, implementationAddress);
       if(address.toLowerCase().endsWith(suffixLower)){
         let salt = 0n;
         for(const b of saltBytes) salt = (salt << 8n) | BigInt(b);
@@ -2477,8 +2530,8 @@
     const totalWei = feeWei + liquidityWei + buyInWei;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(factoryAddress, implementationAddress);
-    const predictedHex = await ethCall(factoryAddress, "0x"+PREDICT_TOKEN_ADDRESS_SELECTOR+toHex32(salt));
+    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
       throw new Error("Vanity address prediction didn't match on-chain — aborting before spending anything. Please try again.");
@@ -2678,8 +2731,8 @@
     const depositWei = feeWei + (isLiquidity ? liquidityWei + buyInWei : 0n);
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(factoryAddress, implementationAddress);
-    const predictedHex = await ethCall(factoryAddress, "0x"+PREDICT_TOKEN_ADDRESS_SELECTOR+toHex32(salt));
+    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
       throw new Error("Vanity address prediction didn't match on-chain — aborting before you sign anything. Please try again.");
@@ -2959,8 +3012,8 @@
     const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(factoryAddress, implementationAddress);
-    const predictedHex = await ethCall(factoryAddress, "0x"+PREDICT_TOKEN_ADDRESS_SELECTOR+toHex32(salt));
+    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
       throw new Error("Vanity address prediction didn't match on-chain — aborting before spending anything. Please try again.");
@@ -3154,8 +3207,8 @@
     const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(factoryAddress, implementationAddress);
-    const predictedHex = await ethCall(factoryAddress, "0x"+PREDICT_TOKEN_ADDRESS_SELECTOR+toHex32(salt));
+    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
       throw new Error("Vanity address prediction didn't match on-chain — aborting before you sign anything. Please try again.");
