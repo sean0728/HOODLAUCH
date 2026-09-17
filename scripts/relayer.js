@@ -342,6 +342,18 @@ function logEnvVarPresence() {
     const value = process.env[name];
     console.log(`  ${name}: ${value ? `present (${value.length} chars)` : "MISSING"}`);
   }
+
+  // Unlike the secrets above, these three are just filesystem paths (see
+  // lib/launchStore.js/relayerStore.js/deploymentStore.js) — nothing
+  // sensitive about them, so print the actual value. This is here
+  // specifically so a mismatch between "what the dashboard shows" and
+  // "what this process actually sees" is visible in the one place that's
+  // authoritative: the process's own process.env, on every single boot.
+  console.log("Data-directory overrides (actual value, not sensitive):");
+  for (const name of ["DEPLOYED_CONTRACTS_DIR", "RELAYER_DATA_DIR", "DEPLOYMENTS_DIR"]) {
+    const value = process.env[name];
+    console.log(`  ${name}: ${value ? JSON.stringify(value) : "unset (using built-in public/assets/ default)"}`);
+  }
 }
 
 async function main() {
