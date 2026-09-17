@@ -72,6 +72,9 @@ const {
   setActiveNetwork,
   getPlatformConfig,
   setPlatformConfig,
+  readPendingDeposits,
+  upsertPendingDeposit,
+  removePendingDeposit,
 } = require("../lib/relayerStore");
 const { verifyAdminSignature, isFreshTimestamp } = require("../lib/adminAuth");
 const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
@@ -758,17 +761,11 @@ async function main() {
     setCursor(factoryAddress, toBlock);
   }
 
-  async function handleDeposit(watcher, event) {
-    const { voucherHash, creator, amount, deadline } = event.args;
-    const record = getVoucher(voucherHash);
-    if (!record || record.kind !== watcher.kind) {
-      console.warn(
-        `[${watcher.kind}] deposit for ${voucherHash} from ${creator} has no matching voucher on file — the ` +
-          `front end may not have submitted it here, or submitted it to a different relayer instance. Skipping ` +
-          `until a matching POST /vouchers/${watcher.kind} arrives; the creator can always reclaim after the deadline.`
-      );
-      return;
-    }
+  // Does the actual work of relaying a deposit that DOES have a matching
+  // voucher on file — split out from handleDeposit() so retryPendingDeposits()
+  // below can run the identical logic for a deposit whose voucher only
+  // showed up a tick or two late, without duplicating any of it.
+  async function relayMatchedDeposit(watcher, { voucherHash, creator, amount, deadline }, record) {
     if (record.creator.toLowerCase() !== creator.toLowerCase()) {
       console.warn(`[${watcher.kind}] deposit creator ${creator} doesn't match voucher's own creator ${record.creator} for ${voucherHash} — ignoring.`);
       return;
@@ -838,8 +835,81 @@ async function main() {
     }
   }
 
+  // FIX: a LaunchDeposited event can be scanned by this poller BEFORE the
+  // matching POST /vouchers/<kind> has finished being received and stored —
+  // the front end submits the two back-to-back (sign+POST the voucher, then
+  // send the deposit tx), and nothing guarantees the POST completes before
+  // the deposit is mined and the next 15s poll tick runs. Before this fix, a
+  // deposit that lost that race was logged as "no matching voucher" ONCE and
+  // then never looked at again, because pollWatcher() unconditionally
+  // advances its cursor past every block it scans — so the very next tick
+  // would never re-examine that same event even though the voucher usually
+  // shows up moments later. That's exactly what got a real launch stuck on
+  // "Deploying" forever: the log showed "no matching voucher" immediately
+  // followed by "voucher received" for the identical voucherHash a moment
+  // later, and nothing was ever watching for that.
+  //
+  // Now, an unmatched deposit is recorded to a small pending-deposits store
+  // (lib/relayerStore.js) instead of being dropped, and retried on every
+  // subsequent poll tick (see retryPendingDeposits() below) until either its
+  // voucher shows up or its own on-chain deadline passes — at which point
+  // it's dropped for good and the creator is left to reclaim it, same as any
+  // other unrecoverable case already was.
+  async function handleDeposit(watcher, event) {
+    const { voucherHash, creator, amount, deadline } = event.args;
+    const record = getVoucher(voucherHash);
+    if (!record || record.kind !== watcher.kind) {
+      upsertPendingDeposit(watcher.kind, voucherHash, {
+        creator,
+        amount: amount.toString(),
+        deadline: deadline.toString(),
+      });
+      console.warn(
+        `[${watcher.kind}] deposit for ${voucherHash} from ${creator} has no matching voucher on file yet — the ` +
+          `front end may not have finished submitting it here yet, or submitted it to a different relayer instance. ` +
+          `Will keep retrying every poll tick until a matching POST /vouchers/${watcher.kind} arrives or its ` +
+          `deadline (${deadline}) passes.`
+      );
+      return;
+    }
+    return relayMatchedDeposit(watcher, { voucherHash, creator, amount, deadline }, record);
+  }
+
+  // Re-checks every deposit that previously lost the voucher race above.
+  // Cheap: just a getVoucher() lookup per pending entry, no chain calls
+  // unless one actually now has a match. Runs once per watcher per poll
+  // tick, before scanning for brand-new deposits, so a voucher that arrives
+  // even a few seconds late still gets relayed on the very next tick instead
+  // of being lost the way it would have been before this fix.
+  async function retryPendingDeposits(watcher) {
+    const pending = readPendingDeposits();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    for (const [voucherHash, dep] of Object.entries(pending)) {
+      if (dep.kind !== watcher.kind) continue;
+      const record = getVoucher(voucherHash);
+      if (record && record.kind === watcher.kind) {
+        removePendingDeposit(voucherHash);
+        console.log(`[${watcher.kind}] voucher for previously-unmatched deposit ${voucherHash} has arrived — relaying now.`);
+        await relayMatchedDeposit(
+          watcher,
+          { voucherHash, creator: dep.creator, amount: BigInt(dep.amount), deadline: BigInt(dep.deadline) },
+          record
+        ).catch((err) => console.error(`[${watcher.kind}] error relaying previously-pending deposit ${voucherHash}: ${err.message}`));
+        continue;
+      }
+      if (nowSeconds > Number(dep.deadline)) {
+        console.warn(
+          `[${watcher.kind}] giving up on deposit ${voucherHash} from ${dep.creator} — no matching voucher ever ` +
+            `arrived and its deadline has passed. The creator can reclaim it (reclaimDeposit).`
+        );
+        removePendingDeposit(voucherHash);
+      }
+    }
+  }
+
   async function pollLoop() {
     for (const watcher of watchers) {
+      await retryPendingDeposits(watcher).catch((err) => console.error(`[${watcher.kind}] pending-deposit retry error: ${err.message}`));
       await pollWatcher(watcher).catch((err) => console.error(`[${watcher.kind}] poll error: ${err.message}`));
     }
     setTimeout(pollLoop, POLL_INTERVAL_MS);
