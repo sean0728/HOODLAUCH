@@ -51,6 +51,10 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     // the creator themselves configured — same "platform always takes its
     // 0.25% until graduation" behavior TokenFactory already has for its
     // simpler token, now available here too. ----
+    /// @notice See TokenFactory.MAX_FEE_BPS — identical hard ceiling on
+    /// feeBps_ in setTaxDefaults here, for the same reasoning.
+    uint256 public constant MAX_FEE_BPS = 2_000; // 20.00%
+
     address public platformFeeWallet;
     uint256 public feeBps = 25; // 0.25%
     address public priceFeed;
@@ -393,7 +397,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
 
         d.settled = true; // effects before interactions
 
-        token = Clones.cloneDeterministic(tokenImplementation, bytes32(voucher.salt));
+        token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(voucher.creator, voucher.salt));
 
         if (!voucher.addLiquidity) {
             require(
@@ -566,10 +570,13 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     /// maxCreatorBuyBps of totalSupply_ (checked against what actually
     /// lands net of buy tax) as an anti-rug safeguard: exceeding it reverts
     /// the whole launch rather than partially executing.
-    /// @param salt Caller-chosen CREATE2 salt for the clone's address — see
-    /// the matching parameter doc on TokenFactory.createToken for the full
-    /// explanation; applies identically here (predictTokenAddress below
-    /// previews it).
+    /// @param salt Caller-chosen CREATE2 salt input for the clone's address
+    /// — see the matching parameter doc on TokenFactory.createToken for the
+    /// full explanation; applies identically here (predictTokenAddress
+    /// below previews the resulting address, and the actual salt used is
+    /// derived from (msg.sender, salt) via _deriveTokenSalt so it's bound
+    /// to the caller and can't be front-run — see TokenFactory's own
+    /// _deriveTokenSalt for the reasoning).
     function createCustomToken(
         string calldata name_,
         string calldata symbol_,
@@ -588,7 +595,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         require(bytes(symbol_).length > 0, "CustomTokenFactory: symbol required");
         require(totalSupply_ > 0, "CustomTokenFactory: supply must be > 0");
 
-        token = Clones.cloneDeterministic(tokenImplementation, bytes32(salt));
+        token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(msg.sender, salt));
         uint256 feeCollected;
 
         if (!addLiquidity) {
@@ -766,11 +773,18 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     }
 
     /// @notice Previews the address createCustomToken()/
-    /// relayedCreateCustomToken() will deploy to for a given `salt` — see
-    /// TokenFactory.predictTokenAddress for the full explanation; applies
-    /// identically here.
-    function predictTokenAddress(uint256 salt) external view returns (address) {
-        return Clones.predictDeterministicAddress(tokenImplementation, bytes32(salt), address(this));
+    /// relayedCreateCustomToken() will deploy to for a given (creator, salt)
+    /// pair — see TokenFactory.predictTokenAddress for the full
+    /// explanation; applies identically here.
+    function predictTokenAddress(address creator_, uint256 salt) external view returns (address) {
+        return Clones.predictDeterministicAddress(tokenImplementation, _deriveTokenSalt(creator_, salt), address(this));
+    }
+
+    /// @dev See TokenFactory._deriveTokenSalt for the full reasoning — binds
+    /// the actual CREATE2 salt to the creator so a mempool-visible salt
+    /// can't be copied and front-run by a third party.
+    function _deriveTokenSalt(address creator_, uint256 salt) private pure returns (bytes32) {
+        return keccak256(abi.encode(creator_, salt));
     }
 
     // ---- admin ----
@@ -854,8 +868,16 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         emit FeeWalletDistributorUpdated(newDistributor);
     }
 
-    /// @notice See TokenFactory.setRelayer — identical behavior here.
+    /// @notice See TokenFactory.setRelayer — identical behavior here,
+    /// including the requirement that maxRelayerGasReimbursementWei already
+    /// be set to a non-zero value before a relayer can be enabled.
     function setRelayer(address newRelayer) external onlyOwner {
+        if (newRelayer != address(0)) {
+            require(
+                maxRelayerGasReimbursementWei > 0,
+                "CustomTokenFactory: set maxRelayerGasReimbursementWei before enabling a relayer"
+            );
+        }
         relayer = newRelayer;
         emit RelayerUpdated(newRelayer);
     }
@@ -893,7 +915,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         uint256 rewardBps_,
         uint256 creatorRewardBps_
     ) external onlyOwner {
-        require(feeBps_ <= 10_000, "CustomTokenFactory: feeBps cannot exceed 100%");
+        require(feeBps_ <= MAX_FEE_BPS, "CustomTokenFactory: feeBps exceeds MAX_FEE_BPS ceiling");
         require(graduationTargetUsd_ > 0, "CustomTokenFactory: graduation target must be > 0");
         require(maxOracleStaleness_ > 0, "CustomTokenFactory: oracle staleness must be > 0");
         require(rewardBps_ + creatorRewardBps_ <= feeBps_, "CustomTokenFactory: rewardBps+creatorRewardBps cannot exceed feeBps");

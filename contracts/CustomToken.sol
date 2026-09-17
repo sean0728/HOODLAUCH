@@ -518,10 +518,16 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// Repoints only the oracle inputs the platform-tax graduation check
     /// reads; touches nothing about platformFeeBps, platformFeeWallet,
     /// pair, or platformTaxActive directly.
+    /// See LaunchedToken.updatePriceFeed's own freshness guard for why this
+    /// reverts if the current feed can still report a fresh price: without
+    /// it, the owner could repoint a healthy, currently-live token's oracle
+    /// inputs at any time for any reason.
     function updatePriceFeed(address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyFactory {
         require(platformTaxConfigured, "CustomToken: platform tax not configured");
         require(newPriceFeed_ != address(0), "CustomToken: invalid price feed");
         require(newMaxOracleStaleness_ > 0, "CustomToken: oracle staleness must be > 0");
+        (, bool feedIsFresh) = currentMarketCapInFeedDecimals();
+        require(!feedIsFresh, "CustomToken: current price feed is still fresh, cannot be repointed");
         priceFeed = IAggregatorV3(newPriceFeed_);
         maxOracleStaleness = newMaxOracleStaleness_;
         emit PriceFeedUpdated(newPriceFeed_, newMaxOracleStaleness_);
@@ -1075,7 +1081,13 @@ contract CustomToken is ERC20, ReentrancyGuard {
         if (pair == address(0)) return (0, false);
         try priceFeed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
             if (answer <= 0) return (0, false);
-            if (block.timestamp - updatedAt > maxOracleStaleness) return (0, false);
+            // See LaunchedToken.currentMarketCapInFeedDecimals for why this
+            // guards against updatedAt > block.timestamp explicitly: a
+            // try/catch only catches a revert from the external call
+            // itself, not from this line, so an unguarded underflow here
+            // (a future-dated oracle round) would revert every future
+            // taxed transfer instead of just skipping this check.
+            if (updatedAt > block.timestamp || block.timestamp - updatedAt > maxOracleStaleness) return (0, false);
 
             try this._computeMarketCapFromPair(uint256(answer)) returns (uint256 mc, bool ok) {
                 if (!ok) return (0, false);
