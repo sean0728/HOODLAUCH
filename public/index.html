@@ -1523,10 +1523,12 @@
      byte against ethers.js's own encodeFunctionData/parseEther before
      shipping — see hoodlaunch-contracts/scratch/verify-encode.js.
   */
-  const CREATE_TOKEN_SELECTOR = "07d3a07d";      // createToken(string,string,uint256,bool,uint256,uint256,uint256)
+  const CREATE_TOKEN_SELECTOR = "3f55fbd8";      // createToken(string,string,uint256,bool,uint256,uint256,uint256,uint256) — trailing uint256 is the mined CREATE2 vanity salt, see mineVanitySalt below
   const DEPLOY_FEE_SELECTOR = "eb2a5d2c";        // deployFee() — "Deploy Token"
   const LAUNCH_FEE_SELECTOR = "cf3cf573";        // launchFee() — "Deploy and Add Liquidity (Launch)"
   const LP_LOCK_DURATION_SELECTOR = "de35eb24";  // lpLockDuration()
+  const TOKEN_IMPLEMENTATION_SELECTOR = "2f3a3d5d"; // tokenImplementation() — identical on TokenFactory and CustomTokenFactory, needed to mine/predict a vanity clone address
+  const PREDICT_TOKEN_ADDRESS_SELECTOR = "257db5de"; // predictTokenAddress(uint256) — identical on both factories, previews the CREATE2 address a given salt will deploy to
   const MAX_CREATOR_BUY_BPS_SELECTOR = "f010bfa3"; // maxCreatorBuyBps() — anti-rug cap on the creator's own buy-in, in bps of totalSupply
   const PAIR_OF_SELECTOR = "a7465bdb";           // pairOf(address)
   const LOCKER_SELECTOR = "d7b96d4e";            // locker() on TokenFactory — the LiquidityLocker address
@@ -1557,7 +1559,7 @@
   // ABIs (ethers.Interface(artifact.abi).getFunction(...).selector /
   // .getEvent(...).topicHash), the same verification standard as the rest
   // of this file's hand-rolled ABI encoding.
-  const CREATE_CUSTOM_TOKEN_SELECTOR = "ee00c597"; // createCustomToken(string,string,uint256,bool,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,address,uint256,uint256)
+  const CREATE_CUSTOM_TOKEN_SELECTOR = "3c9bbe65"; // createCustomToken(string,string,uint256,bool,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,address,uint256,uint256,uint256) — trailing uint256 is the mined CREATE2 vanity salt, see mineVanitySalt below
   const CUSTOM_TOKEN_CREATED_TOPIC0 = "0xbefeff1e9389e222bd5b258cec98c9a3845568ed80de514ea83673e7de7a9ba0";
   const INITIAL_LIQUIDITY_LOCKED_TOPIC0 = "0xe3c7529220384d327963277952b31a807f6fb6d0fc946265ad78f1091340e5c7";
   // CreatorBought's signature is byte-for-byte identical between
@@ -1722,8 +1724,8 @@
   // "Deploy and Add Liquidity (Live)" (today's existing behavior). Checked
   // byte-for-byte against ethers.Interface.encodeFunctionData before
   // shipping, same as encodeCreateTokenCalldata above.
-  function encodeCreateCustomTokenCalldata({name, symbol, totalSupply, addLiquidity, liquidityWei, buyFees, sellFees, reflectionAsset, marketingWallet, buyInWei, minTokensOut}){
-    const HEAD_SLOTS = 17;
+  function encodeCreateCustomTokenCalldata({name, symbol, totalSupply, addLiquidity, liquidityWei, buyFees, sellFees, reflectionAsset, marketingWallet, buyInWei, minTokensOut, salt}){
+    const HEAD_SLOTS = 18; // 17 original fields + the trailing CREATE2 vanity salt (see mineVanitySalt)
     const headBytes = BigInt(HEAD_SLOTS*32);
     const nameTail = encodeAbiString(name);
     const symbolTail = encodeAbiString(symbol);
@@ -1741,6 +1743,7 @@
       encodeAddressParam(marketingWallet || ZERO_ADDRESS),
       toHex32(BigInt(buyInWei)),
       toHex32(BigInt(minTokensOut)),
+      toHex32(BigInt(salt)),
     ].join("");
     return "0x" + CREATE_CUSTOM_TOKEN_SELECTOR + head + nameTail + symbolTail;
   }
@@ -1774,8 +1777,8 @@
   function encodeAddressParam(addr){
     return addr.replace(/^0x/i,"").toLowerCase().padStart(64,"0");
   }
-  function encodeCreateTokenCalldata({name, symbol, totalSupply, addLiquidity, liquidityWei, buyInWei, minTokensOut}){
-    const HEAD_SLOTS = 7;
+  function encodeCreateTokenCalldata({name, symbol, totalSupply, addLiquidity, liquidityWei, buyInWei, minTokensOut, salt}){
+    const HEAD_SLOTS = 8; // 7 original fields + the trailing CREATE2 vanity salt (see mineVanitySalt)
     const headBytes = BigInt(HEAD_SLOTS*32);
     const nameTail = encodeAbiString(name);
     const symbolTail = encodeAbiString(symbol);
@@ -1789,6 +1792,7 @@
       toHex32(BigInt(liquidityWei)),
       toHex32(BigInt(buyInWei)),
       toHex32(BigInt(minTokensOut)),
+      toHex32(BigInt(salt)),
     ].join("");
     return "0x" + CREATE_TOKEN_SELECTOR + head + nameTail + symbolTail;
   }
@@ -1908,16 +1912,168 @@
       { name: "deadline", type: "uint256" },
     ],
   };
-  function randomVoucherSalt(){
-    // Purely for hash uniqueness (so two otherwise-identical launches don't
-    // collide) — not a security-critical nonce, since the deposit/relay
-    // flow's replay protection comes from the (creator, voucher hash)
-    // escrow keying and the settled/reclaimed flags, not from this value.
-    const bytes = new Uint8Array(8);
-    (window.crypto || window.msCrypto).getRandomValues(bytes);
-    let v = 0n;
-    for(const b of bytes) v = (v << 8n) | BigInt(b);
-    return v;
+  /* ---------------- vanity contract addresses ----------------
+     Every token this platform deploys is an EIP-1167 minimal-proxy clone
+     (see TokenFactory.sol/CustomTokenFactory.sol) created via
+     Clones.cloneDeterministic(implementation, salt) — CREATE2, not the
+     ordinary CREATE opcode — specifically so the resulting address can be
+     chosen in advance: for any candidate salt, the clone's address is a
+     pure function of (deployer, salt, implementation's init-code hash),
+     computable off-chain with no chain access at all. "Mining" a vanity
+     salt means trying candidate salts locally until one produces an
+     address ending in VANITY_SUFFIX, then using that exact salt on-chain —
+     the deploy still only happens once, same as before, just at an address
+     chosen in advance instead of whatever the factory's nonce happened to
+     land on.
+
+     Every hoodlaunch token now ends in the platform's own chain ID
+     (Robinhood Chain) as its signature. This doubles as `salt` on
+     LaunchVoucher/CustomLaunchVoucher for the gasless relayed path — that
+     field already existed (originally just random, to keep two
+     otherwise-identical vouchers from hashing the same) and was already
+     part of the signed EIP-712 hash, so a mined value satisfies that same
+     purpose with zero change to the voucher shape, the typed-data types,
+     or the signing flow.
+
+     Implemented with a hand-rolled Keccak-256 (below) rather than any
+     library — same "no external dependency" rule as the rest of this
+     file's ABI encoding (see the note above CREATE_TOKEN_SELECTOR). This
+     was verified byte-for-byte against ethers.js's keccak256 across
+     thousands of random inputs, plus an end-to-end Hardhat test that
+     deployed a real CREATE2 clone at a mined salt and confirmed the
+     address matched both this exact off-chain prediction and the
+     contract's own Clones.predictDeterministicAddress/
+     predictTokenAddress, before shipping. performOnChainLaunch/
+     performRelayedLaunch/performOnChainCustomLaunch/
+     performRelayedCustomLaunch below also re-check the on-chain
+     predictTokenAddress() call against this file's own prediction before
+     ever submitting a transaction, and abort rather than deploy somewhere
+     unexpected if the two ever disagree. */
+  const VANITY_SUFFIX = "4663"; // Robinhood Chain's own chain ID — every launched token's address now ends in this
+
+  // ---- Keccak-256 (the ORIGINAL Keccak padding Ethereum uses, 0x01/0x80 —
+  // NOT NIST's later SHA3-256, which uses a different 0x06 padding byte and
+  // produces different hashes for the same input). Straight implementation
+  // of the Keccak-f[1600] permutation over 25 64-bit lanes, using BigInt
+  // throughout for simplicity over speed — mining a 4-hex-char vanity
+  // suffix only needs on the order of tens of thousands of hashes, well
+  // under a second even at pure-JS BigInt speed. ----
+  const _KECCAK_MASK64 = (1n << 64n) - 1n;
+  function _keccakRotl64(x, n){ x &= _KECCAK_MASK64; return ((x << BigInt(n)) | (x >> BigInt(64-n))) & _KECCAK_MASK64; }
+  const _KECCAK_RC = [
+    0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
+    0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
+    0x000000000000008an, 0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
+    0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
+    0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
+    0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n,
+  ];
+  const _KECCAK_R = [[0,36,3,41,18],[1,44,10,45,2],[62,6,43,15,61],[28,55,25,21,56],[27,20,39,8,14]];
+  function _keccakF1600(state){
+    for(let round=0; round<24; round++){
+      const C = new Array(5);
+      for(let x=0;x<5;x++) C[x] = state[x]^state[x+5]^state[x+10]^state[x+15]^state[x+20];
+      const D = new Array(5);
+      for(let x=0;x<5;x++) D[x] = C[(x+4)%5] ^ _keccakRotl64(C[(x+1)%5], 1);
+      for(let x=0;x<5;x++) for(let y=0;y<5;y++) state[x+5*y] ^= D[x];
+      const B = new Array(25).fill(0n);
+      for(let x=0;x<5;x++) for(let y=0;y<5;y++){
+        const newX=y, newY=(2*x+3*y)%5;
+        B[newX+5*newY] = _keccakRotl64(state[x+5*y], _KECCAK_R[x][y]);
+      }
+      for(let x=0;x<5;x++) for(let y=0;y<5;y++){
+        state[x+5*y] = B[x+5*y] ^ (~B[((x+1)%5)+5*y] & B[((x+2)%5)+5*y]);
+      }
+      for(let i=0;i<25;i++) state[i] &= _KECCAK_MASK64;
+      state[0] ^= _KECCAK_RC[round];
+      state[0] &= _KECCAK_MASK64;
+    }
+    return state;
+  }
+  function _keccakBytesToLanes(block136){
+    const lanes = new Array(17);
+    for(let i=0;i<17;i++){
+      let lane = 0n;
+      for(let j=7;j>=0;j--) lane = (lane<<8n) | BigInt(block136[i*8+j]);
+      lanes[i] = lane;
+    }
+    return lanes;
+  }
+  function keccak256Bytes(message){
+    const RATE_BYTES = 136; // 1088 bits, for Keccak-256 (capacity = 512 bits)
+    const state = new Array(25).fill(0n);
+    const inputLen = message.length;
+    const numBlocks = Math.floor(inputLen/RATE_BYTES) + 1;
+    const paddedLen = numBlocks*RATE_BYTES;
+    const padded = new Uint8Array(paddedLen);
+    padded.set(message, 0);
+    padded[inputLen] ^= 0x01;
+    padded[paddedLen-1] ^= 0x80;
+    for(let offset=0; offset<paddedLen; offset+=RATE_BYTES){
+      const block = padded.subarray(offset, offset+RATE_BYTES);
+      const lanes = _keccakBytesToLanes(block);
+      for(let i=0;i<17;i++) state[i] ^= lanes[i];
+      _keccakF1600(state);
+    }
+    const out = new Uint8Array(32);
+    for(let i=0;i<4;i++){
+      let lane = state[i];
+      for(let j=0;j<8;j++){ out[i*8+j] = Number(lane & 0xffn); lane >>= 8n; }
+    }
+    return out;
+  }
+
+  function _vanityHexToBytes(hex){
+    hex = hex.replace(/^0x/i, "");
+    const out = new Uint8Array(hex.length/2);
+    for(let i=0;i<out.length;i++) out[i] = parseInt(hex.substr(i*2,2), 16);
+    return out;
+  }
+  function _vanityConcatBytes(...arrs){
+    const len = arrs.reduce((a,b)=>a+b.length, 0);
+    const out = new Uint8Array(len);
+    let o=0; for(const a of arrs){ out.set(a,o); o+=a.length; }
+    return out;
+  }
+  // The fixed EIP-1167 minimal-proxy bytecode template every clone uses,
+  // byte-for-byte identical to what OpenZeppelin's Clones.sol embeds in its
+  // own create/create2 assembly.
+  function _minimalProxyInitCode(implementation){
+    return _vanityConcatBytes(
+      _vanityHexToBytes("3d602d80600a3d3981f3363d3d373d3d3d363d73"),
+      _vanityHexToBytes(implementation),
+      _vanityHexToBytes("5af43d82803e903d91602b57fd5bf3")
+    );
+  }
+  // Predicts the address Clones.cloneDeterministic(implementation, salt)
+  // deploys to when called by `deployer` (the factory contract itself,
+  // i.e. address(this) inside cloneDeterministic — not the creator's own
+  // wallet). saltBytes32 is a 32-byte Uint8Array.
+  function predictCloneAddress(deployer, saltBytes32, implementation){
+    const initCodeHash = keccak256Bytes(_minimalProxyInitCode(implementation));
+    const preimage = _vanityConcatBytes(_vanityHexToBytes("ff"), _vanityHexToBytes(deployer), saltBytes32, initCodeHash);
+    const hash = keccak256Bytes(preimage);
+    return "0x" + Array.from(hash.slice(12)).map(b=>b.toString(16).padStart(2,"0")).join("");
+  }
+  // Mines a salt whose resulting clone address ends in `suffix` (default:
+  // VANITY_SUFFIX). Expected attempts for a 4-hex-char suffix: ~65,536
+  // (average ~32,768) — sub-second even at pure-JS BigInt hashing speed.
+  // maxAttempts is a sanity backstop only; it should never come close to
+  // being hit.
+  function mineVanitySalt(deployerAddress, implementationAddress, suffix = VANITY_SUFFIX, maxAttempts = 5_000_000){
+    const suffixLower = suffix.toLowerCase();
+    const cryptoObj = (window.crypto || window.msCrypto);
+    for(let attempt=0; attempt<maxAttempts; attempt++){
+      const saltBytes = new Uint8Array(32);
+      cryptoObj.getRandomValues(saltBytes);
+      const address = predictCloneAddress(deployerAddress, saltBytes, implementationAddress);
+      if(address.toLowerCase().endsWith(suffixLower)){
+        let salt = 0n;
+        for(const b of saltBytes) salt = (salt << 8n) | BigInt(b);
+        return salt;
+      }
+    }
+    throw new Error(`Could not mine a vanity address ending in "${suffix}" within ${maxAttempts} attempts — try again.`);
   }
   // How long a signed voucher stays valid for the relayer to act on before
   // reclaimDeposit() becomes callable — generous enough to survive a slow
@@ -2307,16 +2463,26 @@
 
     const isLiquidity = draft.mode==="liquidity";
     const feeSelector = isLiquidity ? LAUNCH_FEE_SELECTOR : DEPLOY_FEE_SELECTOR;
-    const [feeHex, lpLockDurationHex] = await Promise.all([
+    const [feeHex, lpLockDurationHex, implementationHex] = await Promise.all([
       ethCall(factoryAddress, "0x"+feeSelector),
       ethCall(factoryAddress, "0x"+LP_LOCK_DURATION_SELECTOR),
+      ethCall(factoryAddress, "0x"+TOKEN_IMPLEMENTATION_SELECTOR),
     ]);
     const feeWei = decodeUint256(feeHex);
     const lpLockDurationSeconds = decodeUint256(lpLockDurationHex);
+    const implementationAddress = decodeAddress(implementationHex);
 
     const liquidityWei = isLiquidity ? parseEtherToWei(draft.liquidityEth) : 0n;
     const buyInWei = isLiquidity ? parseEtherToWei(draft.buyInEth) : 0n;
     const totalWei = feeWei + liquidityWei + buyInWei;
+
+    onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
+    const salt = mineVanitySalt(factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, "0x"+PREDICT_TOKEN_ADDRESS_SELECTOR+toHex32(salt));
+    const predictedAddress = decodeAddress(predictedHex);
+    if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
+      throw new Error("Vanity address prediction didn't match on-chain — aborting before spending anything. Please try again.");
+    }
 
     // minCreatorTokensOut left at 0 (no slippage protection) — matches
     // scripts/launch.js's own default; there's no slippage-tolerance field
@@ -2324,7 +2490,7 @@
     // sees real trading volume.
     const data = encodeCreateTokenCalldata({
       name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
-      addLiquidity: isLiquidity, liquidityWei, buyInWei, minTokensOut: 0n,
+      addLiquidity: isLiquidity, liquidityWei, buyInWei, minTokensOut: 0n, salt,
     });
 
     onStep("deploy", "active", "Confirm the transaction in your wallet…");
@@ -2499,20 +2665,30 @@
 
     const isLiquidity = draft.mode==="liquidity";
     const feeSelector = isLiquidity ? LAUNCH_FEE_SELECTOR : DEPLOY_FEE_SELECTOR;
-    const [feeHex, lpLockDurationHex] = await Promise.all([
+    const [feeHex, lpLockDurationHex, implementationHex] = await Promise.all([
       ethCall(factoryAddress, "0x"+feeSelector),
       ethCall(factoryAddress, "0x"+LP_LOCK_DURATION_SELECTOR),
+      ethCall(factoryAddress, "0x"+TOKEN_IMPLEMENTATION_SELECTOR),
     ]);
     const feeWei = decodeUint256(feeHex);
     const lpLockDurationSeconds = decodeUint256(lpLockDurationHex);
+    const implementationAddress = decodeAddress(implementationHex);
     const liquidityWei = isLiquidity ? parseEtherToWei(draft.liquidityEth) : 0n;
     const buyInWei = isLiquidity ? parseEtherToWei(draft.buyInEth) : 0n;
     const depositWei = feeWei + (isLiquidity ? liquidityWei + buyInWei : 0n);
 
+    onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
+    const salt = mineVanitySalt(factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, "0x"+PREDICT_TOKEN_ADDRESS_SELECTOR+toHex32(salt));
+    const predictedAddress = decodeAddress(predictedHex);
+    if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
+      throw new Error("Vanity address prediction didn't match on-chain — aborting before you sign anything. Please try again.");
+    }
+
     const voucher = {
       creator: wallet, name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
       addLiquidityAtLaunch: isLiquidity, liquidityEthAmount: liquidityWei, creatorBuyEthAmount: buyInWei,
-      minCreatorTokensOut: 0n, fee: feeWei, salt: randomVoucherSalt(),
+      minCreatorTokensOut: 0n, fee: feeWei, salt,
       deadline: BigInt(Math.floor(Date.now()/1000) + RELAY_VOUCHER_TTL_SECONDS),
     };
     const voucherForSigning = {
@@ -2766,12 +2942,14 @@
 
     const addLiquidity = draft.mode !== "customDeploy";
     const feeSelector = addLiquidity ? LAUNCH_FEE_SELECTOR : DEPLOY_FEE_SELECTOR;
-    const [feeHex, lpLockDurationHex] = await Promise.all([
+    const [feeHex, lpLockDurationHex, implementationHex] = await Promise.all([
       ethCall(factoryAddress, "0x"+feeSelector),
       ethCall(factoryAddress, "0x"+LP_LOCK_DURATION_SELECTOR),
+      ethCall(factoryAddress, "0x"+TOKEN_IMPLEMENTATION_SELECTOR),
     ]);
     const feeWei = decodeUint256(feeHex);
     const lpLockDurationSeconds = decodeUint256(lpLockDurationHex);
+    const implementationAddress = decodeAddress(implementationHex);
 
     const liquidityWei = addLiquidity ? parseEtherToWei(draft.liquidityEth) : 0n;
     const buyInWei = addLiquidity ? parseEtherToWei(draft.buyInEth) : 0n;
@@ -2780,12 +2958,20 @@
     const reflectionAsset = draft.customFees.reflectionAsset || ZERO_ADDRESS;
     const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
 
+    onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
+    const salt = mineVanitySalt(factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, "0x"+PREDICT_TOKEN_ADDRESS_SELECTOR+toHex32(salt));
+    const predictedAddress = decodeAddress(predictedHex);
+    if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
+      throw new Error("Vanity address prediction didn't match on-chain — aborting before spending anything. Please try again.");
+    }
+
     // minCreatorTokensOut left at 0, same MVP tradeoff as the TokenFactory
     // flow above — no slippage-tolerance field in this wizard yet.
     const data = encodeCreateCustomTokenCalldata({
       name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
       addLiquidity, liquidityWei, buyFees: draft.customFees.buy, sellFees: draft.customFees.sell,
-      reflectionAsset, marketingWallet, buyInWei, minTokensOut: 0n,
+      reflectionAsset, marketingWallet, buyInWei, minTokensOut: 0n, salt,
     });
 
     onStep("deploy", "active", "Confirm the transaction in your wallet…");
@@ -2952,12 +3138,14 @@
 
     const addLiquidity = draft.mode !== "customDeploy";
     const feeSelector = addLiquidity ? LAUNCH_FEE_SELECTOR : DEPLOY_FEE_SELECTOR;
-    const [feeHex, lpLockDurationHex] = await Promise.all([
+    const [feeHex, lpLockDurationHex, implementationHex] = await Promise.all([
       ethCall(factoryAddress, "0x"+feeSelector),
       ethCall(factoryAddress, "0x"+LP_LOCK_DURATION_SELECTOR),
+      ethCall(factoryAddress, "0x"+TOKEN_IMPLEMENTATION_SELECTOR),
     ]);
     const feeWei = decodeUint256(feeHex);
     const lpLockDurationSeconds = decodeUint256(lpLockDurationHex);
+    const implementationAddress = decodeAddress(implementationHex);
     const liquidityWei = addLiquidity ? parseEtherToWei(draft.liquidityEth) : 0n;
     const buyInWei = addLiquidity ? parseEtherToWei(draft.buyInEth) : 0n;
     const depositWei = feeWei + (addLiquidity ? liquidityWei + buyInWei : 0n);
@@ -2965,12 +3153,20 @@
     const reflectionAsset = draft.customFees.reflectionAsset || ZERO_ADDRESS;
     const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
 
+    onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
+    const salt = mineVanitySalt(factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, "0x"+PREDICT_TOKEN_ADDRESS_SELECTOR+toHex32(salt));
+    const predictedAddress = decodeAddress(predictedHex);
+    if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
+      throw new Error("Vanity address prediction didn't match on-chain — aborting before you sign anything. Please try again.");
+    }
+
     const voucher = {
       creator: wallet, name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
       addLiquidity, liquidityEthAmount: liquidityWei,
       buyFees: { ...draft.customFees.buy }, sellFees: { ...draft.customFees.sell },
       reflectionAsset, marketingWallet, creatorBuyEthAmount: buyInWei,
-      minCreatorTokensOut: 0n, fee: feeWei, salt: randomVoucherSalt(),
+      minCreatorTokensOut: 0n, fee: feeWei, salt,
       deadline: BigInt(Math.floor(Date.now()/1000) + RELAY_VOUCHER_TTL_SECONDS),
     };
     const feeSetForSigning = (f)=>({ reflectionBps: f.reflectionBps||0, marketingBps: f.marketingBps||0, liquidityBps: f.liquidityBps||0, burnBps: f.burnBps||0 });
