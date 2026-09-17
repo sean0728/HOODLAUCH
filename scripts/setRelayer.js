@@ -23,12 +23,25 @@
 // setRelayer's own NatSpec in TokenFactory.sol) without touching anything
 // else.
 //
+// Both factories now also require maxRelayerGasReimbursementWei to already
+// be a real, non-zero value before setRelayer() will accept a non-zero
+// relayer — see Finding E of the original TokenFactory audit ("relayer
+// gas-reimbursement cap defaults to uncapped"), which this guard closes. A
+// brand-new deployment starts at 0 for both relayer and
+// maxRelayerGasReimbursementWei, so this script now sets the cap first
+// (only if it's still 0) before calling setRelayer, rather than leaving
+// that as a separate manual step. Override the default via
+// MAX_RELAYER_GAS_REIMBURSEMENT_WEI (wei) if 0.01 ETH isn't the right cap
+// for your gas costs.
+//
 // Examples:
 //   RELAYER_ADDRESS=0x... TOKEN_FACTORY_ADDRESS=0x... CUSTOM_TOKEN_FACTORY_ADDRESS=0x... \
 //     npx hardhat run scripts/setRelayer.js --network robinhoodTestnet
 const hre = require("hardhat");
 
-async function setRelayerOn(contractName, factoryAddress, relayerAddress, ownerSigner) {
+const DEFAULT_MAX_RELAYER_GAS_REIMBURSEMENT_WEI = hre.ethers.parseEther("0.01");
+
+async function setRelayerOn(contractName, factoryAddress, relayerAddress, capWei, ownerSigner) {
   const factory = await hre.ethers.getContractAt(contractName, factoryAddress, ownerSigner);
 
   const onChainOwner = await factory.owner();
@@ -38,6 +51,19 @@ async function setRelayerOn(contractName, factoryAddress, relayerAddress, ownerS
         `(${ownerSigner.address}). Run this with the actual owner's private key, or finish an in-progress ` +
         "transferOwnership/acceptOwnership handoff first."
     );
+  }
+
+  // setRelayer() reverts on a non-zero relayerAddress until this is itself
+  // non-zero (see CustomTokenFactory.sol / TokenFactory.sol setRelayer) —
+  // a fresh deployment starts both at 0, so this has to run first.
+  if (relayerAddress !== hre.ethers.ZeroAddress) {
+    const currentCap = await factory.maxRelayerGasReimbursementWei();
+    if (currentCap === 0n) {
+      console.log(`${contractName}: maxRelayerGasReimbursementWei is 0 — setting cap to ${capWei} wei first...`);
+      const capTx = await factory.setMaxRelayerGasReimbursement(capWei);
+      await capTx.wait();
+      console.log(`${contractName}: setMaxRelayerGasReimbursement(${capWei}) confirmed (tx ${capTx.hash}).`);
+    }
   }
 
   const currentRelayer = await factory.relayer();
@@ -70,12 +96,16 @@ async function main() {
     throw new Error("Set at least one of TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS.");
   }
 
+  const capWei = process.env.MAX_RELAYER_GAS_REIMBURSEMENT_WEI
+    ? BigInt(process.env.MAX_RELAYER_GAS_REIMBURSEMENT_WEI)
+    : DEFAULT_MAX_RELAYER_GAS_REIMBURSEMENT_WEI;
+
   const [ownerSigner] = await hre.ethers.getSigners();
   console.log(`Running as: ${ownerSigner.address}`);
   console.log(`Setting relayer to: ${relayerAddress}`);
 
-  if (tokenFactoryAddress) await setRelayerOn("TokenFactory", tokenFactoryAddress, relayerAddress, ownerSigner);
-  if (customTokenFactoryAddress) await setRelayerOn("CustomTokenFactory", customTokenFactoryAddress, relayerAddress, ownerSigner);
+  if (tokenFactoryAddress) await setRelayerOn("TokenFactory", tokenFactoryAddress, relayerAddress, capWei, ownerSigner);
+  if (customTokenFactoryAddress) await setRelayerOn("CustomTokenFactory", customTokenFactoryAddress, relayerAddress, capWei, ownerSigner);
 
   console.log(
     "\nDone. Restart scripts/relayer.js if it's already running — it only checks relayer() once, at startup."
