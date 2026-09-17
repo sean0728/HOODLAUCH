@@ -60,6 +60,17 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     // ---- transfer-tax defaults, applied to every "Launch + Add Liquidity"
     // pool created after a change (existing pools keep whatever they were
     // created with — see LaunchedToken.configureTax) ----
+    /// @notice Hard ceiling on feeBps_ in setTaxDefaults, well below the
+    /// mathematical 100% limit. Bounds how punishing a future launch's
+    /// transfer tax can ever be set, even by a fully trusted owner acting
+    /// in good faith by mistake or a compromised owner key acting in bad
+    /// faith — 2,000 bps (20%) is intentionally generous relative to the
+    /// 0.25% default so it never gets in the way of a legitimate tax
+    /// change, while still ruling out a tax so high it's effectively
+    /// confiscatory or makes a token untradeable. Adjust this constant if a
+    /// different ceiling fits the platform's actual policy.
+    uint256 public constant MAX_FEE_BPS = 2_000; // 20.00%
+
     address public platformFeeWallet;
     uint256 public feeBps = 25; // 0.25%
     address public priceFeed;
@@ -241,7 +252,11 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// relayedCreateToken call can pay itself out of one voucher's fee — a
     /// circuit breaker against a compromised or malfunctioning relayer key
     /// inflating tx.gasprice to drain more than a real deploy could ever
-    /// cost. 0 (the default) means no cap.
+    /// cost. 0 (the default) means no cap — but setRelayer refuses to
+    /// enable a relayer while this is still 0, so a real value must be
+    /// chosen (via setMaxRelayerGasReimbursement) before the relayed-launch
+    /// feature can actually be used; this variable can only ever be 0 while
+    /// there is also no relayer configured to spend it.
     uint256 public maxRelayerGasReimbursementWei;
 
     /// @dev Flat gas-unit buffer added on top of the gas actually measured
@@ -395,23 +410,45 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator, structHash));
     }
 
+    /// @dev The actual CREATE2 salt used for a given (creator, caller-chosen
+    /// salt) pair is keccak256(abi.encode(creator_, salt)) rather than the
+    /// raw salt value — this binds the resulting clone address to the
+    /// creator who mined it. Without this binding, a salt (and the exact
+    /// calldata carrying it) sitting in the public mempool could be copied
+    /// verbatim by a third party and resubmitted with higher gas, landing
+    /// their transaction first and permanently claiming that address for a
+    /// token of their own choosing, while the original submitter's
+    /// transaction reverts (CREATE2 to an already-deployed address always
+    /// does). Binding the salt to the creator's address makes the resulting
+    /// address unreproducible by anyone else, closing that front-running
+    /// window while preserving the ability to mine a salt for a chosen
+    /// address suffix (the miner just needs to include its own address in
+    /// the off-chain search).
+    function _deriveTokenSalt(address creator_, uint256 salt) private pure returns (bytes32) {
+        return keccak256(abi.encode(creator_, salt));
+    }
+
     /// @notice Deploy a new token, in either mode. msg.value must equal
     /// deployFee exactly for "Deploy Token", or launchFee +
     /// liquidityEthAmount + creatorBuyEthAmount for "Deploy and Add
     /// Liquidity (Launch)" — liquidityEthAmount and creatorBuyEthAmount are
     /// both ignored (and must be 0) in "Deploy Token" mode.
     ///
-    /// @param salt Caller-chosen CREATE2 salt for the clone's address (see
-    /// predictTokenAddress below to preview it before sending this
-    /// transaction). Deployed via Clones.cloneDeterministic rather than the
-    /// old plain Clones.clone specifically so the front end can pick a
-    /// salt that lands on a chosen address suffix (the platform mines one
-    /// ending in its own chain ID) — any salt works, including 0; this
-    /// contract places no meaning on the value itself, only on the address
-    /// it produces. Reusing a salt already used with this same
-    /// implementation simply reverts (CREATE2 to an already-deployed
-    /// address always does), so a caller that wants a specific suffix picks
-    /// a fresh salt and tries again rather than resubmitting the same one.
+    /// @param salt Caller-chosen CREATE2 salt input for the clone's address
+    /// (see predictTokenAddress below to preview the resulting address
+    /// before sending this transaction). Deployed via
+    /// Clones.cloneDeterministic rather than the old plain Clones.clone
+    /// specifically so the front end can pick a salt that lands on a chosen
+    /// address suffix (the platform mines one ending in its own chain ID) —
+    /// any salt works, including 0; this contract places no meaning on the
+    /// value itself, only on the address it produces. The actual CREATE2
+    /// salt used is derived from (msg.sender, salt) — see _deriveTokenSalt —
+    /// so the resulting address is bound to the caller and cannot be
+    /// reproduced or front-run by anyone else. Reusing a salt already used
+    /// by this same caller with this same implementation simply reverts
+    /// (CREATE2 to an already-deployed address always does), so a caller
+    /// that wants a specific suffix picks a fresh salt and tries again
+    /// rather than resubmitting the same one.
     function createToken(
         string calldata name_,
         string calldata symbol_,
@@ -426,7 +463,7 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         require(bytes(symbol_).length > 0, "TokenFactory: symbol required");
         require(totalSupply_ > 0, "TokenFactory: supply must be > 0");
 
-        token = Clones.cloneDeterministic(tokenImplementation, bytes32(salt));
+        token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(msg.sender, salt));
         address pair;
         uint256 feeCollected;
 
@@ -614,7 +651,7 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
 
         d.settled = true; // effects before interactions, same discipline as _finalizeLaunch
 
-        token = Clones.cloneDeterministic(tokenImplementation, bytes32(voucher.salt));
+        token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(voucher.creator, voucher.salt));
         address pair;
 
         if (!voucher.addLiquidityAtLaunch) {
@@ -851,15 +888,19 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     }
 
     /// @notice Previews the address createToken()/relayedCreateToken() will
-    /// deploy to for a given `salt`, without spending any gas or sending a
-    /// transaction — a pure function of (this factory's own address,
-    /// tokenImplementation, salt). The front end (and scripts/launch.js)
-    /// use this only to double-check an off-chain-mined salt actually
-    /// produces the expected address before submitting the real
-    /// transaction; the deploy itself never calls this, it just runs the
-    /// identical CREATE2 computation inline via Clones.cloneDeterministic.
-    function predictTokenAddress(uint256 salt) external view returns (address) {
-        return Clones.predictDeterministicAddress(tokenImplementation, bytes32(salt), address(this));
+    /// deploy to for a given (creator, salt) pair, without spending any gas
+    /// or sending a transaction — a pure function of (this factory's own
+    /// address, tokenImplementation, creator, salt). `creator_` must be the
+    /// same address that will actually call createToken() (msg.sender) or,
+    /// for a relayed launch, the voucher's `creator` field — see
+    /// _deriveTokenSalt for why the address is bound to the creator. The
+    /// front end (and scripts/launch.js) use this only to double-check an
+    /// off-chain-mined salt actually produces the expected address before
+    /// submitting the real transaction; the deploy itself never calls this,
+    /// it just runs the identical CREATE2 computation inline via
+    /// Clones.cloneDeterministic.
+    function predictTokenAddress(address creator_, uint256 salt) external view returns (address) {
+        return Clones.predictDeterministicAddress(tokenImplementation, _deriveTokenSalt(creator_, salt), address(this));
     }
 
     // ---- admin ----
@@ -959,7 +1000,22 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// unset just sits there reclaimable once its deadline passes, rather
     /// than being stuck. Fully reversible, and never touches a launch that
     /// already happened.
+    ///
+    /// Enabling a relayer (newRelayer != address(0)) requires
+    /// maxRelayerGasReimbursementWei to already be set to a real, non-zero
+    /// value — the default of 0 means "no cap" on how much of a launch's
+    /// fee _settleRelayedFee can pay itself back as gas reimbursement, so a
+    /// relayer is never turned on with that safety circuit breaker silently
+    /// left wide open. Call setMaxRelayerGasReimbursement with a value
+    /// sized to real gas costs on this chain before (or in the same
+    /// deployment script as) enabling the relayer.
     function setRelayer(address newRelayer) external onlyOwner {
+        if (newRelayer != address(0)) {
+            require(
+                maxRelayerGasReimbursementWei > 0,
+                "TokenFactory: set maxRelayerGasReimbursementWei before enabling a relayer"
+            );
+        }
         relayer = newRelayer;
         emit RelayerUpdated(newRelayer);
     }
@@ -982,8 +1038,9 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// unconfigured for launches going forward (_launchWithLiquidity simply
     /// refuses to launch until both are set again). feeBps_,
     /// graduationTargetUsd_, and maxOracleStaleness_ get real bounds below
-    /// so a mistyped value can't silently brick every future launch's
-    /// transfers (feeBps_ above 10,000) or defeat the tax from block one
+    /// so a mistyped — or maliciously chosen — value can't silently brick
+    /// every future launch's transfers or make its tax effectively
+    /// confiscatory (feeBps_ above MAX_FEE_BPS) or defeat the tax from block one
     /// (graduationTargetUsd_ == 0) — mirrors the same-style bound already
     /// enforced on setMaxCreatorBuyBps. rewardBps_ is the new addition: how
     /// much of feeBps_ gets carved off to rewardsDistributor going
@@ -998,7 +1055,7 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         uint256 rewardBps_,
         uint256 creatorRewardBps_
     ) external onlyOwner {
-        require(feeBps_ <= 10_000, "TokenFactory: feeBps cannot exceed 100%");
+        require(feeBps_ <= MAX_FEE_BPS, "TokenFactory: feeBps exceeds MAX_FEE_BPS ceiling");
         require(graduationTargetUsd_ > 0, "TokenFactory: graduation target must be > 0");
         require(maxOracleStaleness_ > 0, "TokenFactory: oracle staleness must be > 0");
         require(rewardBps_ + creatorRewardBps_ <= feeBps_, "TokenFactory: rewardBps+creatorRewardBps cannot exceed feeBps");
@@ -1018,7 +1075,11 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// narrow: this can only repoint that one token's oracle inputs, never
     /// its fee rate, fee wallet, pair, or taxActive directly. Graduation
     /// still requires the same market-cap/confirmation-window check as
-    /// ever; this only unblocks that path from behind a dead oracle.
+    /// ever; this only unblocks that path from behind a dead oracle. As of
+    /// LaunchedToken.updatePriceFeed's own freshness guard, this call
+    /// reverts outright if the token's current feed can still report a
+    /// fresh price — it cannot be used to repoint a healthy, currently-live
+    /// token's oracle inputs on a whim.
     function updateTokenPriceFeed(address token, address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyOwner {
         LaunchedToken(token).updatePriceFeed(newPriceFeed_, newMaxOracleStaleness_);
         emit TokenPriceFeedUpdated(token, newPriceFeed_, newMaxOracleStaleness_);

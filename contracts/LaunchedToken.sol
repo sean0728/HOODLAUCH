@@ -223,10 +223,25 @@ contract LaunchedToken is ERC20 {
     /// window path as ever — this only unblocks that path when it would
     /// otherwise be stuck forever behind a dead oracle, it doesn't grant a
     /// shortcut around it.
+    ///
+    /// This also only WORKS when the current feed is actually the dead-
+    /// oracle case it's meant for: the require below reuses this contract's
+    /// own currentMarketCapInFeedDecimals() freshness check and reverts if
+    /// the existing feed can still report a fresh price. Without this
+    /// guard the owner could repoint a perfectly healthy, currently-live
+    /// token's oracle inputs at any time for any reason — an ongoing lever
+    /// over whether/when that token's tax ever turns off. With it, the
+    /// owner can only act once the current feed has genuinely stopped
+    /// delivering fresh data (dead/reverting, stale beyond
+    /// maxOracleStaleness, or returning a non-positive/future-dated round),
+    /// matching the escape-hatch use case this function documents rather
+    /// than an unrestricted standing power.
     function updatePriceFeed(address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyFactory {
         require(taxConfigured, "LaunchedToken: tax not configured");
         require(newPriceFeed_ != address(0), "LaunchedToken: invalid price feed");
         require(newMaxOracleStaleness_ > 0, "LaunchedToken: oracle staleness must be > 0");
+        (, bool feedIsFresh) = currentMarketCapInFeedDecimals();
+        require(!feedIsFresh, "LaunchedToken: current price feed is still fresh, cannot be repointed");
         priceFeed = IAggregatorV3(newPriceFeed_);
         maxOracleStaleness = newMaxOracleStaleness_;
         emit PriceFeedUpdated(newPriceFeed_, newMaxOracleStaleness_);
@@ -293,7 +308,21 @@ contract LaunchedToken is ERC20 {
         if (pair == address(0)) return (0, false);
         try priceFeed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
             if (answer <= 0) return (0, false);
-            if (block.timestamp - updatedAt > maxOracleStaleness) return (0, false);
+            // updatedAt > block.timestamp (a future-dated round — a
+            // misbehaving, misconfigured, or compromised feed) is checked
+            // explicitly before the subtraction below. Solidity's try/catch
+            // only guards a revert thrown by the external call itself
+            // (priceFeed.latestRoundData()); a revert thrown by code here,
+            // after that call already succeeded — such as an underflow
+            // panic from block.timestamp - updatedAt when updatedAt is in
+            // the future — is NOT caught, and would otherwise propagate all
+            // the way out of _maybeDisableTax() and revert the entire
+            // transfer, permanently bricking trading against this token
+            // until the owner intervenes. Treating a future-dated round the
+            // same as a stale one (fail open: skip the check, never revert)
+            // keeps this function's own documented contract ("a stale/
+            // broken feed never blocks trading").
+            if (updatedAt > block.timestamp || block.timestamp - updatedAt > maxOracleStaleness) return (0, false);
 
             try this._computeMarketCapFromPair(uint256(answer)) returns (uint256 mc, bool ok) {
                 if (!ok) return (0, false);
