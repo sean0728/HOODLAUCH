@@ -59,10 +59,11 @@
 // a stolen relayer key can do is waste its own ETH balance or simply stop
 // relaying, not touch anyone else's funds).
 const path = require("path");
+const fs = require("fs"); // used only by the temporary /debug/data-dirs route below
 const express = require("express");
 const hre = require("hardhat");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
-const { recordLaunch, readLedger, PUBLIC_FIELDS } = require("../lib/launchStore");
+const { recordLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = require("../lib/launchStore");
 const {
   getVoucher,
   upsertVoucher,
@@ -75,6 +76,7 @@ const {
   readPendingDeposits,
   upsertPendingDeposit,
   removePendingDeposit,
+  RELAYER_DATA_ROOT,
 } = require("../lib/relayerStore");
 const { verifyAdminSignature, isFreshTimestamp } = require("../lib/adminAuth");
 const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
@@ -718,6 +720,60 @@ async function main() {
       trackedTokenFound: !!tracked,
       priceHistoryPointCount: readPriceHistory(network, req.params.tokenAddress).length,
       discovery,
+    });
+  });
+
+  // TEMPORARY DIAGNOSTIC ROUTE — added specifically to resolve a mismatch
+  // between "the GoDaddy Files panel shows public/assets/ as completely
+  // empty" and "the server's own logs show voucher writes succeeding" (they
+  // can't both be literally true: upsertVoucher() only logs success AFTER
+  // fs.writeFileSync has already succeeded). Rather than trust either side
+  // of that from the outside, this asks the live running process directly:
+  // what does ITS OWN fs module see right now, and can it genuinely write
+  // and read back a file at this exact moment. Safe to leave in short-term
+  // (no secrets exposed — only directory structure, resolved absolute
+  // paths, and a throwaway probe file that's deleted immediately after);
+  // remove once the persistence question is settled.
+  app.get("/debug/data-dirs", (_req, res) => {
+    function listTree(root, depth = 3) {
+      if (!fs.existsSync(root)) return { exists: false, root };
+      function walk(dir, level) {
+        return fs.readdirSync(dir, { withFileTypes: true }).map((entry) => {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory() && level > 0) {
+            return { name: entry.name, type: "dir", children: walk(full, level - 1) };
+          }
+          return { name: entry.name, type: entry.isDirectory() ? "dir" : "file" };
+        });
+      }
+      try {
+        return { exists: true, root, entries: walk(root, depth) };
+      } catch (err) {
+        return { exists: null, root, error: err.message };
+      }
+    }
+
+    const writeProbe = { path: path.join(RELAYER_DATA_ROOT, "__write_probe.json") };
+    try {
+      fs.mkdirSync(RELAYER_DATA_ROOT, { recursive: true });
+      fs.writeFileSync(writeProbe.path, JSON.stringify({ t: Date.now() }));
+      writeProbe.readBack = fs.readFileSync(writeProbe.path, "utf8");
+      fs.unlinkSync(writeProbe.path);
+      writeProbe.ok = true;
+    } catch (err) {
+      writeProbe.ok = false;
+      writeProbe.error = err.message;
+      writeProbe.code = err.code;
+    }
+
+    sendJson(res, 200, {
+      processCwd: process.cwd(),
+      scriptDir: __dirname,
+      RELAYER_DATA_ROOT,
+      DEPLOYED_CONTRACTS_ROOT,
+      relayerDataTree: listTree(RELAYER_DATA_ROOT),
+      deployedContractsTree: listTree(DEPLOYED_CONTRACTS_ROOT),
+      writeProbeRightNow: writeProbe,
     });
   });
 
