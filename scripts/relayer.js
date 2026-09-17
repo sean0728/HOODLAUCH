@@ -67,6 +67,7 @@ const { recordLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = req
 const {
   getVoucher,
   upsertVoucher,
+  readVouchers,
   getCursor,
   setCursor,
   getActiveNetwork,
@@ -775,6 +776,21 @@ async function main() {
       deployedContractsTree: listTree(DEPLOYED_CONTRACTS_ROOT),
       writeProbeRightNow: writeProbe,
     });
+  });
+
+  // TEMPORARY DIAGNOSTIC ROUTE — the GoDaddy Files panel isn't showing a
+  // live view of this app's disk (confirmed by /debug/data-dirs above), so
+  // rather than keep fighting that dashboard, ask the running process to
+  // just hand back vouchers.json directly. Nothing here is a secret in a
+  // way that matters for this app's threat model: a voucher's EIP-712
+  // signature only lets you call relayedCreateToken/relayedCreateCustomToken
+  // with the exact same parameters the creator already signed (no way to
+  // alter amounts/recipient), and doing so still requires being the
+  // factory's own relayer() wallet — see the module comment on
+  // RELAYER_PRIVATE_KEY above. Remove once the /launches recordkeeping gap
+  // is resolved.
+  app.get("/debug/vouchers", (_req, res) => {
+    sendJson(res, 200, { vouchers: readVouchers() });
   });
 
   if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
