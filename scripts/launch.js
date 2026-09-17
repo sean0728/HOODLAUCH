@@ -49,6 +49,7 @@ const path = require("path");
 const hre = require("hardhat");
 const { recordLaunch } = require("../lib/launchStore");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
+const { mineVanitySalt, VANITY_SUFFIX } = require("../lib/vanitySalt");
 
 async function main() {
   const factoryAddress = process.env.TOKEN_FACTORY_ADDRESS;
@@ -95,6 +96,21 @@ async function main() {
         : " (no pool — 100% of supply mints straight to your wallet)")
   );
 
+  // Mine a CREATE2 salt so this launch's clone address lands ending in
+  // VANITY_SUFFIX (see lib/vanitySalt.js and TokenFactory.createToken's own
+  // doc comment) — pure off-chain computation, no extra transaction.
+  const tokenImplementationForMining = await factory.tokenImplementation();
+  const { salt, address: predictedAddress, attempts } = mineVanitySalt(factoryAddress, tokenImplementationForMining);
+  console.log(`Mined a salt for an address ending in "${VANITY_SUFFIX}" in ${attempts} attempts: ${predictedAddress}`);
+  const onChainPrediction = await factory.predictTokenAddress(salt);
+  if (onChainPrediction.toLowerCase() !== predictedAddress.toLowerCase()) {
+    throw new Error(
+      `Vanity address prediction mismatch (off-chain ${predictedAddress} vs on-chain ${onChainPrediction}) — ` +
+        `aborting before spending the deploy fee. This should never happen; if it does, lib/vanitySalt.js has ` +
+        `drifted from TokenFactory.sol's own CREATE2 formula.`
+    );
+  }
+
   const createTx = await factory.createToken(
     name,
     symbol,
@@ -103,6 +119,7 @@ async function main() {
     liquidityWei,
     creatorBuyWei,
     minCreatorTokensOut,
+    salt,
     { value: totalValue }
   );
   console.log(`Submitted create tx ${createTx.hash}, waiting for confirmation...`);
@@ -129,7 +146,7 @@ async function main() {
       (addLiquidityAtLaunch ? ` (pool live at ${pairAddress})` : " (no pool — creator holds 100% of supply)")
   );
 
-  const tokenImplementation = await factory.tokenImplementation();
+  const tokenImplementation = tokenImplementationForMining; // already fetched above, for salt mining
   const implVerification = await verifyContract(tokenImplementation, []);
   const proxyVerification = await verifyProxyClone(tokenAddress, tokenImplementation);
 

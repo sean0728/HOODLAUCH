@@ -19,8 +19,8 @@ const hre = require("hardhat");
 // Usage (from hoodlaunch-contracts/):
 //   TOKEN_FACTORY_ADDRESS=0x6e295099aFA9d88a27131674531A4e6D229e59BE \
 //   PLATFORM_TOKEN_ADDRESS=0x9D931Ef9D5873c8288192A30F9778689D0796b5E \
-//   PLATFORM_TOKEN_LIQUIDITY_AMOUNT=1000000000 \
-//   PLATFORM_TOKEN_LIQUIDITY_ETH=0.0005 \
+//   PLATFORM_TOKEN_LIQUIDITY_AMOUNT=10000000 \
+//   PLATFORM_TOKEN_LIQUIDITY_ETH=0.05 \
 //   npx hardhat run scripts/seedPlatformTokenLiquidity.js --network robinhoodTestnet
 //
 // TOKEN_FACTORY_ADDRESS and PLATFORM_TOKEN_ADDRESS are required (the
@@ -51,8 +51,8 @@ async function main() {
   const router = await hre.ethers.getContractAt("IUniswapV2Router02", routerAddress);
   const platformToken = await hre.ethers.getContractAt("PlatformToken", platformTokenAddress);
 
-  const liquidityTokenAmount = hre.ethers.parseEther(process.env.PLATFORM_TOKEN_LIQUIDITY_AMOUNT || "1000000000");
-  const liquidityEthAmount = hre.ethers.parseEther(process.env.PLATFORM_TOKEN_LIQUIDITY_ETH || "0.005");
+  const liquidityTokenAmount = hre.ethers.parseEther(process.env.PLATFORM_TOKEN_LIQUIDITY_AMOUNT || "10000000");
+  const liquidityEthAmount = hre.ethers.parseEther(process.env.PLATFORM_TOKEN_LIQUIDITY_ETH || "0.05");
 
   const balance = await platformToken.balanceOf(deployer.address);
   if (balance < liquidityTokenAmount) {

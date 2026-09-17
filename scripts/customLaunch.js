@@ -65,6 +65,7 @@ const path = require("path");
 const hre = require("hardhat");
 const { recordLaunch } = require("../lib/launchStore");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
+const { mineVanitySalt, VANITY_SUFFIX } = require("../lib/vanitySalt");
 
 function feeSetFromEnv(side) {
   return {
@@ -127,6 +128,22 @@ async function main() {
   console.log(`Buy tax: ${JSON.stringify(buyFees)}, Sell tax: ${JSON.stringify(sellFees)}`);
   console.log(`Reflections payout: ${reflectionAsset === hre.ethers.ZeroAddress ? "native ETH" : reflectionAsset}`);
 
+  // Mine a CREATE2 salt so this launch's clone address lands ending in
+  // VANITY_SUFFIX (see lib/vanitySalt.js and CustomTokenFactory.
+  // createCustomToken's own doc comment) — pure off-chain computation, no
+  // extra transaction.
+  const tokenImplementationForMining = await factory.tokenImplementation();
+  const { salt, address: predictedAddress, attempts } = mineVanitySalt(factoryAddress, tokenImplementationForMining);
+  console.log(`Mined a salt for an address ending in "${VANITY_SUFFIX}" in ${attempts} attempts: ${predictedAddress}`);
+  const onChainPrediction = await factory.predictTokenAddress(salt);
+  if (onChainPrediction.toLowerCase() !== predictedAddress.toLowerCase()) {
+    throw new Error(
+      `Vanity address prediction mismatch (off-chain ${predictedAddress} vs on-chain ${onChainPrediction}) — ` +
+        `aborting before spending the deploy fee. This should never happen; if it does, lib/vanitySalt.js has ` +
+        `drifted from CustomTokenFactory.sol's own CREATE2 formula.`
+    );
+  }
+
   const createTx = await factory.createCustomToken(
     name,
     symbol,
@@ -139,6 +156,7 @@ async function main() {
     marketingWallet,
     creatorBuyWei,
     minCreatorTokensOut,
+    salt,
     { value: totalValue }
   );
   console.log(`Submitted create tx ${createTx.hash}, waiting for confirmation...`);
@@ -165,7 +183,7 @@ async function main() {
       (addLiquidityAtLaunch ? ` (pool live at ${pairAddress})` : " (no pool — tax stays inert until later activation)")
   );
 
-  const tokenImplementation = await factory.tokenImplementation();
+  const tokenImplementation = tokenImplementationForMining; // already fetched above, for salt mining
   const implVerification = await verifyContract(tokenImplementation, []);
   const proxyVerification = await verifyProxyClone(tokenAddress, tokenImplementation);
 
