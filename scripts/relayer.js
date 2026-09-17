@@ -272,7 +272,33 @@ function sendJson(res, status, body) {
   );
 }
 
-async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementationAddress, creator, name, symbol, totalSupply, network, txHash, extra }) {
+// FIX: liquidityEvent/boughtEvent were previously never captured for a
+// relayed launch at all — this function used to only record the bare
+// essentials (address, creator, supply, tx hash), leaving
+// liquidityEthAmount/liquidityTokenAmount/liquidityLpAmount/
+// liquidityLockId/liquidityUnlockTime/creatorBuyEthAmount/
+// creatorTokensBought permanently null in the ledger for every relayed
+// launch, even when liquidity really was added and a creator buy-in really
+// happened (as scripts/launch.js's own record already did for a
+// directly-run, self-paid launch — this brings the relayed path to parity
+// with it). Callers now parse LiquidityAdded/CreatorBought out of the same
+// relay receipt they already parsed the TokenCreated/CustomTokenCreated
+// event from, and pass them in here.
+async function postLaunchPipeline({
+  kind,
+  tokenAddress,
+  pairAddress,
+  implementationAddress,
+  creator,
+  name,
+  symbol,
+  totalSupply,
+  network,
+  txHash,
+  liquidityEvent,
+  boughtEvent,
+  extra,
+}) {
   const implVerification = await verifyContract(implementationAddress, []);
   const proxyVerification = await verifyProxyClone(tokenAddress, implementationAddress);
 
@@ -284,6 +310,14 @@ async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementat
   } catch (err) {
     console.warn(`Could not generate a flattened source archive: ${err.message}`);
   }
+
+  // Same fallback verify.js's resolveExplorerApiUrl() already uses for the
+  // API URL — EXPLORER_BROWSER_URL still overrides for anyone pointing at a
+  // different explorer, but lib/networks.js's own explorerBrowserUrl means
+  // this no longer silently stays null on a network that already has a
+  // known-good default configured.
+  const explorerBrowserUrl =
+    process.env.EXPLORER_BROWSER_URL || (ROBINHOOD_NETWORKS[network] || {}).explorerBrowserUrl || null;
 
   const record = {
     name,
@@ -298,9 +332,14 @@ async function postLaunchPipeline({ kind, tokenAddress, pairAddress, implementat
     deploymentTxHash: txHash,
     verified: implVerification.verified,
     proxyVerified: proxyVerification.verified,
-    explorerUrl: process.env.EXPLORER_BROWSER_URL
-      ? `${process.env.EXPLORER_BROWSER_URL.replace(/\/$/, "")}/address/${tokenAddress}`
-      : null,
+    liquidityEthAmount: liquidityEvent ? liquidityEvent.args.ethAmount.toString() : null,
+    liquidityTokenAmount: liquidityEvent ? liquidityEvent.args.tokenAmount.toString() : null,
+    liquidityLpAmount: liquidityEvent ? liquidityEvent.args.lpAmount.toString() : null,
+    liquidityLockId: liquidityEvent ? liquidityEvent.args.lockId.toString() : null,
+    liquidityUnlockTime: liquidityEvent ? new Date(Number(liquidityEvent.args.unlockTime) * 1000).toISOString() : null,
+    creatorBuyEthAmount: boughtEvent ? boughtEvent.args.ethIn.toString() : null,
+    creatorTokensBought: boughtEvent ? boughtEvent.args.tokensOut.toString() : null,
+    explorerUrl: explorerBrowserUrl ? `${explorerBrowserUrl.replace(/\/$/, "")}/address/${tokenAddress}` : null,
     flattenedSource: flattenedSource
       ? [
           `// Deployment record for ${name} ($${symbol}) — relayed gasless launch`,
@@ -872,6 +911,13 @@ async function main() {
       });
       const created = parsedLogs.find((p) => p && p.name === watcher.createdEventName);
       if (!created) throw new Error(`${watcher.createdEventName} event not found in relay receipt`);
+      // FIX: these were never looked for before, so a relayed launch's
+      // ledger entry always recorded null for every liquidity/creator-buy
+      // field even when both genuinely happened in this same transaction —
+      // see the comment on postLaunchPipeline() above. Same event names
+      // scripts/launch.js already parses for a direct, self-paid launch.
+      const liquidityEvent = parsedLogs.find((p) => p && p.name === "LiquidityAdded");
+      const boughtEvent = parsedLogs.find((p) => p && p.name === "CreatorBought");
 
       const tokenAddress = created.args.token;
       const pairAddress = created.args.pair || hre.ethers.ZeroAddress;
@@ -897,6 +943,8 @@ async function main() {
         totalSupply: voucher.totalSupply,
         network,
         txHash: receipt.hash,
+        liquidityEvent,
+        boughtEvent,
         extra: { voucherHash },
       });
     } catch (err) {
