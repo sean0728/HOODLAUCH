@@ -129,6 +129,16 @@ const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5
 // launched token on every tick would waste gas for no benefit.
 const FEE_WALLET_DISTRIBUTOR_ADDRESS = process.env.FEE_WALLET_DISTRIBUTOR_ADDRESS || null;
 const FEE_WALLET_POLL_INTERVAL_MS = Number(process.env.FEE_WALLET_POLL_INTERVAL_MS || 5 * 60_000);
+// Slippage tolerance applied to quoteSwapEthOut's prediction before it's
+// used as triggerFeeWalletSwap's real minEthOut floor (see
+// sweepFeeWalletRewardsOnce below) — same 3% default and same reasoning as
+// PLATFORM_BUYBACK_SLIPPAGE_BPS: this is an unattended scheduled sweep, not
+// a one-off UI click a person is watching, so it needs more room than a
+// UI's tighter 2% to avoid spurious reverts from ordinary price drift
+// between the quote and the mined tx, while still giving a sandwiching bot
+// a bounded, small amount of value to extract instead of none at all (what
+// minEthOut=0 handed it before this fix).
+const FEE_WALLET_SLIPPAGE_BPS = BigInt(process.env.FEE_WALLET_SLIPPAGE_BPS || 300); // 3%
 
 // Same optionality as FEE_WALLET_*/CREATOR_REWARDS_* above — leaving
 // PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS unset means this service does
@@ -1539,21 +1549,33 @@ async function main() {
     setTimeout(tokenPricePollLoop, TOKEN_PRICE_POLL_INTERVAL_MS);
   }
 
-  // FIX: triggerCreatorSwap/triggerFeeWalletSwap both route the FULL
-  // amountIn (balance, capped by maxSwapAmount) straight through
-  // swapExactTokensForETHSupportingFeeOnTransferTokens with minEthOut
-  // hardcoded to 0 by both sweep loops below — that only floors an
-  // ACCEPTABLE output, it does nothing to prevent one that rounds down to
-  // EXACTLY zero. A dust-sized amountIn against thick reserves (or a
-  // pool that's barely traded, or effectively abandoned — exactly the
-  // state of "test3", a token that predates the current factory
-  // deployment) computes a zero output, and UniswapV2Pair.swap() itself
-  // hard-reverts with "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT" in that case.
-  // Before this fix, nothing distinguished that PERMANENT failure from a
-  // transient one (no pool yet, threshold not yet reached), so a token
-  // stuck at dust got retried and logged as a fresh failure on every single
-  // poll tick forever, with no path to ever succeed until real trading
-  // volume changes its balance.
+  // FIX (two issues, same root cause): triggerCreatorSwap/triggerFeeWalletSwap
+  // both route the FULL amountIn (balance, capped by maxSwapAmount) straight
+  // through swapExactTokensForETHSupportingFeeOnTransferTokens with minEthOut
+  // hardcoded to 0 by both sweep loops below.
+  //
+  // Issue 1 (dust/log-spam): minEthOut=0 only floors an ACCEPTABLE output, it
+  // does nothing to prevent one that rounds down to EXACTLY zero. A
+  // dust-sized amountIn against thick reserves (or a pool that's barely
+  // traded, or effectively abandoned — exactly the state of "test3", a token
+  // that predates the current factory deployment) computes a zero output,
+  // and UniswapV2Pair.swap() itself hard-reverts with "UniswapV2:
+  // INSUFFICIENT_OUTPUT_AMOUNT" in that case. Before this fix, nothing
+  // distinguished that PERMANENT failure from a transient one (no pool yet,
+  // threshold not yet reached), so a token stuck at dust got retried and
+  // logged as a fresh failure on every single poll tick forever, with no
+  // path to ever succeed until real trading volume changes its balance.
+  //
+  // Issue 2 (MEV/sandwich): minEthOut=0 is also a wide-open door for a
+  // sandwich bot — it can front-run this tx to push the pool's price down,
+  // let the swap fill at whatever's left (zero floor never objects), then
+  // back-run to restore price and pocket the difference, extracting up to
+  // the ENTIRE swap value on every sweep. quoteSwapEthOut's prediction is
+  // used for both: first to skip a permanently-dust call quietly, and now
+  // (see FEE_WALLET_SLIPPAGE_BPS and sweepFeeWalletRewardsOnce below) as the
+  // basis for a real minEthOut floor, exactly the fix already applied to
+  // index.html's convertCreatorRewards and to the platform-rewards sweep
+  // below — this was the one sweep loop still missing it.
   //
   // This predicts the swap's output with the router's own free,
   // side-effect-free getAmountsOut before ever sending a transaction, so a
@@ -1562,10 +1584,10 @@ async function main() {
   // actionable by anyone. Fee-on-transfer tax on the token being sold means
   // the REAL on-chain output can come in lower than this predicts (never
   // higher), so this can still occasionally let a call through that ends up
-  // reverting anyway — but it eliminates the guaranteed-forever case, which
-  // is what was actually spamming the logs. Returns 0n (never throws) for
-  // "don't bother yet" on any failure, including no pool/no liquidity at
-  // all for this token yet.
+  // reverting anyway — but it eliminates the guaranteed-forever dust case,
+  // which is what was actually spamming the logs. Returns 0n (never
+  // throws) for "don't bother yet" on any failure, including no pool/no
+  // liquidity at all for this token yet.
   async function quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn) {
     if (amountIn === 0n) return 0n;
     try {
@@ -1653,9 +1675,17 @@ async function main() {
         const predictedEthOut = await quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn);
         if (predictedEthOut === 0n) continue; // dust, or no pool/liquidity yet — nothing worth logging
 
-        const tx = await feeWalletDistributor.triggerFeeWalletSwap(tokenAddress, 0);
+        // Real slippage floor instead of minEthOut=0 — see the FIX comment
+        // above (Issue 2) and FEE_WALLET_SLIPPAGE_BPS's own comment for why
+        // 3% rather than a UI's tighter 2%.
+        const minEthOut = (predictedEthOut * (10000n - FEE_WALLET_SLIPPAGE_BPS)) / 10000n;
+
+        const tx = await feeWalletDistributor.triggerFeeWalletSwap(tokenAddress, minEthOut);
         const receipt = await tx.wait();
-        console.log(`[fee-wallet] swept ${tokenAddress} (balance ${balance}) in tx ${receipt.hash}.`);
+        console.log(
+          `[fee-wallet] swept ${tokenAddress} (balance ${balance}, predicted ${predictedEthOut} wei, ` +
+            `minEthOut ${minEthOut} wei) in tx ${receipt.hash}.`
+        );
       } catch (err) {
         // Expected/benign cases include: a threshold that hasn't been
         // reached, or another caller having already swept it between our
