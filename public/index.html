@@ -2212,6 +2212,58 @@
     if(from) callObj.from = from; // needed to simulate a caller-gated function (see quoteCreatorSwapMinEthOut)
     return window.ethereum.request({ method:"eth_call", params:[callObj, "latest"] });
   }
+
+  // Decodes the two standard Solidity revert encodings out of raw returned
+  // call data: Error(string) — what require(cond, "reason") and revert
+  // ("reason") both produce — and Panic(uint256) — what a division by
+  // zero, an array out-of-bounds access, or an unchecked arithmetic
+  // over/underflow produce instead. Returns null (never throws) for
+  // anything else, including a custom Solidity error (its own 4-byte
+  // selector, no decodable string) or data that isn't a revert payload at
+  // all — callers fall back to whatever generic message they already had.
+  function decodeRevertReason(hexData){
+    if(!hexData || typeof hexData !== "string" || !hexData.startsWith("0x")) return null;
+    try{
+      if(hexData.startsWith("0x08c379a0")){ // Error(string)
+        return decodeAbiString("0x"+hexData.slice(10));
+      }
+      if(hexData.startsWith("0x4e487b71")){ // Panic(uint256)
+        const code = BigInt("0x"+hexData.slice(10, 74));
+        return `Panic (code 0x${code.toString(16)}) — likely a division by zero or arithmetic overflow in the contract`;
+      }
+    }catch(err){ /* fall through to null below */ }
+    return null;
+  }
+
+  // window.ethereum.request often throws with only a generic top-level
+  // message ("Internal JSON-RPC error.") while the ACTUAL node-reported
+  // revert reason sits one or two levels deeper, in a shape that varies by
+  // wallet/provider — MetaMask nests it under err.data (sometimes itself an
+  // object with its own .data, sometimes the raw hex string directly).
+  // This digs through every shape this codebase has actually seen rather
+  // than surfacing the outer wrapper's unhelpful text, so a failure here
+  // says WHY instead of just THAT.
+  function describeRpcError(err){
+    if(!err) return "Unknown error";
+    const candidates = [
+      err.data && err.data.originalError && err.data.originalError.data,
+      err.data && err.data.data,
+      typeof err.data === "string" ? err.data : null,
+      err.data && err.data.message,
+      err.data && err.data.originalError && err.data.originalError.message,
+    ];
+    for(const candidate of candidates){
+      if(typeof candidate === "string" && candidate.startsWith("0x")){
+        const decoded = decodeRevertReason(candidate);
+        if(decoded) return decoded;
+      }
+    }
+    for(const candidate of candidates){
+      if(typeof candidate === "string" && candidate && !candidate.startsWith("0x")) return candidate;
+    }
+    if(typeof err.message === "string" && err.message) return err.message;
+    return String(err);
+  }
   async function waitForReceipt(txHash, {intervalMs=1500, timeoutMs=180000}={}){
     const start = Date.now();
     while(Date.now()-start < timeoutMs){
@@ -6035,9 +6087,10 @@
       const simulateData = encodeAddressUint256Calldata(CRD_TRIGGER_CREATOR_SWAP_SELECTOR, tokenAddress, 0n);
       simulatedHex = await ethCall(distributorAddress, simulateData, wallet);
     }catch(err){
+      console.error("quoteCreatorSwapMinEthOut simulation failed:", err);
       return {
         minEthOut: 0n, quotedEthOut: 0n, simulationFailed: true,
-        simulationError: (err && err.message) ? err.message : String(err),
+        simulationError: describeRpcError(err),
       };
     }
     const quotedEthOut = decodeUint256(simulatedHex);
@@ -6086,7 +6139,7 @@
     }catch(err){
       console.error(err);
       if(err && err.code===4001) toast("Transaction was rejected in your wallet.");
-      else toast("Conversion failed: " + ((err && err.message) ? err.message : String(err)));
+      else toast("Conversion failed: " + describeRpcError(err));
     }finally{
       if(btnEl){ btnEl.disabled = false; btnEl.textContent = originalLabel; }
       if(views.portfolio.classList.contains("active")) renderPortfolio();
@@ -6118,7 +6171,7 @@
     }catch(err){
       console.error(err);
       if(err && err.code===4001) toast("Transaction was rejected in your wallet.");
-      else toast("Claim failed: " + ((err && err.message) ? err.message : String(err)));
+      else toast("Claim failed: " + describeRpcError(err));
     }finally{
       if(btnEl){ btnEl.disabled = false; btnEl.textContent = originalLabel; }
       if(views.portfolio.classList.contains("active")) renderPortfolio();
