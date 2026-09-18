@@ -418,6 +418,69 @@ async function main() {
     );
   }
 
+  // ---- Fee-wallet distributor (the platform's own trading-tax remainder —
+  // whatever's left of feeBps after rewardBps/creatorRewardBps are carved
+  // out — converted to ETH automatically instead of sitting as whatever
+  // token it was taxed in) — entirely optional, same "off by default,
+  // wired in deliberately" shape as the two distributors above. Leaving
+  // FEE_WALLET_DISTRIBUTOR_ADDRESS unset leaves feeWalletDistributor unset
+  // on both factories, so every taxed transfer's fee-wallet remainder keeps
+  // going straight to the plain platformFeeWallet address, exactly as it
+  // always has (see LaunchedToken._update / CustomToken._update: `super.
+  // _update(from, feeWalletDistributor != address(0) ? feeWalletDistributor
+  // : feeWallet, toFeeWallet)`).
+  //
+  // THIS BLOCK DID NOT EXIST before — deploy.js never wired this up
+  // automatically, at all, for any run before this one. That's the exact
+  // same "silently off until wired" trap that left creatorRewardsDistributor
+  // unset on every token launched after the Sept 2026 redeploy (see
+  // scripts/setCreatorRewardsDistributor.js's own comment for that
+  // incident) — except there wasn't even an opt-in env var path here to
+  // forget to set; wiring feeWalletDistributor onto an already-deployed
+  // factory required either a manual admin-panel action or a one-off
+  // script, and neither happened. If you're redeploying the factories with
+  // an existing FeeWalletDistributor already live, set
+  // FEE_WALLET_DISTRIBUTOR_ADDRESS so this run wires it in immediately
+  // instead of leaving every new launch on the old plain-wallet behavior
+  // until someone remembers to do it by hand again.
+  let feeWalletDistributorAddress = process.env.FEE_WALLET_DISTRIBUTOR_ADDRESS || null;
+
+  if (!feeWalletDistributorAddress && process.env.DEPLOY_FEE_WALLET_DISTRIBUTOR === "true") {
+    const feeWalletDistributorOwner = process.env.FEE_WALLET_DISTRIBUTOR_OWNER_ADDRESS || deployer.address;
+    // Defaults to the same platformFeeWallet this deploy already resolved
+    // above — almost always what you want FeeWalletDistributor.feeWallet to
+    // match, since it's replacing that exact address as the fee-wallet
+    // remainder's destination. Override with FEE_WALLET_ADDRESS if the
+    // eventual ETH recipient should differ from the plain-token fallback
+    // wallet.
+    const feeWalletRecipient = process.env.FEE_WALLET_ADDRESS || platformFeeWallet;
+
+    const FeeWalletDistributor = await hre.ethers.getContractFactory("FeeWalletDistributor");
+    const feeWalletDistributor = await FeeWalletDistributor.deploy(
+      routerAddress,
+      feeWalletDistributorOwner,
+      feeWalletRecipient
+    );
+    await feeWalletDistributor.waitForDeployment();
+    feeWalletDistributorAddress = await feeWalletDistributor.getAddress();
+    console.log(
+      `FeeWalletDistributor deployed at ${feeWalletDistributorAddress}, owned by ${feeWalletDistributorOwner}, ` +
+        `paying out to ${feeWalletRecipient}.`
+    );
+  } else if (feeWalletDistributorAddress) {
+    console.log(`Reusing already-deployed FeeWalletDistributor at ${feeWalletDistributorAddress}.`);
+  }
+
+  if (feeWalletDistributorAddress) {
+    const setFeeWalletDistributorTx1 = await factory.setFeeWalletDistributor(feeWalletDistributorAddress);
+    await setFeeWalletDistributorTx1.wait();
+    const setFeeWalletDistributorTx2 = await customFactory.setFeeWalletDistributor(feeWalletDistributorAddress);
+    await setFeeWalletDistributorTx2.wait();
+    console.log(
+      `TokenFactory and CustomTokenFactory both wired to FeeWalletDistributor at ${feeWalletDistributorAddress}.`
+    );
+  }
+
   const deploymentSummary = {
     tokenImplementation: await tokenImplementation.getAddress(),
     liquidityLocker: await locker.getAddress(),
@@ -438,6 +501,9 @@ async function main() {
     rewardsDistributor: rewardsDistributorAddress || "(not deployed — factories keep their pre-existing behavior)",
     creatorRewardsDistributor:
       creatorRewardsDistributorAddress || "(not deployed — creatorRewardBps stays effectively inactive)",
+    feeWalletDistributor:
+      feeWalletDistributorAddress ||
+      "(not deployed — fee-wallet remainder keeps going straight to the plain platformFeeWallet address)",
   };
 
   console.log("\nDeployment summary:");
