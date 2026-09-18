@@ -763,6 +763,59 @@ async function main() {
     });
   });
 
+  // Admin-gated fixup for exactly what /debug/token/:tokenAddress above is
+  // for diagnosing: discoverLaunchedTokens' cursor is keyed by
+  // "<factoryAddress>:discovery" (see that function below), so pointing
+  // TOKEN_FACTORY_ADDRESS/CUSTOM_TOKEN_FACTORY_ADDRESS at a freshly
+  // redeployed factory starts its cursor over from TOKEN_DISCOVERY_START_BLOCK
+  // — fine the first time this service is ever stood up, but on a live,
+  // already-running deployment that value is now however many blocks in
+  // the past it was originally set for and can be enormously behind the
+  // current tip on a fast-moving chain. Since this process runs wherever
+  // it's actually hosted (see the GoDaddy persistence notes throughout
+  // lib/relayerStore.js/launchStore.js) rather than on whoever's machine
+  // needs to fix it, there's no local shell to run a one-off hardhat script
+  // from — this exposes the identical fast-forward-only cursor bump as an
+  // admin HTTP action instead, reusing the exact same personal_sign
+  // admin-wallet gate as POST /active-network and POST /platform-config.
+  //
+  // Body: { targetBlock, timestamp, signature }. `signature` must be a
+  // personal_sign signature (from ADMIN_WALLET) of the exact string
+  // `Hood Launch admin: reset discovery cursor to block ${targetBlock} at ${timestamp}`.
+  // Only ever moves a cursor forward (mirrors scripts/resetDiscoveryCursor.js's
+  // own safety property) — a cursor already at or past targetBlock-1 is left
+  // alone, so this can't cause discovery to reprocess or duplicate anything,
+  // and is safe to call more than once (e.g. once per redeployed factory).
+  app.post("/debug/reset-discovery-cursor", async (req, res) => {
+    const { targetBlock, timestamp, signature } = req.body || {};
+    const targetBlockNum = Number(targetBlock);
+    if (!Number.isFinite(targetBlockNum) || targetBlockNum < 0 || !Number.isInteger(targetBlockNum)) {
+      return sendJson(res, 400, { error: "targetBlock must be a non-negative integer" });
+    }
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    }
+    const message = `Hood Launch admin: reset discovery cursor to block ${targetBlockNum} at ${timestamp}`;
+    if (!verifyAdminSignature(message, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
+
+    const results = {};
+    for (const watcher of watchers) {
+      const factoryAddress = await watcher.factory.getAddress();
+      const cursorKey = `${factoryAddress}:discovery`;
+      const before = getCursor(cursorKey);
+      if (before !== null && before >= targetBlockNum - 1) {
+        results[watcher.kind] = { factoryAddress, before, after: before, changed: false };
+        continue;
+      }
+      setCursor(cursorKey, targetBlockNum - 1);
+      console.log(`[admin] discovery cursor for ${watcher.kind} (${factoryAddress}) moved ${before === null ? "(never run)" : before} -> ${targetBlockNum - 1}.`);
+      results[watcher.kind] = { factoryAddress, before, after: targetBlockNum - 1, changed: true };
+    }
+    sendJson(res, 200, { network, targetBlock: targetBlockNum, results });
+  });
+
   // TEMPORARY DIAGNOSTIC ROUTE — added specifically to resolve a mismatch
   // between "the GoDaddy Files panel shows public/assets/ as completely
   // empty" and "the server's own logs show voucher writes succeeding" (they
