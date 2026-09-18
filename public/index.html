@@ -1696,8 +1696,8 @@
   const CRD_CLAIMABLE_ETH_SELECTOR = "4793dc40";        // claimableEth(address) — keyed by token address
   const CRD_SWAP_THRESHOLD_SELECTOR = "0ae9b4f0";       // swapThreshold(address)
   const CRD_SET_SWAP_THRESHOLD_SELECTOR = "db3e514c";   // setSwapThreshold(address,uint256)
-  const CRD_TRIGGER_CREATOR_SWAP_SELECTOR = "360f1b2c"; // triggerCreatorSwap(address,uint256) — permissionless
-  const CRD_CLAIM_CREATOR_REWARDS_SELECTOR = "bec3bbcc"; // claimCreatorRewards(address) — permissionless, pays token.creator()
+  const CRD_TRIGGER_CREATOR_SWAP_SELECTOR = "360f1b2c"; // triggerCreatorSwap(address,uint256) — creator-only (msg.sender == token.creator())
+  const CRD_CLAIM_CREATOR_REWARDS_SELECTOR = "bec3bbcc"; // claimCreatorRewards(address) — creator-only, pays token.creator()
 
   function encodeAddressUint256Calldata(selector, addr, value){
     return "0x"+selector+encodeAddressParam(addr)+toHex32(BigInt(value));
@@ -5955,11 +5955,11 @@
     }
   }
 
-  // Permissionless on-chain call, same as claimCreatorRewards below — any
-  // wallet can trigger the swap for any token, since it only ever converts
-  // the distributor's own already-collected balance and pays no one
-  // directly. Shown here because it's the connected wallet's own launch,
-  // but nothing about the contract restricts it to the creator.
+  // Restricted on-chain to that token's own creator — the contract itself
+  // requires msg.sender == token.creator() (see CreatorRewardsDistributor.sol),
+  // so this only succeeds when the connected wallet IS the creator. The
+  // myTokens filter above already only shows this button on the connected
+  // wallet's own launches, matching what the contract would allow anyway.
   async function convertCreatorRewards(tokenAddress, distributorAddress, btnEl){
     if(!window.ethereum){ toast("No browser wallet detected."); return; }
     if(!wallet){ toast("Connect your wallet first."); return; }
@@ -5986,11 +5986,12 @@
     }
   }
 
-  // Also permissionless — claimCreatorRewards always pays the token's own
-  // live creator() regardless of who calls it (see CreatorRewardsDistributor.sol),
-  // so this button works even if a wallet other than the creator's happened
-  // to trigger it; it's only ever shown here under the creator's own
-  // Portfolio.
+  // Also restricted to that token's own creator — same msg.sender ==
+  // token.creator() check as convertCreatorRewards above (see
+  // CreatorRewardsDistributor.sol), read live at call time so a CustomToken
+  // creator transfer is always honored. It's only ever shown here under the
+  // creator's own Portfolio, and the contract would reject it from anyone
+  // else regardless.
   async function claimCreatorRewards(tokenAddress, distributorAddress, btnEl){
     if(!window.ethereum){ toast("No browser wallet detected."); return; }
     if(!wallet){ toast("Connect your wallet first."); return; }
