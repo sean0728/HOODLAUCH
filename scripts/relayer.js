@@ -296,6 +296,7 @@ async function postLaunchPipeline({
   network,
   txHash,
   liquidityEvent,
+  knownLiquidityEthAmount,
   boughtEvent,
   extra,
 }) {
@@ -332,8 +333,23 @@ async function postLaunchPipeline({
     deploymentTxHash: txHash,
     verified: implVerification.verified,
     proxyVerified: proxyVerification.verified,
-    liquidityEthAmount: liquidityEvent ? liquidityEvent.args.ethAmount.toString() : null,
-    liquidityTokenAmount: liquidityEvent ? liquidityEvent.args.tokenAmount.toString() : null,
+    // FIX: InitialLiquidityLocked (CustomTokenFactory's liquidity event) has
+    // no ethAmount/tokenAmount fields at all — only LiquidityAdded
+    // (TokenFactory) does (see the two watchers.push() calls below for why
+    // they're named differently). Branch on the actual event name rather
+    // than assuming every liquidityEvent has the same shape, and fall back
+    // to the voucher's own known liquidityEthAmount for the custom-token
+    // case — same convention scripts/customLaunch.js already uses for its
+    // own (non-relayed) launch records. liquidityTokenAmount has no
+    // equivalent source for a custom launch, so it stays null there too,
+    // same as customLaunch.js.
+    liquidityEthAmount: (() => {
+      if (!liquidityEvent) return null;
+      if (liquidityEvent.name === "LiquidityAdded") return liquidityEvent.args.ethAmount.toString();
+      return knownLiquidityEthAmount != null ? knownLiquidityEthAmount.toString() : null;
+    })(),
+    liquidityTokenAmount:
+      liquidityEvent && liquidityEvent.name === "LiquidityAdded" ? liquidityEvent.args.tokenAmount.toString() : null,
     liquidityLpAmount: liquidityEvent ? liquidityEvent.args.lpAmount.toString() : null,
     liquidityLockId: liquidityEvent ? liquidityEvent.args.lockId.toString() : null,
     liquidityUnlockTime: liquidityEvent ? new Date(Number(liquidityEvent.args.unlockTime) * 1000).toISOString() : null,
@@ -441,6 +457,10 @@ async function main() {
       expectedDepositFn: expectedDepositForToken,
       relayFn: (v, sig) => factory.relayedCreateToken(v, sig),
       createdEventName: "TokenCreated",
+      // TokenFactory's own liquidity event — carries ethAmount/tokenAmount
+      // in addition to lpAmount/lockId/unlockTime (see LiquidityAdded in
+      // contracts/TokenFactory.sol).
+      liquidityEventName: "LiquidityAdded",
     });
   }
 
@@ -462,6 +482,22 @@ async function main() {
       expectedDepositFn: expectedDepositForCustom,
       relayFn: (v, sig) => factory.relayedCreateCustomToken(v, sig),
       createdEventName: "CustomTokenCreated",
+      // FIX: CustomTokenFactory never emits "LiquidityAdded" — that event
+      // (and its ethAmount/tokenAmount fields) only exists on TokenFactory.
+      // CustomTokenFactory's own equivalent is InitialLiquidityLocked (see
+      // contracts/CustomTokenFactory.sol), which carries lpAmount/lockId/
+      // unlockTime but never the ETH/token amounts actually paired into
+      // the pool — scripts/customLaunch.js's own record-keeping already
+      // works around that same gap by falling back to the caller-supplied
+      // liquidityEthAmount instead of an event value; postLaunchPipeline
+      // below does the same for a relayed launch, from the voucher's own
+      // liquidityEthAmount. Before this fix, relayMatchedDeposit only ever
+      // looked for "LiquidityAdded", so every relayed custom-token launch
+      // recorded liquidityEthAmount/liquidityLpAmount/liquidityLockId/
+      // liquidityUnlockTime as permanently null even when liquidity really
+      // was added (visible in the ledger as a real, non-null pairAddress
+      // sitting next to five null liquidity fields).
+      liquidityEventName: "InitialLiquidityLocked",
     });
   }
 
@@ -967,9 +1003,11 @@ async function main() {
       // FIX: these were never looked for before, so a relayed launch's
       // ledger entry always recorded null for every liquidity/creator-buy
       // field even when both genuinely happened in this same transaction —
-      // see the comment on postLaunchPipeline() above. Same event names
-      // scripts/launch.js already parses for a direct, self-paid launch.
-      const liquidityEvent = parsedLogs.find((p) => p && p.name === "LiquidityAdded");
+      // see the comment on postLaunchPipeline() above. watcher.liquidityEventName
+      // is kind-specific (see the two watchers.push() calls above) since
+      // TokenFactory and CustomTokenFactory emit differently-named,
+      // differently-shaped liquidity events.
+      const liquidityEvent = parsedLogs.find((p) => p && p.name === watcher.liquidityEventName);
       const boughtEvent = parsedLogs.find((p) => p && p.name === "CreatorBought");
 
       const tokenAddress = created.args.token;
@@ -997,6 +1035,11 @@ async function main() {
         network,
         txHash: receipt.hash,
         liquidityEvent,
+        // voucher.liquidityEthAmount is the creator's own caller-supplied
+        // ETH amount for the pool (normalized back to a BigInt above) — the
+        // only source of truth for a custom-kind launch, whose on-chain
+        // event (InitialLiquidityLocked) never carries this value itself.
+        knownLiquidityEthAmount: voucher.liquidityEthAmount,
         boughtEvent,
         extra: { voucherHash },
       });
