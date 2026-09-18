@@ -342,6 +342,21 @@
   .chart-tip .p{color:var(--paper-100); font-weight:600;}
   .chart-tip .d{color:var(--paper-700); margin-top:1px;}
 
+  /* platform token spotlight — pinned above the hero/live feed */
+  .spotlight{
+    background:var(--ink-900); border:1px solid var(--line); border-radius:4px; box-shadow:var(--shadow-panel);
+    padding:22px 26px 26px; margin:32px 0 -4px;
+  }
+  .spotlight-head{display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:10px 22px;}
+  .spotlight-id{display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;}
+  .spotlight-name{font-family:var(--font-display); font-size:1.15rem; font-weight:700;}
+  .spotlight-symbol{font-family:var(--font-mono); color:var(--paper-500); font-size:.85rem;}
+  .spotlight-figures{display:flex; align-items:baseline; gap:14px;}
+  .spotlight-price{font-family:var(--font-mono); font-size:1.5rem; font-weight:600;}
+  .spotlight-delta{font-family:var(--font-mono); font-size:.85rem; font-weight:600;}
+  .spotlight .chart-wrap{margin-top:16px;}
+  .spotlight .chart-wrap svg{height:150px;}
+
   .bond-gauge{margin-top:22px;}
   .bond-gauge .bond-track{height:10px;}
   .bond-gauge .milestones{position:relative; height:14px; margin-top:4px;}
@@ -609,6 +624,25 @@
 
     <!-- ===================== EXPLORE ===================== -->
     <section class="view active" id="view-explore">
+
+      <!-- Platform token spotlight: whatever's currently wired as
+           PlatformRewardsDistributor.platformToken() (see
+           refreshPlatformTokenSpotlight()). Hidden entirely until that's
+           configured — nothing to show for a platform that hasn't set one. -->
+      <div class="spotlight" id="platformTokenSpotlight" hidden>
+        <div class="spotlight-head">
+          <div class="spotlight-id">
+            <span class="eyebrow">Platform token</span>
+            <span class="spotlight-name" id="spotlightName">—</span>
+            <span class="spotlight-symbol" id="spotlightSymbol"></span>
+          </div>
+          <div class="spotlight-figures">
+            <span class="spotlight-price num" id="spotlightPrice">—</span>
+            <span class="spotlight-delta num" id="spotlightDelta"></span>
+          </div>
+        </div>
+        <div class="chart-wrap" id="spotlightChartWrap"></div>
+      </div>
 
       <div class="hero">
         <div>
@@ -4707,6 +4741,138 @@
     svg.addEventListener("touchmove", (e)=>{ if(e.touches[0]) onMove(e.touches[0]); }, {passive:true});
   }
 
+  // Same visual as detailChartSVG, minus the crosshair/hover wiring (this
+  // spotlight is meant to be just a chart, per the ask) and, critically,
+  // minus its hardcoded id="detailSvg"/id="crosshairGroup" — detailChartSVG
+  // can only ever be used once per page load (the actual token detail view
+  // already owns those ids), so the platform-token spotlight needed its own
+  // copy rather than calling it a second time and creating duplicate ids.
+  function spotlightChartSVG(hist){
+    const w=600,h=150; const min=Math.min(...hist), max=Math.max(...hist); const range=(max-min)||1;
+    const pts = hist.map((v,i)=>[ (i/(hist.length-1))*w, h - ((v-min)/range)*h*0.8 - h*0.1 ]);
+    const path = pts.map((p,i)=>(i===0?"M":"L")+p[0].toFixed(1)+" "+p[1].toFixed(1)).join(" ");
+    const area = path+` L${w} ${h} L0 ${h} Z`;
+    const color = hist[hist.length-1]>=hist[0] ? "var(--good-500)" : "var(--critical-500)";
+    const gridLines = [0.25,0.5,0.75].map(f=>`<line x1="0" x2="${w}" y1="${h*f}" y2="${h*f}" stroke="rgba(233,236,243,.06)" stroke-width="1"></line>`).join("");
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      ${gridLines}
+      <path d="${area}" fill="${color}" opacity="0.13"></path>
+      <path d="${path}" fill="none" stroke="${color}" stroke-width="2"></path>
+      <circle cx="${pts[pts.length-1][0].toFixed(1)}" cy="${pts[pts.length-1][1].toFixed(1)}" r="3.4" fill="${color}"></circle>
+    </svg>`;
+  }
+
+  // Drives the "Platform token" panel pinned above the hero/live feed.
+  // Deliberately reads the distributor address the same way the rest of
+  // the admin panel already does (rewardsDistributorAddress() +
+  // loadRewardsDistributorState()) rather than inventing a new lookup —
+  // PlatformRewardsDistributor is a platform-wide singleton (unlike
+  // per-token creator rewards), so platformConfig really is the right
+  // source of truth for it. Stays hidden entirely until a distributor AND
+  // a platformToken are actually configured; falls back to hidden again
+  // (rather than a stale/wrong chart) on any read failure.
+  let spotlightTokenAddress = null;
+  async function refreshPlatformTokenSpotlight(){
+    const panel = document.getElementById("platformTokenSpotlight");
+    if(!panel) return;
+    const distributorAddress = rewardsDistributorAddress();
+    if(!distributorAddress){ panel.hidden = true; spotlightTokenAddress = null; return; }
+    let prdState;
+    try{
+      prdState = await loadRewardsDistributorState(distributorAddress);
+    }catch(err){
+      panel.hidden = true; spotlightTokenAddress = null; return;
+    }
+    if(!prdState || !prdState.hasPlatformToken){ panel.hidden = true; spotlightTokenAddress = null; return; }
+    const tokenAddress = prdState.platformToken;
+    spotlightTokenAddress = tokenAddress;
+
+    // Name/symbol read live off the token itself (same NAME_SELECTOR/
+    // SYMBOL_SELECTOR pattern used elsewhere) — no wallet required, this
+    // works the same as any other read-only eth_call.
+    let name = "Platform token", symbol = "";
+    try{
+      const [nameHex, symbolHex] = await Promise.all([
+        ethCall(tokenAddress, "0x"+NAME_SELECTOR),
+        ethCall(tokenAddress, "0x"+SYMBOL_SELECTOR),
+      ]);
+      name = decodeAbiString(nameHex) || name;
+      symbol = decodeAbiString(symbolHex) || "";
+    }catch(err){ /* best-effort — keep the generic label rather than blocking the chart */ }
+
+    const url = relayerApiUrl(appMode);
+    let history = [];
+    if(url){
+      try{
+        const res = await fetch(`${url}/price-history/${tokenAddress}`);
+        if(res.ok){
+          const payload = await res.json();
+          history = Array.isArray(payload && payload.history) ? payload.history : [];
+        }
+      }catch(err){ /* leave history empty — panel below handles that */ }
+    }
+
+    document.getElementById("spotlightName").textContent = name;
+    document.getElementById("spotlightSymbol").textContent = symbol ? `$${symbol}` : "";
+    const chartWrap = document.getElementById("spotlightChartWrap");
+    const priceEl = document.getElementById("spotlightPrice");
+    const deltaEl = document.getElementById("spotlightDelta");
+
+    if(!history.length){
+      priceEl.textContent = "—";
+      deltaEl.textContent = "";
+      chartWrap.innerHTML = `<div class="admin-empty" style="padding:34px 0; text-align:center;">No price history recorded for this token yet${isAdminWallet(wallet) ? " — use “Track for charting” in the admin panel below." : "."}</div>`;
+      panel.hidden = false;
+      return;
+    }
+    const latest = history[history.length-1];
+    const change = computeLiveChange(history);
+    const hist = history.length>=2 ? history.map(pt=>pt.p) : [latest.p, latest.p];
+    priceEl.textContent = fmtUSD(latest.p);
+    deltaEl.textContent = `${fmtPct(change.pct)} · ${change.spansFullDay ? "24h" : "since tracking began"}`;
+    deltaEl.style.color = change.pct>=0 ? "var(--good-500)" : "var(--critical-500)";
+    chartWrap.innerHTML = spotlightChartSVG(hist);
+    panel.hidden = false;
+  }
+
+  // Same admin-signed pattern as requestActiveNetworkChange/
+  // requestPlatformConfigSave — see POST /track-token's own comment in
+  // relayer.js for what this registers and why a plain platform-token
+  // deploy needs it (it never emits the TokenCreated/CustomTokenCreated
+  // event discoverLaunchedTokens scans for, so it's otherwise invisible to
+  // every chart/activity feature on the site).
+  async function requestTrackToken(tokenAddress){
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    const timestamp = Date.now();
+    const message = `Hood Launch admin: track token ${tokenAddress} at ${timestamp}`;
+    let signature;
+    try{
+      signature = await window.ethereum.request({
+        method: "personal_sign",
+        params: ["0x"+utf8Hex(message), wallet],
+      });
+    }catch(err){
+      toast("Signature was rejected — token not registered.");
+      return;
+    }
+    try{
+      const res = await fetch(`${location.origin}/track-token`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ tokenAddress, timestamp, signature }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't register this token for tracking."); return; }
+      toast(data.pairAddress
+        ? `Now tracking ${data.symbol ? "$"+data.symbol : tokenAddress} — its chart will start filling in on the next price-poll tick.`
+        : `Registered ${data.symbol ? "$"+data.symbol : tokenAddress}, but no pool was found yet — it'll start sampling automatically once liquidity exists.`);
+      refreshPlatformTokenSpotlight();
+    }catch(err){
+      toast("Couldn't reach the relayer to register this token.");
+    }
+  }
+
   /* ---------------- create wizard ---------------- */
   let wizStep = 1;
   let draft = { name:"", ticker:"", desc:"", supply:1000000000, mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
@@ -6468,6 +6634,12 @@
         </div>
         <p class="admin-empty" style="margin:0 0 10px;">Blocked while a round is active or airdrop tokens are pending — let the current round finish first.</p>
 
+        ${state.hasPlatformToken ? `
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">Registers the platform token with the relayer's price/activity tracking (see scripts/relayer.js's POST /track-token) — needed for the chart pinned above the live feed, since this token was never launched through a factory and so was never auto-discovered. Safe to click again any time; it just re-checks the pool.</p>
+          <button class="btn btn-ghost btn-sm" data-prd-action="trackForCharting">Track for charting</button>
+        </div>` : ""}
+
         <div class="admin-section-label">Buyback thresholds</div>
         <div class="admin-action-row">
           <div class="field"><label>ETH threshold (ETH)</label><input type="number" step="any" min="0" id="admin_prd_ethThreshold" placeholder="${weiToEtherString(state.ethBuybackThresholdWei,6)}"></div>
@@ -6997,6 +7169,19 @@
     if(!window.ethereum){ toast("No browser wallet detected."); return; }
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
 
+    // Off-chain (an admin-signed relayer call, not a contract transaction)
+    // — handled entirely separately from the eth_sendTransaction path every
+    // other action below falls into. See requestTrackToken/POST
+    // /track-token for what this actually registers.
+    if(action==="trackForCharting"){
+      if(!spotlightTokenAddress){ toast("No platform token configured yet."); return; }
+      const originalLabel = btnEl.textContent;
+      btnEl.disabled = true; btnEl.textContent = "Confirm in wallet…";
+      try{ await requestTrackToken(spotlightTokenAddress); }
+      finally{ btnEl.disabled = false; btnEl.textContent = originalLabel; }
+      return;
+    }
+
     const field = (suffix) => document.getElementById(`admin_prd_${suffix}`);
     let data, successMsg;
     try{
@@ -7283,6 +7468,10 @@
   // refreshLiveTokenPrices' own comment for exactly what this covers.
   setInterval(refreshLiveTokenPrices, LIVE_TOKEN_POLL_MS);
   refreshLiveTokenPrices();
+  // Platform token spotlight — same cadence as the price tracking above,
+  // since it's backed by the same server-recorded price history.
+  setInterval(refreshPlatformTokenSpotlight, LIVE_TOKEN_POLL_MS);
+  refreshPlatformTokenSpotlight();
   // Shared launch feed — pulls in every launch recorded for the current
   // network (see refreshRemoteLaunches' own comment), not just ones this
   // browser has seen. Polled far less often than price, since which
