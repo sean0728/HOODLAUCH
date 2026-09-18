@@ -897,11 +897,23 @@ async function main() {
     if (!isFreshTimestamp(timestamp)) {
       return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
     }
-    const normalized = hre.ethers.getAddress(tokenAddress);
-    const message = `Hood Launch admin: track token ${normalized} at ${timestamp}`;
+    // IMPORTANT: verify against tokenAddress EXACTLY as received, not a
+    // re-checksummed copy. index.html's requestTrackToken() builds its
+    // signed message from whatever case the token address happens to be in
+    // client-side (it comes from decodeAddress(), which returns lowercase
+    // hex straight off an eth_call result — never checksummed). Rebuilding
+    // this message from ethers.getAddress()'s mixed-case output would
+    // silently sign/verify two DIFFERENT strings and fail every real
+    // admin's signature with "does not match" even though the right wallet
+    // signed it. getAddress() is still used below for the actual on-chain
+    // reads and as the tracked-tokens key, since ethers/upsertTrackedToken
+    // are both case-insensitive there (upsertTrackedToken lowercases its
+    // own storage key regardless).
+    const message = `Hood Launch admin: track token ${tokenAddress} at ${timestamp}`;
     if (!verifyAdminSignature(message, signature)) {
       return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
     }
+    const normalized = hre.ethers.getAddress(tokenAddress);
     if (watchers.length === 0) {
       return sendJson(res, 500, { error: "No factory watcher configured on this relayer — can't resolve a router/price feed to track against." });
     }
