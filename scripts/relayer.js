@@ -167,6 +167,31 @@ const TOKEN_DISCOVERY_MAX_BLOCK_RANGE = Number(process.env.TOKEN_DISCOVERY_MAX_B
 // it instead, but this keeps a recurrence from ever being a 24+ hour outage
 // again in the meantime.
 const TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS = Number(process.env.TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS || 3_000_000);
+// FIX: the self-heal above only fires when the stored cursor is literally
+// null — but a redeploy that restores a stale value FROM AN OLD, STILL
+// git-tracked commit (rather than genuinely wiping the file) leaves a real,
+// non-null cursor sitting there instead, frozen far behind the tip. That's
+// exactly what happened right after the fix above shipped: cursors.json
+// came back as a real ~12M value instead of null, so "storedCursor !== null"
+// skipped the self-heal branch entirely and it just crawled forward from
+// there at the normal rate — heading toward a 100M+ block, multi-day catch-up
+// instead of the few-minutes one self-healing was supposed to guarantee.
+// Treat a cursor as "might as well have never run" whenever it's more than
+// TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS behind the tip too, not just when
+// it's null — there's no legitimate reason this app would ever need to
+// backfill tens of millions of blocks from near-zero (TOKEN_DISCOVERY_START_BLOCK
+// defaults to 0 and nothing here sets it to a real historical value), so a
+// cursor this far behind is far more likely stuck/stale than mid-backfill.
+// Default threshold is a generous 10x the auto-lookback itself, so this
+// never fires while a cursor is still legitimately catching up after a
+// genuine self-heal (which lands it within one lookback-width of the tip and
+// only shrinks from there). Only ever moves a cursor FORWARD, same safety
+// property as scripts/resetDiscoveryCursor.js and the admin reset endpoint —
+// the threshold is always far larger than the lookback, so the computed
+// jump target is always further along than a truly-stuck cursor already is.
+const TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS = Number(
+  process.env.TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS || TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS * 10
+);
 const TOKEN_DISCOVERY_POLL_INTERVAL_MS = Number(process.env.TOKEN_DISCOVERY_POLL_INTERVAL_MS || POLL_INTERVAL_MS);
 const ACTIVITY_MAX_BLOCK_RANGE = Number(process.env.ACTIVITY_MAX_BLOCK_RANGE || 5_000);
 const TOKEN_ACTIVITY_POLL_INTERVAL_MS = Number(process.env.TOKEN_ACTIVITY_POLL_INTERVAL_MS || 20_000);
@@ -816,14 +841,18 @@ async function main() {
     for (const watcher of watchers) {
       const factoryAddress = await watcher.factory.getAddress();
       const cursor = getCursor(`${factoryAddress}:discovery`);
+      const blocksBehindRaw = cursor === null ? null : Math.max(0, latestBlock - cursor);
+      const isStuck = cursor !== null && latestBlock - cursor > TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS;
       discovery[watcher.kind] = {
         factoryAddress,
         discoveryCursor: cursor,
         latestBlock,
         blocksBehind:
           cursor === null
-            ? `never run — will self-heal to ~${TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS.toLocaleString()} blocks behind tip (see TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS)`
-            : Math.max(0, latestBlock - cursor),
+            ? `never run — will self-heal to ~${TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS.toLocaleString()} blocks behind tip on the next poll tick (see TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS)`
+            : isStuck
+              ? `${blocksBehindRaw.toLocaleString()} — beyond TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS (${TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS.toLocaleString()}), will self-heal to ~${TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS.toLocaleString()} blocks behind tip on the next poll tick`
+              : blocksBehindRaw,
       };
     }
     sendJson(res, 200, {
@@ -1182,15 +1211,18 @@ async function main() {
     const cursorKey = `${factoryAddress}:discovery`;
     const latestBlock = await hre.ethers.provider.getBlockNumber();
     const storedCursor = getCursor(cursorKey);
-    // See TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS's own comment above: a
-    // "never run" cursor resumes from whichever is LATER of the configured
-    // historical start block and (tip - lookback), so a cursor wiped by a
-    // redeploy self-heals near the tip instead of restarting a 100M+ block
-    // backfill from a start block that's now ancient history.
-    const fromBlock =
-      storedCursor !== null
-        ? storedCursor + 1
-        : Math.max(TOKEN_DISCOVERY_START_BLOCK, latestBlock - TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS);
+    // See TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS's and
+    // TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS's own comments above: a cursor
+    // that's either null OR implausibly far behind the tip (frozen at a
+    // stale value some other persistence hiccup restored, rather than
+    // genuinely wiped to null) resumes from whichever is LATER of the
+    // configured historical start block and (tip - lookback), instead of
+    // crawling forward from wherever it's stuck for what could be days.
+    const isNeverRunOrStuck =
+      storedCursor === null || latestBlock - storedCursor > TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS;
+    const fromBlock = isNeverRunOrStuck
+      ? Math.max(TOKEN_DISCOVERY_START_BLOCK, latestBlock - TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS)
+      : storedCursor + 1;
     if (fromBlock > latestBlock) return;
     const toBlock = Math.min(latestBlock, fromBlock + TOKEN_DISCOVERY_MAX_BLOCK_RANGE);
 
