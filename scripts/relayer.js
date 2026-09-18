@@ -890,9 +890,26 @@ async function main() {
   // already-tracked address just refreshes its pair/priceFeed/metadata
   // rather than erroring.
   app.post("/track-token", async (req, res) => {
-    const { tokenAddress, timestamp, signature } = req.body || {};
+    const { tokenAddress, timestamp, signature, initialSupply } = req.body || {};
     if (!tokenAddress || !hre.ethers.isAddress(tokenAddress)) {
       return sendJson(res, 400, { error: "tokenAddress must be a valid address" });
+    }
+    // Optional, admin-supplied, whole-token figure (e.g. "1000000000") —
+    // there's no on-chain constant for this (PlatformToken mints once in
+    // its constructor and keeps no separate record of that amount, and
+    // totalSupply() alone can't be trusted as a stand-in since burns from
+    // PlatformRewardsDistributor buybacks reduce it over time). Stored
+    // verbatim as whole tokens (not wei) so display code never has to
+    // guess decimals. Left out of the patch entirely when not sent, so
+    // re-clicking "Track for charting" without retyping it never wipes a
+    // previously saved value.
+    let initialSupplyPatch = {};
+    if (initialSupply !== undefined && initialSupply !== null && String(initialSupply).trim() !== "") {
+      const n = Number(String(initialSupply).trim());
+      if (!Number.isFinite(n) || n <= 0) {
+        return sendJson(res, 400, { error: "initialSupply must be a positive number of whole tokens" });
+      }
+      initialSupplyPatch = { initialSupply: String(initialSupply).trim() };
     }
     if (!isFreshTimestamp(timestamp)) {
       return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
@@ -946,6 +963,7 @@ async function main() {
         pairAddress,
         priceFeed,
         manuallyTracked: true,
+        ...initialSupplyPatch,
       });
       console.log(
         `[admin] manually tracking ${normalized}${symbol ? ` ($${symbol})` : ""} for price/activity` +
@@ -964,10 +982,20 @@ async function main() {
   });
 
   app.get("/price-history/:tokenAddress", (req, res) => {
+    // Piggybacks the tracked-tokens record for this address onto the same
+    // response (rather than a separate round trip) — the platform-token
+    // spotlight on index.html needs both the price history AND a couple of
+    // fields off the tracked entry itself (pairAddress, initialSupply) to
+    // render its info panel, and it already fetches this endpoint once per
+    // refresh. Purely additive: existing callers that only read `.history`
+    // are unaffected.
+    const tracked = readTrackedTokens(network)[req.params.tokenAddress.toLowerCase()] || null;
     sendJson(res, 200, {
       network,
       tokenAddress: req.params.tokenAddress,
       history: readPriceHistory(network, req.params.tokenAddress),
+      pairAddress: tracked ? tracked.pairAddress || null : null,
+      initialSupply: tracked ? tracked.initialSupply || null : null,
     });
   });
 
