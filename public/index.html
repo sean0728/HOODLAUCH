@@ -354,8 +354,14 @@
   .spotlight-figures{display:flex; align-items:baseline; gap:14px;}
   .spotlight-price{font-family:var(--font-mono); font-size:1.5rem; font-weight:600;}
   .spotlight-delta{font-family:var(--font-mono); font-size:.85rem; font-weight:600;}
-  .spotlight .chart-wrap{margin-top:16px;}
+  .spotlight-body{display:grid; grid-template-columns:1fr 1fr; gap:22px; margin-top:16px; align-items:start;}
   .spotlight .chart-wrap svg{height:150px;}
+  .spotlight-info{grid-template-columns:1fr 1fr;}
+  .spotlight-info .admin-readout .v{word-break:break-word;}
+  .spotlight-info .admin-readout .v a{color:inherit;}
+  @media (max-width:760px){
+    .spotlight-body{grid-template-columns:1fr;}
+  }
 
   .bond-gauge{margin-top:22px;}
   .bond-gauge .bond-track{height:10px;}
@@ -641,7 +647,10 @@
             <span class="spotlight-delta num" id="spotlightDelta"></span>
           </div>
         </div>
-        <div class="chart-wrap" id="spotlightChartWrap"></div>
+        <div class="spotlight-body">
+          <div class="chart-wrap" id="spotlightChartWrap"></div>
+          <div class="admin-readout-grid spotlight-info" id="spotlightInfoGrid" style="margin-bottom:0;"></div>
+        </div>
       </div>
 
       <div class="hero">
@@ -2254,6 +2263,33 @@
     const callObj = { to, data: dataHex };
     if(from) callObj.from = from; // needed to simulate a caller-gated function (see quoteCreatorSwapMinEthOut)
     return window.ethereum.request({ method:"eth_call", params:[callObj, "latest"] });
+  }
+
+  // Wallet-INDEPENDENT eth_call, used only by the platform-token spotlight
+  // (see refreshPlatformTokenSpotlight further down). Every other on-chain
+  // read on this page deliberately goes through the connected wallet's own
+  // provider (ethCall above) since those reads are already scoped to
+  // whatever the user is doing with their wallet — but the spotlight is
+  // public, platform-wide content that has to render the same for every
+  // visitor, including one with no wallet extension installed at all, and
+  // it must always query the specific network it's displaying rather than
+  // whatever chain a connected wallet happens to be pointed at. Goes
+  // straight to that network's own public RPC endpoint (same URLs NETWORKS
+  // already uses for wallet_addEthereumChain) via a plain JSON-RPC POST.
+  async function publicRpcCall(mode, method, params){
+    const url = NETWORKS[mode] && NETWORKS[mode].rpcUrls && NETWORKS[mode].rpcUrls[0];
+    if(!url) throw new Error(`No public RPC configured for "${mode}"`);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ jsonrpc:"2.0", id:1, method, params }),
+    });
+    const payload = await res.json();
+    if(payload && payload.error) throw new Error(payload.error.message || `${method} failed`);
+    return payload.result;
+  }
+  async function publicEthCall(mode, to, dataHex){
+    return publicRpcCall(mode, "eth_call", [{ to, data: dataHex }, "latest"]);
   }
 
   // Decodes the two standard Solidity revert encodings out of raw returned
@@ -3946,6 +3982,29 @@
     }catch(e){ return null; } // transient RPC error — retried on the next poll tick
   }
 
+  // Wallet-independent twin of getDexInfo above, used only by the platform
+  // token spotlight — same derivation (factory -> router -> DEX
+  // factory/WETH), just over publicEthCall instead of the connected
+  // wallet's provider, and explicitly scoped to `mode` rather than
+  // whatever appMode happens to be when the result comes back. Shares
+  // dexInfoCache with getDexInfo since the resolved addresses are the same
+  // either way — only the transport differs.
+  async function getPublicDexInfo(mode){
+    if(dexInfoCache[mode]) return dexInfoCache[mode];
+    const factoryAddress = tokenFactoryAddress(mode) || customTokenFactoryAddress(mode);
+    if(!factoryAddress) return null;
+    try{
+      const routerAddress = decodeAddress(await publicEthCall(mode, factoryAddress, "0x"+ROUTER_OF_FACTORY_SELECTOR));
+      const [dexFactoryHex, wethHex] = await Promise.all([
+        publicEthCall(mode, routerAddress, "0x"+ROUTER_FACTORY_SELECTOR),
+        publicEthCall(mode, routerAddress, "0x"+ROUTER_WETH_SELECTOR),
+      ]);
+      const info = { dexFactory: decodeAddress(dexFactoryHex), weth: decodeAddress(wethHex), router: routerAddress };
+      dexInfoCache[mode] = info;
+      return info;
+    }catch(e){ return null; }
+  }
+
   // Only ever polls tokens on whichever network the wallet is currently
   // pointed at (appMode) — eth_call always goes out over window.ethereum's
   // current connection, so checking a token from the *other* network here
@@ -4772,60 +4831,129 @@
   }
 
   // Drives the "Platform token" panel pinned above the hero/live feed.
-  // Deliberately reads the distributor address the same way the rest of
-  // the admin panel already does (rewardsDistributorAddress() +
-  // loadRewardsDistributorState()) rather than inventing a new lookup —
-  // PlatformRewardsDistributor is a platform-wide singleton (unlike
-  // per-token creator rewards), so platformConfig really is the right
-  // source of truth for it. Stays hidden entirely until a distributor AND
-  // a platformToken are actually configured; falls back to hidden again
-  // (rather than a stale/wrong chart) on any read failure.
+  // Reads everything through publicEthCall/publicRpcCall (defined up near
+  // ethCall) rather than the connected wallet's own provider — this panel
+  // is public, platform-wide content, so it has to render the same for
+  // every visitor, including one with no wallet extension installed, and
+  // has to keep working across a full page reload instead of racing
+  // whatever wallet-injection timing a given browser happens to have. The
+  // previous version of this function went through loadRewardsDistributorState
+  // (built for the wallet-gated admin panel) and would silently stay
+  // hidden — spotlightTokenAddress stuck at null — whenever window.ethereum
+  // wasn't there yet at the moment this ran; that's exactly the
+  // "disappears on refresh" bug this rewrite fixes.
+  // Stays hidden entirely until a distributor AND a platformToken are
+  // actually configured; falls back to hidden again (rather than a
+  // stale/wrong chart) on any read failure.
   let spotlightTokenAddress = null;
   async function refreshPlatformTokenSpotlight(){
     const panel = document.getElementById("platformTokenSpotlight");
     if(!panel) return;
-    const distributorAddress = rewardsDistributorAddress();
-    if(!distributorAddress){ panel.hidden = true; spotlightTokenAddress = null; return; }
-    let prdState;
-    try{
-      prdState = await loadRewardsDistributorState(distributorAddress);
-    }catch(err){
-      panel.hidden = true; spotlightTokenAddress = null; return;
+    const mode = appMode; // snapshot — a mode switch mid-fetch shouldn't let a stale result overwrite the new one
+    const distributorAddress = rewardsDistributorAddress(mode);
+    if(!distributorAddress){
+      if(mode===appMode){ panel.hidden = true; spotlightTokenAddress = null; }
+      return;
     }
-    if(!prdState || !prdState.hasPlatformToken){ panel.hidden = true; spotlightTokenAddress = null; return; }
-    const tokenAddress = prdState.platformToken;
-    spotlightTokenAddress = tokenAddress;
 
-    // Name/symbol read live off the token itself (same NAME_SELECTOR/
-    // SYMBOL_SELECTOR pattern used elsewhere) — no wallet required, this
-    // works the same as any other read-only eth_call.
-    let name = "Platform token", symbol = "";
+    let tokenAddress;
     try{
-      const [nameHex, symbolHex] = await Promise.all([
-        ethCall(tokenAddress, "0x"+NAME_SELECTOR),
-        ethCall(tokenAddress, "0x"+SYMBOL_SELECTOR),
+      const platformTokenHex = await publicEthCall(mode, distributorAddress, "0x"+PRD_PLATFORM_TOKEN_SELECTOR);
+      tokenAddress = decodeAddress(platformTokenHex);
+    }catch(err){
+      if(mode===appMode){ panel.hidden = true; spotlightTokenAddress = null; }
+      return;
+    }
+    if(!tokenAddress || tokenAddress.toLowerCase()===ZERO_ADDRESS){
+      if(mode===appMode){ panel.hidden = true; spotlightTokenAddress = null; }
+      return;
+    }
+    if(mode!==appMode) return; // network was switched again while the call above was in flight
+
+    // Name/symbol/circulating-supply read live off the token itself — one
+    // best-effort batch, so a missing name()/symbol() (unlikely, but no
+    // reason to block the rest of the panel on it) never hides everything.
+    let name = "Platform token", symbol = "", circulatingSupply = null;
+    try{
+      const [nameHex, symbolHex, supplyHex] = await Promise.all([
+        publicEthCall(mode, tokenAddress, "0x"+NAME_SELECTOR),
+        publicEthCall(mode, tokenAddress, "0x"+SYMBOL_SELECTOR),
+        publicEthCall(mode, tokenAddress, "0x"+PT_TOTAL_SUPPLY_SELECTOR),
       ]);
       name = decodeAbiString(nameHex) || name;
       symbol = decodeAbiString(symbolHex) || "";
-    }catch(err){ /* best-effort — keep the generic label rather than blocking the chart */ }
+      circulatingSupply = Number(weiToEtherString(decodeUint256(supplyHex), 0));
+    }catch(err){ /* best-effort — keep whatever defaults we already have */ }
 
-    const url = relayerApiUrl(appMode);
-    let history = [];
+    // Pool — derived the same way checkPendingLiquidity() does for any
+    // other token (the DEX factory's own getPair()), just over the
+    // wallet-independent transport above, so it resolves for every visitor
+    // and reflects real liquidity the moment it exists — no dependency on
+    // the admin ever having clicked "Track for charting" first.
+    let poolAddress = null;
+    try{
+      const dexInfo = await getPublicDexInfo(mode);
+      if(dexInfo){
+        const pairData = "0x"+FACTORY_GET_PAIR_SELECTOR+encodeAddressParam(tokenAddress)+encodeAddressParam(dexInfo.weth);
+        const rawPair = decodeAddress(await publicEthCall(mode, dexInfo.dexFactory, pairData));
+        if(rawPair.toLowerCase()!==ZERO_ADDRESS) poolAddress = rawPair;
+      }
+    }catch(err){ /* leave null — info grid below shows "Not seeded yet" */ }
+
+    const url = relayerApiUrl(mode);
+    let history = [], initialSupply = null;
     if(url){
       try{
         const res = await fetch(`${url}/price-history/${tokenAddress}`);
         if(res.ok){
           const payload = await res.json();
           history = Array.isArray(payload && payload.history) ? payload.history : [];
+          initialSupply = (payload && payload.initialSupply) || null;
+          // Fallback only — the client-side DEX lookup above is preferred
+          // since it works even before anyone's clicked "Track for
+          // charting," but if that came up empty (e.g. no launchpad
+          // factory configured on this network to derive the DEX from),
+          // the relayer's own record of the pool it found is better than
+          // nothing.
+          if(!poolAddress && payload && payload.pairAddress) poolAddress = payload.pairAddress;
         }
-      }catch(err){ /* leave history empty — panel below handles that */ }
+      }catch(err){ /* leave history/initialSupply empty — panel below handles that */ }
     }
+
+    if(mode!==appMode) return; // don't paint a stale network's data over whatever the user switched to meanwhile
+    spotlightTokenAddress = tokenAddress;
 
     document.getElementById("spotlightName").textContent = name;
     document.getElementById("spotlightSymbol").textContent = symbol ? `$${symbol}` : "";
     const chartWrap = document.getElementById("spotlightChartWrap");
     const priceEl = document.getElementById("spotlightPrice");
     const deltaEl = document.getElementById("spotlightDelta");
+    const infoGrid = document.getElementById("spotlightInfoGrid");
+    const explorerBase = (NETWORKS[mode].blockExplorerUrls && NETWORKS[mode].blockExplorerUrls[0]) || "";
+
+    const latestPrice = history.length ? history[history.length-1].p : null;
+    const marketCap = (latestPrice!=null && circulatingSupply!=null) ? latestPrice * circulatingSupply : null;
+
+    function infoRow(label, valueHtml){
+      return `<div class="admin-readout"><div class="l">${escapeHtml(label)}</div><div class="v">${valueHtml}</div></div>`;
+    }
+    function addrLink(addr){
+      return explorerBase
+        ? `<a href="${explorerBase}address/${escapeHtml(addr)}" target="_blank" rel="noopener noreferrer">${fmtAddrSafe(addr)}</a>`
+        : fmtAddrSafe(addr);
+    }
+    if(infoGrid){
+      infoGrid.innerHTML = [
+        infoRow("Price", latestPrice!=null ? fmtUSD(latestPrice) : "—"),
+        infoRow("Initial token supply", initialSupply!=null
+          ? fmtInt(Number(initialSupply))
+          : (isAdminWallet(wallet) ? "Not set — add it below" : "—")),
+        infoRow("Circulating supply", circulatingSupply!=null ? fmtInt(circulatingSupply) : "—"),
+        infoRow("Market cap", marketCap!=null ? fmtUSD(marketCap) : "—"),
+        infoRow("Token contract", addrLink(tokenAddress)),
+        infoRow("Pool", poolAddress ? addrLink(poolAddress) : "Not seeded yet"),
+      ].join("");
+    }
 
     if(!history.length){
       priceEl.textContent = "—";
@@ -4850,10 +4978,15 @@
   // deploy needs it (it never emits the TokenCreated/CustomTokenCreated
   // event discoverLaunchedTokens scans for, so it's otherwise invisible to
   // every chart/activity feature on the site).
-  async function requestTrackToken(tokenAddress){
+  async function requestTrackToken(tokenAddress, initialSupply){
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
     if(!window.ethereum){ toast("No browser wallet detected."); return; }
     const timestamp = Date.now();
+    // initialSupply is deliberately NOT part of the signed message (kept
+    // identical to relayer.js's own reconstruction of it) — it's a plain
+    // display figure with no funds-moving consequence, so it rides along
+    // in the request body unsigned, the same way an optional/cosmetic
+    // field would on any other admin form here.
     const message = `Hood Launch admin: track token ${tokenAddress} at ${timestamp}`;
     let signature;
     try{
@@ -4866,10 +4999,12 @@
       return;
     }
     try{
+      const body = { tokenAddress, timestamp, signature };
+      if(initialSupply) body.initialSupply = initialSupply;
       const res = await fetch(`${location.origin}/track-token`, {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ tokenAddress, timestamp, signature }),
+        body: JSON.stringify(body),
       });
       const data = await res.json().catch(()=>({}));
       if(!res.ok){ toast(data.error || "Couldn't register this token for tracking."); return; }
@@ -6646,8 +6781,12 @@
         ${state.hasPlatformToken ? `
         <div class="admin-action-row">
           <p class="admin-empty" style="margin:0; flex:1;">Registers the platform token with the relayer's price/activity tracking (see scripts/relayer.js's POST /track-token) — needed for the chart pinned above the live feed, since this token was never launched through a factory and so was never auto-discovered. Safe to click again any time; it just re-checks the pool.</p>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Initial supply (whole tokens, optional)</label><input type="number" step="any" min="0" id="admin_prd_initialSupply" placeholder="e.g. 1000000000 — no on-chain record of this, so it's typed in once"></div>
           <button class="btn btn-ghost btn-sm" data-prd-action="trackForCharting">Track for charting</button>
-        </div>` : ""}
+        </div>
+        <p class="admin-empty" style="margin:0 0 10px;">Leave the field blank to just re-check the pool without changing the saved initial-supply figure.</p>` : ""}
 
         <div class="admin-section-label">Buyback thresholds</div>
         <div class="admin-action-row">
@@ -7184,9 +7323,11 @@
     // /track-token for what this actually registers.
     if(action==="trackForCharting"){
       if(!spotlightTokenAddress){ toast("No platform token configured yet."); return; }
+      const supplyEl = document.getElementById("admin_prd_initialSupply");
+      const initialSupply = supplyEl && supplyEl.value.trim() ? supplyEl.value.trim() : null;
       const originalLabel = btnEl.textContent;
       btnEl.disabled = true; btnEl.textContent = "Confirm in wallet…";
-      try{ await requestTrackToken(spotlightTokenAddress); }
+      try{ await requestTrackToken(spotlightTokenAddress, initialSupply); }
       finally{ btnEl.disabled = false; btnEl.textContent = originalLabel; }
       return;
     }
