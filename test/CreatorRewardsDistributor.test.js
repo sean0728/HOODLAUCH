@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 /// Covers CreatorRewardsDistributor's own internals in isolation: swapping
 /// an accumulated in-kind cut of ONE token for ETH, and letting that
@@ -64,6 +65,7 @@ describe("CreatorRewardsDistributor", function () {
       const { distributor, token } = await deployStack();
       expect(await distributor.claimableEth(await token.getAddress())).to.equal(0);
       expect(await distributor.swapThreshold(await token.getAddress())).to.equal(0);
+      expect(await distributor.maxSwapAmount(await token.getAddress())).to.equal(0);
     });
   });
 
@@ -82,6 +84,21 @@ describe("CreatorRewardsDistributor", function () {
         .withArgs(await token.getAddress(), ethers.parseEther("1000"));
       expect(await distributor.swapThreshold(await token.getAddress())).to.equal(ethers.parseEther("1000"));
     });
+
+    it("setMaxSwapAmount is owner-only", async function () {
+      const { distributor, other, token } = await deployStack();
+      await expect(
+        distributor.connect(other).setMaxSwapAmount(await token.getAddress(), 1)
+      ).to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount");
+    });
+
+    it("setMaxSwapAmount succeeds for the owner and emits an event", async function () {
+      const { distributor, owner, token } = await deployStack();
+      await expect(distributor.connect(owner).setMaxSwapAmount(await token.getAddress(), ethers.parseEther("100")))
+        .to.emit(distributor, "MaxSwapAmountUpdated")
+        .withArgs(await token.getAddress(), ethers.parseEther("100"));
+      expect(await distributor.maxSwapAmount(await token.getAddress())).to.equal(ethers.parseEther("100"));
+    });
   });
 
   describe("triggerCreatorSwap", function () {
@@ -89,23 +106,6 @@ describe("CreatorRewardsDistributor", function () {
       const { distributor } = await deployStack();
       await expect(distributor.triggerCreatorSwap(ethers.ZeroAddress, 0)).to.be.revertedWith(
         "CreatorRewardsDistributor: invalid token"
-      );
-    });
-
-    it("reverts with a zero balance of the token", async function () {
-      const { distributor, token } = await deployStack();
-      await expect(distributor.triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
-        "CreatorRewardsDistributor: below threshold"
-      );
-    });
-
-    it("respects a configured per-token swap threshold", async function () {
-      const { distributor, owner, deployer, token } = await deployStack();
-      await distributor.connect(owner).setSwapThreshold(await token.getAddress(), ethers.parseEther("1000"));
-      await token.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("10"));
-
-      await expect(distributor.triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
-        "CreatorRewardsDistributor: below threshold"
       );
     });
 
@@ -120,21 +120,53 @@ describe("CreatorRewardsDistributor", function () {
       );
       await orphanToken.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("10"));
 
-      // No pool exists for orphanToken either, but the creator() check runs
-      // first — confirms the require order, not just that it eventually
-      // reverts.
+      // No pool exists for orphanToken either, and no signer could possibly
+      // equal address(0), but the creator() check runs first regardless —
+      // confirms the require order, not just that it eventually reverts.
       await expect(distributor.triggerCreatorSwap(await orphanToken.getAddress(), 0)).to.be.revertedWith(
         "CreatorRewardsDistributor: token has no creator"
       );
     });
 
-    it("swaps the full token balance for ETH, credits claimableEth for that token, and is permissionless", async function () {
-      const { distributor, deployer, creator, other, token } = await deployStack();
+    it("reverts for any caller other than the token's own creator", async function () {
+      const { distributor, deployer, owner, other, token } = await deployStack();
+      await token.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("10"));
+
+      // Neither an unrelated wallet nor the distributor's own owner gets a
+      // pass here — creator-only means exactly that, not
+      // creator-or-privileged-role.
+      await expect(distributor.connect(other).triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
+        "CreatorRewardsDistributor: caller is not this token's creator"
+      );
+      await expect(distributor.connect(owner).triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
+        "CreatorRewardsDistributor: caller is not this token's creator"
+      );
+    });
+
+    it("reverts with a zero balance of the token, even when called by the actual creator", async function () {
+      const { distributor, creator, token } = await deployStack();
+      await expect(distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
+        "CreatorRewardsDistributor: below threshold"
+      );
+    });
+
+    it("respects a configured per-token swap threshold", async function () {
+      const { distributor, owner, deployer, creator, token } = await deployStack();
+      await distributor.connect(owner).setSwapThreshold(await token.getAddress(), ethers.parseEther("1000"));
+      await token.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("10"));
+
+      await expect(distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
+        "CreatorRewardsDistributor: below threshold"
+      );
+    });
+
+    it("swaps the full token balance for ETH and credits claimableEth for that token, when called by the creator", async function () {
+      const { distributor, deployer, creator, token } = await deployStack();
       const amount = ethers.parseEther("1000");
       await token.connect(deployer).transfer(await distributor.getAddress(), amount);
 
       const ethBefore = await ethers.provider.getBalance(await distributor.getAddress());
-      const tx = await distributor.connect(other).triggerCreatorSwap(await token.getAddress(), 0); // permissionless
+      const tx = await distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0);
       const receipt = await tx.wait();
       const parsed = receipt.logs.map((l) => {
         try {
@@ -155,13 +187,100 @@ describe("CreatorRewardsDistributor", function () {
       expect(await token.balanceOf(await distributor.getAddress())).to.equal(0);
       expect(await distributor.claimableEth(await token.getAddress())).to.equal(ethOut);
     });
+
+    it("a CustomToken-style creator transfer immediately changes who's allowed to trigger the swap", async function () {
+      const { distributor, deployer, creator, other, token } = await deployStack();
+      await token.connect(creator).setCreator(other.address);
+      await token.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("10"));
+
+      // The old creator no longer passes the check...
+      await expect(distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
+        "CreatorRewardsDistributor: caller is not this token's creator"
+      );
+      // ...only the new one does, read live via creator() at call time.
+      await expect(distributor.connect(other).triggerCreatorSwap(await token.getAddress(), 0)).to.emit(
+        distributor,
+        "CreatorSwapTriggered"
+      );
+    });
+
+    // Anti-dump: a token that's accumulated a large balance (heavy trading
+    // volume between the creator's own trigger calls) must not have its
+    // ENTIRE pile sold in one swap once a cap is configured — that single
+    // large sale is exactly the visible chart-dump this knob exists to
+    // prevent. See maxSwapAmount's own contract-level comment.
+    it("caps a single call's swap size to maxSwapAmount, leaving the remainder on the contract's balance", async function () {
+      const { distributor, owner, deployer, creator, token } = await deployStack();
+      const cap = ethers.parseEther("100");
+      const pile = ethers.parseEther("1000"); // 10x the cap
+      await distributor.connect(owner).setMaxSwapAmount(await token.getAddress(), cap);
+      await token.connect(deployer).transfer(await distributor.getAddress(), pile);
+
+      const tx = await distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0);
+      await expect(tx).to.emit(distributor, "CreatorSwapTriggered").withArgs(
+        await token.getAddress(),
+        creator.address,
+        cap,
+        anyValue
+      );
+
+      // Only the capped amount left the contract's token balance — the rest
+      // of the pile is still sitting there, untouched, for a later call.
+      expect(await token.balanceOf(await distributor.getAddress())).to.equal(pile - cap);
+    });
+
+    it("drains a large pile across multiple capped calls instead of one, crediting claimableEth cumulatively", async function () {
+      const { distributor, owner, deployer, creator, token } = await deployStack();
+      const cap = ethers.parseEther("250");
+      const pile = ethers.parseEther("1000"); // exactly 4x the cap
+      await distributor.connect(owner).setMaxSwapAmount(await token.getAddress(), cap);
+      await token.connect(deployer).transfer(await distributor.getAddress(), pile);
+
+      for (let i = 0; i < 4; i++) {
+        await distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0);
+      }
+
+      // Fully drained after exactly pile/cap calls, and every partial swap's
+      // ETH proceeds accumulated into the same claimableEth balance rather
+      // than overwriting each other.
+      expect(await token.balanceOf(await distributor.getAddress())).to.equal(0);
+      expect(await distributor.claimableEth(await token.getAddress())).to.be.gt(0n);
+
+      // A 5th call has nothing left to swap.
+      await expect(distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
+        "CreatorRewardsDistributor: below threshold"
+      );
+    });
+
+    it("a cap larger than the actual balance swaps only what's there (no revert, no over-swap)", async function () {
+      const { distributor, owner, deployer, creator, token } = await deployStack();
+      const amount = ethers.parseEther("50");
+      await distributor.connect(owner).setMaxSwapAmount(await token.getAddress(), ethers.parseEther("100000"));
+      await token.connect(deployer).transfer(await distributor.getAddress(), amount);
+
+      const tx = await distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0);
+      await expect(tx).to.emit(distributor, "CreatorSwapTriggered");
+      expect(await token.balanceOf(await distributor.getAddress())).to.equal(0);
+    });
+
+    it("leaving maxSwapAmount at its default (0) preserves the original uncapped, swap-everything behavior", async function () {
+      const { distributor, deployer, creator, token } = await deployStack();
+      const amount = ethers.parseEther("5000");
+      await token.connect(deployer).transfer(await distributor.getAddress(), amount);
+
+      await distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0);
+      expect(await token.balanceOf(await distributor.getAddress())).to.equal(0);
+    });
   });
 
   describe("claimCreatorRewards", function () {
+    // Funds and swaps AS THE CREATOR, since triggerCreatorSwap is
+    // creator-only now — this is just setup for the claim tests below, not
+    // itself what's under test in this describe block.
     async function fundAndSwap(ctx, amount = ethers.parseEther("1000")) {
-      const { distributor, deployer, token } = ctx;
+      const { distributor, deployer, creator, token } = ctx;
       await token.connect(deployer).transfer(await distributor.getAddress(), amount);
-      await distributor.triggerCreatorSwap(await token.getAddress(), 0);
+      await distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0);
       return await distributor.claimableEth(await token.getAddress());
     }
 
@@ -179,36 +298,52 @@ describe("CreatorRewardsDistributor", function () {
       );
     });
 
-    it("reverts with nothing to claim", async function () {
-      const { distributor, token } = await deployStack();
-      await expect(distributor.claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
+    it("reverts for any caller other than the token's own creator", async function () {
+      const { distributor, owner, other, token } = await deployStack();
+      // Neither an unrelated wallet nor the distributor's own owner gets a
+      // pass — same creator-only-means-creator-only rule as
+      // triggerCreatorSwap, and it fires before the "nothing to claim"
+      // check even though claimableEth is still 0 here.
+      await expect(distributor.connect(other).claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
+        "CreatorRewardsDistributor: caller is not this token's creator"
+      );
+      await expect(distributor.connect(owner).claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
+        "CreatorRewardsDistributor: caller is not this token's creator"
+      );
+    });
+
+    it("reverts with nothing to claim, even when called by the actual creator", async function () {
+      const { distributor, creator, token } = await deployStack();
+      await expect(distributor.connect(creator).claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
         "CreatorRewardsDistributor: nothing to claim"
       );
     });
 
-    it("pays the token's creator, zeroes claimableEth first, and is permissionless", async function () {
+    it("pays the token's creator and zeroes claimableEth first, when called by the creator", async function () {
       const ctx = await deployStack();
-      const { distributor, creator, other, token } = ctx;
+      const { distributor, creator, token } = ctx;
       const claimable = await fundAndSwap(ctx);
       expect(claimable).to.be.gt(0n);
 
       const creatorBefore = await ethers.provider.getBalance(creator.address);
-      const tx = await distributor.connect(other).claimCreatorRewards(await token.getAddress()); // permissionless
+      const tx = await distributor.connect(creator).claimCreatorRewards(await token.getAddress());
+      const receipt = await tx.wait();
+      const gasCost = receipt.gasUsed * receipt.gasPrice;
       await expect(tx)
         .to.emit(distributor, "CreatorRewardsClaimed")
-        .withArgs(await token.getAddress(), creator.address, other.address, claimable);
+        .withArgs(await token.getAddress(), creator.address, creator.address, claimable);
 
-      expect(await ethers.provider.getBalance(creator.address)).to.equal(creatorBefore + claimable);
+      expect(await ethers.provider.getBalance(creator.address)).to.equal(creatorBefore + claimable - gasCost);
       expect(await distributor.claimableEth(await token.getAddress())).to.equal(0);
 
       // A second claim right after finds nothing left — proves the balance
       // was actually zeroed, not just read.
-      await expect(distributor.claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
+      await expect(distributor.connect(creator).claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
         "CreatorRewardsDistributor: nothing to claim"
       );
     });
 
-    it("pays whoever creator() reports AT CLAIM TIME, never a stale snapshot from when the reward accrued", async function () {
+    it("a CustomToken-style creator transfer immediately changes who's allowed to claim, and pays the new creator", async function () {
       const ctx = await deployStack();
       const { distributor, creator, other, token } = ctx;
       const claimable = await fundAndSwap(ctx);
@@ -218,11 +353,20 @@ describe("CreatorRewardsDistributor", function () {
       // BEFORE it's claimed.
       await token.connect(creator).setCreator(other.address);
 
+      // The old creator no longer passes the check...
+      await expect(distributor.connect(creator).claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
+        "CreatorRewardsDistributor: caller is not this token's creator"
+      );
+
+      // ...only the new one does, and the payout follows creator() read live
+      // at claim time, never a stale snapshot from when the reward accrued.
       const oldCreatorBefore = await ethers.provider.getBalance(creator.address);
       const newCreatorBefore = await ethers.provider.getBalance(other.address);
-      await distributor.claimCreatorRewards(await token.getAddress());
+      const tx = await distributor.connect(other).claimCreatorRewards(await token.getAddress());
+      const receipt = await tx.wait();
+      const gasCost = receipt.gasUsed * receipt.gasPrice;
 
-      expect(await ethers.provider.getBalance(other.address)).to.equal(newCreatorBefore + claimable);
+      expect(await ethers.provider.getBalance(other.address)).to.equal(newCreatorBefore + claimable - gasCost);
       expect(await ethers.provider.getBalance(creator.address)).to.equal(oldCreatorBefore); // untouched
     });
 
@@ -255,13 +399,13 @@ describe("CreatorRewardsDistributor", function () {
 
       const claimableFirst = await fundAndSwap(ctx, ethers.parseEther("1000"));
       await secondToken.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("500"));
-      await distributor.triggerCreatorSwap(await secondToken.getAddress(), 0);
+      await distributor.connect(secondCreator).triggerCreatorSwap(await secondToken.getAddress(), 0);
       const claimableSecond = await distributor.claimableEth(await secondToken.getAddress());
 
       expect(claimableFirst).to.be.gt(0n);
       expect(claimableSecond).to.be.gt(0n);
 
-      await distributor.claimCreatorRewards(await token.getAddress());
+      await distributor.connect(creator).claimCreatorRewards(await token.getAddress());
       expect(await distributor.claimableEth(await token.getAddress())).to.equal(0);
       // Claiming the first token's rewards must not touch the second's.
       expect(await distributor.claimableEth(await secondToken.getAddress())).to.equal(claimableSecond);
