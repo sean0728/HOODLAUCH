@@ -42,6 +42,23 @@
 // single fixed platform wallet, not a per-token creator), so its sweep is
 // untouched and still runs the same as before.
 //
+// A fourth, similarly-optional sweep automates PlatformRewardsDistributor's
+// own accumulate -> buyback -> burn/airdrop pipeline: set
+// PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS and this service periodically calls
+// triggerEthBuyback (for the 50% launch-fee ETH share sitting there),
+// triggerTokenBuyback (for every launched token's own rewardBps cut,
+// accumulated in-kind same as the fee-wallet/creator-rewards flows above),
+// and startAirdropRound/processAirdropBatch (to actually push the
+// resulting platformToken half out to holders) once each one's own
+// threshold clears — the exact same PERMISSIONLESS calls the admin panel's
+// own manual "Trigger a buyback"/"Airdrop rounds" buttons already make, just
+// on a schedule instead of requiring someone to notice and click them. Like
+// the fee-wallet sweep, this is safe to run from this service's own wallet
+// because none of these calls have a caller-dependent destination — the
+// split is always the same fixed 50% burn / 50% holder-airdrop-pool,
+// regardless of who triggers it. See the PLATFORM_REWARDS_*/
+// PLATFORM_AIRDROP_* constants and platformRewardsPollLoop below.
+//
 // GET /status/:voucherHash lets the front end poll a launch's progress
 // (received -> deposited -> relayed, or failed) — merged with a live
 // on-chain read of the matching deposit, so the front end can tell a
@@ -112,6 +129,37 @@ const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5
 // launched token on every tick would waste gas for no benefit.
 const FEE_WALLET_DISTRIBUTOR_ADDRESS = process.env.FEE_WALLET_DISTRIBUTOR_ADDRESS || null;
 const FEE_WALLET_POLL_INTERVAL_MS = Number(process.env.FEE_WALLET_POLL_INTERVAL_MS || 5 * 60_000);
+
+// Same optionality as FEE_WALLET_*/CREATOR_REWARDS_* above — leaving
+// PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS unset means this service does
+// nothing extra here either. When set, it automates
+// PlatformRewardsDistributor's own buyback/burn/airdrop pipeline (see the
+// module comment above and platformRewardsPollLoop below) on this same
+// 5-minute-default cadence — an unconverted buyback balance or an
+// un-started airdrop round costs nothing by sitting a while longer, same
+// reasoning as the other two sweeps.
+const PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS = process.env.PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS || null;
+const PLATFORM_REWARDS_POLL_INTERVAL_MS = Number(process.env.PLATFORM_REWARDS_POLL_INTERVAL_MS || 5 * 60_000);
+// Slippage tolerance applied to both triggerEthBuyback's and
+// triggerTokenBuyback's own live pool quote before it's sent as minTokensOut
+// — see quoteAmountsOut/sweepPlatformEthBuybackOnce below. Left as its own,
+// slightly looser default than index.html's CREATOR_SWAP_DEFAULT_SLIPPAGE_BPS
+// (2%) since a buyback sweep runs unattended on a fixed schedule rather than
+// firing from a single click a person is watching — tolerating a bit more
+// drift here means fewer spurious reverts from ordinary price movement
+// between the quote and the transaction landing, at the cost of a slightly
+// looser worst-case floor.
+const PLATFORM_BUYBACK_SLIPPAGE_BPS = BigInt(process.env.PLATFORM_BUYBACK_SLIPPAGE_BPS || 300); // 3%
+// How many platformToken holders processAirdropBatch sweeps per call, and
+// how many such calls platformRewardsPollLoop will make in a single tick
+// before yielding to the next scheduled tick — a safety bound so a
+// platformToken with a very large holder set can't turn one tick into an
+// unbounded loop of transactions. A round that isn't finished within one
+// tick's batch budget simply continues on the next tick (roundActive stays
+// true and roundCursor stays wherever it left off), never restarting from
+// scratch.
+const PLATFORM_AIRDROP_BATCH_SIZE = Number(process.env.PLATFORM_AIRDROP_BATCH_SIZE || 200);
+const PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK = Number(process.env.PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK || 10);
 
 const ERC20_BALANCE_OF_ABI = ["function balanceOf(address) view returns (uint256)"];
 
@@ -445,6 +493,7 @@ function logEnvVarPresence() {
     "TOKEN_FACTORY_ADDRESS",
     "CUSTOM_TOKEN_FACTORY_ADDRESS",
     "FEE_WALLET_DISTRIBUTOR_ADDRESS",
+    "PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS",
     "HARDHAT_NETWORK",
     "PORT",
     "RELAYER_PORT",
@@ -593,6 +642,31 @@ async function main() {
     }
   }
 
+  let platformRewardsDistributor = null;
+  if (PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS) {
+    // Same try/catch reasoning as FeeWalletDistributor above: an optional
+    // convenience feature whose load failure should never take the core
+    // relayer down with it.
+    try {
+      platformRewardsDistributor = await hre.ethers.getContractAt(
+        "PlatformRewardsDistributor",
+        PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS,
+        relayerWallet
+      );
+      console.log(`Platform rewards (buyback/burn/airdrop) auto-sweep enabled against distributor ${PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS}.`);
+    } catch (err) {
+      console.error(
+        `Could not load PlatformRewardsDistributor at ${PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS} (${err.message}). ` +
+          "Platform rewards auto-sweep is DISABLED for this run — everything else (vouchers, deposits, the API, " +
+          "the site, activity/price polling, fee-wallet auto-sweep) starts normally regardless. This specific " +
+          "error usually means the contract's build artifact wasn't included in this deploy (a stale/cached " +
+          "build) — a clean rebuild that actually recompiles contracts/PlatformRewardsDistributor.sol should " +
+          "fix it; set PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS again afterward to re-enable auto-sweep."
+      );
+      platformRewardsDistributor = null;
+    }
+  }
+
   // ---- HTTP API ----
   const app = express();
   app.use(express.json());
@@ -658,6 +732,8 @@ async function main() {
       customTokenFactoryAddress: customTokenFactoryAddress || null,
       feeWalletDistributorAddress: FEE_WALLET_DISTRIBUTOR_ADDRESS || null,
       feeWalletAutoSweepEnabled: !!feeWalletDistributor,
+      platformRewardsDistributorAddress: PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS || null,
+      platformRewardsAutoSweepEnabled: !!platformRewardsDistributor,
     })
   );
 
@@ -1501,6 +1577,25 @@ async function main() {
     }
   }
 
+  // Generalized version of quoteSwapEthOut above for an arbitrary path —
+  // used by the platform-rewards sweep below, where the path is either
+  // [WETH, platformToken] (the ETH-buyback leg) or [token, WETH,
+  // platformToken] (the token-buyback leg), neither of which is the fixed
+  // [token, WETH] shape quoteSwapEthOut itself assumes. Same contract:
+  // never throws, returns 0n for "don't bother yet" on any failure
+  // (including no pool/liquidity along the path yet), and amountIn === 0n
+  // short-circuits without an RPC round trip.
+  async function quoteAmountsOut(routerAddress, path, amountIn) {
+    if (amountIn === 0n) return 0n;
+    try {
+      const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
+      const amounts = await router.getAmountsOut(amountIn, path);
+      return amounts[amounts.length - 1];
+    } catch (err) {
+      return 0n;
+    }
+  }
+
   // NOTE: there used to be an analogous "---- creator-reward auto-sweep
   // (optional) ----" section here (sweepCreatorRewardsOnce/
   // creatorRewardsPollLoop), walking every launched token and calling
@@ -1576,6 +1671,156 @@ async function main() {
     setTimeout(feeWalletPollLoop, FEE_WALLET_POLL_INTERVAL_MS);
   }
 
+  // ---- platform rewards auto-sweep (optional) ----
+  // Automates PlatformRewardsDistributor's own accumulate -> buyback ->
+  // burn/airdrop pipeline (see PlatformRewardsDistributor.sol's own
+  // contract-level comment, and the module comment near the top of this
+  // file). Three independent sub-sweeps, run in sequence every tick — each
+  // one no-ops quietly (not as a logged failure) until
+  // PlatformRewardsDistributor.platformToken() is actually configured (see
+  // scripts/deploy.js's DEPLOY_PLATFORM_TOKEN flag), since every trigger
+  // call on the contract reverts with "platform token not set" until then.
+
+  // Sub-sweep 1: the 50%-of-every-deployFee/launchFee ETH share that lands
+  // here directly (see TokenFactory._finalizeLaunch /
+  // CustomTokenFactory.createCustomToken) — buys platformToken with it once
+  // ethBuybackThreshold clears, same dust/no-pool prediction check as the
+  // fee-wallet sweep above, with a real slippage floor instead of the 0
+  // this project's earlier sweeps used to hardcode (see
+  // PLATFORM_BUYBACK_SLIPPAGE_BPS above).
+  async function sweepPlatformEthBuybackOnce() {
+    const platformTokenAddress = await platformRewardsDistributor.platformToken();
+    if (platformTokenAddress === hre.ethers.ZeroAddress) return; // not configured yet — see comment above
+
+    const distributorAddress = await platformRewardsDistributor.getAddress();
+    const balance = await hre.ethers.provider.getBalance(distributorAddress);
+    if (balance === 0n) return;
+
+    const threshold = await platformRewardsDistributor.ethBuybackThreshold();
+    if (balance < threshold) return;
+
+    const cap = await platformRewardsDistributor.maxEthBuybackAmount();
+    const ethIn = cap > 0n && balance > cap ? cap : balance;
+
+    const routerAddress = await platformRewardsDistributor.router();
+    const wethAddress = await (
+      await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
+    ).WETH();
+
+    const quotedTokensOut = await quoteAmountsOut(routerAddress, [wethAddress, platformTokenAddress], ethIn);
+    if (quotedTokensOut === 0n) return; // dust, or no platformToken pool/liquidity yet — nothing worth logging
+
+    const minTokensOut = (quotedTokensOut * (10000n - PLATFORM_BUYBACK_SLIPPAGE_BPS)) / 10000n;
+    const tx = await platformRewardsDistributor.triggerEthBuyback(minTokensOut);
+    const receipt = await tx.wait();
+    console.log(`[platform-rewards] ETH buyback: ${ethIn} wei -> ~${quotedTokensOut} platformToken in tx ${receipt.hash}.`);
+  }
+
+  // Sub-sweep 2: every launched token's own rewardBps cut, accumulated
+  // in-kind on this same distributor exactly like the creator-rewards/
+  // fee-wallet flows — walks every token this relayer has ever recorded a
+  // launch for and buys platformToken with whatever's cleared that token's
+  // own tokenBuybackThreshold. A token that happens to equal platformToken
+  // itself (e.g. someone sends it here directly) is credited without a
+  // swap — the contract's own triggerTokenBuyback special-cases that path
+  // uncapped and never touches minTokensOut for it, so this passes 0 there
+  // and only computes a real quote/floor for the swapped case.
+  async function sweepPlatformTokenBuybacksOnce() {
+    const platformTokenAddress = await platformRewardsDistributor.platformToken();
+    if (platformTokenAddress === hre.ethers.ZeroAddress) return;
+
+    const network = hre.network.name;
+    const ledger = readLedger(network);
+    const distributorAddress = await platformRewardsDistributor.getAddress();
+    const routerAddress = await platformRewardsDistributor.router();
+    const wethAddress = await (
+      await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
+    ).WETH();
+    const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
+
+    for (const tokenAddress of tokenAddresses) {
+      try {
+        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
+        const balance = await token.balanceOf(distributorAddress);
+        if (balance === 0n) continue;
+
+        const threshold = await platformRewardsDistributor.tokenBuybackThreshold(tokenAddress);
+        if (balance < threshold) continue;
+
+        const isPlatformTokenItself = tokenAddress.toLowerCase() === platformTokenAddress.toLowerCase();
+        let amountIn = balance;
+        let minTokensOut = 0n; // unused by the contract on the direct-credit path below
+
+        if (!isPlatformTokenItself) {
+          const cap = await platformRewardsDistributor.maxTokenBuybackAmount(tokenAddress);
+          amountIn = cap > 0n && balance > cap ? cap : balance;
+
+          const quotedTokensOut = await quoteAmountsOut(
+            routerAddress,
+            [tokenAddress, wethAddress, platformTokenAddress],
+            amountIn
+          );
+          if (quotedTokensOut === 0n) continue; // dust, or no pool/liquidity yet — nothing worth logging
+          minTokensOut = (quotedTokensOut * (10000n - PLATFORM_BUYBACK_SLIPPAGE_BPS)) / 10000n;
+        }
+
+        const tx = await platformRewardsDistributor.triggerTokenBuyback(tokenAddress, minTokensOut);
+        const receipt = await tx.wait();
+        console.log(
+          `[platform-rewards] ${isPlatformTokenItself ? "direct-credited" : "token buyback"} ${tokenAddress} ` +
+            `(amountIn ${amountIn}) in tx ${receipt.hash}.`
+        );
+      } catch (err) {
+        // Expected/benign cases include: a threshold that hasn't been
+        // reached, or another caller having already swept it between our
+        // balance read and our tx landing — the permanent dust/no-liquidity
+        // case is now filtered out above before it ever gets here.
+        console.warn(`[platform-rewards] skip token buyback for ${tokenAddress}: ${err.message}`);
+      }
+    }
+  }
+
+  // Sub-sweep 3: actually moves the burn half's counterpart — the half
+  // sitting in pendingAirdropTokens after either buyback above — out to
+  // platformToken's own holders. Starts a round if one isn't already active
+  // and there's something to distribute, then keeps calling
+  // processAirdropBatch until either the round completes or this tick's own
+  // PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK budget is spent; an unfinished
+  // round just continues on the next tick (roundActive/roundCursor are
+  // on-chain state, not something this loop needs to track itself).
+  async function sweepPlatformAirdropRoundOnce() {
+    const platformTokenAddress = await platformRewardsDistributor.platformToken();
+    if (platformTokenAddress === hre.ethers.ZeroAddress) return;
+
+    let roundActive = await platformRewardsDistributor.roundActive();
+    if (!roundActive) {
+      const pending = await platformRewardsDistributor.pendingAirdropTokens();
+      if (pending === 0n) return; // nothing to distribute yet
+
+      const tx = await platformRewardsDistributor.startAirdropRound();
+      const receipt = await tx.wait();
+      console.log(`[platform-rewards] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
+      roundActive = true;
+    }
+
+    for (let i = 0; i < PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK && roundActive; i++) {
+      const tx = await platformRewardsDistributor.processAirdropBatch(PLATFORM_AIRDROP_BATCH_SIZE);
+      const receipt = await tx.wait();
+      roundActive = await platformRewardsDistributor.roundActive();
+      console.log(
+        `[platform-rewards] airdrop batch processed in tx ${receipt.hash}` +
+          (roundActive ? " (round continues next tick)." : " (round completed).")
+      );
+    }
+  }
+
+  async function platformRewardsPollLoop() {
+    await sweepPlatformEthBuybackOnce().catch((err) => console.error(`[platform-rewards] ETH buyback sweep error: ${err.message}`));
+    await sweepPlatformTokenBuybacksOnce().catch((err) => console.error(`[platform-rewards] token buyback sweep error: ${err.message}`));
+    await sweepPlatformAirdropRoundOnce().catch((err) => console.error(`[platform-rewards] airdrop round sweep error: ${err.message}`));
+    setTimeout(platformRewardsPollLoop, PLATFORM_REWARDS_POLL_INTERVAL_MS);
+  }
+
   console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits (only deposits made from now on — see cursors.json).`);
   pollLoop();
 
@@ -1592,6 +1837,11 @@ async function main() {
   if (feeWalletDistributor) {
     console.log(`Sweeping fee-wallet rewards every ${FEE_WALLET_POLL_INTERVAL_MS}ms.`);
     feeWalletPollLoop();
+  }
+
+  if (platformRewardsDistributor) {
+    console.log(`Sweeping platform rewards (buyback/burn/airdrop) every ${PLATFORM_REWARDS_POLL_INTERVAL_MS}ms.`);
+    platformRewardsPollLoop();
   }
 }
 
