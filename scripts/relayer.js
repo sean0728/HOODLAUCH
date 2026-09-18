@@ -142,6 +142,31 @@ const ERC20_BALANCE_OF_ABI = ["function balanceOf(address) view returns (uint256
 // since nothing here is time-sensitive the way a pending gasless launch is.
 const TOKEN_DISCOVERY_START_BLOCK = Number(process.env.TOKEN_DISCOVERY_START_BLOCK || 0);
 const TOKEN_DISCOVERY_MAX_BLOCK_RANGE = Number(process.env.TOKEN_DISCOVERY_MAX_BLOCK_RANGE || 20_000);
+// FIX: a "never run" discovery cursor used to always resume from the bare
+// TOKEN_DISCOVERY_START_BLOCK — fine the very first time this service is
+// ever stood up, but on a fast-moving chain that same value stays frozen at
+// wherever it was originally set while the chain tip keeps climbing, so it
+// gets further behind every day this service has been alive. That's exactly
+// what turned a routine relayer.js redeploy into a 100M+ block backlog: this
+// process's persisted JSON (see the "GoDaddy persistence notes" comment on
+// /debug/token below) lives inside public/assets/, which isn't actually a
+// separate persistent volume here — a redeploy resets it to whatever was
+// last committed, silently turning "never run" into "never run" again after
+// the service had already caught all the way up to the tip. Rather than
+// requiring a human to notice the dashboard going blank and manually POST
+// /debug/reset-discovery-cursor (see scripts/adminResetDiscoveryCursor.js)
+// every time this happens, a "never run" cursor now self-heals to within
+// TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS of the current tip instead — same
+// generous default (3,000,000) as that admin script already uses, and still
+// never earlier than TOKEN_DISCOVERY_START_BLOCK so an intentionally-set
+// historical start (e.g. a factory's real deployment block) is still
+// honored on a genuine first run. This can still miss a token launched more
+// than that many blocks behind the tip if this exact wipe recurs and nobody
+// catches it in time — the real fix is finding GoDaddy's actual persistent
+// storage location and pointing RELAYER_DATA_DIR/DEPLOYED_CONTRACTS_DIR at
+// it instead, but this keeps a recurrence from ever being a 24+ hour outage
+// again in the meantime.
+const TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS = Number(process.env.TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS || 3_000_000);
 const TOKEN_DISCOVERY_POLL_INTERVAL_MS = Number(process.env.TOKEN_DISCOVERY_POLL_INTERVAL_MS || POLL_INTERVAL_MS);
 const ACTIVITY_MAX_BLOCK_RANGE = Number(process.env.ACTIVITY_MAX_BLOCK_RANGE || 5_000);
 const TOKEN_ACTIVITY_POLL_INTERVAL_MS = Number(process.env.TOKEN_ACTIVITY_POLL_INTERVAL_MS || 20_000);
@@ -786,7 +811,10 @@ async function main() {
         factoryAddress,
         discoveryCursor: cursor,
         latestBlock,
-        blocksBehind: cursor === null ? "never run — will start from TOKEN_DISCOVERY_START_BLOCK" : Math.max(0, latestBlock - cursor),
+        blocksBehind:
+          cursor === null
+            ? `never run — will self-heal to ~${TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS.toLocaleString()} blocks behind tip (see TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS)`
+            : Math.max(0, latestBlock - cursor),
       };
     }
     sendJson(res, 200, {
@@ -1145,7 +1173,15 @@ async function main() {
     const cursorKey = `${factoryAddress}:discovery`;
     const latestBlock = await hre.ethers.provider.getBlockNumber();
     const storedCursor = getCursor(cursorKey);
-    const fromBlock = storedCursor !== null ? storedCursor + 1 : TOKEN_DISCOVERY_START_BLOCK;
+    // See TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS's own comment above: a
+    // "never run" cursor resumes from whichever is LATER of the configured
+    // historical start block and (tip - lookback), so a cursor wiped by a
+    // redeploy self-heals near the tip instead of restarting a 100M+ block
+    // backfill from a start block that's now ancient history.
+    const fromBlock =
+      storedCursor !== null
+        ? storedCursor + 1
+        : Math.max(TOKEN_DISCOVERY_START_BLOCK, latestBlock - TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS);
     if (fromBlock > latestBlock) return;
     const toBlock = Math.min(latestBlock, fromBlock + TOKEN_DISCOVERY_MAX_BLOCK_RANGE);
 
@@ -1499,7 +1535,9 @@ async function main() {
   pollLoop();
 
   console.log(
-    `Discovering launched tokens every ${TOKEN_DISCOVERY_POLL_INTERVAL_MS}ms (backfilling from block ${TOKEN_DISCOVERY_START_BLOCK}), ` +
+    `Discovering launched tokens every ${TOKEN_DISCOVERY_POLL_INTERVAL_MS}ms (a cursor with no history starts from ` +
+      `whichever is later of block ${TOKEN_DISCOVERY_START_BLOCK} (TOKEN_DISCOVERY_START_BLOCK) and ` +
+      `${TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS.toLocaleString()} blocks behind the current tip), ` +
       `polling trade activity every ${TOKEN_ACTIVITY_POLL_INTERVAL_MS}ms, and sampling price/market-cap every ${TOKEN_PRICE_POLL_INTERVAL_MS}ms.`
   );
   tokenDiscoveryPollLoop();
