@@ -1166,6 +1166,22 @@
     merged = mergeConfigLayer(merged, serverPlatformConfig);
     merged = mergeConfigLayer(merged, loadLocalConfigOverrides());
     platformConfig = merged;
+    // The platform-token spotlight reads rewardsDistributorAddress() (via
+    // platformConfig.rewardsDistributor), which is null until whichever of
+    // config.json/the relayer's saved config/local overrides actually
+    // carries the deployed address — all three load asynchronously, well
+    // after the spotlight's own first, synchronous refresh call at the
+    // bottom of this script. Without this, that first call sees no
+    // distributor configured yet, hides the panel, and nothing tells it to
+    // look again until its own 60s poll interval happens to come back
+    // around — which is exactly the "disappears on refresh, pops back up
+    // about a minute later" symptom. Re-running it the instant any config
+    // layer actually resolves closes that gap. Guarded with typeof since
+    // rebuildPlatformConfig runs (during the initial loadPlatformConfigFile/
+    // fetchServerPlatformConfig calls further down) before
+    // refreshPlatformTokenSpotlight is declared later in this script —
+    // same pattern setMode() already uses below.
+    if(typeof refreshPlatformTokenSpotlight==="function") refreshPlatformTokenSpotlight();
   }
 
   async function loadPlatformConfigFile(){
