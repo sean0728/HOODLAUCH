@@ -273,8 +273,18 @@ const AGGREGATOR_V3_ABI = [
 // file.)
 const UNIV2_ROUTER_QUOTE_ABI = [
   "function WETH() view returns (address)",
+  "function factory() view returns (address)",
   "function getAmountsOut(uint amountIn, address[] calldata path) view returns (uint[] memory amounts)",
 ];
+// Minimal read-only Uniswap V2 factory ABI — just enough to resolve a
+// token's own pair address up front when POST /track-token registers it
+// (see that route below), so pollTokenPrices can start sampling on its very
+// next tick instead of waiting on the per-kind "backfill from the owning
+// factory's pairOf()" step that only applies to tokens actually launched
+// through TokenFactory/CustomTokenFactory.
+const UNIV2_FACTORY_ABI = ["function getPair(address tokenA, address tokenB) view returns (address pair)"];
+// Minimal ERC20 metadata ABI, best-effort only — see POST /track-token.
+const ERC20_METADATA_ABI = ["function name() view returns (string)", "function symbol() view returns (string)"];
 // LaunchedToken and CustomToken expose the same tax-progress fields under
 // different getter names (taxActive vs platformTaxActive — see the module
 // comment in lib/priceMath.js and CustomToken.sol/LaunchedToken.sol
@@ -858,6 +868,81 @@ async function main() {
     setPlatformConfig(canonical);
     console.log("[admin] platform config saved.");
     sendJson(res, 200, { config: canonical });
+  });
+
+  // ---- manual token tracking (admin-gated) ----
+  // Registers an arbitrary token address for price/activity tracking even
+  // though it was never launched through TokenFactory/CustomTokenFactory —
+  // built specifically for the platform's own token (see PlatformToken.sol
+  // and scripts/deployPlatformRewards.js), which is a plain standalone
+  // deploy with no TokenCreated/CustomTokenCreated event for
+  // discoverLaunchedTokens to ever pick up. Anything registered here gets
+  // kind: "platform" — pollTokenPrices below has a dedicated branch for it
+  // that skips the LaunchedToken/CustomToken-only calls (priceFeed(),
+  // graduationTargetUsd(), taxActive()/platformTaxActive()) a plain ERC20
+  // simply doesn't have.
+  //
+  // Body: { tokenAddress, timestamp, signature }. `signature` must be a
+  // personal_sign signature (from ADMIN_WALLET) of
+  // `Hood Launch admin: track token ${tokenAddress} at ${timestamp}` — same
+  // convention and same safe-failure-on-drift reasoning as
+  // POST /active-network above. Idempotent: registering an
+  // already-tracked address just refreshes its pair/priceFeed/metadata
+  // rather than erroring.
+  app.post("/track-token", async (req, res) => {
+    const { tokenAddress, timestamp, signature } = req.body || {};
+    if (!tokenAddress || !hre.ethers.isAddress(tokenAddress)) {
+      return sendJson(res, 400, { error: "tokenAddress must be a valid address" });
+    }
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    }
+    const normalized = hre.ethers.getAddress(tokenAddress);
+    const message = `Hood Launch admin: track token ${normalized} at ${timestamp}`;
+    if (!verifyAdminSignature(message, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
+    if (watchers.length === 0) {
+      return sendJson(res, 500, { error: "No factory watcher configured on this relayer — can't resolve a router/price feed to track against." });
+    }
+    try {
+      // router/priceFeed are shared platform-wide (see TokenFactory.sol's
+      // own module comment), so any configured watcher's factory is an
+      // equally valid source for them — this doesn't have to be the
+      // factory that (didn't) launch this token.
+      const sourceFactory = watchers[0].factory;
+      const [routerAddress, priceFeed] = await Promise.all([sourceFactory.router(), sourceFactory.priceFeed()]);
+      const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
+      const [wethAddress, factoryAddress] = await Promise.all([router.WETH(), router.factory()]);
+      const univ2Factory = await hre.ethers.getContractAt(UNIV2_FACTORY_ABI, factoryAddress, hre.ethers.provider);
+      const rawPair = await univ2Factory.getPair(normalized, wethAddress).catch(() => hre.ethers.ZeroAddress);
+      const pairAddress = rawPair && rawPair !== hre.ethers.ZeroAddress ? rawPair : null;
+
+      let name = null;
+      let symbol = null;
+      try {
+        const erc20 = await hre.ethers.getContractAt(ERC20_METADATA_ABI, normalized, hre.ethers.provider);
+        [name, symbol] = await Promise.all([erc20.name(), erc20.symbol()]);
+      } catch (err) {
+        // best-effort only — a missing name()/symbol() shouldn't block tracking
+      }
+
+      upsertTrackedToken(network, normalized, {
+        kind: "platform",
+        name,
+        symbol,
+        pairAddress,
+        priceFeed,
+        manuallyTracked: true,
+      });
+      console.log(
+        `[admin] manually tracking ${normalized}${symbol ? ` ($${symbol})` : ""} for price/activity` +
+          (pairAddress ? ` — pair ${pairAddress} found, sampling starts on the next tick.` : " — no pool found yet, will keep checking.")
+      );
+      sendJson(res, 200, { tokenAddress: normalized, name, symbol, pairAddress });
+    } catch (err) {
+      sendJson(res, 500, { error: `Couldn't resolve this token against the router/factory: ${err.message}` });
+    }
   });
 
   // ---- real trade activity / price history (see pollTokenActivity /
@@ -1495,6 +1580,69 @@ async function main() {
     const tracked = readTrackedTokens(network);
     for (const entry of Object.values(tracked)) {
       try {
+        // A manually-tracked plain token (kind: "platform" — see
+        // POST /track-token above) was never launched through
+        // TokenFactory/CustomTokenFactory, so it has none of the
+        // LaunchedToken/CustomToken-only surface the branch below depends
+        // on (priceFeed()/graduationTargetUsd()/taxActive()/
+        // platformTaxActive() simply don't exist on it) — handled entirely
+        // separately here instead.
+        if (entry.kind === "platform") {
+          // Liquidity can be added after registration (see the "not seeded
+          // yet" case in POST /track-token) — recheck the DEX factory's own
+          // getPair each tick until one shows up, same idea as the
+          // pairOf()-backfill below but sourced from the DEX itself rather
+          // than a launch factory, since this token was never launched
+          // through one.
+          if (!entry.pairAddress && watchers.length > 0) {
+            try {
+              const sourceFactory = watchers[0].factory;
+              const routerAddress = await sourceFactory.router();
+              const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
+              const [wethAddress, dexFactoryAddress] = await Promise.all([router.WETH(), router.factory()]);
+              const univ2Factory = await hre.ethers.getContractAt(UNIV2_FACTORY_ABI, dexFactoryAddress, hre.ethers.provider);
+              const onChainPair = await univ2Factory.getPair(entry.tokenAddress, wethAddress);
+              if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
+                entry.pairAddress = onChainPair;
+                upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
+              }
+            } catch (err) {
+              // best-effort backfill only — next tick tries again
+            }
+          }
+          if (!entry.pairAddress) continue; // still no pool — nothing to sample yet
+
+          const pair = await hre.ethers.getContractAt(UNIV2_PAIR_ABI, entry.pairAddress, hre.ethers.provider);
+          const [reserves, token0] = await Promise.all([pair.getReserves(), pair.token0()]);
+          const wethIsToken0 = token0.toLowerCase() !== entry.tokenAddress.toLowerCase();
+          if (entry.wethIsToken0 !== wethIsToken0) upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
+          const tokenReserve = wethIsToken0 ? reserves.reserve1 : reserves.reserve0;
+          const wethReserve = wethIsToken0 ? reserves.reserve0 : reserves.reserve1;
+
+          const token = await hre.ethers.getContractAt(
+            ["function totalSupply() view returns (uint256)"],
+            entry.tokenAddress,
+            hre.ethers.provider
+          );
+          const totalSupply = await token.totalSupply();
+
+          const ethUsd = await fetchEthUsdFromFeed(entry.priceFeed);
+          const priceUsd = computeTokenPriceUsd(tokenReserve, wethReserve, ethUsd);
+          const mcapUsd = computeMarketCapUsd(priceUsd, totalSupply);
+          const holders = await fetchHolderCount(entry.tokenAddress);
+
+          // No bonding-curve/tax milestone applies to a plain platform
+          // token — taxProgressPct/taxActive are reported as "nothing to
+          // track, already past any such milestone" so anything reusing
+          // this same price-history point shape (it's the same
+          // appendPricePoint/GET /price-history every launched token uses)
+          // doesn't have to special-case a missing field.
+          const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct: 100, taxActive: false };
+          if (holders !== null) point.holders = holders;
+          appendPricePoint(network, entry.tokenAddress, point);
+          continue;
+        }
+
         // A "Just Launch" token can gain a pool later via independently-
         // added liquidity (see index.html's checkPendingLiquidity) — recheck
         // the owning factory's own pairOf mapping each tick until one shows
