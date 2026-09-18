@@ -3,8 +3,9 @@ artifacts/
 cache/
 .env
 coverage
-deployed-contracts/
-relayer-data/
+public/assets/deployed-contracts/
+public/assets/relayer-data/
+
 
 # deployed-contracts/ (the per-network launch ledgers scripts/launch.js
 # writes to) and deployments/ (the per-network platform-contract addresses
