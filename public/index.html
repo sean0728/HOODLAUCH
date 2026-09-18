@@ -1258,6 +1258,15 @@
     // this only ever runs well after the whole script has run once.
     refreshRemoteLaunches(appMode);
     if(typeof seedFeed==="function") seedFeed();
+    // Platform token spotlight reads platformConfig.rewardsDistributor[mode]
+    // (via rewardsDistributorAddress()) and fetches price history scoped to
+    // this same mode (via relayerApiUrl(appMode)) — both need a fresh read
+    // the instant the mode actually changes, same as everything else in
+    // this function, rather than waiting up to LIVE_TOKEN_POLL_MS for its
+    // own interval to come back around. Guarded the same way seedFeed is
+    // above: setMode() runs once during initial platformConfig sync, before
+    // this function is declared further down the script.
+    if(typeof refreshPlatformTokenSpotlight==="function") refreshPlatformTokenSpotlight();
   }
 
   // Reads the platform-wide active network straight off the same relayer
