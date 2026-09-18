@@ -1644,6 +1644,16 @@
   const CREATOR_REWARDS_DISTRIBUTOR_SELECTOR = "0d0b866b"; // creatorRewardsDistributor()
   const CREATOR_REWARD_BPS_SELECTOR = "7e5d936a";          // creatorRewardBps()
   const SET_CREATOR_REWARDS_DISTRIBUTOR_SELECTOR = "9355cce7"; // setCreatorRewardsDistributor(address) — factories only
+  // Fee-wallet distributor — same getter-on-both-call-sites convention as
+  // CREATOR_REWARDS_DISTRIBUTOR_SELECTOR above (identical signature on
+  // TokenFactory/CustomTokenFactory and on every already-launched
+  // LaunchedToken/CustomToken clone). No bps selector needed here: unlike
+  // reward/creator-reward diversion, the fee-wallet slice isn't a separate
+  // bps of its own — it's just whatever's left of feeBps after those two
+  // are carved out (see FeeWalletDistributor.sol's own contract-level
+  // comment).
+  const FEE_WALLET_DISTRIBUTOR_SELECTOR = "810561e1";      // feeWalletDistributor()
+  const SET_FEE_WALLET_DISTRIBUTOR_SELECTOR = "8123fa0d";  // setFeeWalletDistributor(address) — factories only
 
   // One-arg encoders for the admin setters above — every parameter in this
   // whole group is static (uint256 or address), so calldata is always
@@ -6111,6 +6121,7 @@
       ownerHex, pendingOwnerHex, deployFeeHex, launchFeeHex, feeTreasuryHex, lpLockDurationHex,
       maxCreatorBuyBpsHex, platformFeeWalletHex, feeBpsHex, priceFeedHex, graduationTargetUsdHex, maxOracleStalenessHex,
       rewardsDistributorHex, rewardBpsHex, creatorRewardsDistributorHex, creatorRewardBpsHex,
+      feeWalletDistributorHex,
     ] = await Promise.all([
       ethCall(address, "0x"+OWNER_SELECTOR),
       ethCall(address, "0x"+PENDING_OWNER_SELECTOR),
@@ -6128,6 +6139,7 @@
       ethCall(address, "0x"+REWARD_BPS_SELECTOR),
       ethCall(address, "0x"+CREATOR_REWARDS_DISTRIBUTOR_SELECTOR),
       ethCall(address, "0x"+CREATOR_REWARD_BPS_SELECTOR),
+      ethCall(address, "0x"+FEE_WALLET_DISTRIBUTOR_SELECTOR),
     ]);
     return {
       owner: decodeAddress(ownerHex),
@@ -6146,6 +6158,7 @@
       rewardBps: decodeUint256(rewardBpsHex),
       creatorRewardsDistributor: decodeAddress(creatorRewardsDistributorHex),
       creatorRewardBps: decodeUint256(creatorRewardBpsHex),
+      feeWalletDistributor: decodeAddress(feeWalletDistributorHex),
     };
   }
 
@@ -6191,6 +6204,7 @@
           <div class="admin-readout"><div class="l">Reward diversion</div><div class="v">${(Number(state.rewardBps)/100).toFixed(2)}% ${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "(inactive — no distributor set)" : `of the ${(Number(state.feeBps)/100).toFixed(2)}% platform tax`}</div></div>
           <div class="admin-readout"><div class="l">Creator rewards distributor</div><div class="v">${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "Unset — no creator-reward cut is taken" : escapeHtml(state.creatorRewardsDistributor)}</div></div>
           <div class="admin-readout"><div class="l">Creator reward diversion</div><div class="v">${(Number(state.creatorRewardBps)/100).toFixed(2)}% ${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "(inactive — no distributor set)" : `of the ${(Number(state.feeBps)/100).toFixed(2)}% platform tax`}</div></div>
+          <div class="admin-readout"><div class="l">Fee wallet distributor</div><div class="v">${state.feeWalletDistributor.toLowerCase()===ZERO_ADDRESS ? "Unset — fee-wallet remainder goes straight to the plain wallet above" : escapeHtml(state.feeWalletDistributor)}</div></div>
         </div>
 
         <div class="admin-section-label">Update fees</div>
@@ -6245,6 +6259,16 @@
         <div class="admin-action-row">
           <div class="field"><label>Creator rewards distributor (address)</label><input type="text" id="admin_${key}_creatorRewardsDistributor" placeholder="${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.creatorRewardsDistributor}"></div>
           <button class="btn btn-primary btn-sm" data-admin-action="creatorRewardsDistributor" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
+        </div>
+
+        <div class="admin-section-label">Fee wallet distributor · the platform's own trading-tax remainder, converted to ETH</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Redirects whatever's left of the platform tax after the reward/creator-reward diversion above — the fee-wallet slice that would otherwise sit at "Platform fee wallet" as whatever token it was taxed in — to a FeeWalletDistributor contract instead, which converts it to ETH automatically and pays out to one address it controls (owner-changeable independently of this panel). Leaving this unset (the default) keeps the fee-wallet slice going straight to the plain wallet above, exactly as it's always worked — see scripts/deployFeeWalletDistributor.js for how one gets deployed.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Fee wallet distributor (address)</label><input type="text" id="admin_${key}_feeWalletDistributor" placeholder="${state.feeWalletDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.feeWalletDistributor}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="feeWalletDistributor" data-factory-key="${key}">Update</button>
         </div>
         <div class="admin-action-row">
           <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
@@ -6838,6 +6862,11 @@
         if(v && !isAddressLike(v)) throw new Error("Creator rewards distributor must be a valid address, or left blank to unset it.");
         data = encodeAddressCalldata(SET_CREATOR_REWARDS_DISTRIBUTOR_SELECTOR, v || ZERO_ADDRESS);
         successMsg = v ? "Creator rewards distributor updated." : "Creator rewards distributor cleared — creator reward diversion is inactive again.";
+      } else if(action==="feeWalletDistributor"){
+        const v = field("feeWalletDistributor").value.trim();
+        if(v && !isAddressLike(v)) throw new Error("Fee wallet distributor must be a valid address, or left blank to unset it.");
+        data = encodeAddressCalldata(SET_FEE_WALLET_DISTRIBUTOR_SELECTOR, v || ZERO_ADDRESS);
+        successMsg = v ? "Fee wallet distributor updated." : "Fee wallet distributor cleared — the fee-wallet remainder goes straight to the plain wallet again.";
       } else if(action==="transferOwnership"){
         const v = field("newOwner").value.trim();
         if(!isAddressLike(v)) throw new Error("Enter a valid address to propose as the new owner.");
