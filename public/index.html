@@ -1706,7 +1706,7 @@
   const CRD_CLAIMABLE_ETH_SELECTOR = "4793dc40";        // claimableEth(address) — keyed by token address
   const CRD_SWAP_THRESHOLD_SELECTOR = "0ae9b4f0";       // swapThreshold(address)
   const CRD_SET_SWAP_THRESHOLD_SELECTOR = "db3e514c";   // setSwapThreshold(address,uint256)
-  const CRD_MAX_SWAP_AMOUNT_SELECTOR = "e7881011";      // maxSwapAmount(address) — same per-call cap triggerCreatorSwap itself enforces; read here so the MEV-safe quote below is over the SAME amountIn the contract will actually swap
+  const CRD_MAX_SWAP_AMOUNT_SELECTOR = "e7881011";      // maxSwapAmount(address) — not currently read anywhere in this file (quoteCreatorSwapMinEthOut simulates triggerCreatorSwap directly instead of reimplementing its amountIn-capping logic); kept for any future admin-panel readout of this value, same as the other CRD_* getters above
   const CRD_TRIGGER_CREATOR_SWAP_SELECTOR = "360f1b2c"; // triggerCreatorSwap(address,uint256) — creator-only (msg.sender == token.creator())
   const CRD_CLAIM_CREATOR_REWARDS_SELECTOR = "bec3bbcc"; // claimCreatorRewards(address) — creator-only, pays token.creator()
   // Slippage tolerance applied to convertCreatorRewards' own live pool quote
@@ -2207,8 +2207,10 @@
     return words;
   }
 
-  async function ethCall(to, dataHex){
-    return window.ethereum.request({ method:"eth_call", params:[{ to, data: dataHex }, "latest"] });
+  async function ethCall(to, dataHex, from){
+    const callObj = { to, data: dataHex };
+    if(from) callObj.from = from; // needed to simulate a caller-gated function (see quoteCreatorSwapMinEthOut)
+    return window.ethereum.request({ method:"eth_call", params:[callObj, "latest"] });
   }
   async function waitForReceipt(txHash, {intervalMs=1500, timeoutMs=180000}={}){
     const start = Date.now();
@@ -5976,60 +5978,74 @@
     }
   }
 
-  // Quotes the SAME swap triggerCreatorSwap will actually make — same
-  // amountIn-capping logic as the contract (min of the distributor's
-  // balance and maxSwapAmount[token]), same [token, WETH] path, same
-  // constant-product math the pool itself runs (getAmountOut, shared with
-  // the real trade panel above) — off the pool's own live reserves, then
-  // applies CREATOR_SWAP_DEFAULT_SLIPPAGE_BPS as a floor.
+  // Quotes the SAME swap triggerCreatorSwap will actually make by
+  // simulating that exact call via a read-only eth_call (state changes are
+  // computed, then discarded — nothing is sent), rather than recomputing
+  // the pool math ourselves in JS, then applies
+  // CREATOR_SWAP_DEFAULT_SLIPPAGE_BPS as a floor on the simulated result.
   //
-  // Why this exists: triggerCreatorSwap used to always be called with
-  // minEthOut hardcoded to 0, meaning it accepted ANY nonzero output. That
-  // makes the swap a textbook sandwich target — a bot watching the mempool
-  // front-runs this transaction with a buy that pushes the token's price up
-  // against ETH, lets this swap execute into the now-worse price, then
-  // back-runs with a sell to pocket the difference, straight out of the
-  // creator's own reward conversion. Restricting the caller to the token's
-  // own creator (see CreatorRewardsDistributor.sol) doesn't fix this by
-  // itself — it only changes who can send the transaction, not whether it's
-  // protected once sent and sitting in the mempool. This is what actually
-  // closes it.
+  // Why this exists (two layers): triggerCreatorSwap used to always be
+  // called with minEthOut hardcoded to 0, meaning it accepted ANY nonzero
+  // output — a textbook sandwich target, a bot watching the mempool
+  // front-runs this transaction, lets it execute into a worse price, then
+  // back-runs to pocket the difference. Restricting the caller to the
+  // token's own creator (see CreatorRewardsDistributor.sol) doesn't fix
+  // that by itself — it only changes who can send the transaction, not
+  // whether it's protected once sent and sitting in the mempool.
+  //
+  // The first version of this function fixed that by reading the pool's
+  // live reserves and running getAmountOut(amountIn, ...) locally — the
+  // same math the real trade panel uses. That works for an ordinary swap,
+  // but triggerCreatorSwap's `amountIn` (the distributor's own balance)
+  // isn't an ordinary transfer: sending it into the pair is itself a sell,
+  // and both LaunchedToken and CustomToken skim a fee on any transfer that
+  // touches the pair (see their _update overrides) — so the pool actually
+  // only ever receives amountIn minus that skim, never the full nominal
+  // amountIn a local getAmountOut(amountIn, ...) assumes. On a taxed token
+  // (the common case — see the "TAXED" badge) that overstated the
+  // achievable output, and the real send then tripped the router's own
+  // "insufficient output amount" check against our own inflated floor —
+  // on every attempt, not just an unlucky one, since it wasn't actually
+  // slippage/front-running causing the mismatch. Replicating each
+  // contract's exact fee schedule here to correct for it would work for
+  // LaunchedToken's flat feeBps, but CustomToken layers its creator's own
+  // buy/sell fee sets (reflection/marketing/liquidity/burn) on top of the
+  // platform's cut, and getting that arithmetic wrong client-side would
+  // just trade one silent mis-quote for another. Simulating the genuine
+  // call sidesteps needing to know any of that: eth_call runs the actual
+  // function body — actual tax, actual router swap, actual everything —
+  // and simply discards the resulting state change, so the `ethOut` it
+  // returns is exactly what a real send would produce right now. The
+  // simulated call is sent `from` the connected wallet, so it also
+  // naturally surfaces "caller is not this token's creator" as a decodable
+  // revert here instead of a generic failure only after a real send.
   async function quoteCreatorSwapMinEthOut(tokenAddress, distributorAddress){
-    const [balanceHex, thresholdHex, capHex, routerHex] = await Promise.all([
+    const [balanceHex, thresholdHex] = await Promise.all([
       ethCall(tokenAddress, "0x"+BALANCE_OF_SELECTOR+encodeAddressParam(distributorAddress)),
       ethCall(distributorAddress, "0x"+CRD_SWAP_THRESHOLD_SELECTOR+encodeAddressParam(tokenAddress)),
-      ethCall(distributorAddress, "0x"+CRD_MAX_SWAP_AMOUNT_SELECTOR+encodeAddressParam(tokenAddress)),
-      ethCall(distributorAddress, "0x"+ROUTER_OF_FACTORY_SELECTOR), // same selector as TokenFactory.router() — CreatorRewardsDistributor.router() is an identical public-getter signature
     ]);
     const balance = decodeUint256(balanceHex);
     const threshold = decodeUint256(thresholdHex);
     if(balance===0n || balance<threshold){
-      return { amountIn: 0n, minEthOut: 0n, quotedEthOut: 0n, belowThreshold: true };
+      return { minEthOut: 0n, quotedEthOut: 0n, belowThreshold: true };
     }
 
-    const cap = decodeUint256(capHex);
-    const amountIn = (cap>0n && balance>cap) ? cap : balance;
-
-    const routerAddress = decodeAddress(routerHex);
-    const [wethHex, factoryHex] = await Promise.all([
-      ethCall(routerAddress, "0x"+ROUTER_WETH_SELECTOR),
-      ethCall(routerAddress, "0x"+ROUTER_FACTORY_SELECTOR),
-    ]);
-    const wethAddress = decodeAddress(wethHex);
-    const factoryAddress = decodeAddress(factoryHex);
-    const pairHex = await ethCall(
-      factoryAddress,
-      "0x"+FACTORY_GET_PAIR_SELECTOR+encodeAddressParam(tokenAddress)+encodeAddressParam(wethAddress)
-    );
-    const pairAddress = decodeAddress(pairHex);
-    if(pairAddress.toLowerCase()===ZERO_ADDRESS){
-      return { amountIn, minEthOut: 0n, quotedEthOut: 0n, noPool: true };
+    let simulatedHex;
+    try{
+      const simulateData = encodeAddressUint256Calldata(CRD_TRIGGER_CREATOR_SWAP_SELECTOR, tokenAddress, 0n);
+      simulatedHex = await ethCall(distributorAddress, simulateData, wallet);
+    }catch(err){
+      return {
+        minEthOut: 0n, quotedEthOut: 0n, simulationFailed: true,
+        simulationError: (err && err.message) ? err.message : String(err),
+      };
     }
-
-    const { tokenReserve, wethReserve } = await getPairReserves(pairAddress, tokenAddress);
-    const quotedEthOut = getAmountOut(amountIn, tokenReserve, wethReserve);
+    const quotedEthOut = decodeUint256(simulatedHex);
+    if(quotedEthOut<=0n){
+      return { minEthOut: 0n, quotedEthOut: 0n, dust: true };
+    }
     const minEthOut = (quotedEthOut * (10000n - CREATOR_SWAP_DEFAULT_SLIPPAGE_BPS)) / 10000n;
-    return { amountIn, minEthOut, quotedEthOut };
+    return { minEthOut, quotedEthOut };
   }
 
   // Restricted on-chain to that token's own creator — the contract itself
@@ -6047,8 +6063,14 @@
     try{
       const quote = await quoteCreatorSwapMinEthOut(tokenAddress, distributorAddress);
       if(quote.belowThreshold){ toast("Balance hasn't cleared this token's swap threshold yet."); return; }
-      if(quote.noPool){ toast("No liquidity pool found for this token — can't safely quote a conversion."); return; }
-      if(quote.quotedEthOut<=0n){ toast("Balance is too small to convert right now (dust) — wait for more to accumulate."); return; }
+      if(quote.simulationFailed){
+        // Whatever the real send would have failed with — no liquidity pool
+        // yet, this wallet isn't actually this token's creator on-chain,
+        // etc. — surfaced here instead of only after a real transaction.
+        toast("Can't safely quote a conversion right now: " + quote.simulationError);
+        return;
+      }
+      if(quote.dust){ toast("Balance is too small to convert right now (dust) — wait for more to accumulate."); return; }
 
       if(btnEl) btnEl.textContent = "Converting…";
       toast("Confirm the transaction in your wallet…");
