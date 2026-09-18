@@ -190,6 +190,15 @@ const AGGREGATOR_V3_ABI = [
   "function decimals() view returns (uint8)",
   "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
 ];
+// Minimal read-only router ABI used only to PREDICT a
+// triggerCreatorSwap/triggerFeeWalletSwap outcome before ever sending it —
+// see quoteSwapEthOut() below for why. CreatorRewardsDistributor/
+// FeeWalletDistributor both already expose their router as a public
+// immutable (router()), so this needs no separate env var to find it.
+const UNIV2_ROUTER_QUOTE_ABI = [
+  "function WETH() view returns (address)",
+  "function getAmountsOut(uint amountIn, address[] calldata path) view returns (uint[] memory amounts)",
+];
 // LaunchedToken and CustomToken expose the same tax-progress fields under
 // different getter names (taxActive vs platformTaxActive — see the module
 // comment in lib/priceMath.js and CustomToken.sol/LaunchedToken.sol
@@ -1448,6 +1457,44 @@ async function main() {
     setTimeout(tokenPricePollLoop, TOKEN_PRICE_POLL_INTERVAL_MS);
   }
 
+  // FIX: triggerCreatorSwap/triggerFeeWalletSwap both route the FULL
+  // amountIn (balance, capped by maxSwapAmount) straight through
+  // swapExactTokensForETHSupportingFeeOnTransferTokens with minEthOut
+  // hardcoded to 0 by both sweep loops below — that only floors an
+  // ACCEPTABLE output, it does nothing to prevent one that rounds down to
+  // EXACTLY zero. A dust-sized amountIn against thick reserves (or a
+  // pool that's barely traded, or effectively abandoned — exactly the
+  // state of "test3", a token that predates the current factory
+  // deployment) computes a zero output, and UniswapV2Pair.swap() itself
+  // hard-reverts with "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT" in that case.
+  // Before this fix, nothing distinguished that PERMANENT failure from a
+  // transient one (no pool yet, threshold not yet reached), so a token
+  // stuck at dust got retried and logged as a fresh failure on every single
+  // poll tick forever, with no path to ever succeed until real trading
+  // volume changes its balance.
+  //
+  // This predicts the swap's output with the router's own free,
+  // side-effect-free getAmountsOut before ever sending a transaction, so a
+  // permanently-dust token can be skipped quietly (same treatment as a
+  // balance under threshold) instead of spamming a "failure" that isn't
+  // actionable by anyone. Fee-on-transfer tax on the token being sold means
+  // the REAL on-chain output can come in lower than this predicts (never
+  // higher), so this can still occasionally let a call through that ends up
+  // reverting anyway — but it eliminates the guaranteed-forever case, which
+  // is what was actually spamming the logs. Returns 0n (never throws) for
+  // "don't bother yet" on any failure, including no pool/no liquidity at
+  // all for this token yet.
+  async function quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn) {
+    if (amountIn === 0n) return 0n;
+    try {
+      const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
+      const amounts = await router.getAmountsOut(amountIn, [tokenAddress, wethAddress]);
+      return amounts[amounts.length - 1];
+    } catch (err) {
+      return 0n;
+    }
+  }
+
   // ---- creator-reward auto-sweep (optional) ----
   // Walks every token this relayer has ever recorded a launch for (across
   // both the plain and custom flows — creatorRewardBps applies identically
@@ -1462,6 +1509,10 @@ async function main() {
     const network = hre.network.name;
     const ledger = readLedger(network);
     const distributorAddress = await creatorRewardsDistributor.getAddress();
+    const routerAddress = await creatorRewardsDistributor.router();
+    const wethAddress = await (
+      await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
+    ).WETH();
     const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
 
     for (const tokenAddress of tokenAddresses) {
@@ -1473,14 +1524,23 @@ async function main() {
         const threshold = await creatorRewardsDistributor.swapThreshold(tokenAddress);
         if (balance < threshold) continue;
 
+        // Mirror the contract's own amountIn cap so this predicts the
+        // outcome of the EXACT swap triggerCreatorSwap would actually make.
+        const cap = await creatorRewardsDistributor.maxSwapAmount(tokenAddress);
+        const amountIn = cap > 0n && balance > cap ? cap : balance;
+
+        const predictedEthOut = await quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn);
+        if (predictedEthOut === 0n) continue; // dust, or no pool/liquidity yet — nothing worth logging
+
         const tx = await creatorRewardsDistributor.triggerCreatorSwap(tokenAddress, 0);
         const receipt = await tx.wait();
         console.log(`[creator-rewards] swept ${tokenAddress} (balance ${balance}) in tx ${receipt.hash}.`);
       } catch (err) {
-        // Expected/benign cases include: no pool for this token yet,
-        // ICreatorAware(token).creator() reverting on a pre-feature token,
-        // or another caller having already swept it between our balance
-        // read and our tx landing. Log and move on to the next token.
+        // Expected/benign cases include: ICreatorAware(token).creator()
+        // reverting on a pre-feature token, or another caller having
+        // already swept it between our balance read and our tx landing —
+        // the permanent dust/no-liquidity case is now filtered out above
+        // before it ever gets here. Log and move on to the next token.
         console.warn(`[creator-rewards] skip ${tokenAddress}: ${err.message}`);
       }
     }
@@ -1503,6 +1563,10 @@ async function main() {
     const network = hre.network.name;
     const ledger = readLedger(network);
     const distributorAddress = await feeWalletDistributor.getAddress();
+    const routerAddress = await feeWalletDistributor.router();
+    const wethAddress = await (
+      await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
+    ).WETH();
     const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
 
     for (const tokenAddress of tokenAddresses) {
@@ -1514,13 +1578,23 @@ async function main() {
         const threshold = await feeWalletDistributor.swapThreshold(tokenAddress);
         if (balance < threshold) continue;
 
+        // See quoteSwapEthOut()'s comment above sweepCreatorRewardsOnce —
+        // same fix, same reasoning, same "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT"
+        // failure mode against a dust balance or thin/abandoned pool.
+        const cap = await feeWalletDistributor.maxSwapAmount(tokenAddress);
+        const amountIn = cap > 0n && balance > cap ? cap : balance;
+
+        const predictedEthOut = await quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn);
+        if (predictedEthOut === 0n) continue; // dust, or no pool/liquidity yet — nothing worth logging
+
         const tx = await feeWalletDistributor.triggerFeeWalletSwap(tokenAddress, 0);
         const receipt = await tx.wait();
         console.log(`[fee-wallet] swept ${tokenAddress} (balance ${balance}) in tx ${receipt.hash}.`);
       } catch (err) {
-        // Expected/benign cases include: no pool for this token yet, a
-        // threshold that hasn't been reached, or another caller having
-        // already swept it between our balance read and our tx landing.
+        // Expected/benign cases include: a threshold that hasn't been
+        // reached, or another caller having already swept it between our
+        // balance read and our tx landing — the permanent dust/no-liquidity
+        // case is now filtered out above before it ever gets here.
         console.warn(`[fee-wallet] skip ${tokenAddress}: ${err.message}`);
       }
     }
