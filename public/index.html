@@ -23,7 +23,7 @@
 <title>Hood Launch</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
 <style>
   /* ============================================================
@@ -36,43 +36,48 @@
 
   :root{
     color-scheme: dark;
-    /* ground */
-    --ink-950:#090d14;
-    --ink-900:#111826;
-    --ink-850:#151d2c;
-    --ink-800:#1c2536;
-    --ink-700:#2a3550;
-    --line:      rgba(233,236,243,.09);
-    --line-strong: rgba(233,236,243,.18);
+    /* ground — deepened toward true black so neon accents actually read as neon */
+    --ink-950:#05070c;
+    --ink-900:#0e1420;
+    --ink-850:#131b2b;
+    --ink-800:#1a2436;
+    --ink-700:#283452;
+    --line:      rgba(140,190,255,.10);
+    --line-strong: rgba(160,205,255,.22);
     /* ink */
-    --paper-100:#eceff5;
-    --paper-300:#c1c8da;
-    --paper-500:#8b93a9;
-    --paper-700:#5c6478;
+    --paper-100:#eef2fb;
+    --paper-300:#c3cbe2;
+    --paper-500:#8b93b3;
+    --paper-700:#5c6484;
     /* brand */
-    --signal-300:#ffc189;
-    --signal-500:#ff9f4a;
-    --signal-600:#e8863a;
-    --signal-wash: rgba(255,159,74,.12);
-    /* secondary / info */
-    --cyan-400:#7fd6e6;
-    --cyan-500:#56c7db;
-    --cyan-wash: rgba(86,199,219,.12);
-    /* status (reserved, never used as brand) */
-    --good-500:#2ed47a;
-    --good-wash: rgba(46,212,122,.13);
-    --critical-500:#ff4d6a;
-    --critical-wash: rgba(255,77,106,.13);
+    --signal-300:#ffcb96;
+    --signal-500:#ff9d3c;
+    --signal-600:#e87a1f;
+    --signal-wash: rgba(255,157,60,.13);
+    /* secondary / info — pushed toward a more electric, saturated cyan */
+    --cyan-400:#8fe9ff;
+    --cyan-500:#31d9f2;
+    --cyan-wash: rgba(49,217,242,.13);
+    /* status (reserved, never used as brand) — same hues, more neon-saturated */
+    --good-500:#39ffa8;
+    --good-wash: rgba(57,255,168,.14);
+    --critical-500:#ff3366;
+    --critical-wash: rgba(255,51,102,.14);
     /* categorical (validated: worst all-pair ΔE 9.4 CVD / 20.9 normal on this surface) */
     --cat-1:#3987e5;
     --cat-2:#d95926;
     --cat-3:#199e70;
     --cat-other:#3a4258;
+    /* glow — reusable neon box/drop-shadow recipes, one per accent hue */
+    --glow-signal: 0 0 1px rgba(255,157,60,.9), 0 0 18px rgba(255,157,60,.5), 0 0 46px rgba(255,157,60,.18);
+    --glow-cyan: 0 0 1px rgba(49,217,242,.9), 0 0 18px rgba(49,217,242,.45), 0 0 46px rgba(49,217,242,.16);
+    --glow-good: 0 0 14px rgba(57,255,168,.5);
+    --glow-critical: 0 0 14px rgba(255,51,102,.5);
     /* type */
-    --font-display:'Unbounded', system-ui, sans-serif;
+    --font-display:'Chakra Petch', system-ui, sans-serif;
     --font-body:'IBM Plex Sans', system-ui, -apple-system, sans-serif;
     --font-mono:'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
-    --shadow-panel: 0 24px 60px -20px rgba(0,0,0,.65);
+    --shadow-panel: 0 24px 60px -20px rgba(0,0,0,.75);
   }
 
   *{box-sizing:border-box;}
@@ -95,19 +100,22 @@
     content:"";
     position:fixed; inset:0; z-index:0; pointer-events:none;
     background:
-      radial-gradient(1100px 620px at 82% -8%, rgba(255,159,74,.09), transparent 60%),
-      radial-gradient(900px 500px at -10% 10%, rgba(86,199,219,.06), transparent 55%),
+      radial-gradient(1200px 680px at 82% -8%, rgba(255,157,60,.13), transparent 60%),
+      radial-gradient(1000px 560px at -10% 8%, rgba(49,217,242,.09), transparent 55%),
+      radial-gradient(900px 500px at 50% 110%, rgba(49,217,242,.05), transparent 60%),
       linear-gradient(var(--ink-950), var(--ink-950));
   }
   body::after{
     content:"";
-    position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;
+    position:fixed; inset:-42px -42px; z-index:0; pointer-events:none; opacity:.6;
     background-image:
-      linear-gradient(rgba(233,236,243,.035) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(233,236,243,.035) 1px, transparent 1px);
+      linear-gradient(rgba(49,217,242,.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(49,217,242,.05) 1px, transparent 1px);
     background-size: 42px 42px;
     mask-image: radial-gradient(1200px 700px at 70% 0%, black, transparent 75%);
+    animation: gridDrift 50s linear infinite;
   }
+  @keyframes gridDrift{ from{ background-position:0 0, 0 0; } to{ background-position:42px 42px, 42px 42px; } }
 
   a{color:inherit;}
   button{font-family:inherit;}
@@ -127,41 +135,45 @@
   /* ---------------- HUD bar ---------------- */
   .hud{
     position:sticky; top:0; z-index:40;
-    background:rgba(9,13,20,.86); backdrop-filter:blur(10px);
-    border-bottom:1px solid var(--line);
+    background:rgba(5,7,12,.82); backdrop-filter:blur(14px) saturate(140%);
+    border-bottom:1px solid var(--line-strong);
+    box-shadow:0 1px 0 rgba(49,217,242,.18), 0 20px 40px -24px rgba(0,0,0,.8);
   }
   .hud-inner{
     max-width:1240px; margin:0 auto; padding:14px 28px;
     display:flex; align-items:center; gap:28px;
   }
-  .brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; font-size:1.05rem; letter-spacing:-.01em; white-space:nowrap;}
+  .brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; font-size:1.05rem; letter-spacing:.01em; white-space:nowrap;}
   .brand-mark{
     width:30px; height:30px; flex:none; position:relative;
-    background:linear-gradient(155deg, var(--signal-500), var(--signal-600));
+    background:linear-gradient(155deg, var(--signal-300), var(--signal-600));
     clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
+    filter:drop-shadow(0 0 8px rgba(255,157,60,.65)) drop-shadow(0 0 18px rgba(255,157,60,.3));
+    animation: markPulse 3.2s ease-in-out infinite;
   }
   .brand-mark::after{
     content:""; position:absolute; left:50%; top:56%; width:6px; height:6px; border-radius:50%;
     background:var(--ink-950); transform:translate(-50%,-50%);
   }
+  @keyframes markPulse{0%,100%{filter:drop-shadow(0 0 8px rgba(255,157,60,.65)) drop-shadow(0 0 18px rgba(255,157,60,.3));} 50%{filter:drop-shadow(0 0 11px rgba(255,157,60,.85)) drop-shadow(0 0 26px rgba(255,157,60,.45));}}
   .brand small{font-family:var(--font-mono); font-weight:500; font-size:.62rem; letter-spacing:.1em; color:var(--paper-500); display:block; margin-top:1px;}
 
   .tabs{display:flex; gap:4px; background:var(--ink-900); border:1px solid var(--line); padding:4px; border-radius:3px;}
   .tab{
     appearance:none; border:1px solid transparent; background:transparent; color:var(--paper-500);
     font-family:var(--font-mono); font-size:.78rem; letter-spacing:.05em; text-transform:uppercase; font-weight:500;
-    padding:7px 14px; border-radius:2px; cursor:pointer; transition:color .15s, background .15s, border-color .15s;
+    padding:7px 14px; border-radius:2px; cursor:pointer; transition:color .15s, background .15s, border-color .15s, box-shadow .15s;
   }
   .tab:hover{color:var(--paper-100);}
-  .tab[aria-selected="true"]{background:var(--ink-800); border-color:var(--line-strong); color:var(--signal-300);}
+  .tab[aria-selected="true"]{background:var(--ink-800); border-color:rgba(255,157,60,.4); color:var(--signal-300); box-shadow:inset 0 0 0 1px rgba(255,157,60,.15), 0 0 16px rgba(255,157,60,.2);}
 
   .net-pill{
     display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:.74rem; color:var(--paper-300);
     border:1px solid var(--line); padding:6px 12px; border-radius:3px; white-space:nowrap;
   }
-  .net-dot{width:7px; height:7px; border-radius:50%; background:var(--good-500); box-shadow:0 0 0 3px var(--good-wash); animation:pulse 2.4s ease-in-out infinite;}
-  .net-pill.live .net-dot{background:var(--critical-500); box-shadow:0 0 0 3px var(--critical-wash);}
-  .net-pill.live{border-color:rgba(255,77,106,.35); color:var(--paper-100);}
+  .net-dot{width:7px; height:7px; border-radius:50%; background:var(--good-500); box-shadow:0 0 0 3px var(--good-wash), var(--glow-good); animation:pulse 2.4s ease-in-out infinite;}
+  .net-pill.live .net-dot{background:var(--critical-500); box-shadow:0 0 0 3px var(--critical-wash), var(--glow-critical);}
+  .net-pill.live{border-color:rgba(255,51,102,.4); color:var(--paper-100); box-shadow:0 0 14px rgba(255,51,102,.12);}
   @keyframes pulse{0%,100%{opacity:1;} 50%{opacity:.45;}}
 
   /* Demo/Live mode toggle — visually mirrors .tabs/.tab but is a separate
@@ -172,22 +184,23 @@
   .mode-tab{
     appearance:none; border:1px solid transparent; background:transparent; color:var(--paper-500);
     font-family:var(--font-mono); font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; font-weight:600;
-    padding:7px 12px; border-radius:2px; cursor:pointer; transition:color .15s, background .15s, border-color .15s;
+    padding:7px 12px; border-radius:2px; cursor:pointer; transition:color .15s, background .15s, border-color .15s, box-shadow .15s;
   }
   .mode-tab:hover{color:var(--paper-100);}
-  .mode-tab[aria-pressed="true"]{background:var(--ink-800); border-color:var(--line-strong); color:var(--signal-300);}
-  .mode-tab.live-tab[aria-pressed="true"]{color:var(--critical-500); border-color:rgba(255,77,106,.4);}
+  .mode-tab[aria-pressed="true"]{background:var(--ink-800); border-color:rgba(255,157,60,.4); color:var(--signal-300); box-shadow:inset 0 0 0 1px rgba(255,157,60,.15), 0 0 16px rgba(255,157,60,.2);}
+  .mode-tab.live-tab[aria-pressed="true"]{color:var(--critical-500); border-color:rgba(255,51,102,.45); box-shadow:inset 0 0 0 1px rgba(255,51,102,.18), 0 0 16px rgba(255,51,102,.25);}
 
   .hud-spacer{flex:1;}
 
   .wallet-btn{
     appearance:none; cursor:pointer; border-radius:2px; font-family:var(--font-mono); font-size:.78rem; font-weight:600; letter-spacing:.03em;
     padding:9px 16px; border:1px solid var(--signal-600); background:var(--signal-wash); color:var(--signal-300);
-    transition:background .15s, transform .1s; white-space:nowrap;
+    transition:background .15s, transform .1s, box-shadow .15s; white-space:nowrap;
   }
-  .wallet-btn:hover{background:rgba(255,159,74,.2);}
+  .wallet-btn:hover{background:rgba(255,157,60,.2); box-shadow:var(--glow-signal);}
   .wallet-btn:active{transform:translateY(1px);}
   .wallet-btn.connected{border-color:var(--line-strong); background:var(--ink-800); color:var(--paper-100);}
+  .wallet-btn.connected:hover{box-shadow:var(--glow-cyan);}
 
   @media (max-width: 900px){
     .tabs{order:3; width:100%;}
@@ -205,20 +218,27 @@
     padding:76px 0 56px;
   }
   .hero-eyebrow{display:flex; align-items:center; gap:10px; margin-bottom:18px;}
-  .hero-eyebrow .rule{width:28px; height:1px; background:var(--signal-500);}
+  .hero-eyebrow .rule{width:28px; height:1px; background:var(--signal-500); box-shadow:0 0 8px rgba(255,157,60,.8);}
   h1.hero-h{font-size:clamp(2.4rem, 4.4vw, 3.6rem); line-height:1.04;}
-  h1.hero-h em{font-style:normal; color:var(--signal-500);}
+  h1.hero-h em{font-style:normal; color:var(--signal-300); text-shadow:0 0 24px rgba(255,157,60,.45);}
   .hero-sub{margin:20px 0 28px; max-width:46ch; color:var(--paper-300); font-size:1.05rem;}
   .hero-cta{display:flex; gap:12px; flex-wrap:wrap;}
   .btn{
+    position:relative; overflow:hidden;
     appearance:none; cursor:pointer; border-radius:2px; font-family:var(--font-body); font-weight:600; font-size:.92rem;
-    padding:13px 22px; border:1px solid transparent; transition:transform .1s, background .15s, border-color .15s;
+    padding:13px 22px; border:1px solid transparent; transition:transform .1s, background .15s, border-color .15s, box-shadow .2s;
   }
+  .btn::after{
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background:linear-gradient(115deg, transparent 40%, rgba(255,255,255,.3) 50%, transparent 60%);
+    transform:translateX(-130%); transition:transform .5s ease;
+  }
+  .btn:hover::after{transform:translateX(130%);}
   .btn:active{transform:translateY(1px);}
   .btn-primary{background:linear-gradient(155deg, var(--signal-500), var(--signal-600)); color:#1a0f04;}
-  .btn-primary:hover{background:linear-gradient(155deg, var(--signal-300), var(--signal-500));}
+  .btn-primary:hover{background:linear-gradient(155deg, var(--signal-300), var(--signal-500)); box-shadow:var(--glow-signal);}
   .btn-ghost{background:transparent; border-color:var(--line-strong); color:var(--paper-100);}
-  .btn-ghost:hover{border-color:var(--paper-500);}
+  .btn-ghost:hover{border-color:var(--cyan-500); box-shadow:0 0 16px rgba(49,217,242,.22);}
   .btn-block{width:100%; text-align:center;}
   .btn-sm{padding:9px 14px; font-size:.82rem;}
 
@@ -228,12 +248,20 @@
 
   /* console panel */
   .console{
-    background:var(--ink-900); border:1px solid var(--line); border-radius:4px; box-shadow:var(--shadow-panel);
+    position:relative; background:var(--ink-900); border:1px solid var(--line); border-radius:4px;
+    box-shadow:var(--shadow-panel), 0 0 40px -18px rgba(49,217,242,.15);
     overflow:hidden;
+  }
+  .console::before{
+    content:""; position:absolute; top:0; left:0; right:0; height:2px; z-index:1;
+    background:linear-gradient(90deg, var(--cyan-500), var(--signal-500));
   }
   .console-head{display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--line);}
   .console-head .dots{display:flex; gap:6px;}
   .console-head .dots span{width:8px; height:8px; border-radius:50%; background:var(--ink-700);}
+  .console-head .dots span:nth-child(1){background:var(--critical-500); box-shadow:0 0 6px rgba(255,51,102,.6);}
+  .console-head .dots span:nth-child(2){background:var(--signal-500); box-shadow:0 0 6px rgba(255,157,60,.6);}
+  .console-head .dots span:nth-child(3){background:var(--good-500); box-shadow:0 0 6px rgba(57,255,168,.6);}
   .console-body{padding:6px 4px; height:280px; overflow:hidden; display:flex; flex-direction:column-reverse; gap:2px;}
   .feed-line{
     display:flex; gap:10px; align-items:baseline; padding:9px 14px; font-family:var(--font-mono); font-size:.8rem;
@@ -247,7 +275,12 @@
 
   /* ---------------- stat row ---------------- */
   .stat-row{display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:4px; overflow:hidden; margin-bottom:56px;}
-  .stat-tile{background:var(--ink-900); padding:20px 22px;}
+  .stat-tile{position:relative; background:var(--ink-900); padding:20px 22px; overflow:hidden;}
+  .stat-tile::before{
+    content:""; position:absolute; top:0; left:0; right:0; height:2px;
+    background:linear-gradient(90deg, var(--signal-500), var(--cyan-500));
+    opacity:.7;
+  }
   .stat-tile .eyebrow{margin-bottom:10px;}
   .stat-tile .figure{font-family:var(--font-mono); font-size:1.7rem; font-weight:600; display:flex; align-items:baseline; gap:8px;}
   .stat-tile .delta{font-size:.78rem; font-weight:600;}
@@ -263,12 +296,13 @@
     appearance:none; cursor:pointer; background:var(--ink-900); border:1px solid var(--line); color:var(--paper-300);
     font-family:var(--font-mono); font-size:.74rem; letter-spacing:.03em; padding:7px 13px; border-radius:2px; transition:all .15s;
   }
-  .chip[aria-pressed="true"]{border-color:var(--signal-500); color:var(--signal-300); background:var(--signal-wash);}
+  .chip[aria-pressed="true"]{border-color:var(--signal-500); color:var(--signal-300); background:var(--signal-wash); box-shadow:0 0 12px rgba(255,157,60,.22);}
   .search{
     background:var(--ink-900); border:1px solid var(--line); color:var(--paper-100); font-family:var(--font-mono);
-    font-size:.82rem; padding:9px 12px; border-radius:2px; min-width:200px;
+    font-size:.82rem; padding:9px 12px; border-radius:2px; min-width:200px; transition:border-color .15s, box-shadow .15s;
   }
   .search::placeholder{color:var(--paper-700);}
+  .search:focus{outline:none; border-color:var(--cyan-500); box-shadow:0 0 0 3px var(--cyan-wash);}
 
   .token-grid{display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; margin-bottom:64px;}
   @media (max-width: 980px){ .token-grid{grid-template-columns:repeat(2,1fr);} }
@@ -276,14 +310,15 @@
 
   .token-card{
     position:relative; background:var(--ink-900); border:1px solid var(--line); padding:20px; border-radius:2px;
-    cursor:pointer; text-align:left; width:100%; color:inherit; transition:border-color .15s, transform .12s;
+    cursor:pointer; text-align:left; width:100%; color:inherit; transition:border-color .18s, transform .15s, box-shadow .18s;
   }
-  .token-card:hover{border-color:var(--line-strong); transform:translateY(-2px);}
-  .corner{position:absolute; width:10px; height:10px; border:0 solid var(--signal-500); opacity:.55; pointer-events:none;}
+  .token-card:hover{border-color:rgba(49,217,242,.4); transform:translateY(-3px); box-shadow:0 18px 40px -22px rgba(0,0,0,.7), 0 0 22px rgba(49,217,242,.12);}
+  .corner{position:absolute; width:10px; height:10px; border:0 solid var(--signal-500); opacity:.55; pointer-events:none; transition:opacity .18s, filter .18s;}
   .corner.tl{top:-1px; left:-1px; border-top-width:2px; border-left-width:2px;}
   .corner.tr{top:-1px; right:-1px; border-top-width:2px; border-right-width:2px;}
   .corner.bl{bottom:-1px; left:-1px; border-bottom-width:2px; border-left-width:2px;}
   .corner.br{bottom:-1px; right:-1px; border-bottom-width:2px; border-right-width:2px;}
+  .token-card:hover .corner{opacity:1; filter:drop-shadow(0 0 5px rgba(255,157,60,.75));}
 
   .tc-head{display:flex; gap:12px; align-items:center; margin-bottom:14px;}
   .tc-mark{width:38px; height:38px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:700; font-size:1rem; flex:none; color:#0c0f16; overflow:hidden;}
@@ -307,7 +342,7 @@
   .bond-wrap{}
   .bond-labels{display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:.64rem; color:var(--paper-700); margin-bottom:5px; text-transform:uppercase; letter-spacing:.05em;}
   .bond-track{position:relative; height:7px; border-radius:2px; background:var(--ink-800); overflow:hidden;}
-  .bond-fill{position:absolute; inset:0 auto 0 0; background:linear-gradient(90deg, var(--signal-600), var(--signal-500));}
+  .bond-fill{position:absolute; inset:0 auto 0 0; background:linear-gradient(90deg, var(--signal-600), var(--signal-500)); box-shadow:0 0 9px rgba(255,255,255,.3);}
   .bond-ticks{position:absolute; inset:0; background-image:repeating-linear-gradient(90deg, rgba(9,13,20,.55) 0 1px, transparent 1px 10%);}
 
   .empty{
@@ -320,7 +355,12 @@
   .detail-grid{display:grid; grid-template-columns:1.6fr 1fr; gap:20px; margin-bottom:70px; align-items:start;}
   @media (max-width: 980px){ .detail-grid{grid-template-columns:1fr;} }
 
-  .panel{background:var(--ink-900); border:1px solid var(--line); border-radius:4px; padding:22px;}
+  .panel{position:relative; background:var(--ink-900); border:1px solid var(--line); border-radius:4px; padding:22px;}
+  .panel::before{
+    content:""; position:absolute; top:0; left:16px; right:16px; height:2px;
+    background:linear-gradient(90deg, transparent, var(--cyan-500), var(--signal-500), transparent);
+    opacity:.6; pointer-events:none;
+  }
   .detail-banner{
     margin:-22px -22px 18px; aspect-ratio:3.2/1; border-radius:4px 4px 0 0; overflow:hidden;
     background:linear-gradient(120deg, var(--ink-950), var(--ink-850));
@@ -342,17 +382,36 @@
   .chart-tip .p{color:var(--paper-100); font-weight:600;}
   .chart-tip .d{color:var(--paper-700); margin-top:1px;}
 
+  /* Neon glow on every price line/sparkline site-wide. Every chart path/
+     circle in this file is drawn with an inline stroke/fill of literally
+     "var(--good-500)" / "var(--critical-500)" / "var(--signal-500)" /
+     "var(--cyan-500)" (see sparkSVG/detailChartSVG/spotlightChartSVG) — so
+     these attribute selectors match that exact string and light up every
+     chart line the same way, with zero changes needed in the script that
+     draws them. */
+  svg path[stroke="var(--good-500)"], svg circle[fill="var(--good-500)"]{ filter:drop-shadow(0 0 5px rgba(57,255,168,.65)); }
+  svg path[stroke="var(--critical-500)"], svg circle[fill="var(--critical-500)"]{ filter:drop-shadow(0 0 5px rgba(255,51,102,.6)); }
+  svg path[stroke="var(--signal-500)"], svg circle[fill="var(--signal-500)"]{ filter:drop-shadow(0 0 5px rgba(255,157,60,.6)); }
+  svg path[stroke="var(--cyan-500)"], svg circle[fill="var(--cyan-500)"]{ filter:drop-shadow(0 0 5px rgba(49,217,242,.6)); }
+
   /* platform token spotlight — pinned above the hero/live feed */
   .spotlight{
-    background:var(--ink-900); border:1px solid var(--line); border-radius:4px; box-shadow:var(--shadow-panel);
-    padding:22px 26px 26px; margin:32px 0 -4px;
+    position:relative; background:var(--ink-900); border:1px solid rgba(49,217,242,.25); border-radius:4px;
+    box-shadow:var(--shadow-panel), 0 0 46px -20px rgba(49,217,242,.35);
+    padding:22px 26px 26px; margin:32px 0 -4px; overflow:hidden;
   }
+  .spotlight::before{
+    content:""; position:absolute; top:0; left:0; right:0; height:2px;
+    background:linear-gradient(90deg, var(--signal-500), var(--cyan-500), var(--signal-500));
+    background-size:200% 100%; animation:accentFlow 6s linear infinite;
+  }
+  @keyframes accentFlow{ from{background-position:0% 0;} to{background-position:200% 0;} }
   .spotlight-head{display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:10px 22px;}
   .spotlight-id{display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;}
   .spotlight-name{font-family:var(--font-display); font-size:1.15rem; font-weight:700;}
   .spotlight-symbol{font-family:var(--font-mono); color:var(--paper-500); font-size:.85rem;}
   .spotlight-figures{display:flex; align-items:baseline; gap:14px;}
-  .spotlight-price{font-family:var(--font-mono); font-size:1.5rem; font-weight:600;}
+  .spotlight-price{font-family:var(--font-mono); font-size:1.5rem; font-weight:600; text-shadow:0 0 18px rgba(49,217,242,.35);}
   .spotlight-delta{font-family:var(--font-mono); font-size:.85rem; font-weight:600;}
   .spotlight-body{display:grid; grid-template-columns:1fr 1fr; gap:22px; margin-top:16px; align-items:start;}
   .spotlight .chart-wrap svg{height:150px;}
@@ -382,7 +441,7 @@
     width:100%; background:var(--ink-950); border:1px solid var(--line-strong); color:var(--paper-100); border-radius:2px;
     padding:11px 12px; font-family:var(--font-mono); font-size:.92rem;
   }
-  .field input:focus, .field select:focus, .field textarea:focus{border-color:var(--signal-500); outline:none;}
+  .field input:focus, .field select:focus, .field textarea:focus{border-color:var(--signal-500); outline:none; box-shadow:0 0 0 3px var(--signal-wash);}
   .field .hint{font-size:.72rem; color:var(--paper-700); margin-top:5px; font-family:var(--font-mono);}
   .trade-out{display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:.78rem; color:var(--paper-500); margin:14px 0; padding-top:12px; border-top:1px solid var(--line);}
   .disclaimer-line{font-size:.7rem; color:var(--paper-700); margin-top:12px; text-align:center;}
@@ -467,8 +526,8 @@
   .toast-stack{position:fixed; right:20px; bottom:20px; z-index:80; display:flex; flex-direction:column; gap:10px; align-items:flex-end;}
   .toast{
     background:var(--ink-800); border:1px solid var(--line-strong); border-left:3px solid var(--signal-500); color:var(--paper-100);
-    padding:12px 16px; border-radius:3px; font-size:.84rem; box-shadow:var(--shadow-panel); max-width:320px;
-    animation:toastIn .22s ease;
+    padding:12px 16px; border-radius:3px; font-size:.84rem; box-shadow:var(--shadow-panel), -4px 0 20px -8px rgba(255,157,60,.35); max-width:320px;
+    animation:toastIn .22s ease; backdrop-filter:blur(8px);
   }
   @keyframes toastIn{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:translateY(0);}}
 
@@ -480,13 +539,14 @@
   .modal-overlay[hidden]{display:none;}
   .modal-card{
     max-width:460px; width:100%; background:var(--ink-900); border:1px solid var(--critical-wash);
-    border-top:3px solid var(--critical-500); border-radius:4px; padding:26px; box-shadow:var(--shadow-panel);
+    border-top:3px solid var(--critical-500); border-radius:4px; padding:26px;
+    box-shadow:var(--shadow-panel), 0 0 60px -16px rgba(255,51,102,.3);
     animation:toastIn .18s ease;
   }
   .modal-card h3{margin-bottom:12px; color:var(--paper-100);}
   .modal-card p{color:var(--paper-500); font-size:.9rem; margin:0 0 20px;}
   .modal-card p strong{color:var(--paper-100);}
-  .modal-card.neutral{border-color:var(--line-strong); border-top-color:var(--signal-500);}
+  .modal-card.neutral{border-color:var(--line-strong); border-top-color:var(--signal-500); box-shadow:var(--shadow-panel), 0 0 60px -16px rgba(255,157,60,.28);}
   .modal-actions{display:flex; justify-content:flex-end; gap:10px;}
 
   /* ---------------- contract / social links, My Tokens ---------------- */
@@ -545,15 +605,15 @@
   .admin-locked{max-width:480px; margin:60px auto; text-align:center;}
   .admin-locked .glyph{font-size:2rem; margin-bottom:14px;}
   .admin-status-badge{display:inline-block; font-family:var(--font-mono); font-size:.66rem; letter-spacing:.05em; padding:2px 9px; border-radius:999px; margin-left:10px; vertical-align:middle; border:1px solid var(--line-strong); background:var(--ink-800); color:var(--paper-500);}
-  .admin-status-badge.on{color:var(--good-500); background:var(--good-wash); border-color:rgba(46,212,122,.4);}
-  .admin-status-badge.partial{color:var(--signal-300); background:var(--signal-wash); border-color:rgba(255,159,74,.4);}
+  .admin-status-badge.on{color:var(--good-500); background:var(--good-wash); border-color:rgba(57,255,168,.45); box-shadow:0 0 10px rgba(57,255,168,.3);}
+  .admin-status-badge.partial{color:var(--signal-300); background:var(--signal-wash); border-color:rgba(255,157,60,.45); box-shadow:0 0 10px rgba(255,157,60,.25);}
   .switch-row{display:flex; align-items:center; gap:14px; margin-top:4px;}
   .switch{position:relative; display:inline-block; width:42px; height:24px; flex:none;}
   .switch input{position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer;}
-  .switch .track{position:absolute; inset:0; background:var(--ink-800); border:1px solid var(--line-strong); border-radius:999px; transition:background .15s, border-color .15s; pointer-events:none;}
-  .switch .track .thumb{position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:var(--paper-300); transition:transform .15s, background .15s;}
-  .switch input:checked + .track{background:var(--good-wash); border-color:rgba(46,212,122,.5);}
-  .switch input:checked + .track .thumb{transform:translateX(18px); background:var(--good-500);}
+  .switch .track{position:absolute; inset:0; background:var(--ink-800); border:1px solid var(--line-strong); border-radius:999px; transition:background .15s, border-color .15s, box-shadow .15s; pointer-events:none;}
+  .switch .track .thumb{position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:var(--paper-300); transition:transform .15s, background .15s, box-shadow .15s;}
+  .switch input:checked + .track{background:var(--good-wash); border-color:rgba(57,255,168,.55); box-shadow:0 0 12px rgba(57,255,168,.25);}
+  .switch input:checked + .track .thumb{transform:translateX(18px); background:var(--good-500); box-shadow:0 0 8px rgba(57,255,168,.8);}
   .switch input:disabled{cursor:not-allowed;}
   .switch input:disabled + .track{opacity:.5;}
   .switch-label .t{font-weight:600; color:var(--paper-100); font-size:.92rem;}
@@ -1722,6 +1782,21 @@
   // comment).
   const FEE_WALLET_DISTRIBUTOR_SELECTOR = "810561e1";      // feeWalletDistributor()
   const SET_FEE_WALLET_DISTRIBUTOR_SELECTOR = "8123fa0d";  // setFeeWalletDistributor(address) — factories only
+
+  // ---- FeeWalletDistributor's OWN selectors (the contract itself, not the
+  // per-factory pointer above) — same per-token claimableEth/swapThreshold/
+  // maxSwapAmount shape as CreatorRewardsDistributor (identical function
+  // signatures there too, just a coincidence of both contracts sharing this
+  // accumulate-then-trigger pattern — NOT the same deployed contract).
+  const FWD_FEE_WALLET_SELECTOR = "f25f4b56";              // feeWallet()
+  const FWD_CLAIMABLE_ETH_SELECTOR = "4793dc40";           // claimableEth(address) — keyed by token address
+  const FWD_SWAP_THRESHOLD_SELECTOR = "0ae9b4f0";          // swapThreshold(address)
+  const FWD_MAX_SWAP_AMOUNT_SELECTOR = "e7881011";         // maxSwapAmount(address)
+  const FWD_SET_FEE_WALLET_SELECTOR = "90d49b9d";          // setFeeWallet(address)
+  const FWD_SET_SWAP_THRESHOLD_SELECTOR = "db3e514c";      // setSwapThreshold(address,uint256)
+  const FWD_SET_MAX_SWAP_AMOUNT_SELECTOR = "a589d319";     // setMaxSwapAmount(address,uint256)
+  const FWD_TRIGGER_SWAP_SELECTOR = "4d048085";            // triggerFeeWalletSwap(address,uint256)
+  const FWD_CLAIM_REWARDS_SELECTOR = "5a7af73c";           // claimFeeWalletRewards(address)
 
   // One-arg encoders for the admin setters above — every parameter in this
   // whole group is static (uint256 or address), so calldata is always
@@ -6689,6 +6764,242 @@
       </div>`;
   }
 
+  // ---- FeeWalletDistributor admin panel — another single, platform-wide
+  // contract, same shape as PlatformRewardsDistributor below. Unlike that
+  // one, though, FeeWalletDistributor has no dedicated platformConfig slot
+  // of its own (no CONFIG_KEYS entry) — the only place its address is wired
+  // up at all is per-factory, via each factory's own feeWalletDistributor()
+  // getter (see the "Fee wallet distributor (address)" field under
+  // TokenFactory/CustomTokenFactory above). So rather than adding a
+  // parallel, potentially-drifting config entry, this reads it straight off
+  // whichever factory is configured — exactly like getDexInfo derives the
+  // shared DEX factory/WETH from a factory's own router().
+  async function feeWalletDistributorContractAddress(mode){
+    const factoryAddress = tokenFactoryAddress(mode) || customTokenFactoryAddress(mode);
+    if(!factoryAddress) return null;
+    try{
+      const addr = decodeAddress(await ethCall(factoryAddress, "0x"+FEE_WALLET_DISTRIBUTOR_SELECTOR));
+      return addr.toLowerCase()===ZERO_ADDRESS ? null : addr;
+    }catch(err){ return null; }
+  }
+
+  // claimableEth/swapThreshold/maxSwapAmount are all keyed per TOKEN (see
+  // FeeWalletDistributor.sol) and there's no way to enumerate every token
+  // that's ever accrued a balance here without an event scan — so, same as
+  // the "Buyback thresholds" section of the PlatformRewardsDistributor panel
+  // below, this panel takes a token address to look up on demand rather
+  // than trying to list all of them. fwdLookupToken persists across
+  // re-renders in this tab so the looked-up token stays loaded after an
+  // action against it completes.
+  let fwdLookupToken = null;
+  async function loadFeeWalletDistributorState(address){
+    const [ownerHex, pendingOwnerHex, feeWalletHex] = await Promise.all([
+      ethCall(address, "0x"+OWNER_SELECTOR),
+      ethCall(address, "0x"+PENDING_OWNER_SELECTOR),
+      ethCall(address, "0x"+FWD_FEE_WALLET_SELECTOR),
+    ]);
+    const state = {
+      owner: decodeAddress(ownerHex),
+      pendingOwner: decodeAddress(pendingOwnerHex),
+      feeWallet: decodeAddress(feeWalletHex),
+      lookupToken: fwdLookupToken,
+      claimableEth: 0n,
+      swapThreshold: 0n,
+      maxSwapAmount: 0n,
+    };
+    if(fwdLookupToken){
+      try{
+        const [claimableHex, thresholdHex, maxHex] = await Promise.all([
+          ethCall(address, "0x"+FWD_CLAIMABLE_ETH_SELECTOR+encodeAddressParam(fwdLookupToken)),
+          ethCall(address, "0x"+FWD_SWAP_THRESHOLD_SELECTOR+encodeAddressParam(fwdLookupToken)),
+          ethCall(address, "0x"+FWD_MAX_SWAP_AMOUNT_SELECTOR+encodeAddressParam(fwdLookupToken)),
+        ]);
+        state.claimableEth = decodeUint256(claimableHex);
+        state.swapThreshold = decodeUint256(thresholdHex);
+        state.maxSwapAmount = decodeUint256(maxHex);
+      }catch(err){ /* best-effort — looked-up token's fields just show as 0 */ }
+    }
+    return state;
+  }
+
+  function feeWalletDistributorPanelHTML(address, state){
+    if(!address){
+      return `
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>FeeWalletDistributor</h3></div>
+          <p class="admin-empty">Not wired up on ${escapeHtml(NETWORKS[appMode].label)} yet — set a "Fee wallet distributor" address under TokenFactory or CustomTokenFactory above (see scripts/deployFeeWalletDistributor.js), and this panel picks it up automatically.</p>
+        </div>`;
+    }
+    if(!state){
+      return `
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>FeeWalletDistributor</h3></div>
+          <div class="admin-addr-line">${escapeHtml(address)}</div>
+          <p class="admin-empty">Couldn't read this contract's on-chain state — check your wallet's network and try again.</p>
+        </div>`;
+    }
+    const pendingIsZero = state.pendingOwner.toLowerCase()===ZERO_ADDRESS;
+    const feeWalletIsZero = state.feeWallet.toLowerCase()===ZERO_ADDRESS;
+    const walletIsPendingOwner = wallet && !pendingIsZero && wallet.toLowerCase()===state.pendingOwner.toLowerCase();
+    return `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>FeeWalletDistributor</h3></div>
+        <div class="admin-addr-line">${escapeHtml(address)}</div>
+
+        <div class="admin-section-label">Current state</div>
+        <div class="admin-readout-grid">
+          <div class="admin-readout"><div class="l">Owner</div><div class="v">${escapeHtml(state.owner)}</div></div>
+          <div class="admin-readout"><div class="l">Pending owner</div><div class="v">${pendingIsZero ? "None" : escapeHtml(state.pendingOwner)}</div></div>
+          <div class="admin-readout"><div class="l">Fee wallet (payout recipient)</div><div class="v">${feeWalletIsZero ? "Unset — claims will revert until this is set" : escapeHtml(state.feeWallet)}</div></div>
+        </div>
+
+        <div class="admin-section-label">Payout recipient</div>
+        <div class="admin-action-row">
+          <div class="field"><label>Fee wallet (address)</label><input type="text" id="admin_fwd_feeWallet" placeholder="${feeWalletIsZero ? "0x… (currently unset)" : state.feeWallet}"></div>
+          <button class="btn btn-primary btn-sm" data-fwd-action="setFeeWallet">Update</button>
+        </div>
+        <p class="admin-empty" style="margin:0 0 10px;">Repoints where every token's NEXT claim pays out, all at once — never retroactive to ETH already claimed.</p>
+
+        <div class="admin-section-label">Per-token balance — accumulates automatically from every taxed trade, but nothing sweeps it out on its own</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Each launched token's fee-wallet slice sits here as an ordinary balance of THAT token until someone (anyone — this is permissionless) triggers a swap to ETH, then a claim. Look up a token below to see and act on its balance.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Token address</label><input type="text" id="admin_fwd_lookupToken" placeholder="0x…" value="${state.lookupToken ? escapeHtml(state.lookupToken) : ""}"></div>
+          <button class="btn btn-ghost btn-sm" data-fwd-action="lookupToken">Load</button>
+        </div>
+        ${state.lookupToken ? `
+        <div class="admin-readout-grid">
+          <div class="admin-readout"><div class="l">Claimable ETH (already swapped)</div><div class="v">${weiToEtherString(state.claimableEth,6)} ETH</div></div>
+          <div class="admin-readout"><div class="l">Swap threshold</div><div class="v">${fmtInt(Number(weiToEtherString(state.swapThreshold,0)))} tokens</div></div>
+          <div class="admin-readout"><div class="l">Max swap per call</div><div class="v">${state.maxSwapAmount>0n ? fmtInt(Number(weiToEtherString(state.maxSwapAmount,0)))+" tokens" : "Uncapped"}</div></div>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Min ETH out (slippage floor)</label><input type="number" step="any" min="0" id="admin_fwd_minEthOut" placeholder="0"></div>
+          <button class="btn btn-ghost btn-sm" data-fwd-action="triggerSwap">Swap accumulated balance → ETH</button>
+        </div>
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">Pays out ${weiToEtherString(state.claimableEth,6)} claimable ETH to ${feeWalletIsZero ? "(fee wallet not set)" : escapeHtml(fmtAddrSafe(state.feeWallet))} right now.</p>
+          <button class="btn btn-ghost btn-sm" data-fwd-action="claimRewards" ${state.claimableEth>0n ? "" : "disabled"}>Claim ETH</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Swap threshold (whole tokens)</label><input type="number" step="any" min="0" id="admin_fwd_newThreshold" placeholder="0"></div>
+          <button class="btn btn-ghost btn-sm" data-fwd-action="setSwapThreshold">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Max swap per call (whole tokens, 0 = uncapped)</label><input type="number" step="any" min="0" id="admin_fwd_newMax" placeholder="0"></div>
+          <button class="btn btn-ghost btn-sm" data-fwd-action="setMaxSwapAmount">Update</button>
+        </div>` : `<p class="admin-empty" style="margin:0 0 10px;">Enter a launched token's address above and click Load to see its accumulated balance and act on it.</p>`}
+
+        <div class="admin-section-label">Ownership · Ownable2Step</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Transferring ownership doesn't take effect until the new address itself calls acceptOwnership() — the current owner keeps full control until then, so a mistyped address can't lock this contract out.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Transfer ownership to</label><input type="text" id="admin_fwd_newOwner" placeholder="0x…"></div>
+          <button class="btn btn-ghost btn-sm" data-fwd-action="transferOwnership">Propose</button>
+        </div>
+        ${walletIsPendingOwner ? `
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">This connected wallet is the pending owner — accept to complete the transfer.</p>
+          <button class="btn btn-primary btn-sm" data-fwd-action="acceptOwnership">Accept ownership</button>
+        </div>` : ""}
+      </div>`;
+  }
+
+  // Same shape as runAdminAction/runDistributorAction — see those for the
+  // pattern. triggerFeeWalletSwap/claimFeeWalletRewards have no onlyOwner
+  // on-chain at all (deliberately permissionless — see
+  // FeeWalletDistributor.sol) but this panel only ever renders inside the
+  // admin-gated tab in the first place, so every action here is reached the
+  // same way regardless.
+  async function runFeeWalletDistributorAction(action, btnEl){
+    const address = await feeWalletDistributorContractAddress();
+    if(!address){ toast("FeeWalletDistributor isn't wired up on the current network."); return; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+
+    const field = (suffix) => document.getElementById(`admin_fwd_${suffix}`);
+
+    // Pure client-side state (which token's balance is on screen) — no
+    // transaction involved, so it's handled separately from the
+    // eth_sendTransaction path every other action below falls into.
+    if(action==="lookupToken"){
+      const v = field("lookupToken").value.trim();
+      if(!isAddressLike(v)){ toast("Enter a valid token address."); return; }
+      fwdLookupToken = v;
+      if(views.admin.classList.contains("active")) renderAdmin();
+      return;
+    }
+
+    let data, successMsg;
+    try{
+      if(action==="setFeeWallet"){
+        const v = field("feeWallet").value.trim();
+        if(!isAddressLike(v)) throw new Error("Enter a valid fee wallet address.");
+        data = encodeAddressCalldata(FWD_SET_FEE_WALLET_SELECTOR, v);
+        successMsg = "Fee wallet updated — every token's next claim pays out here.";
+      } else if(action==="triggerSwap"){
+        if(!fwdLookupToken) throw new Error("Load a token first.");
+        const v = field("minEthOut").value;
+        const minOut = v==="" ? 0n : parseEtherToWei(v);
+        if(v!=="" && (isNaN(parseFloat(v)) || parseFloat(v)<0)) throw new Error("Enter a valid minimum amount, or leave blank for 0.");
+        data = encodeAddressUint256Calldata(FWD_TRIGGER_SWAP_SELECTOR, fwdLookupToken, minOut);
+        successMsg = "Fee-wallet swap triggered.";
+      } else if(action==="claimRewards"){
+        if(!fwdLookupToken) throw new Error("Load a token first.");
+        data = "0x"+FWD_CLAIM_REWARDS_SELECTOR+encodeAddressParam(fwdLookupToken);
+        successMsg = "ETH claimed to the fee wallet.";
+      } else if(action==="setSwapThreshold"){
+        if(!fwdLookupToken) throw new Error("Load a token first.");
+        const v = field("newThreshold").value;
+        if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid token amount.");
+        data = encodeAddressUint256Calldata(FWD_SET_SWAP_THRESHOLD_SELECTOR, fwdLookupToken, parseEtherToWei(v));
+        successMsg = "Swap threshold updated.";
+      } else if(action==="setMaxSwapAmount"){
+        if(!fwdLookupToken) throw new Error("Load a token first.");
+        const v = field("newMax").value;
+        if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid token amount, or 0 for uncapped.");
+        data = encodeAddressUint256Calldata(FWD_SET_MAX_SWAP_AMOUNT_SELECTOR, fwdLookupToken, parseEtherToWei(v));
+        successMsg = "Max swap amount updated.";
+      } else if(action==="transferOwnership"){
+        const v = field("newOwner").value.trim();
+        if(!isAddressLike(v)) throw new Error("Enter a valid address to propose as the new owner.");
+        data = encodeAddressCalldata(TRANSFER_OWNERSHIP_SELECTOR, v);
+        successMsg = "Ownership transfer proposed — the new address must call acceptOwnership() itself to complete it.";
+      } else if(action==="acceptOwnership"){
+        data = "0x"+ACCEPT_OWNERSHIP_SELECTOR;
+        successMsg = "Ownership accepted.";
+      } else {
+        return;
+      }
+    }catch(validationErr){
+      toast(validationErr.message);
+      return;
+    }
+
+    const originalLabel = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = "Confirm in wallet…";
+    try{
+      toast("Confirm the transaction in your wallet…");
+      const txHash = await window.ethereum.request({
+        method:"eth_sendTransaction",
+        params:[{ from: wallet, to: address, data }],
+      });
+      btnEl.textContent = "Waiting for confirmation…";
+      const receipt = await waitForReceipt(txHash);
+      if(receipt.status !== "0x1"){
+        toast("The transaction reverted on-chain — nothing was changed.");
+      } else {
+        toast(`✅ ${successMsg}`);
+      }
+    }catch(err){
+      if(err && err.code===4001) toast("Transaction was rejected.");
+      else toast(err && err.message ? err.message : "Transaction failed.");
+    }finally{
+      btnEl.disabled = false;
+      btnEl.textContent = originalLabel;
+      if(views.admin.classList.contains("active")) renderAdmin();
+    }
+  }
+
   // ---- PlatformRewardsDistributor admin panel — a single contract (not
   // keyed per-factory like tf/ctf above), so it gets its own state loader
   // and action dispatcher rather than being shoehorned into
@@ -7146,6 +7457,7 @@
         <div class="panel admin-panel"><p class="admin-empty">Loading TokenFactory…</p></div>
         <div class="panel admin-panel"><p class="admin-empty">Loading CustomTokenFactory…</p></div>
         <div class="panel admin-panel"><p class="admin-empty">Loading PlatformRewardsDistributor…</p></div>
+        <div class="panel admin-panel"><p class="admin-empty">Loading FeeWalletDistributor…</p></div>
       </div>`;
 
     // The "Platform contracts" panel is pure client-side config (no
@@ -7168,10 +7480,12 @@
     const tfAddress = adminFactoryAddress("tf");
     const ctfAddress = adminFactoryAddress("ctf");
     const prdAddress = rewardsDistributorAddress();
-    const [tfState, ctfState, prdState] = await Promise.all([
+    const fwdAddress = await feeWalletDistributorContractAddress();
+    const [tfState, ctfState, prdState, fwdState] = await Promise.all([
       tfAddress ? loadFactoryAdminState(tfAddress).catch(()=>null) : Promise.resolve(null),
       ctfAddress ? loadFactoryAdminState(ctfAddress).catch(()=>null) : Promise.resolve(null),
       prdAddress ? loadRewardsDistributorState(prdAddress).catch(()=>null) : Promise.resolve(null),
+      fwdAddress ? loadFeeWalletDistributorState(fwdAddress).catch(()=>null) : Promise.resolve(null),
     ]);
 
     // The admin wallet may have disconnected, switched, or navigated away
@@ -7191,13 +7505,17 @@
     grid.innerHTML =
       adminFactoryPanelHTML("tf", "TokenFactory", tfAddress, tfState) +
       adminFactoryPanelHTML("ctf", "CustomTokenFactory", ctfAddress, ctfState) +
-      rewardsDistributorPanelHTML(prdAddress, prdState);
+      rewardsDistributorPanelHTML(prdAddress, prdState) +
+      feeWalletDistributorPanelHTML(fwdAddress, fwdState);
 
     grid.querySelectorAll("[data-admin-action]").forEach(btn=>{
       btn.addEventListener("click", ()=> runAdminAction(btn.dataset.adminAction, btn.dataset.factoryKey, btn));
     });
     grid.querySelectorAll("[data-prd-action]").forEach(btn=>{
       btn.addEventListener("click", ()=> runDistributorAction(btn.dataset.prdAction, btn));
+    });
+    grid.querySelectorAll("[data-fwd-action]").forEach(btn=>{
+      btn.addEventListener("click", ()=> runFeeWalletDistributorAction(btn.dataset.fwdAction, btn));
     });
   }
 
