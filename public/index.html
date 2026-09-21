@@ -7578,6 +7578,146 @@
     }
   }
 
+  // Holds the last-fetched GET /launches + GET /failed-launches results for
+  // the "Launch activity" admin panel, plus which of its two tabs is
+  // currently showing — kept here (rather than re-fetched on every tab
+  // click) so switching between "Recent Launches" and "Failed Launches"
+  // just re-renders the list from what's already in memory.
+  let launchActivityData = { recent: [], failed: [] };
+  let launchActivityTab = "recent";
+
+  // Requirement 2's read side: GET /failed-launches (scripts/relayer.js)
+  // surfaces every voucher that ended in relayMatchedDeposit()'s "failed"
+  // state, curated and reshaped — see that route's own comment for where the
+  // data actually lives (the existing relayer_vouchers JSON column, no new
+  // table). This panel is pure fetch()-over-HTTP, same as the "Platform
+  // contracts" panel above, so it's wired in before the window.ethereum
+  // guard in renderAdmin() and works with no wallet connected.
+  async function renderLaunchActivityPanel(){
+    const wrap = document.getElementById("launchActivityWrap");
+    if(!wrap) return;
+    const url = relayerApiUrl(appMode);
+    if(!url){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No relayer configured for ${escapeHtml(NETWORKS[appMode].label)} yet.</p></div>`;
+      return;
+    }
+
+    // Each fetch is independently wrapped — a failure on one (network error,
+    // non-2xx, bad JSON) never kills the other, it just falls back to
+    // `fallback` for that half. `reached` says whether a response came back
+    // at all; if EITHER call reaches the relayer, it's up, so a totally
+    // unreachable relayer gets its own message instead of looking identical
+    // to "no launches yet".
+    async function fetchJsonSafe(path, fallback){
+      try{
+        const r = await fetch(`${url}${path}`);
+        return { reached: true, payload: r.ok ? await r.json() : fallback };
+      }catch(e){
+        return { reached: false, payload: fallback };
+      }
+    }
+    const [launchesResult, failedResult] = await Promise.all([
+      fetchJsonSafe("/launches", { launches: [] }),
+      fetchJsonSafe("/failed-launches", { failedLaunches: [] }),
+    ]);
+    const launchesPayload = launchesResult.payload;
+    const failedPayload = failedResult.payload;
+    if(!launchesResult.reached && !failedResult.reached){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Couldn't reach the relayer.</p></div>`;
+      return;
+    }
+
+    const launches = Array.isArray(launchesPayload && launchesPayload.launches) ? launchesPayload.launches : [];
+    const failed = Array.isArray(failedPayload && failedPayload.failedLaunches) ? failedPayload.failedLaunches : [];
+    const recent = launches
+      .slice()
+      .sort((a, b) => {
+        const aTime = a.createdAt ? Date.parse(a.createdAt) : NaN;
+        const bTime = b.createdAt ? Date.parse(b.createdAt) : NaN;
+        const aValid = !Number.isNaN(aTime);
+        const bValid = !Number.isNaN(bTime);
+        if(!aValid && !bValid) return 0;
+        if(!aValid) return 1; // unparseable/missing dates sort last (oldest)
+        if(!bValid) return -1;
+        return bTime - aTime;
+      })
+      .slice(0, 20);
+    launchActivityData = { recent, failed };
+
+    wrap.innerHTML = `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3>Launch activity</h3></div>
+        <p class="admin-empty" style="margin-bottom:14px;">The 20 most recent completed launches on ${escapeHtml(NETWORKS[appMode].label)}, and every gasless-launch attempt that failed before a contract was ever deployed (with why).</p>
+        <div class="admin-action-row" style="margin-bottom:4px;">
+          <button class="chip" data-launch-tab="recent" aria-pressed="true">Recent Launches</button>
+          <button class="chip" data-launch-tab="failed" aria-pressed="false">Failed Launches (${failed.length})</button>
+        </div>
+        <div id="launchActivityList"></div>
+      </div>`;
+
+    launchActivityTab = "recent";
+    wrap.querySelectorAll("[data-launch-tab]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        wrap.querySelectorAll("[data-launch-tab]").forEach(b=>b.setAttribute("aria-pressed", String(b===btn)));
+        launchActivityTab = btn.dataset.launchTab;
+        renderLaunchActivityList();
+      });
+    });
+    renderLaunchActivityList();
+  }
+
+  // Renders just the #launchActivityList body for whichever tab is active —
+  // split out of renderLaunchActivityPanel() so switching tabs is a cheap
+  // re-render from launchActivityData, no re-fetch.
+  function renderLaunchActivityList(){
+    const list = document.getElementById("launchActivityList");
+    if(!list) return;
+
+    if(launchActivityTab === "failed"){
+      const failed = launchActivityData.failed;
+      if(!failed.length){
+        list.innerHTML = `<p class="admin-empty">No failed launches. Nothing here yet.</p>`;
+        return;
+      }
+      list.innerHTML = failed.map(f => {
+        const label = (f.name || f.symbol) ? `${escapeHtml(f.name || f.symbol)}${f.name && f.symbol ? ` <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(f.symbol)}</span>` : ""}` : "(name unknown)";
+        const when = f.updatedAt ? new Date(f.updatedAt).toLocaleString() : "Unknown time";
+        return `
+          <div class="my-token-row" style="align-items:flex-start;">
+            <div style="flex:1; min-width:0;">
+              <div class="mtr-name">${label} <span class="tc-status creator-held" style="display:inline-block; margin-left:6px; vertical-align:middle;">${escapeHtml(f.kind || "unknown")}</span></div>
+              <div class="mtr-meta">${f.creator ? fmtAddrSafe(f.creator) : "Unknown creator"} · ${escapeHtml(when)}</div>
+              <div class="mtr-meta" style="margin-top:6px; white-space:pre-wrap; word-break:break-word; max-height:120px; overflow-y:auto; color:var(--critical-500);">${escapeHtml(f.error)}</div>
+            </div>
+          </div>`;
+      }).join("");
+      return;
+    }
+
+    const recent = launchActivityData.recent;
+    if(!recent.length){
+      list.innerHTML = `<p class="admin-empty">No launches recorded yet. Nothing here yet.</p>`;
+      return;
+    }
+    list.innerHTML = recent.map(entry => {
+      const isLiquidity = !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS);
+      const status = statusFromTokenStatus(entry, isLiquidity);
+      const when = entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "Unknown time";
+      const label = entry.name || entry.symbol || "Unnamed token";
+      return `
+        <div class="my-token-row">
+          <div style="flex:1; min-width:0;">
+            <div class="mtr-name">${escapeHtml(label)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(entry.symbol || "TOKEN")}</span> <span class="tc-status ${status}" style="display:inline-block; margin-left:6px; vertical-align:middle;">${STATUS_LABEL[status]||status}</span></div>
+            <div class="mtr-meta">${entry.tokenAddress ? fmtAddrSafe(entry.tokenAddress) : "Unknown address"} · ${escapeHtml(when)}</div>
+          </div>
+          <div class="mtr-actions">
+            ${entry.tokenAddress ? `<button class="btn btn-ghost" style="padding:7px 12px; font-size:.8rem;" data-view-token="${escapeHtml(entry.tokenAddress)}">View</button>` : ""}
+          </div>
+        </div>`;
+    }).join("");
+    list.querySelectorAll("[data-view-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.viewToken)) );
+  }
+
   async function renderAdmin(){
     const wrap = document.getElementById("adminWrap");
     if(!isAdminWallet(wallet)){
@@ -7597,6 +7737,10 @@
       </div>
       <div class="section-head"><h2>Platform admin</h2></div>
       <div id="platformContractsWrap"></div>
+      <div class="section-head" style="margin-top:28px;"><h2>Launch activity</h2></div>
+      <div id="launchActivityWrap">
+        <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+      </div>
       <div class="section-head" style="margin-top:28px;"><h2>Platform rewards</h2></div>
       <div id="platformRewardsWrap">
         <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
@@ -7619,6 +7763,11 @@
     configWrap.querySelectorAll("[data-cfg-action]").forEach(btn=>{
       btn.addEventListener("click", ()=> runConfigAction(btn.dataset.cfgAction, btn));
     });
+
+    // Same reasoning as the "Platform contracts" panel above: pure server
+    // data over fetch(), no window.ethereum needed, so it belongs before the
+    // wallet guard below and renders regardless of wallet state.
+    await renderLaunchActivityPanel();
 
     if(!window.ethereum){
       document.getElementById("platformRewardsWrap").innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No browser wallet detected — connect one to manage platform rewards.</p></div>`;
