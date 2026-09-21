@@ -1354,6 +1354,47 @@ async function main() {
     sendJson(res, 200, { vouchers: await readVouchers() });
   });
 
+  // Curated read of every voucher that ended in relayMatchedDeposit()'s
+  // "failed" state (see the two upsertVoucher(voucherHash, { status: "failed",
+  // error: ... }) call sites above) — this is the diagnosable record of a
+  // gasless launch attempt that never became a real deployment. There's no
+  // separate "failed launches" table: a voucher's failure and its reason are
+  // already durable, per-network state living in the same relayer_vouchers
+  // JSON `data` column (or vouchers.json fallback) that /debug/vouchers dumps
+  // raw, so no schema change was needed here — this route just filters that
+  // same store down to the "failed" ones and reshapes them into a stable,
+  // non-raw-signature-leaking shape for the admin UI. Unauthenticated GET,
+  // same precedent as /launches, /activity, and /debug/vouchers above: none
+  // of this is more sensitive than what /debug/vouchers already exposes, and
+  // it's only ever rendered inside the admin panel, though nothing stops any
+  // visitor from calling it directly.
+  app.get("/failed-launches", async (_req, res) => {
+    const vouchers = await readVouchers();
+    const failedLaunches = Object.values(vouchers)
+      .filter((v) => v.status === "failed")
+      .map((v) => ({
+        voucherHash: v.voucherHash,
+        kind: v.kind,
+        creator: v.creator,
+        name: (v.voucher && v.voucher.name) || null,
+        symbol: (v.voucher && v.voucher.symbol) || null,
+        error: v.error || "Unknown error",
+        updatedAt: v.updatedAt || null,
+      }))
+      .sort((a, b) => {
+        const aTime = a.updatedAt ? Date.parse(a.updatedAt) : NaN;
+        const bTime = b.updatedAt ? Date.parse(b.updatedAt) : NaN;
+        const aValid = !Number.isNaN(aTime);
+        const bValid = !Number.isNaN(bTime);
+        if (!aValid && !bValid) return 0;
+        if (!aValid) return 1; // missing/unparseable dates sort last
+        if (!bValid) return -1;
+        return bTime - aTime; // newest first
+      })
+      .slice(0, 200); // generous cap — this endpoint has no pagination
+    sendJson(res, 200, { network, failedLaunches });
+  });
+
   if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
   if (customTokenFactoryAddress) app.post("/vouchers/custom", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom")));
 
