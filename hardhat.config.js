@@ -31,7 +31,6 @@ module.exports = {
     },
   },
   networks: {
-    hardhat: {},
     robinhoodTestnet: {
       url: process.env.ROBINHOOD_TESTNET_RPC_URL || ROBINHOOD_NETWORKS.robinhoodTestnet.defaultRpcUrl,
       chainId: ROBINHOOD_NETWORKS.robinhoodTestnet.chainId,
