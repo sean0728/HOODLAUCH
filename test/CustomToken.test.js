@@ -204,17 +204,17 @@ describe("CustomToken / CustomTokenFactory", function () {
 
   describe("initialization & fee caps", function () {
     it("reverts if buy-side fees exceed 5%", async function () {
-      const { factory, creator } = await deployStack();
+      const { factory, creator, tokenImplementation } = await deployStack();
       await expect(
         createCustomToken(factory, creator, { buyFees: { reflectionBps: 300, marketingBps: 300, liquidityBps: 0, burnBps: 0 } })
-      ).to.be.revertedWith("CustomToken: buy tax exceeds 5%");
+      ).to.be.revertedWithCustomError(tokenImplementation, "BuyTaxExceedsLimit");
     });
 
     it("reverts if sell-side fees exceed 5%", async function () {
-      const { factory, creator } = await deployStack();
+      const { factory, creator, tokenImplementation } = await deployStack();
       await expect(
         createCustomToken(factory, creator, { sellFees: { reflectionBps: 100, marketingBps: 100, liquidityBps: 100, burnBps: 201 } })
-      ).to.be.revertedWith("CustomToken: sell tax exceeds 5%");
+      ).to.be.revertedWithCustomError(tokenImplementation, "SellTaxExceedsLimit");
     });
 
     it("allows exactly 5% on each side (boundary)", async function () {
@@ -226,10 +226,10 @@ describe("CustomToken / CustomTokenFactory", function () {
     });
 
     it("reverts if a marketing fee is set but no marketing wallet is given", async function () {
-      const { factory, creator } = await deployStack();
+      const { factory, creator, tokenImplementation } = await deployStack();
       await expect(
         createCustomToken(factory, creator, { buyFees: { reflectionBps: 0, marketingBps: 100, liquidityBps: 0, burnBps: 0 } })
-      ).to.be.revertedWith("CustomToken: marketing wallet required when marketing fee is set");
+      ).to.be.revertedWithCustomError(tokenImplementation, "MarketingWalletRequired");
     });
 
     it("cannot be initialized twice", async function () {
@@ -237,20 +237,20 @@ describe("CustomToken / CustomTokenFactory", function () {
       const { token } = await createCustomToken(factory, creator);
       await expect(
         token.initialize("x", "X", 1n, creator.address, creator.address, await factory.getAddress(), ethers.ZeroAddress, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress)
-      ).to.be.revertedWith("CustomToken: already initialized");
+      ).to.be.revertedWithCustomError(token, "AlreadyInitialized");
     });
 
     it("the implementation contract itself can never be initialized (only clones)", async function () {
       const { tokenImplementation, factory, creator } = await deployStack();
       await expect(
         tokenImplementation.initialize("x", "X", 1n, creator.address, creator.address, await factory.getAddress(), ethers.ZeroAddress, ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress)
-      ).to.be.revertedWith("CustomToken: already initialized");
+      ).to.be.revertedWithCustomError(tokenImplementation, "AlreadyInitialized");
     });
 
     it("setPair can only be set once and only by the factory", async function () {
       const { factory, creator, otherAccount } = await deployStack();
       const { token, pairAddress } = await createCustomToken(factory, creator);
-      await expect(token.connect(otherAccount).setPair(otherAccount.address)).to.be.revertedWith("CustomToken: caller is not the factory");
+      await expect(token.connect(otherAccount).setPair(otherAccount.address)).to.be.revertedWithCustomError(token, "NotFactory");
       // pair is already set by the factory during launch — confirm it stuck
       expect(await token.pair()).to.equal(pairAddress);
     });
@@ -520,10 +520,11 @@ describe("CustomToken / CustomTokenFactory", function () {
         marketingWallet: marketingWallet.address,
       });
 
-      await expect(token.connect(otherAccount).setMarketingWallet(otherAccount.address)).to.be.revertedWith(
-        "CustomToken: caller is not the creator"
+      await expect(token.connect(otherAccount).setMarketingWallet(otherAccount.address)).to.be.revertedWithCustomError(
+        token,
+        "NotCreator"
       );
-      await expect(token.connect(creator).setMarketingWallet(ethers.ZeroAddress)).to.be.revertedWith("CustomToken: invalid wallet");
+      await expect(token.connect(creator).setMarketingWallet(ethers.ZeroAddress)).to.be.revertedWithCustomError(token, "InvalidWallet");
 
       await token.connect(creator).setMarketingWallet(otherAccount.address);
       expect(await token.marketingWallet()).to.equal(otherAccount.address);
@@ -604,7 +605,7 @@ describe("CustomToken / CustomTokenFactory", function () {
       expect(ethAfter - ethBefore + gasCost).to.equal(buyer2Claimable);
 
       // double-claim without a new distribution has nothing left to withdraw
-      await expect(token.connect(buyer2).claimReflections()).to.be.revertedWith("CustomToken: nothing to claim");
+      await expect(token.connect(buyer2).claimReflections()).to.be.revertedWithCustomError(token, "NothingToClaim");
     });
 
     it("keeps dividend accounting correct across a transfer between holders", async function () {
@@ -764,7 +765,7 @@ describe("CustomToken / CustomTokenFactory", function () {
 
       expect(await token.accumulativeDividendOf(buyer.address)).to.equal(0n);
       expect(await token.withdrawableDividendOf(buyer.address)).to.equal(0n);
-      await expect(token.connect(buyer).claimReflections()).to.be.revertedWith("CustomToken: nothing to claim");
+      await expect(token.connect(buyer).claimReflections()).to.be.revertedWithCustomError(token, "NothingToClaim");
     });
 
     it("claimReflections reverts for a blocked wallet even if it had already claimed once before being blocked (no underflow)", async function () {
@@ -787,7 +788,7 @@ describe("CustomToken / CustomTokenFactory", function () {
 
       await token.connect(creator).setRewardsBlocked(buyer.address, true);
       expect(await token.withdrawableDividendOf(buyer.address)).to.equal(0n); // must not revert
-      await expect(token.connect(buyer).claimReflections()).to.be.revertedWith("CustomToken: nothing to claim");
+      await expect(token.connect(buyer).claimReflections()).to.be.revertedWithCustomError(token, "NothingToClaim");
 
       // A further distribution while blocked still doesn't unlock anything.
       await buyTokens(router, token, buyer2, ethers.parseEther("1"));
@@ -821,16 +822,18 @@ describe("CustomToken / CustomTokenFactory", function () {
     it("only the creator can block or unblock a wallet", async function () {
       const { factory, creator, buyer, otherAccount } = await deployStack();
       const { token } = await createCustomToken(factory, creator);
-      await expect(token.connect(otherAccount).setRewardsBlocked(buyer.address, true)).to.be.revertedWith(
-        "CustomToken: caller is not the creator"
+      await expect(token.connect(otherAccount).setRewardsBlocked(buyer.address, true)).to.be.revertedWithCustomError(
+        token,
+        "NotCreator"
       );
     });
 
     it("rejects blocking the zero address", async function () {
       const { factory, creator } = await deployStack();
       const { token } = await createCustomToken(factory, creator);
-      await expect(token.connect(creator).setRewardsBlocked(ethers.ZeroAddress, true)).to.be.revertedWith(
-        "CustomToken: invalid account"
+      await expect(token.connect(creator).setRewardsBlocked(ethers.ZeroAddress, true)).to.be.revertedWithCustomError(
+        token,
+        "InvalidAccount"
       );
     });
 
@@ -955,7 +958,7 @@ describe("CustomToken / CustomTokenFactory", function () {
       // payment between the two paths).
       expect(await token.withdrawableDividendOf(buyer.address)).to.equal(0n);
       expect(await token.withdrawableDividendOf(buyer2.address)).to.equal(0n);
-      await expect(token.connect(buyer).claimReflections()).to.be.revertedWith("CustomToken: nothing to claim");
+      await expect(token.connect(buyer).claimReflections()).to.be.revertedWithCustomError(token, "NothingToClaim");
     });
 
     it("a holder who already self-claimed is simply skipped by a later push — no double payment, no revert", async function () {
@@ -1151,7 +1154,7 @@ describe("CustomToken / CustomTokenFactory", function () {
       const sellFees = { reflectionBps: 500, marketingBps: 0, liquidityBps: 0, burnBps: 0 };
       const { token } = await createCustomToken(factory, creator, { sellFees });
 
-      await expect(token.pushReflections(0)).to.be.revertedWith("CustomToken: maxHolders must be > 0");
+      await expect(token.pushReflections(0)).to.be.revertedWithCustomError(token, "MaxHoldersMustBePositive");
       const [holdersPaid, totalPaid] = await token.pushReflections.staticCall(10);
       expect(holdersPaid).to.equal(0n);
       expect(totalPaid).to.equal(0n);
@@ -1169,9 +1172,9 @@ describe("CustomToken / CustomTokenFactory", function () {
       const { factory, creator, otherAccount } = await deployStack();
       const { token, supply } = await createCustomToken(factory, creator);
 
-      await expect(token.connect(otherAccount).setSwapThreshold(1n)).to.be.revertedWith("CustomToken: caller is not the creator");
-      await expect(token.connect(creator).setSwapThreshold(0n)).to.be.revertedWith("CustomToken: threshold out of bounds");
-      await expect(token.connect(creator).setSwapThreshold(supply / 20n + 1n)).to.be.revertedWith("CustomToken: threshold out of bounds");
+      await expect(token.connect(otherAccount).setSwapThreshold(1n)).to.be.revertedWithCustomError(token, "NotCreator");
+      await expect(token.connect(creator).setSwapThreshold(0n)).to.be.revertedWithCustomError(token, "ThresholdOutOfBounds");
+      await expect(token.connect(creator).setSwapThreshold(supply / 20n + 1n)).to.be.revertedWithCustomError(token, "ThresholdOutOfBounds");
 
       await token.connect(creator).setSwapThreshold(supply / 20n);
       expect(await token.swapThreshold()).to.equal(supply / 20n);
@@ -1282,51 +1285,109 @@ describe("CustomToken / CustomTokenFactory", function () {
         it("reverts before any pool exists", async function () {
           const { factory, creator } = await deployStack();
           const { token } = await createCustomToken(factory, creator, { addLiquidity: false });
-          await expect(token.connect(creator).activateIndependentPair()).to.be.revertedWith("CustomToken: no pool found yet");
+          await expect(token.connect(creator).activateIndependentPair()).to.be.revertedWithCustomError(token, "NoPoolFound");
         });
 
-        it("only the creator can call it", async function () {
+        // Deliberate behavior change: activateIndependentPair() is no
+        // longer onlyCreator — see CustomToken.activateIndependentPair's
+        // updated NatSpec. The property that matters is "a pool genuinely
+        // exists on-chain" (still verified trustlessly below), not who
+        // happens to call the function announcing that fact. These two
+        // cases show a non-creator getting exactly the same outcome a
+        // creator would — "no pool found yet" before one exists, and
+        // (since the pool-seeding transfer itself now auto-activates via
+        // _update(), before anyone ever calls this manually — see the next
+        // test) "pair already set" once it does — never a permission
+        // error either way.
+        it("is callable by anyone, not just the creator — reverts on the same terms as a creator's own call would", async function () {
           const { factory, creator, router, otherAccount } = await deployStack();
           const { token } = await createCustomToken(factory, creator, { addLiquidity: false });
+
+          await expect(token.connect(otherAccount).activateIndependentPair()).to.be.revertedWithCustomError(token, "NoPoolFound");
+
           await addLiquidityIndependently(router, token, creator, ethers.parseEther("2"));
-          await expect(token.connect(otherAccount).activateIndependentPair()).to.be.revertedWith("CustomToken: caller is not the creator");
+          // The liquidity-seeding transfer above already auto-activated
+          // `pair` on its own (see the next test) — a stranger calling the
+          // manual entry point afterward gets the ordinary
+          // already-activated outcome, not a permission error.
+          await expect(token.connect(otherAccount).activateIndependentPair()).to.be.revertedWithCustomError(token, "PairAlreadySet");
         });
 
         it("reverts if the pair is already set (an addLiquidity: true token)", async function () {
           const { factory, creator } = await deployStack();
           const { token } = await createCustomToken(factory, creator); // addLiquidity: true (default)
-          await expect(token.connect(creator).activateIndependentPair()).to.be.revertedWith("CustomToken: pair already set");
+          await expect(token.connect(creator).activateIndependentPair()).to.be.revertedWithCustomError(token, "PairAlreadySet");
         });
 
-        it("wires up the real DEX pair once liquidity exists, and never touches the platform tax", async function () {
-          const { factory, creator, router } = await deployStack({ platformTaxEnabled: true }); // even with a platform wallet configured factory-wide
+        // This is the core of the feature: previously, a deploy-only
+        // CustomToken's platformTaxConfigured/platformTaxActive stayed
+        // false forever no matter what — that's exactly the gap being
+        // closed now. The liquidity-seeding transfer inside
+        // addLiquidityETH is itself an ordinary token transfer, so
+        // CustomToken._update()'s own auto-detection (gated on
+        // `pair == address(0)`) fires during that exact call — no
+        // separate activateIndependentPair() call is needed at all
+        // anymore; calling it afterward is a redundant no-op that simply
+        // reverts, since `pair` is already set.
+        it("auto-activates the real DEX pair AND the platform's graduating tax the moment liquidity is added, with no explicit call needed", async function () {
+          const { factory, creator, router } = await deployStack({ platformTaxEnabled: true });
           const { token, tokenAddress } = await createCustomToken(factory, creator, { addLiquidity: false });
-          await addLiquidityIndependently(router, token, creator, ethers.parseEther("2"));
 
           expect(await token.pair()).to.equal(ethers.ZeroAddress);
-          await token.connect(creator).activateIndependentPair();
+          expect(await token.platformTaxConfigured()).to.equal(false);
+
+          await addLiquidityIndependently(router, token, creator, ethers.parseEther("2"));
 
           const expectedPair = await router.pairs(tokenAddress);
           expect(expectedPair).to.not.equal(ethers.ZeroAddress);
           expect(await token.pair()).to.equal(expectedPair);
-          // The platform tax stays permanently unconfigured/inactive for a
-          // deploy-only token, no matter what the factory's own defaults
-          // are — configurePlatformTax() is onlyFactory and is simply
-          // never called anywhere in this path.
-          expect(await token.platformTaxConfigured()).to.equal(false);
-          expect(await token.platformTaxActive()).to.equal(false);
+          // Platform tax auto-configured off CustomTokenFactory's CURRENT
+          // defaults the moment the pool was detected — no factory call,
+          // no separate step.
+          expect(await token.platformTaxConfigured()).to.equal(true);
+          expect(await token.platformTaxActive()).to.equal(true);
+          expect(await token.platformFeeBps()).to.equal(await factory.feeBps());
+          expect(await token.platformFeeWallet()).to.equal(await factory.platformFeeWallet());
+          expect(await token.graduationTargetUsd()).to.equal(await factory.graduationTargetUsd());
+
+          // Now a genuine no-op: the manual convenience path produces the
+          // exact same end state, so there's nothing left for it to do.
+          await expect(token.connect(creator).activateIndependentPair()).to.be.revertedWithCustomError(token, "PairAlreadySet");
         });
 
-        it("applies the creator's own configured tax on trades once activated, with no platform cut", async function () {
+        it("never taxes the liquidity-seeding transfer itself — the pool receives the full amount added", async function () {
+          const { factory, creator, router } = await deployStack({ platformTaxEnabled: true });
+          const buyFees = { reflectionBps: 0, marketingBps: 0, liquidityBps: 0, burnBps: 200 }; // 2% burn on buys — would apply to a real buy, must not apply here
+          const { token, tokenAddress } = await createCustomToken(factory, creator, { addLiquidity: false, buyFees, sellFees: buyFees });
+
+          const creatorBalance = await token.balanceOf(creator.address);
+          await addLiquidityIndependently(router, token, creator, ethers.parseEther("2"));
+
+          const pairAddress = await router.pairs(tokenAddress);
+          // The pair received exactly what was sent — no creator-side
+          // burn, no platform cut skimmed off the seeding transfer, even
+          // though both are now configured and active immediately after
+          // this same call.
+          expect(await token.balanceOf(pairAddress)).to.equal(creatorBalance);
+          expect(await token.balanceOf(creator.address)).to.equal(0n);
+          expect(await token.platformTaxActive()).to.equal(true);
+        });
+
+        it("applies BOTH the creator's own configured tax AND the platform's cut on the very next trade — not before, not separately", async function () {
           const { factory, creator, router, buyer, platformFeeWallet } = await deployStack({ platformTaxEnabled: true });
-          const buyFees = { reflectionBps: 0, marketingBps: 0, liquidityBps: 0, burnBps: 200 }; // 2% burn on buys, simplest to verify
+          const buyFees = { reflectionBps: 0, marketingBps: 0, liquidityBps: 0, burnBps: 200 }; // 2% burn on buys, simplest to verify alongside the platform cut
           const { token, tokenAddress } = await createCustomToken(factory, creator, { addLiquidity: false, buyFees, sellFees: buyFees });
           await addLiquidityIndependently(router, token, creator, ethers.parseEther("2"));
-          await token.connect(creator).activateIndependentPair();
+
+          // Both halves of the tax activated together, off the same
+          // liquidity-seeding transfer — neither before nor after the
+          // other.
+          expect(await token.platformTaxActive()).to.equal(true);
 
           const pairAddress = await router.pairs(tokenAddress);
           const supplyBefore = await token.totalSupply();
           const platformBalBefore = await token.balanceOf(platformFeeWallet.address);
+          const platformFeeBps = await token.platformFeeBps();
 
           const [tokenReserve, ethReserve] = await (async () => {
             const [r0, r1] = await (await ethers.getContractAt("MockLPToken", pairAddress)).getReserves();
@@ -1335,13 +1396,14 @@ describe("CustomToken / CustomTokenFactory", function () {
           })();
           const ethIn = ethers.parseEther("0.05");
           const grossOut = (tokenReserve * ethIn) / (ethReserve + ethIn);
-          const expectedBurn = (grossOut * 200n) / 10_000n;
+          const expectedBurn = (grossOut * 200n) / 10_000n; // creator's own 2% burn
+          const expectedPlatformCut = (grossOut * platformFeeBps) / 10_000n; // platform's own cut, independent of the creator's
 
           await buyTokens(router, token, buyer, ethIn);
 
-          expect(await token.balanceOf(buyer.address)).to.equal(grossOut - expectedBurn);
-          expect(await token.totalSupply()).to.equal(supplyBefore - expectedBurn); // true burn
-          expect(await token.balanceOf(platformFeeWallet.address)).to.equal(platformBalBefore); // untouched — no platform cut, ever, on this token
+          expect(await token.balanceOf(buyer.address)).to.equal(grossOut - expectedBurn - expectedPlatformCut);
+          expect(await token.totalSupply()).to.equal(supplyBefore - expectedBurn); // true burn — only the creator's own cut shrinks supply
+          expect(await token.balanceOf(platformFeeWallet.address)).to.equal(platformBalBefore + expectedPlatformCut);
         });
       });
     });
@@ -1830,7 +1892,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         const { token, otherAccount, platformFeeWallet, priceFeed } = await deployWithPlatformTax();
         await expect(
           token.connect(otherAccount).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
-        ).to.be.revertedWith("CustomToken: caller is not the factory");
+        ).to.be.revertedWithCustomError(token, "NotFactory");
       });
 
       it("cannot be called twice", async function () {
@@ -1840,7 +1902,7 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         await expect(
           token.connect(factorySigner).configurePlatformTax(platformFeeWallet.address, 25, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
-        ).to.be.revertedWith("CustomToken: platform tax already configured");
+        ).to.be.revertedWithCustomError(token, "PlatformTaxAlreadyConfigured");
       });
     });
 
@@ -1849,7 +1911,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         const { token, otherAccount, priceFeed } = await deployWithPlatformTax();
         await expect(
           token.connect(otherAccount).updatePriceFeed(await priceFeed.getAddress(), 7200)
-        ).to.be.revertedWith("CustomToken: caller is not the factory");
+        ).to.be.revertedWithCustomError(token, "NotFactory");
       });
 
       it("cannot be called before platform tax is configured", async function () {
@@ -1862,8 +1924,9 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         const MockAggregatorV3 = await ethers.getContractFactory("MockAggregatorV3");
         const newFeed = await MockAggregatorV3.deploy(8, ETH_USD_PRICE);
-        await expect(token.connect(deployer).updatePriceFeed(await newFeed.getAddress(), 7200)).to.be.revertedWith(
-          "CustomToken: platform tax not configured"
+        await expect(token.connect(deployer).updatePriceFeed(await newFeed.getAddress(), 7200)).to.be.revertedWithCustomError(
+          token,
+          "PlatformTaxNotConfigured"
         );
       });
 
@@ -1872,14 +1935,16 @@ describe("CustomToken / CustomTokenFactory", function () {
         const factorySigner = await ethers.getImpersonatedSigner(await factory.getAddress());
         await ethers.provider.send("hardhat_setBalance", [await factory.getAddress(), "0x56BC75E2D63100000"]);
 
-        await expect(token.connect(factorySigner).updatePriceFeed(ethers.ZeroAddress, 7200)).to.be.revertedWith(
-          "CustomToken: invalid price feed"
+        await expect(token.connect(factorySigner).updatePriceFeed(ethers.ZeroAddress, 7200)).to.be.revertedWithCustomError(
+          token,
+          "InvalidPriceFeed"
         );
 
         const MockAggregatorV3 = await ethers.getContractFactory("MockAggregatorV3");
         const newFeed = await MockAggregatorV3.deploy(8, ETH_USD_PRICE);
-        await expect(token.connect(factorySigner).updatePriceFeed(await newFeed.getAddress(), 0)).to.be.revertedWith(
-          "CustomToken: oracle staleness must be > 0"
+        await expect(token.connect(factorySigner).updatePriceFeed(await newFeed.getAddress(), 0)).to.be.revertedWithCustomError(
+          token,
+          "InvalidOracleStaleness"
         );
       });
 
@@ -1931,7 +1996,7 @@ describe("CustomToken / CustomTokenFactory", function () {
             "Too Big", "BIG", cap + 1n, deployer.address, holder.address, deployer.address, deployer.address,
             ZERO_FEES, ZERO_FEES, ethers.ZeroAddress, ethers.ZeroAddress
           )
-        ).to.be.revertedWith("CustomToken: supply too large");
+        ).to.be.revertedWithCustomError(token, "SupplyTooLarge");
       });
 
       it("accepts a totalSupply_ exactly at the cap", async function () {
@@ -2036,14 +2101,17 @@ describe("CustomToken / CustomTokenFactory", function () {
         expect(await token.MIN_PROCESSING_SLIPPAGE_BPS()).to.equal(500n);
         expect(await token.MAX_PROCESSING_SLIPPAGE_BPS()).to.equal(800n);
 
-        await expect(token.connect(otherAccount).setProcessingSlippageBps(700)).to.be.revertedWith(
-          "CustomToken: caller is not the creator"
+        await expect(token.connect(otherAccount).setProcessingSlippageBps(700)).to.be.revertedWithCustomError(
+          token,
+          "NotCreator"
         );
-        await expect(token.connect(creator).setProcessingSlippageBps(499)).to.be.revertedWith(
-          "CustomToken: slippage below 5% floor"
+        await expect(token.connect(creator).setProcessingSlippageBps(499)).to.be.revertedWithCustomError(
+          token,
+          "SlippageBelowFloor"
         );
-        await expect(token.connect(creator).setProcessingSlippageBps(801)).to.be.revertedWith(
-          "CustomToken: slippage above 8% ceiling"
+        await expect(token.connect(creator).setProcessingSlippageBps(801)).to.be.revertedWithCustomError(
+          token,
+          "SlippageAboveCeiling"
         );
 
         await expect(token.connect(creator).setProcessingSlippageBps(750))
@@ -2102,11 +2170,86 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         await expect(
           token.connect(deployer).configurePlatformTax(feeWallet.address, 9_501, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
-        ).to.be.revertedWith("CustomToken: combined platform and creator tax exceeds 100%");
+        ).to.be.revertedWithCustomError(token, "CombinedTaxExceedsLimit");
 
         await expect(
           token.connect(deployer).configurePlatformTax(feeWallet.address, 9_500, await priceFeed.getAddress(), 80_000, 3600, ethers.ZeroAddress, 0, ethers.ZeroAddress, 0, ethers.ZeroAddress)
         ).to.not.be.reverted; // 9,500 + 500 == 10,000 exactly — the ceiling itself is not rejected
+      });
+    });
+
+    // Bonus coverage for the NEW auto-configure path's own defensive
+    // guards (mirrors configurePlatformTax's Finding-3-style require, and
+    // the rewardBps+creatorRewardBps <= feeBps invariant) — exercised via
+    // a MockTaxDefaultsFactory standing in for `factory`, since
+    // CustomTokenFactory's own setTaxDefaults()/configurePlatformTax()
+    // enforce both invariants at the platform level and could never
+    // actually produce a violating combination themselves.
+    describe("auto-configure path's own defensive skip-not-revert guards", function () {
+      it("still sets `pair` (and the creator's own buy/sell tax) even when the platform's rewardBps+creatorRewardBps > feeBps invariant is violated — the platform tax portion alone stays unconfigured", async function () {
+        const [deployer, creator, buyer] = await ethers.getSigners();
+
+        const MockERC20 = await ethers.getContractFactory("MockERC20");
+        const mockWeth = await MockERC20.deploy("Mock WETH", "mWETH", ethers.parseEther("1"));
+        const MockRouter = await ethers.getContractFactory("MockRouter");
+        const router = await MockRouter.deploy(await mockWeth.getAddress());
+
+        const MockAggregatorV3 = await ethers.getContractFactory("MockAggregatorV3");
+        const priceFeed = await MockAggregatorV3.deploy(8, ETH_USD_PRICE);
+
+        const MockTaxDefaultsFactory = await ethers.getContractFactory("MockTaxDefaultsFactory");
+        const mockFactory = await MockTaxDefaultsFactory.deploy(await router.getAddress());
+        await mockFactory.setFeeBps(100);
+        await mockFactory.setPlatformFeeWallet(deployer.address);
+        await mockFactory.setPriceFeed(await priceFeed.getAddress());
+        await mockFactory.setRewardsDistributor(deployer.address);
+        await mockFactory.setRewardBps(80);
+        await mockFactory.setCreatorRewardsDistributor(deployer.address);
+        await mockFactory.setCreatorRewardBps(80); // 80 + 80 = 160 > feeBps (100) — invalid
+
+        const token = await deployCustomTokenClone(deployer);
+        const buyFees = { reflectionBps: 0, marketingBps: 0, liquidityBps: 0, burnBps: 100 }; // 1% burn — the creator's own, independent tax
+        await token.initialize(
+          "Broken Defaults", "BRK", ethers.parseEther("1000000"), creator.address, creator.address,
+          await mockFactory.getAddress(), await router.getAddress(), buyFees, buyFees, ethers.ZeroAddress, ethers.ZeroAddress
+        );
+
+        const creatorBalance = await token.balanceOf(creator.address);
+        const liquidityAmount = creatorBalance - ethers.parseEther("1000"); // leave some for the later trade
+        await token.connect(creator).approve(await router.getAddress(), liquidityAmount);
+        const deadline = (await ethers.provider.getBlock("latest")).timestamp + 900;
+
+        await expect(
+          router.connect(creator).addLiquidityETH(await token.getAddress(), liquidityAmount, 0, 0, creator.address, deadline, {
+            value: ethers.parseEther("2"),
+          })
+        ).to.not.be.reverted;
+
+        // `pair` got set (and the seeding transfer itself stayed untaxed,
+        // exactly as usual) even though the platform tax half was skipped.
+        expect(await token.pair()).to.not.equal(ethers.ZeroAddress);
+        expect(await token.balanceOf(await router.pairs(await token.getAddress()))).to.equal(liquidityAmount);
+        expect(await token.platformTaxConfigured()).to.equal(false);
+        expect(await token.platformTaxActive()).to.equal(false);
+
+        // The creator's own, independent 1% burn tax still activated and
+        // applies normally on the very next buy — the platform-side
+        // failure never touched it.
+        const pairAddress = await router.pairs(await token.getAddress());
+        const [r0, r1] = await (await ethers.getContractAt("MockLPToken", pairAddress)).getReserves();
+        const token0 = await (await ethers.getContractAt("MockLPToken", pairAddress)).token0();
+        const [tokenReserve, ethReserve] = token0.toLowerCase() === (await token.getAddress()).toLowerCase() ? [r0, r1] : [r1, r0];
+        const ethIn = ethers.parseEther("0.05");
+        const grossOut = (tokenReserve * ethIn) / (ethReserve + ethIn);
+        const expectedBurn = (grossOut * 100n) / 10_000n;
+
+        await router
+          .connect(buyer)
+          .swapExactETHForTokensSupportingFeeOnTransferTokens(0, [await router.WETH(), await token.getAddress()], buyer.address, deadline, {
+            value: ethIn,
+          });
+
+        expect(await token.balanceOf(buyer.address)).to.equal(grossOut - expectedBurn);
       });
     });
 
@@ -2121,10 +2264,10 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         await expect(
           token.connect(otherAccount).rescueToken(await strayToken.getAddress(), otherAccount.address, ethers.parseEther("10"))
-        ).to.be.revertedWith("CustomToken: caller is not the creator");
+        ).to.be.revertedWithCustomError(token, "NotCreator");
         await expect(
           token.connect(creator).rescueToken(await strayToken.getAddress(), ethers.ZeroAddress, ethers.parseEther("10"))
-        ).to.be.revertedWith("CustomToken: invalid recipient");
+        ).to.be.revertedWithCustomError(token, "InvalidRecipient");
 
         await expect(token.connect(creator).rescueToken(await strayToken.getAddress(), otherAccount.address, ethers.parseEther("10")))
           .to.emit(token, "TokenRescued")
@@ -2149,8 +2292,9 @@ describe("CustomToken / CustomTokenFactory", function () {
         expect(pending).to.be.gt(0n);
         expect(await token.balanceOf(await token.getAddress())).to.equal(pending);
 
-        await expect(token.connect(creator).rescueToken(await token.getAddress(), creator.address, 1n)).to.be.revertedWith(
-          "CustomToken: amount exceeds rescuable balance"
+        await expect(token.connect(creator).rescueToken(await token.getAddress(), creator.address, 1n)).to.be.revertedWithCustomError(
+          token,
+          "AmountExceedsRescuable"
         );
       });
 
@@ -2172,8 +2316,9 @@ describe("CustomToken / CustomTokenFactory", function () {
         const contractEthBalance = await ethers.provider.getBalance(await token.getAddress());
         const rescuableExpected = contractEthBalance - distributed; // nobody has claimed anything yet
 
-        await expect(token.connect(creator).rescueEth(otherAccount.address, rescuableExpected + 1n)).to.be.revertedWith(
-          "CustomToken: amount exceeds rescuable balance"
+        await expect(token.connect(creator).rescueEth(otherAccount.address, rescuableExpected + 1n)).to.be.revertedWithCustomError(
+          token,
+          "AmountExceedsRescuable"
         );
 
         const before = await ethers.provider.getBalance(otherAccount.address);
@@ -2190,10 +2335,11 @@ describe("CustomToken / CustomTokenFactory", function () {
         const { factory, creator, otherAccount } = await deployStack();
         const { token } = await createCustomToken(factory, creator);
 
-        await expect(token.connect(otherAccount).transferCreator(otherAccount.address)).to.be.revertedWith(
-          "CustomToken: caller is not the creator"
+        await expect(token.connect(otherAccount).transferCreator(otherAccount.address)).to.be.revertedWithCustomError(
+          token,
+          "NotCreator"
         );
-        await expect(token.connect(creator).transferCreator(ethers.ZeroAddress)).to.be.revertedWith("CustomToken: invalid creator");
+        await expect(token.connect(creator).transferCreator(ethers.ZeroAddress)).to.be.revertedWithCustomError(token, "InvalidCreator");
 
         await expect(token.connect(creator).transferCreator(otherAccount.address))
           .to.emit(token, "CreatorTransferStarted")
@@ -2203,7 +2349,7 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         // The old creator keeps every privilege right up until the handoff completes.
         await expect(token.connect(creator).setSwapThreshold(1)).to.not.be.reverted;
-        await expect(token.connect(creator).acceptCreator()).to.be.revertedWith("CustomToken: caller is not the pending creator");
+        await expect(token.connect(creator).acceptCreator()).to.be.revertedWithCustomError(token, "NotPendingCreator");
 
         await expect(token.connect(otherAccount).acceptCreator())
           .to.emit(token, "CreatorTransferred")
@@ -2212,7 +2358,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         expect(await token.creator()).to.equal(otherAccount.address);
         expect(await token.pendingCreator()).to.equal(ethers.ZeroAddress);
 
-        await expect(token.connect(creator).setSwapThreshold(2)).to.be.revertedWith("CustomToken: caller is not the creator");
+        await expect(token.connect(creator).setSwapThreshold(2)).to.be.revertedWithCustomError(token, "NotCreator");
         await expect(token.connect(otherAccount).setSwapThreshold(2)).to.not.be.reverted;
       });
     });
@@ -2228,7 +2374,7 @@ describe("CustomToken / CustomTokenFactory", function () {
             "Self Reflect", "SELF", ethers.parseEther("1000"), deployer.address, holder.address, deployer.address, deployer.address,
             ZERO_FEES, ZERO_FEES, tokenAddress, ethers.ZeroAddress
           )
-        ).to.be.revertedWith("CustomToken: reflection asset cannot be this token");
+        ).to.be.revertedWithCustomError(token, "ReflectionAssetIsSelf");
       });
     });
 
@@ -2237,11 +2383,13 @@ describe("CustomToken / CustomTokenFactory", function () {
         const { factory, creator, otherAccount } = await deployStack();
         const { token } = await createCustomToken(factory, creator);
 
-        await expect(token.connect(otherAccount).setTaxExempt(otherAccount.address, true)).to.be.revertedWith(
-          "CustomToken: caller is not the creator"
+        await expect(token.connect(otherAccount).setTaxExempt(otherAccount.address, true)).to.be.revertedWithCustomError(
+          token,
+          "NotCreator"
         );
-        await expect(token.connect(creator).setTaxExempt(ethers.ZeroAddress, true)).to.be.revertedWith(
-          "CustomToken: invalid account"
+        await expect(token.connect(creator).setTaxExempt(ethers.ZeroAddress, true)).to.be.revertedWithCustomError(
+          token,
+          "InvalidAccount"
         );
       });
 
@@ -2309,7 +2457,7 @@ describe("CustomToken / CustomTokenFactory", function () {
         const { factory, creator, otherAccount } = await deployStack();
         const { token } = await createCustomToken(factory, creator);
 
-        await expect(token.connect(otherAccount).renounceCreator()).to.be.revertedWith("CustomToken: caller is not the creator");
+        await expect(token.connect(otherAccount).renounceCreator()).to.be.revertedWithCustomError(token, "NotCreator");
 
         await expect(token.connect(creator).renounceCreator()).to.emit(token, "CreatorRenounced").withArgs(creator.address);
 
@@ -2318,15 +2466,18 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         // Every onlyCreator lever is now permanently unreachable, by anyone,
         // including the address that used to be the creator.
-        await expect(token.connect(creator).setSwapThreshold(1)).to.be.revertedWith("CustomToken: caller is not the creator");
-        await expect(token.connect(creator).setMarketingWallet(otherAccount.address)).to.be.revertedWith(
-          "CustomToken: caller is not the creator"
+        await expect(token.connect(creator).setSwapThreshold(1)).to.be.revertedWithCustomError(token, "NotCreator");
+        await expect(token.connect(creator).setMarketingWallet(otherAccount.address)).to.be.revertedWithCustomError(
+          token,
+          "NotCreator"
         );
-        await expect(token.connect(creator).setTaxExempt(otherAccount.address, true)).to.be.revertedWith(
-          "CustomToken: caller is not the creator"
+        await expect(token.connect(creator).setTaxExempt(otherAccount.address, true)).to.be.revertedWithCustomError(
+          token,
+          "NotCreator"
         );
-        await expect(token.connect(creator).transferCreator(otherAccount.address)).to.be.revertedWith(
-          "CustomToken: caller is not the creator"
+        await expect(token.connect(creator).transferCreator(otherAccount.address)).to.be.revertedWithCustomError(
+          token,
+          "NotCreator"
         );
       });
 
@@ -2340,8 +2491,9 @@ describe("CustomToken / CustomTokenFactory", function () {
         await token.connect(creator).renounceCreator();
         expect(await token.pendingCreator()).to.equal(ethers.ZeroAddress);
 
-        await expect(token.connect(otherAccount).acceptCreator()).to.be.revertedWith(
-          "CustomToken: caller is not the pending creator"
+        await expect(token.connect(otherAccount).acceptCreator()).to.be.revertedWithCustomError(
+          token,
+          "NotPendingCreator"
         );
       });
 

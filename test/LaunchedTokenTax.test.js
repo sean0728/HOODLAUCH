@@ -646,4 +646,251 @@ describe("LaunchedToken — transfer tax", function () {
       expect(await token.taxActive()).to.equal(true);
     });
   });
+
+  // New coverage: a "Deploy Token" (no liquidity at launch) whose creator
+  // later pairs it against the DEX entirely on their own, bypassing
+  // TokenFactory. Before this feature, configureTax() was never called for
+  // this path and the platform's tax was permanently unreachable no matter
+  // what the creator did afterward — see LaunchedToken._maybeAutoActivateTax.
+  describe("automatic platform-tax activation (creator adds liquidity independently)", function () {
+    const GRADUATION_CONFIRMATION_WINDOW = 30 * 60;
+
+    async function deployDeployOnlyStack(overrides = {}) {
+      const signers = await ethers.getSigners();
+      const [deployer, creator, trader, otherAccount, treasury, platformFeeWallet] = signers;
+      const newFeeWallet = signers[6];
+
+      const LaunchedToken = await ethers.getContractFactory("LaunchedToken");
+      const tokenImplementation = await LaunchedToken.deploy();
+
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const mockWeth = await MockERC20.deploy("Mock WETH", "mWETH", ethers.parseEther("1"));
+
+      const MockRouter = await ethers.getContractFactory("MockRouter");
+      const router = await MockRouter.deploy(await mockWeth.getAddress());
+
+      const MockAggregatorV3 = await ethers.getContractFactory("MockAggregatorV3");
+      const priceFeed = await MockAggregatorV3.deploy(8, overrides.ethUsdPrice ?? ETH_USD_PRICE);
+
+      const LiquidityLocker = await ethers.getContractFactory("LiquidityLocker");
+      const locker = await LiquidityLocker.deploy();
+
+      const TokenFactory = await ethers.getContractFactory("TokenFactory");
+      const factory = await TokenFactory.deploy(
+        await tokenImplementation.getAddress(),
+        await router.getAddress(),
+        await locker.getAddress(),
+        DEPLOY_FEE,
+        LAUNCH_FEE,
+        treasury.address,
+        LP_LOCK_DURATION,
+        platformFeeWallet.address,
+        await priceFeed.getAddress()
+      );
+      await locker.setFactory(await factory.getAddress());
+
+      const totalSupply = overrides.totalSupply ?? ethers.parseEther("1000000");
+
+      const tx = await factory
+        .connect(creator)
+        .createToken("Deploy Only", "DPLY", totalSupply, false, 0, 0, 0, 0n, { value: DEPLOY_FEE });
+      const receipt = await tx.wait();
+      const createdEvent = receipt.logs
+        .map((log) => {
+          try {
+            return factory.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
+        .find((p) => p && p.name === "TokenCreated");
+
+      const token = await ethers.getContractAt("LaunchedToken", createdEvent.args.token);
+
+      return {
+        factory,
+        router,
+        priceFeed,
+        token,
+        totalSupply,
+        deployer,
+        creator,
+        trader,
+        otherAccount,
+        platformFeeWallet,
+        newFeeWallet,
+      };
+    }
+
+    // Mirrors what a real creator would do after a "Deploy Token" launch:
+    // they already hold 100% of supply, so they can pair it against the DEX
+    // router directly — entirely outside TokenFactory.
+    async function addLiquidityIndependently(router, token, creator, ethIn) {
+      const balance = await token.balanceOf(creator.address);
+      await token.connect(creator).approve(await router.getAddress(), balance);
+      const deadline = (await ethers.provider.getBlock("latest")).timestamp + 900;
+      await router.connect(creator).addLiquidityETH(await token.getAddress(), balance, 0, 0, creator.address, deadline, { value: ethIn });
+      return balance;
+    }
+
+    async function buy(router, token, trader, value) {
+      return router
+        .connect(trader)
+        .swapExactETHForTokensSupportingFeeOnTransferTokens(
+          0,
+          [await router.WETH(), await token.getAddress()],
+          trader.address,
+          (await ethers.provider.getBlock("latest")).timestamp + 900,
+          { value }
+        );
+    }
+
+    it("stays completely untaxed forever when liquidity is never added — plain transfers are unaffected and the extra detection calls never revert", async function () {
+      const { token, creator, trader, otherAccount } = await deployDeployOnlyStack();
+      expect(await token.taxConfigured()).to.equal(false);
+
+      const amount = ethers.parseEther("1000");
+      await token.connect(creator).transfer(trader.address, amount);
+      expect(await token.balanceOf(trader.address)).to.equal(amount);
+      await token.connect(trader).transfer(otherAccount.address, amount);
+      expect(await token.balanceOf(otherAccount.address)).to.equal(amount);
+
+      expect(await token.taxConfigured()).to.equal(false);
+      expect(await token.taxActive()).to.equal(false);
+      expect(await token.pair()).to.equal(ethers.ZeroAddress);
+    });
+
+    it("auto-activates using TokenFactory's CURRENT tax defaults at the moment liquidity is added — not whatever was in effect at deploy time", async function () {
+      const { factory, token, router, creator, deployer, priceFeed, newFeeWallet } = await deployDeployOnlyStack();
+
+      // Deploy-time defaults are TokenFactory's built-in ones (feeBps=100,
+      // graduationTargetUsd=50_000 — see TokenFactory.sol). Change them
+      // AFTER this token was deployed but BEFORE liquidity is added.
+      const newFeeBps = 250n;
+      const newGraduationTarget = 75_000n;
+      const newStaleness = 7200n;
+      await factory
+        .connect(deployer)
+        .setTaxDefaults(newFeeWallet.address, newFeeBps, await priceFeed.getAddress(), newGraduationTarget, newStaleness, 0, 0);
+
+      expect(await token.taxConfigured()).to.equal(false);
+      await addLiquidityIndependently(router, token, creator, ethers.parseEther("2"));
+
+      expect(await token.taxConfigured()).to.equal(true);
+      expect(await token.pair()).to.not.equal(ethers.ZeroAddress);
+      // Picked up the NEW values, not the deploy-time (100 / 50_000) ones.
+      expect(await token.feeBps()).to.equal(newFeeBps);
+      expect(await token.feeWallet()).to.equal(newFeeWallet.address);
+      expect(await token.graduationTargetUsd()).to.equal(newGraduationTarget);
+      expect(await token.maxOracleStaleness()).to.equal(newStaleness);
+      expect(await token.taxActive()).to.equal(true);
+    });
+
+    it("never taxes the liquidity-seeding transfer, but taxes the very next buy at the current feeBps", async function () {
+      const { factory, token, router, creator, trader, deployer, priceFeed, newFeeWallet } = await deployDeployOnlyStack();
+      const newFeeBps = 250n;
+      await factory
+        .connect(deployer)
+        .setTaxDefaults(newFeeWallet.address, newFeeBps, await priceFeed.getAddress(), 75_000, 7200, 0, 0);
+
+      const liquidityEth = ethers.parseEther("2");
+      const creatorBalance = await addLiquidityIndependently(router, token, creator, liquidityEth);
+
+      const pairAddress = await router.pairs(await token.getAddress());
+      // The pair received the FULL amount added — not amount minus fee.
+      expect(await token.balanceOf(pairAddress)).to.equal(creatorBalance);
+      expect(await token.balanceOf(creator.address)).to.equal(0n);
+
+      // The very next buy against the pool IS taxed, at the newly-active feeBps.
+      const ethIn = ethers.parseEther("0.5");
+      const grossOut = (creatorBalance * ethIn) / (liquidityEth + ethIn);
+      const expectedFee = (grossOut * newFeeBps) / 10_000n;
+      const feeWalletBalBefore = await token.balanceOf(newFeeWallet.address);
+
+      await buy(router, token, trader, ethIn);
+
+      expect(await token.balanceOf(trader.address)).to.equal(grossOut - expectedFee);
+      expect((await token.balanceOf(newFeeWallet.address)) - feeWalletBalBefore).to.equal(expectedFee);
+    });
+
+    it("graduation still works normally once auto-activated — mirrors the factory-launched graduation flow", async function () {
+      const { token, router, creator, trader } = await deployDeployOnlyStack();
+      // A tiny pool relative to the pump below, same pattern as the
+      // factory-launched graduation tests above.
+      await addLiquidityIndependently(router, token, creator, ethers.parseEther("0.001"));
+      expect(await token.taxActive()).to.equal(true);
+
+      await buy(router, token, trader, ethers.parseEther("5")); // pump
+      expect(await token.graduationCandidateAt()).to.equal(0n); // not off its own trade
+
+      const pokeTx = await buy(router, token, trader, 1n);
+      await expect(pokeTx).to.emit(token, "GraduationCandidateObserved");
+      expect(await token.taxActive()).to.equal(true);
+
+      await ethers.provider.send("evm_increaseTime", [GRADUATION_CONFIRMATION_WINDOW + 1]);
+      await ethers.provider.send("evm_mine");
+
+      const confirmTx = await buy(router, token, trader, 1n);
+      await expect(confirmTx).to.emit(token, "TaxDisabled");
+      expect(await token.taxActive()).to.equal(false);
+    });
+
+    // Bonus coverage: a deliberately-broken platform-side config, exercised
+    // via a MockTaxDefaultsFactory standing in for `factory` — TokenFactory's
+    // own setTaxDefaults() enforces rewardBps_+creatorRewardBps_ <= feeBps_
+    // and so could never actually produce this combination itself, but
+    // _maybeAutoActivateTax() re-checks it anyway (defense in depth) and
+    // must skip, never revert, if it's ever violated some other way.
+    it("skips auto-activation (leaves taxConfigured/pair unset, never reverts) if the platform's own rewardBps+creatorRewardBps > feeBps invariant is violated — and retries successfully once fixed", async function () {
+      const [deployer, creator, trader] = await ethers.getSigners();
+
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const mockWeth = await MockERC20.deploy("Mock WETH", "mWETH", ethers.parseEther("1"));
+      const MockRouter = await ethers.getContractFactory("MockRouter");
+      const router = await MockRouter.deploy(await mockWeth.getAddress());
+
+      const MockAggregatorV3 = await ethers.getContractFactory("MockAggregatorV3");
+      const priceFeed = await MockAggregatorV3.deploy(8, ETH_USD_PRICE);
+
+      const MockTaxDefaultsFactory = await ethers.getContractFactory("MockTaxDefaultsFactory");
+      const mockFactory = await MockTaxDefaultsFactory.deploy(await router.getAddress());
+      await mockFactory.setFeeBps(100);
+      await mockFactory.setPlatformFeeWallet(deployer.address);
+      await mockFactory.setPriceFeed(await priceFeed.getAddress());
+      await mockFactory.setRewardsDistributor(deployer.address);
+      await mockFactory.setRewardBps(80);
+      await mockFactory.setCreatorRewardsDistributor(deployer.address);
+      await mockFactory.setCreatorRewardBps(80); // 80 + 80 = 160 > feeBps (100) — invalid
+
+      const token = await deployLaunchedTokenClone(deployer);
+      await token.initialize(
+        "Broken Defaults", "BRK", ethers.parseEther("1000"), creator.address, creator.address, await mockFactory.getAddress()
+      );
+
+      const creatorBalance = await token.balanceOf(creator.address);
+      const liquidityAmount = creatorBalance - 1n; // leave 1 unit so the creator can still send the later, retrying transfer
+      await token.connect(creator).approve(await router.getAddress(), liquidityAmount);
+      const deadline = (await ethers.provider.getBlock("latest")).timestamp + 900;
+
+      // The liquidity add itself must not revert — the broken invariant is
+      // only ever a reason to skip activation, never to brick the transfer.
+      await expect(
+        router.connect(creator).addLiquidityETH(await token.getAddress(), liquidityAmount, 0, 0, creator.address, deadline, {
+          value: ethers.parseEther("1"),
+        })
+      ).to.not.be.reverted;
+
+      expect(await token.taxConfigured()).to.equal(false);
+      expect(await token.pair()).to.equal(ethers.ZeroAddress);
+
+      // Fix the platform's own config...
+      await mockFactory.setCreatorRewardBps(0); // 80 + 0 = 80 <= feeBps (100) — now valid
+
+      // ...and the very next ordinary transfer retries and succeeds.
+      await token.connect(creator).transfer(trader.address, 1n);
+      expect(await token.taxConfigured()).to.equal(true);
+      expect(await token.pair()).to.not.equal(ethers.ZeroAddress);
+      expect(await token.taxActive()).to.equal(true);
+    });
+  });
 });
