@@ -49,16 +49,16 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     // they were configured with — see CustomToken.configurePlatformTax).
     // This is entirely separate from, and on top of, whatever buy/sell tax
     // the creator themselves configured — same "platform always takes its
-    // 0.25% until graduation" behavior TokenFactory already has for its
+    // 1.00% until graduation" behavior TokenFactory already has for its
     // simpler token, now available here too. ----
     /// @notice See TokenFactory.MAX_FEE_BPS — identical hard ceiling on
     /// feeBps_ in setTaxDefaults here, for the same reasoning.
     uint256 public constant MAX_FEE_BPS = 2_000; // 20.00%
 
     address public platformFeeWallet;
-    uint256 public feeBps = 25; // 0.25%
+    uint256 public feeBps = 100; // 1.00%
     address public priceFeed;
-    uint256 public graduationTargetUsd = 80_000; // whole dollars; tax permanently disables once a pool's live market cap crosses this
+    uint256 public graduationTargetUsd = 50_000; // whole dollars; tax permanently disables once a pool's live market cap crosses this
     uint256 public maxOracleStaleness = 1 hours;
 
     /// @notice PlatformRewardsDistributor's address — see
@@ -74,7 +74,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     /// rewardsDistributor instead of platformFeeWallet. See
     /// TokenFactory.rewardBps for the full explanation; behaves
     /// identically here.
-    uint256 public rewardBps = 10; // 0.10%
+    uint256 public rewardBps = 45; // 0.45%
 
     /// @notice CreatorRewardsDistributor's address — see
     /// TokenFactory.creatorRewardsDistributor for the full explanation;
@@ -86,7 +86,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     /// OF feeBps, never added on top of it, and never overlapping
     /// rewardBps above. See TokenFactory.creatorRewardBps for the full
     /// explanation; behaves identically here.
-    uint256 public creatorRewardBps = 5; // 0.05%
+    uint256 public creatorRewardBps = 10; // 0.10%
 
     /// @notice FeeWalletDistributor's address — see
     /// TokenFactory.feeWalletDistributor for the full explanation; behaves
@@ -626,7 +626,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
             );
         } else {
             // "Deploy and Add Liquidity (Live)": the only path where either
-            // the creator's own tax or the platform's 0.25%-until-
+            // the creator's own tax or the platform's 1.00%-until-
             // graduation tax can ever apply — both require a live pair,
             // which only this branch creates.
             require(msg.value >= launchFee, "CustomTokenFactory: launch fee not met");
@@ -722,7 +722,7 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
         CustomToken(payable(token)).setPair(pair);
 
         // Wire the platform's own graduating tax on top of whatever the
-        // creator configured — same 0.25%-until-graduation behavior as
+        // creator configured — same 1.00%-until-graduation behavior as
         // TokenFactory's simpler token, just skimmed in-kind rather than
         // batched. Leaving platformFeeWallet/priceFeed unset simply leaves
         // this permanently inactive (see CustomToken.configurePlatformTax);

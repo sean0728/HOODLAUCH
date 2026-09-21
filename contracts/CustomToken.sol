@@ -142,10 +142,10 @@ contract CustomToken is ERC20, ReentrancyGuard {
     // inactive. ----
     bool public platformTaxConfigured;
     address public platformFeeWallet;
-    uint256 public platformFeeBps; // 25 = 0.25%
+    uint256 public platformFeeBps; // 100 = 1.00%
     bool public platformTaxActive;
     IAggregatorV3 public priceFeed;
-    uint256 public graduationTargetUsd; // whole dollars, e.g. 80000
+    uint256 public graduationTargetUsd; // whole dollars, e.g. 50000
     uint256 public maxOracleStaleness; // seconds; the tax-disable check is skipped (never reverted) if the feed is older than this
 
     // ---- reward diversion: carves a slice of the PLATFORM's own

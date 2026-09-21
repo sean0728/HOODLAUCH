@@ -65,16 +65,16 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// transfer tax can ever be set, even by a fully trusted owner acting
     /// in good faith by mistake or a compromised owner key acting in bad
     /// faith — 2,000 bps (20%) is intentionally generous relative to the
-    /// 0.25% default so it never gets in the way of a legitimate tax
+    /// 1.00% default so it never gets in the way of a legitimate tax
     /// change, while still ruling out a tax so high it's effectively
     /// confiscatory or makes a token untradeable. Adjust this constant if a
     /// different ceiling fits the platform's actual policy.
     uint256 public constant MAX_FEE_BPS = 2_000; // 20.00%
 
     address public platformFeeWallet;
-    uint256 public feeBps = 25; // 0.25%
+    uint256 public feeBps = 100; // 1.00%
     address public priceFeed;
-    uint256 public graduationTargetUsd = 80_000; // whole dollars; tax permanently disables once a pool's live market cap crosses this
+    uint256 public graduationTargetUsd = 50_000; // whole dollars; tax permanently disables once a pool's live market cap crosses this
     uint256 public maxOracleStaleness = 1 hours;
 
     /// @notice PlatformRewardsDistributor's address — the platform's own
@@ -88,14 +88,14 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// happened.
     address public rewardsDistributor;
 
-    /// @notice Out of feeBps (the platform's ongoing 0.25% trading tax),
-    /// how much (in absolute bps, e.g. 10 = 0.10%) gets diverted to
+    /// @notice Out of feeBps (the platform's ongoing 1.00% trading tax),
+    /// how much (in absolute bps, e.g. 45 = 0.45%) gets diverted to
     /// rewardsDistributor instead of platformFeeWallet — carved OUT OF
     /// feeBps, never added on top of it. Must stay <= feeBps (enforced in
     /// setTaxDefaults); has no effect at all while rewardsDistributor is
     /// unset. Snapshotted per-token at launch, same as every other tax
     /// default here.
-    uint256 public rewardBps = 10; // 0.10%
+    uint256 public rewardBps = 45; // 0.45%
 
     /// @notice CreatorRewardsDistributor's address — pays a slice of the
     /// ongoing trading tax back to each token's own creator, in native ETH,
@@ -114,7 +114,7 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// enforced in setTaxDefaults). Has no effect at all while
     /// creatorRewardsDistributor is unset. Snapshotted per-token at launch,
     /// same as every other tax default here.
-    uint256 public creatorRewardBps = 5; // 0.05%
+    uint256 public creatorRewardBps = 10; // 0.10%
 
     /// @notice FeeWalletDistributor's address — automatically converts the
     /// remainder of feeBps that would otherwise sit at platformFeeWallet as

@@ -42,10 +42,10 @@ contract LaunchedToken is ERC20 {
     bool public taxConfigured;
     address public pair;
     address public feeWallet;
-    uint256 public feeBps; // 25 = 0.25%
+    uint256 public feeBps; // 100 = 1.00%
     bool public taxActive;
     IAggregatorV3 public priceFeed;
-    uint256 public graduationTargetUsd; // whole dollars, e.g. 80000
+    uint256 public graduationTargetUsd; // whole dollars, e.g. 50000
     uint256 public maxOracleStaleness; // seconds; the tax-disable check is skipped (never reverted) if the feed is older than this
 
     // ---- reward diversion: carves a slice of the platform's own feeBps
