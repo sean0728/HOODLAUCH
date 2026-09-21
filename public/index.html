@@ -749,12 +749,11 @@
         <div class="section-head">
           <h2>Live launches</h2>
           <div class="filter-row">
-            <input class="search" id="searchInput" type="search" placeholder="Search name or ticker…" aria-label="Search tokens">
-            <button class="chip" aria-pressed="true" data-filter="all">All</button>
-            <button class="chip" aria-pressed="false" data-filter="taxed">Taxed</button>
+            <input class="search" id="searchInput" type="search" placeholder="Search name, ticker, or contract address…" aria-label="Search tokens">
+            <button class="chip" aria-pressed="true" data-filter="recent">Recently Launched</button>
+            <button class="chip" aria-pressed="false" data-filter="launched">Launched</button>
+            <button class="chip" aria-pressed="false" data-filter="deployed">Deployed</button>
             <button class="chip" aria-pressed="false" data-filter="graduated">Graduated</button>
-            <button class="chip" aria-pressed="false" data-filter="creator-held">Creator-held</button>
-            <button class="chip" aria-pressed="false" data-filter="live-pool">Unlocked pool</button>
           </div>
         </div>
         <div class="token-grid" id="tokenGrid"></div>
@@ -3219,6 +3218,7 @@
         lockId: result.lockId, unlockAt: result.unlockAt, lpLockDurationDays: result.lpLockDurationDays,
         lpWithdrawn:false, factoryAddress,
         networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(),
       } : {
         id: result.tokenAddress, name: draft.name, ticker: draft.ticker,
         desc: draft.desc || "A freshly launched community token.",
@@ -3227,6 +3227,7 @@
         catColor:"var(--signal-500)", mode:"just", status:"creator-held", createdCustom:true,
         onChain:true, tokenAddress: result.tokenAddress, txHash: result.txHash,
         networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(),
       };
       tokens.unshift(newToken);
       saveCustomTokens();
@@ -3672,6 +3673,7 @@
         reflectionAsset: (result.reflectionAsset!=null ? result.reflectionAsset : draft.customFees.reflectionAsset) || null,
         marketingWallet: draft.customFees.marketingWallet || null,
         networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(),
       } : {
         id: result.tokenAddress, name: draft.name, ticker: draft.ticker,
         desc: draft.desc || "A freshly launched community token.",
@@ -3683,6 +3685,7 @@
         reflectionAsset: (result.reflectionAsset!=null ? result.reflectionAsset : draft.customFees.reflectionAsset) || null,
         marketingWallet: draft.customFees.marketingWallet || null,
         networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(),
       };
       tokens.unshift(newToken);
       saveCustomTokens();
@@ -4087,6 +4090,11 @@
       // same wallet here.
       creatorWallet: entry.creator || null,
       socials: entry.socials || {}, logo: entry.logo || null, banner: entry.banner || null,
+      // Backs the "Recently Launched" tab (see RECENT_LAUNCH_WINDOW_MS) —
+      // the same createdAtMs already computed above for the LP-lock-duration
+      // fallback, just also attached to the token object itself so renderGrid
+      // can filter on real launch date instead of guessing.
+      createdAtMs,
     };
   }
 
@@ -4292,7 +4300,22 @@
   }
 
   /* ---------------- token grid ---------------- */
-  let activeFilter = "all", searchTerm = "";
+  let activeFilter = "recent", searchTerm = "";
+  const RECENT_LAUNCH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // "Recently Launched" = createdAtMs within the last 7 days, recomputed on every render so it rolls forward daily on its own — no stored "is recent" flag to keep in sync.
+  // The four simplified tabs, mapped onto t.status (itself already a direct
+  // mirror of the server's own 0/1/2 tokenStatus — see statusFromTokenStatus
+  // above): DEPLOYED (0) -> "creator-held", LAUNCHED (1) -> "taxed",
+  // GRADUATED (2) -> "graduated". "live-pool"/"pool-detected" are a separate,
+  // narrower case (a pool detected on-chain that was added completely
+  // outside Hood Launch, never through recordLaunch/tokenStatus) — folded
+  // into the "Launched" tab since they do have a live pool, same as "taxed",
+  // rather than inventing a 5th tab for what's a rare edge case.
+  function matchesStatusFilter(t, filter){
+    if(filter==="launched") return t.status==="taxed" || t.status==="live-pool" || t.status==="pool-detected";
+    if(filter==="deployed") return t.status==="creator-held";
+    if(filter==="graduated") return t.status==="graduated";
+    return true;
+  }
   function tokenBottomHTML(t){
     if(t.status==="creator-held"){
       return `
@@ -4373,8 +4396,16 @@
     const grid = document.getElementById("tokenGrid");
     const q = searchTerm.trim().toLowerCase();
     const filtered = tokens.filter(t=>{
-      if(activeFilter!=="all" && t.status!==activeFilter) return false;
-      if(q && !(t.name.toLowerCase().includes(q) || t.ticker.toLowerCase().includes(q))) return false;
+      if(activeFilter==="recent"){
+        if(!(typeof t.createdAtMs==="number" && (Date.now()-t.createdAtMs)<=RECENT_LAUNCH_WINDOW_MS)) return false;
+      } else if(!matchesStatusFilter(t, activeFilter)){
+        return false;
+      }
+      if(q && !(
+        t.name.toLowerCase().includes(q) ||
+        t.ticker.toLowerCase().includes(q) ||
+        (t.tokenAddress && t.tokenAddress.toLowerCase().includes(q))
+      )) return false;
       return true;
     });
     if(!filtered.length){
@@ -5955,7 +5986,8 @@
         price: 0, change24h: 0, hist:[0.001],
         holders: 1, mcap: 0, vol: 0,
         catColor:"var(--signal-500)", mode:"just", status:"creator-held", createdCustom:true,
-        networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner
+        networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(),
       };
     } else {
       setLaunchStep("liquidity", "active", "Simulating pool creation…");
@@ -5970,7 +6002,8 @@
         liquidityEth: draft.liquidityEth, creatorBuyInEth: buyInEth, createdCustom:true,
         lockId: null, unlockAt: Date.now() + lpLockDaysDisplay()*86400000, lpLockDurationDays: lpLockDaysDisplay(),
         lpWithdrawn:false, onChain:false,
-        networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner
+        networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(),
       };
 
       if(buyInEth>0){
@@ -6049,7 +6082,8 @@
         catColor:"var(--signal-500)", mode:"just", status:"creator-held", createdCustom:true,
         customTax:true, buyFees: {...draft.customFees.buy}, sellFees: {...draft.customFees.sell},
         reflectionAsset: draft.customFees.reflectionAsset || null, marketingWallet: draft.customFees.marketingWallet || null,
-        networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner
+        networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(),
       };
     } else {
       setLaunchStep("liquidity", "active", "Simulating pool creation…");
@@ -6067,6 +6101,7 @@
         customTax:true, buyFees: {...draft.customFees.buy}, sellFees: {...draft.customFees.sell},
         reflectionAsset: draft.customFees.reflectionAsset || null, marketingWallet: draft.customFees.marketingWallet || null,
         networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(),
       };
 
       if(buyInEth>0){
