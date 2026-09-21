@@ -220,7 +220,7 @@ async function main() {
     createdAt: new Date().toISOString(),
   };
 
-  const { metaPath, solPath, ledgerPath, csvPath } = recordLaunch(record);
+  const { metaPath, solPath, ledgerPath, csvPath } = await recordLaunch(record);
   console.log("\nRecorded launch:");
   console.log(`  ledger (all launches, JSON): ${ledgerPath}`);
   console.log(`  ledger (all launches, CSV):  ${csvPath}`);

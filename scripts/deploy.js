@@ -514,7 +514,7 @@ async function main() {
   // or the front end's network config should read to get "the addresses in
   // use right now" for this network, instead of scrolling back through
   // console output.
-  const { currentPath, historyPath } = recordDeployment(network, deploymentSummary);
+  const { currentPath, historyPath } = await recordDeployment(network, deploymentSummary);
   console.log(`\nRecorded deployment for network "${network}":`);
   console.log(`  current (latest for this network): ${currentPath}`);
   console.log(`  history (every run, appended):     ${historyPath}`);

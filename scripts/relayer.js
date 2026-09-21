@@ -106,6 +106,7 @@ const { readTrackedTokens, upsertTrackedToken } = require("../lib/trackedTokensS
 const { readActivity, appendActivity } = require("../lib/activityStore");
 const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore");
 const { ROBINHOOD_NETWORKS } = require("../lib/networks");
+const { isDbConfigured, ensureSchema } = require("../lib/db");
 
 // Managed Node.js hosts (GoDaddy Node.js Hosting among them) inject the
 // port an app must listen on via the platform-standard PORT env var and
@@ -493,7 +494,7 @@ async function postLaunchPipeline({
     ...extra,
   };
 
-  const paths = recordLaunch(record);
+  const paths = await recordLaunch(record);
   console.log(`  recorded: ${paths.metaPath}`);
   return { implVerification, proxyVerification };
 }
@@ -537,7 +538,36 @@ function logEnvVarPresence() {
   }
 }
 
+// Storage-backend bootstrap — the single on/off switch documented in
+// lib/db.js. Called once, at the very top of main(), before anything else
+// touches a store module (lib/launchStore.js and friends all gate on the
+// exact same isDbConfigured() check on every call, so this isn't strictly
+// required for correctness — but running ensureSchema() once up front means
+// a misconfigured/unreachable database fails loudly at startup, with a
+// clear message, instead of surfacing later as a confusing error the first
+// time some unrelated request happens to touch the database).
+async function initStorageBackend() {
+  if (!isDbConfigured()) {
+    console.log(
+      "[storage] No DATABASE_URL/DB_* env vars set — using JSON-file storage under public/assets/ (see lib/db.js for how to enable MySQL)"
+    );
+    return;
+  }
+  try {
+    await ensureSchema();
+    console.log("[storage] MySQL configured — using database-backed storage");
+  } catch (err) {
+    console.error(
+      `[storage] MySQL is configured (DATABASE_URL/DB_HOST+DB_NAME) but ensureSchema() failed: ${err.message}\n` +
+        "Refusing to start with a half-broken database layer — double check DATABASE_URL/DB_HOST/DB_PORT/DB_USER/" +
+        "DB_PASSWORD/DB_NAME (see lib/db.js) and that the database is reachable from this host, then restart."
+    );
+    process.exit(1);
+  }
+}
+
 async function main() {
+  await initStorageBackend();
   logEnvVarPresence();
   const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
   if (!relayerPrivateKey) {
@@ -764,8 +794,8 @@ async function main() {
   // this reads. Only PUBLIC_FIELDS are sent back per launch — notably never
   // `flattenedSource`, which would make every response needlessly huge.
   const network = hre.network.name;
-  app.get("/launches", (_req, res) => {
-    const ledger = readLedger(network);
+  app.get("/launches", async (_req, res) => {
+    const ledger = await readLedger(network);
     const launches = ledger.map((entry) => {
       const publicEntry = {};
       for (const field of PUBLIC_FIELDS) publicEntry[field] = entry[field] ?? null;
@@ -786,7 +816,7 @@ async function main() {
         return sendJson(res, 400, { error: "signature does not match voucher.creator" });
       }
 
-      upsertVoucher(voucherHash, {
+      await upsertVoucher(voucherHash, {
         kind: watcher.kind,
         status: "received",
         voucher,
@@ -806,8 +836,8 @@ async function main() {
   // syncActiveNetworkFromServer, polled every 60s) so which network the
   // whole platform shows is one server-held value, not a per-browser
   // localStorage setting anyone could flip.
-  app.get("/active-network", (_req, res) => {
-    sendJson(res, 200, { network: getActiveNetwork() });
+  app.get("/active-network", async (_req, res) => {
+    sendJson(res, 200, { network: await getActiveNetwork() });
   });
 
   // Body: { network: "demo"|"live", timestamp, signature }. `signature` must
@@ -817,7 +847,7 @@ async function main() {
   // requestActiveNetworkChange() builds, or a real admin's signature will
   // simply fail to verify here (see lib/adminAuth.js's own comment on why
   // that's the safe failure direction).
-  app.post("/active-network", (req, res) => {
+  app.post("/active-network", async (req, res) => {
     const { network: targetNetwork, timestamp, signature } = req.body || {};
     if (targetNetwork !== "demo" && targetNetwork !== "live") {
       return sendJson(res, 400, { error: 'network must be "demo" or "live"' });
@@ -829,7 +859,7 @@ async function main() {
     if (!verifyAdminSignature(message, signature)) {
       return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
     }
-    setActiveNetwork(targetNetwork);
+    await setActiveNetwork(targetNetwork);
     console.log(`[admin] active network set to "${targetNetwork}".`);
     sendJson(res, 200, { network: targetNetwork });
   });
@@ -840,8 +870,8 @@ async function main() {
   // with no manual redeploy step. `config` returned here is always the
   // canonicalized shape (every CONFIG_KEYS entry, {demo,live}, missing
   // values as null) — never raw, unvalidated input.
-  app.get("/platform-config", (_req, res) => {
-    sendJson(res, 200, { config: getPlatformConfig() });
+  app.get("/platform-config", async (_req, res) => {
+    sendJson(res, 200, { config: await getPlatformConfig() });
   });
 
   // Body: { config, timestamp, signature }. `signature` must be a
@@ -852,7 +882,7 @@ async function main() {
   // and signed. lib/platformConfig.js's canonicalizePlatformConfig MUST stay
   // byte-identical to index.html's own copy or this will never verify a
   // real admin's signature (see that module's own comment).
-  app.post("/platform-config", (req, res) => {
+  app.post("/platform-config", async (req, res) => {
     const { config, timestamp, signature } = req.body || {};
     if (!config || typeof config !== "object") {
       return sendJson(res, 400, { error: "config is required" });
@@ -865,7 +895,7 @@ async function main() {
       return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
     }
     const canonical = canonicalizePlatformConfig(config);
-    setPlatformConfig(canonical);
+    await setPlatformConfig(canonical);
     console.log("[admin] platform config saved.");
     sendJson(res, 200, { config: canonical });
   });
@@ -956,7 +986,7 @@ async function main() {
         // best-effort only — a missing name()/symbol() shouldn't block tracking
       }
 
-      upsertTrackedToken(network, normalized, {
+      await upsertTrackedToken(network, normalized, {
         kind: "platform",
         name,
         symbol,
@@ -977,11 +1007,11 @@ async function main() {
 
   // ---- real trade activity / price history (see pollTokenActivity /
   // pollTokenPrices below for what populates these) ----
-  app.get("/activity", (_req, res) => {
-    sendJson(res, 200, { network, activity: readActivity(network) });
+  app.get("/activity", async (_req, res) => {
+    sendJson(res, 200, { network, activity: await readActivity(network) });
   });
 
-  app.get("/price-history/:tokenAddress", (req, res) => {
+  app.get("/price-history/:tokenAddress", async (req, res) => {
     // Piggybacks the tracked-tokens record for this address onto the same
     // response (rather than a separate round trip) — the platform-token
     // spotlight on index.html needs both the price history AND a couple of
@@ -989,11 +1019,11 @@ async function main() {
     // render its info panel, and it already fetches this endpoint once per
     // refresh. Purely additive: existing callers that only read `.history`
     // are unaffected.
-    const tracked = readTrackedTokens(network)[req.params.tokenAddress.toLowerCase()] || null;
+    const tracked = (await readTrackedTokens(network))[req.params.tokenAddress.toLowerCase()] || null;
     sendJson(res, 200, {
       network,
       tokenAddress: req.params.tokenAddress,
-      history: readPriceHistory(network, req.params.tokenAddress),
+      history: await readPriceHistory(network, req.params.tokenAddress),
       pairAddress: tracked ? tracked.pairAddress || null : null,
       initialSupply: tracked ? tracked.initialSupply || null : null,
     });
@@ -1020,12 +1050,12 @@ async function main() {
   // current chain tip, and how many price points have been sampled so far.
   app.get("/debug/token/:tokenAddress", async (req, res) => {
     const addr = req.params.tokenAddress.toLowerCase();
-    const tracked = readTrackedTokens(network)[addr] || null;
+    const tracked = (await readTrackedTokens(network))[addr] || null;
     const latestBlock = await hre.ethers.provider.getBlockNumber();
     const discovery = {};
     for (const watcher of watchers) {
       const factoryAddress = await watcher.factory.getAddress();
-      const cursor = getCursor(`${factoryAddress}:discovery`);
+      const cursor = await getCursor(`${factoryAddress}:discovery`);
       const blocksBehindRaw = cursor === null ? null : Math.max(0, latestBlock - cursor);
       const isStuck = cursor !== null && latestBlock - cursor > TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS;
       discovery[watcher.kind] = {
@@ -1045,7 +1075,7 @@ async function main() {
       tokenAddress: req.params.tokenAddress,
       trackedAsOf: tracked ? { pairAddress: tracked.pairAddress || null, kind: tracked.kind || null, symbol: tracked.symbol || null } : null,
       trackedTokenFound: !!tracked,
-      priceHistoryPointCount: readPriceHistory(network, req.params.tokenAddress).length,
+      priceHistoryPointCount: (await readPriceHistory(network, req.params.tokenAddress)).length,
       discovery,
     });
   });
@@ -1091,12 +1121,12 @@ async function main() {
     for (const watcher of watchers) {
       const factoryAddress = await watcher.factory.getAddress();
       const cursorKey = `${factoryAddress}:discovery`;
-      const before = getCursor(cursorKey);
+      const before = await getCursor(cursorKey);
       if (before !== null && before >= targetBlockNum - 1) {
         results[watcher.kind] = { factoryAddress, before, after: before, changed: false };
         continue;
       }
-      setCursor(cursorKey, targetBlockNum - 1);
+      await setCursor(cursorKey, targetBlockNum - 1);
       console.log(`[admin] discovery cursor for ${watcher.kind} (${factoryAddress}) moved ${before === null ? "(never run)" : before} -> ${targetBlockNum - 1}.`);
       results[watcher.kind] = { factoryAddress, before, after: targetBlockNum - 1, changed: true };
     }
@@ -1168,15 +1198,15 @@ async function main() {
   // factory's own relayer() wallet — see the module comment on
   // RELAYER_PRIVATE_KEY above. Remove once the /launches recordkeeping gap
   // is resolved.
-  app.get("/debug/vouchers", (_req, res) => {
-    sendJson(res, 200, { vouchers: readVouchers() });
+  app.get("/debug/vouchers", async (_req, res) => {
+    sendJson(res, 200, { vouchers: await readVouchers() });
   });
 
   if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
   if (customTokenFactoryAddress) app.post("/vouchers/custom", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom")));
 
   app.get("/status/:voucherHash", async (req, res) => {
-    const record = getVoucher(req.params.voucherHash);
+    const record = await getVoucher(req.params.voucherHash);
     if (!record) return sendJson(res, 404, { error: "unknown voucherHash" });
 
     const watcher = watchers.find((w) => w.kind === record.kind);
@@ -1198,7 +1228,7 @@ async function main() {
   async function pollWatcher(watcher) {
     const factoryAddress = await watcher.factory.getAddress();
     const latestBlock = await hre.ethers.provider.getBlockNumber();
-    const storedCursor = getCursor(factoryAddress);
+    const storedCursor = await getCursor(factoryAddress);
     const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // first run: only watch new deposits from now on
     if (fromBlock > latestBlock) return;
     const toBlock = Math.min(latestBlock, fromBlock + MAX_BLOCK_RANGE_PER_POLL);
@@ -1209,7 +1239,7 @@ async function main() {
         console.error(`[${watcher.kind}] error handling deposit in tx ${event.transactionHash}: ${err.message}`)
       );
     }
-    setCursor(factoryAddress, toBlock);
+    await setCursor(factoryAddress, toBlock);
   }
 
   // Does the actual work of relaying a deposit that DOES have a matching
@@ -1229,12 +1259,12 @@ async function main() {
     const voucher = normalizeVoucher(record.voucher, watcher.voucherFields, watcher.voucherUintFields);
     const expected = watcher.expectedDepositFn(voucher);
     if (amount !== expected) {
-      upsertVoucher(voucherHash, { status: "failed", error: `deposit amount ${amount} != expected ${expected}` });
+      await upsertVoucher(voucherHash, { status: "failed", error: `deposit amount ${amount} != expected ${expected}` });
       console.error(`[${watcher.kind}] deposit amount mismatch for ${voucherHash} — leaving it for the creator to reclaim after ${deadline}.`);
       return;
     }
 
-    upsertVoucher(voucherHash, { status: "deposited" });
+    await upsertVoucher(voucherHash, { status: "deposited" });
     console.log(`[${watcher.kind}] deposit confirmed for ${voucherHash}, relaying...`);
 
     try {
@@ -1266,7 +1296,7 @@ async function main() {
       const implementationAddress = await watcher.factory.tokenImplementation();
       const network = hre.network.name;
 
-      upsertVoucher(voucherHash, {
+      await upsertVoucher(voucherHash, {
         status: "relayed",
         txHash: receipt.hash,
         tokenAddress,
@@ -1296,7 +1326,7 @@ async function main() {
       });
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
-      upsertVoucher(voucherHash, { status: "failed", error: message });
+      await upsertVoucher(voucherHash, { status: "failed", error: message });
       console.error(`[${watcher.kind}] relay failed for ${voucherHash}: ${message}`);
       console.error(`  The creator's deposit is untouched and reclaimable once its deadline passes (reclaimDeposit).`);
     }
@@ -1324,9 +1354,9 @@ async function main() {
   // other unrecoverable case already was.
   async function handleDeposit(watcher, event) {
     const { voucherHash, creator, amount, deadline } = event.args;
-    const record = getVoucher(voucherHash);
+    const record = await getVoucher(voucherHash);
     if (!record || record.kind !== watcher.kind) {
-      upsertPendingDeposit(watcher.kind, voucherHash, {
+      await upsertPendingDeposit(watcher.kind, voucherHash, {
         creator,
         amount: amount.toString(),
         deadline: deadline.toString(),
@@ -1349,13 +1379,13 @@ async function main() {
   // even a few seconds late still gets relayed on the very next tick instead
   // of being lost the way it would have been before this fix.
   async function retryPendingDeposits(watcher) {
-    const pending = readPendingDeposits();
+    const pending = await readPendingDeposits();
     const nowSeconds = Math.floor(Date.now() / 1000);
     for (const [voucherHash, dep] of Object.entries(pending)) {
       if (dep.kind !== watcher.kind) continue;
-      const record = getVoucher(voucherHash);
+      const record = await getVoucher(voucherHash);
       if (record && record.kind === watcher.kind) {
-        removePendingDeposit(voucherHash);
+        await removePendingDeposit(voucherHash);
         console.log(`[${watcher.kind}] voucher for previously-unmatched deposit ${voucherHash} has arrived — relaying now.`);
         await relayMatchedDeposit(
           watcher,
@@ -1369,7 +1399,7 @@ async function main() {
           `[${watcher.kind}] giving up on deposit ${voucherHash} from ${dep.creator} — no matching voucher ever ` +
             `arrived and its deadline has passed. The creator can reclaim it (reclaimDeposit).`
         );
-        removePendingDeposit(voucherHash);
+        await removePendingDeposit(voucherHash);
       }
     }
   }
@@ -1395,7 +1425,7 @@ async function main() {
     const factoryAddress = await watcher.factory.getAddress();
     const cursorKey = `${factoryAddress}:discovery`;
     const latestBlock = await hre.ethers.provider.getBlockNumber();
-    const storedCursor = getCursor(cursorKey);
+    const storedCursor = await getCursor(cursorKey);
     // See TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS's and
     // TOKEN_DISCOVERY_STUCK_THRESHOLD_BLOCKS's own comments above: a cursor
     // that's either null OR implausibly far behind the tip (frozen at a
@@ -1416,7 +1446,7 @@ async function main() {
     for (const event of events) {
       const { token, creator, name, symbol, pair } = event.args;
       const pairAddress = pair && pair !== hre.ethers.ZeroAddress ? pair : null;
-      upsertTrackedToken(network, token, {
+      await upsertTrackedToken(network, token, {
         kind: watcher.kind,
         creator,
         name,
@@ -1426,7 +1456,7 @@ async function main() {
       });
       console.log(`[discovery] tracking ${watcher.kind} token $${symbol} (${token})${pairAddress ? ` with pair ${pairAddress}` : ""}.`);
     }
-    setCursor(cursorKey, toBlock);
+    await setCursor(cursorKey, toBlock);
   }
 
   async function tokenDiscoveryPollLoop() {
@@ -1540,8 +1570,8 @@ async function main() {
   // history before this feature existed was never recorded and isn't worth
   // a potentially enormous one-time backscan.
   async function pollTokenActivity() {
-    const tracked = readTrackedTokens(network);
-    const existing = readActivity(network);
+    const tracked = await readTrackedTokens(network);
+    const existing = await readActivity(network);
     const seen = new Set(existing.map((e) => `${e.txHash}:${e.logIndex}`));
     const blockTimestampCache = new Map();
 
@@ -1561,12 +1591,12 @@ async function main() {
         if (wethIsToken0 === undefined) {
           const token0 = await pair.token0();
           wethIsToken0 = token0.toLowerCase() !== entry.tokenAddress.toLowerCase();
-          upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
+          await upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
         }
 
         const cursorKey = `${entry.pairAddress}:activity`;
         const latestBlock = await hre.ethers.provider.getBlockNumber();
-        const storedCursor = getCursor(cursorKey);
+        const storedCursor = await getCursor(cursorKey);
         const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // skip pre-existing history, same as pollWatcher
         if (fromBlock > latestBlock) continue;
         const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
@@ -1590,7 +1620,7 @@ async function main() {
           const usdValue = (Number(ethAmount) / 1e18) * ethUsd;
           const t = await blockTimestampMs(event.blockNumber);
 
-          appendActivity(network, {
+          await appendActivity(network, {
             t,
             txHash: event.transactionHash,
             logIndex: event.index,
@@ -1602,7 +1632,7 @@ async function main() {
             usdValue,
           });
         }
-        setCursor(cursorKey, toBlock);
+        await setCursor(cursorKey, toBlock);
       } catch (err) {
         console.warn(`[activity] skip ${entry.tokenAddress}: ${err.message}`);
       }
@@ -1617,7 +1647,7 @@ async function main() {
   // ---- live price / market cap / graduation sampling (backs
   // GET /price-history/:tokenAddress) ----
   async function pollTokenPrices() {
-    const tracked = readTrackedTokens(network);
+    const tracked = await readTrackedTokens(network);
     for (const entry of Object.values(tracked)) {
       try {
         // A manually-tracked plain token (kind: "platform" — see
@@ -1644,7 +1674,7 @@ async function main() {
               const onChainPair = await univ2Factory.getPair(entry.tokenAddress, wethAddress);
               if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
                 entry.pairAddress = onChainPair;
-                upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
+                await upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
               }
             } catch (err) {
               // best-effort backfill only — next tick tries again
@@ -1655,7 +1685,7 @@ async function main() {
           const pair = await hre.ethers.getContractAt(UNIV2_PAIR_ABI, entry.pairAddress, hre.ethers.provider);
           const [reserves, token0] = await Promise.all([pair.getReserves(), pair.token0()]);
           const wethIsToken0 = token0.toLowerCase() !== entry.tokenAddress.toLowerCase();
-          if (entry.wethIsToken0 !== wethIsToken0) upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
+          if (entry.wethIsToken0 !== wethIsToken0) await upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
           const tokenReserve = wethIsToken0 ? reserves.reserve1 : reserves.reserve0;
           const wethReserve = wethIsToken0 ? reserves.reserve0 : reserves.reserve1;
 
@@ -1679,7 +1709,7 @@ async function main() {
           // doesn't have to special-case a missing field.
           const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct: 100, taxActive: false };
           if (holders !== null) point.holders = holders;
-          appendPricePoint(network, entry.tokenAddress, point);
+          await appendPricePoint(network, entry.tokenAddress, point);
           continue;
         }
 
@@ -1694,7 +1724,7 @@ async function main() {
             const onChainPair = await watcher.factory.pairOf(entry.tokenAddress);
             if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
               entry.pairAddress = onChainPair;
-              upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
+              await upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
             }
           }
         }
@@ -1703,7 +1733,7 @@ async function main() {
         const pair = await hre.ethers.getContractAt(UNIV2_PAIR_ABI, entry.pairAddress, hre.ethers.provider);
         const [reserves, token0] = await Promise.all([pair.getReserves(), pair.token0()]);
         const wethIsToken0 = token0.toLowerCase() !== entry.tokenAddress.toLowerCase();
-        if (entry.wethIsToken0 !== wethIsToken0) upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
+        if (entry.wethIsToken0 !== wethIsToken0) await upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
         const tokenReserve = wethIsToken0 ? reserves.reserve1 : reserves.reserve0;
         const wethReserve = wethIsToken0 ? reserves.reserve0 : reserves.reserve1;
 
@@ -1715,7 +1745,7 @@ async function main() {
           token.graduationTargetUsd(),
           entry.kind === "custom" ? token.platformTaxActive() : token.taxActive(),
         ]);
-        if (entry.priceFeed !== feedAddress) upsertTrackedToken(network, entry.tokenAddress, { priceFeed: feedAddress });
+        if (entry.priceFeed !== feedAddress) await upsertTrackedToken(network, entry.tokenAddress, { priceFeed: feedAddress });
 
         const ethUsd = await fetchEthUsdFromFeed(feedAddress);
         const priceUsd = computeTokenPriceUsd(tokenReserve, wethReserve, ethUsd);
@@ -1725,7 +1755,7 @@ async function main() {
 
         const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive };
         if (holders !== null) point.holders = holders;
-        appendPricePoint(network, entry.tokenAddress, point);
+        await appendPricePoint(network, entry.tokenAddress, point);
       } catch (err) {
         console.warn(`[price] skip ${entry.tokenAddress}: ${err.message}`);
       }
@@ -1836,7 +1866,7 @@ async function main() {
   // handleDeposit's per-event error isolation above.
   async function sweepFeeWalletRewardsOnce() {
     const network = hre.network.name;
-    const ledger = readLedger(network);
+    const ledger = await readLedger(network);
     const distributorAddress = await feeWalletDistributor.getAddress();
     const routerAddress = await feeWalletDistributor.router();
     const wethAddress = await (
@@ -1948,7 +1978,7 @@ async function main() {
     if (platformTokenAddress === hre.ethers.ZeroAddress) return;
 
     const network = hre.network.name;
-    const ledger = readLedger(network);
+    const ledger = await readLedger(network);
     const distributorAddress = await platformRewardsDistributor.getAddress();
     const routerAddress = await platformRewardsDistributor.router();
     const wethAddress = await (
