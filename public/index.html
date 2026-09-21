@@ -1132,6 +1132,29 @@
   function platformConfigMessage(cfg, timestamp){
     return `Hood Launch admin: update platform config to ${JSON.stringify(canonicalizePlatformConfig(cfg))} at ${timestamp}`;
   }
+
+  // Must produce byte-identical output to relayer.js's own
+  // canonicalizeTokenMetadata/tokenMetadataMessage (lib/tokenMetadata.js)
+  // for the same input, or a signature made here won't verify there — see
+  // POST /token-metadata/:tokenAddress's own comment in relayer.js. Kept in
+  // sync by hand, same convention as canonicalizePlatformConfig/
+  // platformConfigMessage just above.
+  function canonicalizeTokenMetadata(metadata){
+    const socials = (metadata && metadata.socials) || {};
+    return {
+      logo: (metadata && metadata.logo) || null,
+      banner: (metadata && metadata.banner) || null,
+      socials: {
+        website: socials.website || null,
+        twitter: socials.twitter || null,
+        telegram: socials.telegram || null,
+        discord: socials.discord || null,
+      },
+    };
+  }
+  function tokenMetadataMessage(tokenAddress, metadata, timestamp){
+    return `Hood Launch: update token metadata for ${tokenAddress} to ${JSON.stringify(canonicalizeTokenMetadata(metadata))} at ${timestamp}`;
+  }
   const CONFIG_LABELS = {
     tokenFactory: "TokenFactory",
     customTokenFactory: "CustomTokenFactory",
@@ -1406,6 +1429,38 @@
     }catch(err){
       toast("Couldn't reach the relayer to switch networks.");
     }
+  }
+
+  // Best-effort background sync of a token's logo/banner/socials to the
+  // relayer (see POST /token-metadata/:tokenAddress in scripts/relayer.js),
+  // so they persist server-side instead of living only as data: URIs in
+  // this one browser's localStorage (see saveCustomTokens()'s own comment).
+  // Same personal_sign + fetch shape as requestActiveNetworkChange above,
+  // except: (1) it's gated per-token against that token's own creator, not
+  // a fixed admin wallet, and (2) it never toasts or throws on failure —
+  // the local edit (saveCustomTokens()) already succeeded and is what the
+  // creator's own browser shows regardless of whether this sync lands, so a
+  // rejected signature or an unreachable relayer is silently swallowed
+  // rather than nagging the user about a background sync they didn't
+  // explicitly ask to watch.
+  async function syncTokenMetadataToServer(t){
+    if(!(t && t.onChain && t.tokenAddress && window.ethereum)) return;
+    const url = relayerApiUrl(t.networkMode);
+    if(!url) return;
+    const metadata = { logo: t.logo||null, banner: t.banner||null, socials: t.socials||{} };
+    const timestamp = Date.now();
+    const message = tokenMetadataMessage(t.tokenAddress, metadata, timestamp);
+    let signature;
+    try{
+      signature = await window.ethereum.request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
+    }catch(err){ return; } // rejected — this is a best-effort background sync, don't nag the user
+    try{
+      await fetch(`${url}/token-metadata/${t.tokenAddress}`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ ...metadata, timestamp, signature }),
+      });
+    }catch(err){ /* best-effort — the local edit already succeeded via saveCustomTokens */ }
   }
 
   // Same admin-signed pattern as requestActiveNetworkChange above, for the
@@ -3175,6 +3230,7 @@
       };
       tokens.unshift(newToken);
       saveCustomTokens();
+      syncTokenMetadataToServer(newToken).catch(()=>{});
       if(isLiquidity) refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real price
       if(isLiquidity){
         setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on ${escapeHtml(NETWORKS[appMode].chainName)}.`);
@@ -3630,6 +3686,7 @@
       };
       tokens.unshift(newToken);
       saveCustomTokens();
+      syncTokenMetadataToServer(newToken).catch(()=>{});
       if(addLiquidity) refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real price
       if(addLiquidity){
         setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on ${escapeHtml(NETWORKS[appMode].chainName)}.`);
@@ -4029,7 +4086,7 @@
       // launched from a different browser/device once you reconnect the
       // same wallet here.
       creatorWallet: entry.creator || null,
-      socials: {}, logo: null, banner: null,
+      socials: entry.socials || {}, logo: entry.logo || null, banner: entry.banner || null,
     };
   }
 
@@ -4074,6 +4131,24 @@
       // wallet connected here, so pick up any advance it made since the last
       // time this tab fetched /launches, the same way checkPendingLiquidity
       // does for a connected wallet, but working for every visitor.
+      //
+      // Logo/banner/socials sync unconditionally here, NOT gated behind the
+      // tokenStatus-advance check below — unlike tokenStatus, which only
+      // ever moves one way (DEPLOYED -> LAUNCHED -> GRADUATED), metadata
+      // can change at any time (another browser/device editing this same
+      // token's branding) independent of lifecycle stage, so it can't reuse
+      // that rank-gate. Compared before assigning so a no-op poll (the
+      // overwhelmingly common case) doesn't spuriously flip `updated` and
+      // trigger a re-render for nothing.
+      const nextLogo = entry.logo ?? null;
+      const nextBanner = entry.banner ?? null;
+      const nextSocials = entry.socials || {};
+      if(existing.logo !== nextLogo || existing.banner !== nextBanner || JSON.stringify(existing.socials||{}) !== JSON.stringify(nextSocials)){
+        existing.logo = nextLogo;
+        existing.banner = nextBanner;
+        existing.socials = nextSocials;
+        updated = true;
+      }
       if(typeof entry.tokenStatus !== "number") continue;
       const nextStatus = statusFromTokenStatus(entry, !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS));
       if((STATUS_RANK[nextStatus]||0) > (STATUS_RANK[existing.status]||0)){
@@ -7851,6 +7926,7 @@
     t.logo = editImages.logo;
     t.banner = editImages.banner;
     saveCustomTokens();
+    syncTokenMetadataToServer(t).catch(()=>{});
     closeEditToken();
     toast(`$${t.ticker} updated.`);
     renderGrid();
