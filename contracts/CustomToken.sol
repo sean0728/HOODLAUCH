@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IUniswapV2Router02.sol";
 import "./interfaces/IUniswapV2Pair.sol";
 import "./interfaces/IAggregatorV3.sol";
+import "./interfaces/ITokenFactoryTaxDefaults.sol";
 
 /// @title CustomToken
 /// @notice A configurable ERC20 that CustomTokenFactory clones (EIP-1167,
@@ -246,11 +247,11 @@ contract CustomToken is ERC20, ReentrancyGuard {
     }
 
     modifier onlyFactory() {
-        require(msg.sender == factory, "CustomToken: caller is not the factory");
+        if (msg.sender != factory) revert NotFactory();
         _;
     }
     modifier onlyCreator() {
-        require(msg.sender == creator, "CustomToken: caller is not the creator");
+        if (msg.sender != creator) revert NotCreator();
         _;
     }
 
@@ -343,6 +344,72 @@ contract CustomToken is ERC20, ReentrancyGuard {
     event CreatorRenounced(address indexed previousCreator);
     event TaxExemptionUpdated(address indexed account, bool exempt);
 
+    // ---- custom errors ----
+    // Behavior-preserving swap-in for what used to be require(cond, "CustomToken: ...")
+    // string-literal reverts throughout this contract: same validation, same
+    // order, same revert conditions — only how the revert reason is encoded
+    // on-chain changes (a 4-byte selector instead of a stored/ABI-encoded
+    // string per call site), which is what keeps this contract's deployed
+    // bytecode under the 24,576-byte Spurious Dragon limit. Grouped here the
+    // same way the events above are grouped, rather than declared inline at
+    // each call site.
+
+    // access control
+    error NotFactory(); // caller is not the factory
+    error NotCreator(); // caller is not the creator
+    error NotPendingCreator(); // caller is not the pending creator
+    error InternalOnly(); // callable only via this contract's own external self-call
+
+    // initialize()
+    error AlreadyInitialized();
+    error SupplyMustBePositive(); // supply must be > 0
+    error SupplyTooLarge(); // supply exceeds MAX_TOTAL_SUPPLY
+    error InvalidCreator();
+    error InvalidMintRecipient();
+    error InvalidFactory();
+    error InvalidRouter();
+    error ReflectionAssetIsSelf(); // reflection asset cannot be this token
+    error BuyTaxExceedsLimit(); // buy tax exceeds 5%
+    error SellTaxExceedsLimit(); // sell tax exceeds 5%
+    error MarketingWalletRequired(); // marketing wallet required when marketing fee is set
+
+    // pair / platform tax wiring
+    error PairAlreadySet();
+    error InvalidPair();
+    error NoPoolFound();
+    error PlatformTaxAlreadyConfigured();
+    error PairNotSet();
+    error RewardBpsExceedsFeeBps(); // rewardBps + creatorRewardBps exceeds feeBps
+    error RewardBpsRequiresDistributor();
+    error CreatorRewardBpsRequiresDistributor();
+    error CombinedTaxExceedsLimit(); // combined platform and creator tax exceeds 100%
+    error PlatformTaxNotConfigured();
+    error InvalidPriceFeed();
+    error InvalidOracleStaleness(); // oracle staleness must be > 0
+    error PriceFeedStillFresh(); // current price feed is still fresh, cannot be repointed
+
+    // operational setters
+    error InvalidWallet();
+    error ThresholdOutOfBounds();
+    error SlippageBelowFloor(); // slippage below 5% floor
+    error SlippageAboveCeiling(); // slippage above 8% ceiling
+    error InvalidAccount();
+
+    // creator handoff / rescue
+    error InvalidRecipient();
+    error AmountExceedsRescuable();
+    error RescueTransferFailed();
+
+    // reflections
+    error DividendCorrectionOverflow();
+    error NothingToClaim();
+    error EthClaimTransferFailed();
+    error ReflectionTokenClaimTransferFailed();
+    error MaxHoldersMustBePositive();
+
+    // swap-and-process
+    error MarketingTransferFailed();
+
     // Runs exactly once, on the implementation contract the factory clones
     // from. Never runs again on any clone.
     constructor() ERC20("", "") {
@@ -364,21 +431,21 @@ contract CustomToken is ERC20, ReentrancyGuard {
         address reflectionAsset_,
         address marketingWallet_
     ) external {
-        require(!_initialized, "CustomToken: already initialized");
-        require(totalSupply_ > 0, "CustomToken: supply must be > 0");
-        require(totalSupply_ <= MAX_TOTAL_SUPPLY, "CustomToken: supply too large");
-        require(creator_ != address(0), "CustomToken: invalid creator");
-        require(mintTo_ != address(0), "CustomToken: invalid mint recipient");
-        require(factory_ != address(0), "CustomToken: invalid factory");
-        require(router_ != address(0), "CustomToken: invalid router");
-        require(reflectionAsset_ != address(this), "CustomToken: reflection asset cannot be this token");
+        if (_initialized) revert AlreadyInitialized();
+        if (totalSupply_ == 0) revert SupplyMustBePositive();
+        if (totalSupply_ > MAX_TOTAL_SUPPLY) revert SupplyTooLarge();
+        if (creator_ == address(0)) revert InvalidCreator();
+        if (mintTo_ == address(0)) revert InvalidMintRecipient();
+        if (factory_ == address(0)) revert InvalidFactory();
+        if (router_ == address(0)) revert InvalidRouter();
+        if (reflectionAsset_ == address(this)) revert ReflectionAssetIsSelf();
 
         uint256 buyTotal = uint256(buyFees_.reflectionBps) + buyFees_.marketingBps + buyFees_.liquidityBps + buyFees_.burnBps;
         uint256 sellTotal = uint256(sellFees_.reflectionBps) + sellFees_.marketingBps + sellFees_.liquidityBps + sellFees_.burnBps;
-        require(buyTotal <= MAX_TOTAL_BPS, "CustomToken: buy tax exceeds 5%");
-        require(sellTotal <= MAX_TOTAL_BPS, "CustomToken: sell tax exceeds 5%");
+        if (buyTotal > MAX_TOTAL_BPS) revert BuyTaxExceedsLimit();
+        if (sellTotal > MAX_TOTAL_BPS) revert SellTaxExceedsLimit();
         if (buyFees_.marketingBps > 0 || sellFees_.marketingBps > 0) {
-            require(marketingWallet_ != address(0), "CustomToken: marketing wallet required when marketing fee is set");
+            if (marketingWallet_ == address(0)) revert MarketingWalletRequired();
         }
 
         _initialized = true;
@@ -405,49 +472,151 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// after it seeds this token's pool — mirrors
     /// LaunchedToken.configureTax's role for the simpler contract.
     function setPair(address pair_) external onlyFactory {
-        require(pair == address(0), "CustomToken: pair already set");
-        require(pair_ != address(0), "CustomToken: invalid pair");
+        if (pair != address(0)) revert PairAlreadySet();
+        if (pair_ == address(0)) revert InvalidPair();
         pair = pair_;
         emit PairSet(pair_);
     }
 
-    /// @notice The only way a "deploy-only" CustomToken (created via
-    /// CustomTokenFactory.createCustomToken with addLiquidity=false) can
-    /// ever activate its own buy/sell tax: _update()'s isBuy/isSell checks
-    /// are gated on `pair` being set, and the deploy-only path never calls
-    /// setPair() above — the full supply just mints straight to the
-    /// creator, with no pool, no tax of any kind, exactly like
-    /// TokenFactory's "Deploy Token". If that creator later adds liquidity
-    /// entirely on their own — a plain call to the DEX router, completely
-    /// outside this platform — the pool exists, but this token still has
-    /// no idea about it until someone calls this.
+    /// @notice The shared pool-detection-and-activation core used both by
+    /// the fully automatic in-_update() path (see the top of _update()
+    /// below) and by activateIndependentPair()'s manual "poke it right
+    /// now" convenience below — both produce identical results, since
+    /// both funnel through here.
     ///
-    /// Only the creator can call it (their own choice when to switch their
-    /// configured tax on), and only once, and only after a real pool
-    /// actually exists: the pair address itself is never taken as an
-    /// argument — it's derived the same trustless way
-    /// CustomTokenFactory._seedLiquidityAndBuyIn does it, straight off the
-    /// DEX factory's own getPair(token, WETH), so nobody can point `pair`
-    /// at an arbitrary address.
+    /// @dev Both call sites already guarantee `pair == address(0)` before
+    /// calling this (see activateIndependentPair()'s own require and
+    /// _update()'s `pair == address(0)` guard), so this trusts that
+    /// precondition rather than re-checking it — and since
+    /// configurePlatformTax() itself requires `pair != address(0)` before
+    /// it can ever set platformTaxConfigured, that same precondition also
+    /// guarantees platformTaxConfigured is still false here, so
+    /// _maybeAutoConfigurePlatformTax() below is likewise called
+    /// unconditionally. Does nothing (returns false) if no real pool is
+    /// found yet. Otherwise derives the pair the same trustless way
+    /// CustomTokenFactory itself does at launch (straight off the DEX
+    /// factory's own getPair(token, WETH), so nobody can point `pair` at
+    /// an arbitrary address), sets it, emits PairSet — AND, immediately
+    /// after, attempts to also auto-configure the platform's own
+    /// graduating tax. Before this change, a deploy-only CustomToken's
+    /// platformTaxConfigured/platformTaxActive stayed false forever, by
+    /// design; this reverses that — see the contract-level rationale
+    /// above activateIndependentPair.
     ///
-    /// Deliberately does nothing to the platform's own graduating tax.
-    /// configurePlatformTax() is onlyFactory and is only ever invoked from
-    /// CustomTokenFactory._seedLiquidityAndBuyIn() — a path a deploy-only
-    /// token's creation never went through — so platformTaxConfigured and
-    /// platformTaxActive stay false forever here, no matter when this is
-    /// called: the platform's 0.25% tax is permanently out of reach for a
-    /// "Deploy Custom Tax Token" launch, exactly as intended. The
-    /// resulting pool is also never LP-locked by this platform — that
-    /// only ever happens inside the atomic addLiquidity=true path — so
-    /// activating here doesn't create or imply any lock.
-    function activateIndependentPair() external onlyCreator {
-        require(pair == address(0), "CustomToken: pair already set");
+    /// The resulting pool is never LP-locked by this platform regardless
+    /// of how it's found — that only ever happens inside the atomic
+    /// addLiquidity=true path — so activating here doesn't create or
+    /// imply any lock.
+    ///
+    /// @dev External purely so both call sites can wrap it in try/catch —
+    /// same pattern as _computeMarketCapFromPair/_processLiquidity/
+    /// _processMarketing/_processReflections elsewhere in this contract
+    /// (Solidity's try/catch only guards external calls, never arbitrary
+    /// internal logic). Not meant to be called by anything but this
+    /// contract itself, hence the msg.sender check. This matters here
+    /// specifically because _update() below calls this unconditionally on
+    /// every transfer of a still-pool-less token, including the very
+    /// first mint inside initialize() — router/factory are ordinarily
+    /// real, correctly-implemented contracts, but if either one were ever
+    /// misconfigured, temporarily misbehaving, or (as plenty of this
+    /// file's own lower-level tests deliberately do) simply not a real
+    /// router/factory at all, every external call below would revert;
+    /// without try/catch that revert would propagate out of _update() and
+    /// brick the mint/transfer that triggered it, instead of just leaving
+    /// this detection attempt unable to run this time.
+    ///
+    /// The platform-tax half (after PairSet is emitted) pulls
+    /// CustomTokenFactory's CURRENT tax defaults and self-configures,
+    /// mirroring configurePlatformTax()'s own field-by-field assignment
+    /// exactly — see LaunchedToken._maybeAutoActivateTax for the
+    /// identical reasoning on the simpler token (no "snapshot at deploy
+    /// time" exists for a deploy-only token, since none was ever taken;
+    /// whatever the platform's config is at the moment the pool is first
+    /// found is the only sensible value to use). This runs inside an
+    /// arbitrary caller's ordinary transfer (or inside
+    /// activateIndependentPair()'s manual call), so it must never revert
+    /// over a platform-side misconfiguration: it replicates both of
+    /// configurePlatformTax()'s own require() invariants defensively, but
+    /// skips configuring instead of reverting if either would fail —
+    /// `pair` still gets set either way, so the creator's own
+    /// already-configured buy/sell tax, if any, still activates
+    /// independently of whether the platform's portion could be safely
+    /// added right now. Note this is a one-shot attempt bundled with pool
+    /// detection: since `pair` is set unconditionally the moment a pool is
+    /// found (whether or not the platform-tax half succeeds), and this
+    /// whole function only ever runs while `pair == address(0)`, a
+    /// platform-side fix made AFTER the pool was already found has no
+    /// later transfer to retry against for that token — platformTaxConfigured
+    /// stays permanently false for it. This mirrors configurePlatformTax()
+    /// itself, which has always been a single onlyFactory, exactly-once
+    /// call with no separate retry entry point either; it isn't a
+    /// regression this change introduces. In practice this guard is
+    /// unreachable through CustomTokenFactory's own real, live
+    /// configuration anyway (its setTaxDefaults()/configurePlatformTax()
+    /// already enforce both invariants at the platform level — this is
+    /// defense in depth, not a path expected to ever actually trip).
+    function _activatePoolIfFound() external returns (bool activated) {
+        if (msg.sender != address(this)) revert InternalOnly();
         address dexFactory = IUniswapV2Router02(router).factory();
         address weth = IUniswapV2Router02(router).WETH();
         address detectedPair = IUniswapV2FactoryMinimal(dexFactory).getPair(address(this), weth);
-        require(detectedPair != address(0), "CustomToken: no pool found yet");
+        if (detectedPair == address(0)) return false;
+
         pair = detectedPair;
         emit PairSet(detectedPair);
+
+        ITokenFactoryTaxDefaults tokenFactory = ITokenFactoryTaxDefaults(factory);
+        uint256 feeBps_ = tokenFactory.feeBps();
+        address rewardsDistributor_ = tokenFactory.rewardsDistributor();
+        address creatorRewardsDistributor_ = tokenFactory.creatorRewardsDistributor();
+        // Same "distributor unset -> bps forced to 0" defense
+        // CustomTokenFactory._seedLiquidityAndBuyIn applies before calling
+        // configurePlatformTax() — replicated here rather than trusting
+        // the raw getters directly.
+        uint256 rewardBps_ = rewardsDistributor_ != address(0) ? tokenFactory.rewardBps() : 0;
+        uint256 creatorRewardBps_ = creatorRewardsDistributor_ != address(0) ? tokenFactory.creatorRewardBps() : 0;
+
+        // Mirrors configurePlatformTax()'s own two requires —
+        // rewardBps_ + creatorRewardBps_ <= feeBps_, and the platform's
+        // feeBps_ plus this token's already-locked-in creator-side tax
+        // (buyFees/sellFees, fixed back at initialize()) not summing past
+        // 100% (else _update()'s `value - cuts.total` would underflow and
+        // permanently brick every future transfer) — but skip, don't
+        // revert, the calling transfer if either would fail.
+        if (rewardBps_ + creatorRewardBps_ <= feeBps_ && feeBps_ + _maxCreatorFeeTotal() <= 10_000) {
+            _applyPlatformTaxConfig(
+                tokenFactory.platformFeeWallet(), feeBps_, tokenFactory.priceFeed(), tokenFactory.graduationTargetUsd(),
+                tokenFactory.maxOracleStaleness(), rewardsDistributor_, rewardBps_, creatorRewardsDistributor_,
+                creatorRewardBps_, tokenFactory.feeWalletDistributor()
+            );
+        }
+        return true;
+    }
+
+    /// @notice Manual "poke it right now" convenience for a "deploy-only"
+    /// CustomToken (created via CustomTokenFactory.createCustomToken with
+    /// addLiquidity=false): if a creator (or anyone) has added liquidity
+    /// for this token directly against the DEX, calling this activates it
+    /// immediately instead of waiting for the next ordinary transfer to
+    /// trigger the same detection automatically from _update() below —
+    /// both paths funnel through the same _activatePoolIfFound() and so
+    /// produce identical results.
+    ///
+    /// @dev Callable by ANYONE, not just the creator — a deliberate
+    /// behavior change from this contract's earlier, creator-only
+    /// version. The safety property that actually matters here is "a
+    /// pool genuinely, verifiably exists on-chain" (still enforced below:
+    /// the pair is derived trustlessly off the DEX factory, never taken
+    /// as an argument), not who happens to call the function announcing
+    /// that fact. Since the automatic in-_update() path is already fully
+    /// permissionless by construction — any ordinary transfer, by
+    /// anyone, can trigger the exact same activation — gating only this
+    /// manual convenience version behind onlyCreator no longer served a
+    /// real purpose and was merely inconsistent with the automatic path.
+    function activateIndependentPair() external {
+        if (pair != address(0)) revert PairAlreadySet();
+        bool activated = this._activatePoolIfFound();
+        if (!activated) revert NoPoolFound();
     }
 
     /// @notice One-time wiring step, called by the factory immediately
@@ -470,14 +639,13 @@ contract CustomToken is ERC20, ReentrancyGuard {
         uint256 creatorRewardBps_,
         address feeWalletDistributor_
     ) external onlyFactory {
-        require(!platformTaxConfigured, "CustomToken: platform tax already configured");
-        require(pair != address(0), "CustomToken: pair not set yet");
-        require(rewardBps_ + creatorRewardBps_ <= feeBps_, "CustomToken: rewardBps+creatorRewardBps exceeds feeBps");
-        require(rewardsDistributor_ != address(0) || rewardBps_ == 0, "CustomToken: rewardBps requires a distributor");
-        require(
-            creatorRewardsDistributor_ != address(0) || creatorRewardBps_ == 0,
-            "CustomToken: creatorRewardBps requires a distributor"
-        );
+        if (platformTaxConfigured) revert PlatformTaxAlreadyConfigured();
+        if (pair == address(0)) revert PairNotSet();
+        if (rewardBps_ + creatorRewardBps_ > feeBps_) revert RewardBpsExceedsFeeBps();
+        if (rewardsDistributor_ == address(0) && rewardBps_ != 0) revert RewardBpsRequiresDistributor();
+        if (creatorRewardsDistributor_ == address(0) && creatorRewardBps_ != 0) {
+            revert CreatorRewardBpsRequiresDistributor();
+        }
         // Defends against the platform's own feeBps_ and this token's
         // already-locked-in creator-side tax (buyFees/sellFees, set back
         // at initialize()) summing past 100%. If they ever did,
@@ -489,11 +657,42 @@ contract CustomToken is ERC20, ReentrancyGuard {
         // but this closes the combination off at configuration time
         // rather than relying on the platform owner never raising feeBps_
         // without checking.
+        if (feeBps_ + _maxCreatorFeeTotal() > 10_000) revert CombinedTaxExceedsLimit();
+
+        _applyPlatformTaxConfig(
+            feeWallet_, feeBps_, priceFeed_, graduationTargetUsd_, maxOracleStaleness_,
+            rewardsDistributor_, rewardBps_, creatorRewardsDistributor_, creatorRewardBps_, feeWalletDistributor_
+        );
+    }
+
+    /// @dev The larger of buyFees'/sellFees' own combined bps totals —
+    /// shared by configurePlatformTax()'s require and
+    /// _maybeAutoConfigurePlatformTax()'s identical defensive check, so
+    /// the computation exists exactly once in the compiled contract
+    /// rather than twice.
+    function _maxCreatorFeeTotal() private view returns (uint256) {
         uint256 buyTotal = uint256(buyFees.reflectionBps) + buyFees.marketingBps + buyFees.liquidityBps + buyFees.burnBps;
         uint256 sellTotal = uint256(sellFees.reflectionBps) + sellFees.marketingBps + sellFees.liquidityBps + sellFees.burnBps;
-        uint256 maxCreatorTotal = buyTotal > sellTotal ? buyTotal : sellTotal;
-        require(feeBps_ + maxCreatorTotal <= 10_000, "CustomToken: combined platform and creator tax exceeds 100%");
+        return buyTotal > sellTotal ? buyTotal : sellTotal;
+    }
 
+    /// @dev The actual field-by-field write configurePlatformTax() and
+    /// _maybeAutoConfigurePlatformTax() both need, factored out so it
+    /// exists exactly once in the compiled contract rather than twice —
+    /// callers are responsible for validating everything first (this
+    /// performs no checks of its own).
+    function _applyPlatformTaxConfig(
+        address feeWallet_,
+        uint256 feeBps_,
+        address priceFeed_,
+        uint256 graduationTargetUsd_,
+        uint256 maxOracleStaleness_,
+        address rewardsDistributor_,
+        uint256 rewardBps_,
+        address creatorRewardsDistributor_,
+        uint256 creatorRewardBps_,
+        address feeWalletDistributor_
+    ) private {
         platformTaxConfigured = true;
         platformFeeWallet = feeWallet_;
         platformFeeBps = feeBps_;
@@ -523,11 +722,11 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// it, the owner could repoint a healthy, currently-live token's oracle
     /// inputs at any time for any reason.
     function updatePriceFeed(address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyFactory {
-        require(platformTaxConfigured, "CustomToken: platform tax not configured");
-        require(newPriceFeed_ != address(0), "CustomToken: invalid price feed");
-        require(newMaxOracleStaleness_ > 0, "CustomToken: oracle staleness must be > 0");
+        if (!platformTaxConfigured) revert PlatformTaxNotConfigured();
+        if (newPriceFeed_ == address(0)) revert InvalidPriceFeed();
+        if (newMaxOracleStaleness_ == 0) revert InvalidOracleStaleness();
         (, bool feedIsFresh) = currentMarketCapInFeedDecimals();
-        require(!feedIsFresh, "CustomToken: current price feed is still fresh, cannot be repointed");
+        if (feedIsFresh) revert PriceFeedStillFresh();
         priceFeed = IAggregatorV3(newPriceFeed_);
         maxOracleStaleness = newMaxOracleStaleness_;
         emit PriceFeedUpdated(newPriceFeed_, newMaxOracleStaleness_);
@@ -541,7 +740,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// wallet change happen (event below), but nobody, including this
     /// contract's own code, can touch the tax rates themselves again.
     function setMarketingWallet(address newWallet) external onlyCreator {
-        require(newWallet != address(0), "CustomToken: invalid wallet");
+        if (newWallet == address(0)) revert InvalidWallet();
         marketingWallet = newWallet;
         emit MarketingWalletUpdated(newWallet);
     }
@@ -553,7 +752,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// not a fee rate, so letting the creator tune it doesn't reopen the
     /// "rates are locked forever" guarantee above.
     function setSwapThreshold(uint256 newThreshold) external onlyCreator {
-        require(newThreshold > 0 && newThreshold <= totalSupply() / 20, "CustomToken: threshold out of bounds");
+        if (newThreshold == 0 || newThreshold > totalSupply() / 20) revert ThresholdOutOfBounds();
         swapThreshold = newThreshold;
         emit SwapThresholdUpdated(newThreshold);
     }
@@ -563,8 +762,8 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// Bounded to the same 5.00%-8.00% band already used elsewhere in this
     /// codebase for the identical purpose.
     function setProcessingSlippageBps(uint256 newBps) external onlyCreator {
-        require(newBps >= MIN_PROCESSING_SLIPPAGE_BPS, "CustomToken: slippage below 5% floor");
-        require(newBps <= MAX_PROCESSING_SLIPPAGE_BPS, "CustomToken: slippage above 8% ceiling");
+        if (newBps < MIN_PROCESSING_SLIPPAGE_BPS) revert SlippageBelowFloor();
+        if (newBps > MAX_PROCESSING_SLIPPAGE_BPS) revert SlippageAboveCeiling();
         processingSlippageBps = uint16(newBps);
         emit ProcessingSlippageBpsUpdated(newBps);
     }
@@ -574,7 +773,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// live `creator` role until the proposed address calls
     /// acceptCreator() itself.
     function transferCreator(address newCreator) external onlyCreator {
-        require(newCreator != address(0), "CustomToken: invalid creator");
+        if (newCreator == address(0)) revert InvalidCreator();
         pendingCreator = newCreator;
         emit CreatorTransferStarted(creator, newCreator);
     }
@@ -586,7 +785,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// rescueToken, rescueEth) starts listening to it instead of the old
     /// creator.
     function acceptCreator() external {
-        require(msg.sender == pendingCreator, "CustomToken: caller is not the pending creator");
+        if (msg.sender != pendingCreator) revert NotPendingCreator();
         address previousCreator = creator;
         creator = pendingCreator;
         pendingCreator = address(0);
@@ -628,7 +827,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// totalDividendsWithdrawn) — for any other token, the full balance
     /// is rescuable since this contract never intentionally holds one.
     function rescueToken(address token, address to, uint256 amount) external onlyCreator {
-        require(to != address(0), "CustomToken: invalid recipient");
+        if (to == address(0)) revert InvalidRecipient();
         uint256 balance = IERC20(token).balanceOf(address(this));
         uint256 reserved;
         if (token == address(this)) {
@@ -638,10 +837,10 @@ contract CustomToken is ERC20, ReentrancyGuard {
             reserved += totalDividendsDistributed - totalDividendsWithdrawn;
         }
         uint256 rescuable = balance > reserved ? balance - reserved : 0;
-        require(amount <= rescuable, "CustomToken: amount exceeds rescuable balance");
+        if (amount > rescuable) revert AmountExceedsRescuable();
 
         bool sent = IERC20(token).transfer(to, amount);
-        require(sent, "CustomToken: rescue transfer failed");
+        if (!sent) revert RescueTransferFailed();
         emit TokenRescued(token, to, amount);
     }
 
@@ -653,14 +852,14 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// still-unclaimed dividend balance the same way rescueToken does
     /// above.
     function rescueEth(address to, uint256 amount) external onlyCreator {
-        require(to != address(0), "CustomToken: invalid recipient");
+        if (to == address(0)) revert InvalidRecipient();
         uint256 reserved = reflectionAsset == address(0) ? (totalDividendsDistributed - totalDividendsWithdrawn) : 0;
         uint256 balance = address(this).balance;
         uint256 rescuable = balance > reserved ? balance - reserved : 0;
-        require(amount <= rescuable, "CustomToken: amount exceeds rescuable balance");
+        if (amount > rescuable) revert AmountExceedsRescuable();
 
         (bool sent, ) = payable(to).call{value: amount}("");
-        require(sent, "CustomToken: rescue transfer failed");
+        if (!sent) revert RescueTransferFailed();
         emit EthRescued(to, amount);
     }
 
@@ -683,7 +882,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// toggling it on and off is not a way to selectively skip specific
     /// distributions.
     function setRewardsBlocked(address account, bool blocked) external onlyCreator {
-        require(account != address(0), "CustomToken: invalid account");
+        if (account == address(0)) revert InvalidAccount();
         isBlockedFromRewards[account] = blocked;
         emit RewardsAccessUpdated(account, blocked);
     }
@@ -702,7 +901,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// airdrop-distribution contract, or a CEX deposit wallet the creator
     /// has arranged a listing with.
     function setTaxExempt(address account, bool exempt) external onlyCreator {
-        require(account != address(0), "CustomToken: invalid account");
+        if (account == address(0)) revert InvalidAccount();
         isTaxExempt[account] = exempt;
         emit TaxExemptionUpdated(account, exempt);
     }
@@ -715,14 +914,63 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// (including every leg of our own swap-and-process batch, guarded by
     /// _inSwap) is untaxed, same convention LaunchedToken already uses.
     function _update(address from, address to, uint256 value) internal override {
+        // Auto-detect an independently-created pool before anything else
+        // below runs — see _activatePoolIfFound()/
+        // _maybeAutoConfigurePlatformTax(). Skipped once `pair` is set
+        // (the common case after the first pool-detecting transfer, or
+        // for the entire life of an addLiquidity=true token, which starts
+        // out with `pair` already set) and skipped whenever
+        // `from == factory`: that's specifically CustomTokenFactory's own
+        // internal liquidity-seeding transfer inside its atomic
+        // addLiquidity=true flow (see
+        // CustomTokenFactory._seedLiquidityAndBuyIn/
+        // _relayedSeedLiquidityAndBuyIn, both of which mint the full
+        // supply to `address(this)` and then transfer it into the
+        // freshly-created pair via addLiquidityETH, strictly BEFORE
+        // calling setPair()/configurePlatformTax() themselves). Without
+        // this guard, that same internal transfer would race ahead and
+        // set `pair` here first, and the factory's own explicit
+        // setPair() call right after would then revert on
+        // `require(pair == address(0))`, permanently breaking every
+        // atomic launch. A deploy-only token's creator can never trip
+        // this guard by accident: the factory never holds any of a
+        // deploy-only token's supply (100% mints straight to the
+        // creator), so `from` can never equal `factory` for that token's
+        // own, later, independent liquidity add.
+        //
+        // Deliberate, disclosed gas tradeoff, same as LaunchedToken's
+        // identical mechanism: until a pool is found, EVERY transfer of
+        // an otherwise-untaxed deploy-only token pays the extra gas of
+        // this detection attempt. Wrapped in try/catch (see
+        // _activatePoolIfFound's own doc comment for why) so a
+        // misbehaving/incomplete router or factory can never brick this
+        // transfer — it just leaves `pair` unset for now, retried on a
+        // later one.
+        bool justActivated = false;
+        if (pair == address(0) && from != factory) {
+            try this._activatePoolIfFound() returns (bool activated) {
+                justActivated = activated;
+            } catch {
+                justActivated = false;
+            }
+        }
+
         if (_inSwap || from == address(0) || value == 0) {
             super._update(from, to, value);
             _afterBalanceChange(from, to, value);
             return;
         }
 
-        bool isBuy = pair != address(0) && from == pair;
-        bool isSell = pair != address(0) && to == pair;
+        // `justActivated` forces this exact transfer down the untaxed
+        // passthrough branch below even though `to` now equals the pair
+        // that was just set moments ago in this same call — by neither
+        // the creator's own buy/sell fee nor the platform's cut. Mirrors
+        // the existing, always-untaxed factory-seeded liquidity transfer
+        // (there, `pair`/platform tax are wired strictly after
+        // addLiquidityETH returns). Taxation begins with the next
+        // transfer that touches the pool, not this one.
+        bool isBuy = !justActivated && pair != address(0) && from == pair;
+        bool isSell = !justActivated && pair != address(0) && to == pair;
 
         if (!isBuy && !isSell) {
             super._update(from, to, value);
@@ -894,7 +1142,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     }
 
     function _toInt256Safe(uint256 a) private pure returns (int256) {
-        require(a <= uint256(type(int256).max), "CustomToken: dividend correction overflow");
+        if (a > uint256(type(int256).max)) revert DividendCorrectionOverflow();
         return int256(a);
     }
 
@@ -939,16 +1187,16 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// pushReflections' own comment for exactly what that closes off.
     function claimReflections() external nonReentrant returns (uint256 amount) {
         amount = withdrawableDividendOf(msg.sender);
-        require(amount > 0, "CustomToken: nothing to claim");
+        if (amount == 0) revert NothingToClaim();
         withdrawnDividends[msg.sender] += amount;
         totalDividendsWithdrawn += amount;
 
         if (reflectionAsset == address(0)) {
             (bool sent, ) = payable(msg.sender).call{value: amount}("");
-            require(sent, "CustomToken: ETH claim transfer failed");
+            if (!sent) revert EthClaimTransferFailed();
         } else {
             bool sent = IERC20(reflectionAsset).transfer(msg.sender, amount);
-            require(sent, "CustomToken: reflection token claim transfer failed");
+            if (!sent) revert ReflectionTokenClaimTransferFailed();
         }
         emit DividendWithdrawn(msg.sender, amount);
     }
@@ -1003,7 +1251,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// cross-function reentrancy between them, not only self-recursion.
 
     function pushReflections(uint256 maxHolders) external nonReentrant returns (uint256 holdersPaid, uint256 totalPaid) {
-        require(maxHolders > 0, "CustomToken: maxHolders must be > 0");
+        if (maxHolders == 0) revert MaxHoldersMustBePositive();
         uint256 total = _reflectionHolders.length;
         if (total == 0) return (0, 0);
 
@@ -1105,7 +1353,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// this mirrors exactly. Not meant to be called by anything but this
     /// contract itself.
     function _computeMarketCapFromPair(uint256 ethUsd) external view returns (uint256 marketCap, bool ok) {
-        require(msg.sender == address(this), "CustomToken: internal only");
+        if (msg.sender != address(this)) revert InternalOnly();
         (uint112 reserve0, uint112 reserve1, ) = IUniswapV2PairMinimal(pair).getReserves();
         address token0 = IUniswapV2PairMinimal(pair).token0();
         uint256 tokenReserve = token0 == address(this) ? uint256(reserve0) : uint256(reserve1);
@@ -1217,7 +1465,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// comment; not meant to be called by anything but this contract
     /// itself.
     function _processLiquidity(uint256 amount) external {
-        require(msg.sender == address(this), "CustomToken: internal only");
+        if (msg.sender != address(this)) revert InternalOnly();
         uint256 half = amount / 2;
         uint256 otherHalf = amount - half;
         if (half == 0 || otherHalf == 0) return;
@@ -1243,13 +1491,13 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// see that function's own comment; not meant to be called by
     /// anything but this contract itself.
     function _processMarketing(uint256 amount) external {
-        require(msg.sender == address(this), "CustomToken: internal only");
+        if (msg.sender != address(this)) revert InternalOnly();
         uint256 ethBefore = address(this).balance;
         _swapTokensForEth(amount);
         uint256 ethOut = address(this).balance - ethBefore;
         if (ethOut == 0) return;
         (bool sent, ) = payable(marketingWallet).call{value: ethOut}("");
-        require(sent, "CustomToken: marketing transfer failed");
+        if (!sent) revert MarketingTransferFailed();
         emit MarketingFeeSent(ethOut);
     }
 
@@ -1257,7 +1505,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// see that function's own comment; not meant to be called by
     /// anything but this contract itself.
     function _processReflections(uint256 amount) external {
-        require(msg.sender == address(this), "CustomToken: internal only");
+        if (msg.sender != address(this)) revert InternalOnly();
         if (reflectionAsset == address(0)) {
             uint256 ethBefore = address(this).balance;
             _swapTokensForEth(amount);

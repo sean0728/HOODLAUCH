@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import "./interfaces/IAggregatorV3.sol";
 import "./interfaces/IUniswapV2Pair.sol";
+import "./interfaces/IUniswapV2Router02.sol";
+import "./interfaces/ITokenFactoryTaxDefaults.sol";
 
 /// @title LaunchedToken
 /// @notice The ERC20 every launch deploys as an EIP-1167 clone of this
@@ -250,6 +252,105 @@ contract LaunchedToken is ERC20 {
     function name() public view override returns (string memory) { return _tokenName; }
     function symbol() public view override returns (string memory) { return _tokenSymbol; }
 
+    /// @notice Permissionless, automatic activation of the platform's tax
+    /// for a "Just Launch" token (100% minted straight to the creator, no
+    /// pool, configureTax() never called) the moment a real DEX pool for
+    /// it is first detected on-chain — closes the gap where a creator who
+    /// deploys "Just Launch" and later adds liquidity entirely on their
+    /// own, outside this platform, would otherwise leave the platform's
+    /// tax permanently unreachable even though a real, tradeable pool now
+    /// exists. See the contract-level doc comment above.
+    ///
+    /// Called from the very top of _update(), gated there on
+    /// `!taxConfigured` — once taxConfigured is true (whether because a
+    /// pool was found this way, or because this is actually a "Launch +
+    /// Add Liquidity" token that had configureTax() called on it back at
+    /// launch) this function is never even invoked again, so the overhead
+    /// below disappears forever. Until then, this is a deliberate,
+    /// disclosed tradeoff: EVERY transfer of a still-pool-less token pays
+    /// the extra gas of this detection attempt (a couple of staticcalls),
+    /// in exchange for activation needing no explicit call from anyone,
+    /// ever.
+    ///
+    /// Returns true only if THIS call is the one that just flipped
+    /// taxConfigured on, so _update() can make sure the exact transfer
+    /// that seeds the newly-found pool is never itself taxed — see
+    /// _update()'s use of the return value below.
+    ///
+    /// @dev External purely so _update() can wrap it in try/catch (see
+    /// _computeMarketCapFromPair below for the same pattern already used
+    /// in this contract — Solidity's try/catch only guards external
+    /// calls, never arbitrary internal logic). Not meant to be called by
+    /// anything but this contract itself, hence the msg.sender check.
+    /// This matters here specifically because _update() calls this
+    /// unconditionally on every transfer of a still-pool-less token,
+    /// including the very first mint inside initialize() — factory/router
+    /// are ordinarily real, correctly-implemented contracts, but if
+    /// either one were ever misconfigured, temporarily misbehaving, or
+    /// simply not a real factory/router at all, every external call below
+    /// would revert; without try/catch that revert would propagate out of
+    /// _update() and brick the mint/transfer that triggered it, instead
+    /// of just leaving this detection attempt unable to run this time.
+    function _maybeAutoActivateTax() external returns (bool justActivated) {
+        require(msg.sender == address(this), "LaunchedToken: internal only");
+        if (taxConfigured) return false;
+
+        ITokenFactoryTaxDefaults tokenFactory = ITokenFactoryTaxDefaults(factory);
+        IUniswapV2Router02 factoryRouter = tokenFactory.router();
+        address dexFactory = factoryRouter.factory();
+        address weth = factoryRouter.WETH();
+        address detectedPair = IUniswapV2FactoryMinimal(dexFactory).getPair(address(this), weth);
+        if (detectedPair == address(0)) return false; // no pool yet — the common case for most transfers
+
+        // No "snapshot at deploy time" exists for a Just Launch token,
+        // since none was ever taken — the platform's tax defaults in
+        // effect at the moment a pool is first detected are the only
+        // sensible ones to apply, read straight off TokenFactory's
+        // current storage exactly like TokenFactory._launchWithLiquidity
+        // reads its own storage when it seeds a pool itself.
+        uint256 feeBps_ = tokenFactory.feeBps();
+        address platformFeeWallet_ = tokenFactory.platformFeeWallet();
+        address priceFeed_ = tokenFactory.priceFeed();
+        uint256 graduationTargetUsd_ = tokenFactory.graduationTargetUsd();
+        uint256 maxOracleStaleness_ = tokenFactory.maxOracleStaleness();
+        address rewardsDistributor_ = tokenFactory.rewardsDistributor();
+        address creatorRewardsDistributor_ = tokenFactory.creatorRewardsDistributor();
+        address feeWalletDistributor_ = tokenFactory.feeWalletDistributor();
+
+        // Same "distributor unset -> bps forced to 0" defense
+        // TokenFactory._launchWithLiquidity applies before calling
+        // configureTax() — replicated here rather than trusting the raw
+        // getters directly, even though TokenFactory's own invariants
+        // should already guarantee this.
+        uint256 rewardBps_ = rewardsDistributor_ != address(0) ? tokenFactory.rewardBps() : 0;
+        uint256 creatorRewardBps_ = creatorRewardsDistributor_ != address(0) ? tokenFactory.creatorRewardBps() : 0;
+
+        // Same invariant configureTax() itself enforces via require —
+        // but this runs inside an arbitrary caller's ordinary transfer,
+        // so a platform-side misconfiguration must never revert (brick)
+        // that unrelated transfer. Skip activation this time instead;
+        // taxConfigured stays false, so a later transfer can retry once/
+        // if the platform's own config is fixed.
+        if (rewardBps_ + creatorRewardBps_ > feeBps_) return false;
+
+        taxConfigured = true;
+        pair = detectedPair;
+        feeWallet = platformFeeWallet_;
+        feeBps = feeBps_;
+        priceFeed = IAggregatorV3(priceFeed_);
+        graduationTargetUsd = graduationTargetUsd_;
+        maxOracleStaleness = maxOracleStaleness_;
+        taxActive = feeBps_ > 0 && platformFeeWallet_ != address(0);
+        rewardsDistributor = rewardsDistributor_;
+        rewardBps = rewardBps_;
+        creatorRewardsDistributor = creatorRewardsDistributor_;
+        creatorRewardBps = creatorRewardBps_;
+        feeWalletDistributor = feeWalletDistributor_;
+
+        emit TaxConfigured(detectedPair, platformFeeWallet_, feeBps_, graduationTargetUsd_);
+        return true;
+    }
+
     /// @dev The tax itself. Skims feeBps to feeWallet on any transfer that
     /// touches the pool directly (a buy sends pair -> someone; a sell sends
     /// someone -> pair). Every other transfer — the factory's own seeding
@@ -259,7 +360,49 @@ contract LaunchedToken is ERC20 {
     /// side is ever the pool) — passes through untaxed automatically,
     /// since none of those match `from == pair || to == pair` while taxed.
     function _update(address from, address to, uint256 value) internal override {
-        if (taxActive && value > 0 && (from == pair || to == pair)) {
+        // Auto-detect an independently-created pool before anything else
+        // below runs — see _maybeAutoActivateTax(). Skipped once
+        // taxConfigured (the common case after the first pool-detecting
+        // transfer, or for the entire life of a "Launch + Add Liquidity"
+        // token, which starts out with taxConfigured already true) and
+        // skipped whenever `from == factory`: that's specifically
+        // TokenFactory's own internal liquidity-seeding transfer inside
+        // its atomic "Launch + Add Liquidity" flow (see
+        // TokenFactory._launchWithLiquidity/_relayedLaunchWithLiquidity,
+        // both of which mint the full supply to `address(this)` and then
+        // transfer it into the freshly-created pair via addLiquidityETH,
+        // strictly BEFORE calling configureTax() themselves). Without this
+        // guard, that same internal transfer would race ahead and
+        // self-configure the tax here first, and TokenFactory's own
+        // explicit configureTax() call right after would then revert on
+        // `require(!taxConfigured)`, permanently breaking every atomic
+        // launch. A "Just Launch" token's creator can never trip this
+        // guard by accident: TokenFactory never holds any of a
+        // deploy-only token's supply (100% mints straight to the
+        // creator), so `from` can never equal `factory` for that token's
+        // own, later, independent liquidity add.
+        // Wrapped in try/catch (see _maybeAutoActivateTax's own doc
+        // comment for why) so a misbehaving/incomplete factory or router
+        // can never brick this transfer — it just leaves taxConfigured
+        // false for now, retried on a later one.
+        bool justActivated = false;
+        if (!taxConfigured && from != factory) {
+            try this._maybeAutoActivateTax() returns (bool activated) {
+                justActivated = activated;
+            } catch {
+                justActivated = false;
+            }
+        }
+
+        // `justActivated` forces this exact transfer down the untaxed
+        // passthrough branch below even though `to` (or `from`) now
+        // equals the pair that was just set moments ago in this same
+        // call — mirrors the existing, always-untaxed factory-launched
+        // seeding transfer (there, taxActive is still false at that
+        // point since configureTax() runs strictly after addLiquidityETH
+        // returns). Taxation begins with the next transfer that touches
+        // the pool, not this one.
+        if (!justActivated && taxActive && value > 0 && (from == pair || to == pair)) {
             uint256 fee = (value * feeBps) / 10_000;
             if (fee > 0) {
                 // rewardCut and creatorCut are both carved OUT OF fee, never
