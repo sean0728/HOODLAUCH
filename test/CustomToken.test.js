@@ -1502,17 +1502,17 @@ describe("CustomToken / CustomTokenFactory", function () {
       it("tax default changes apply to tokens created afterward, not retroactively", async function () {
         const { factory, deployer, creator, treasury, priceFeed } = await deployStack({ platformTaxEnabled: true });
         const { token: tokenBefore } = await createCustomToken(factory, creator, { name: "First", symbol: "FRST" });
-        expect(await tokenBefore.platformFeeBps()).to.equal(25n);
+        expect(await tokenBefore.platformFeeBps()).to.equal(100n);
 
-        await factory.connect(deployer).setTaxDefaults(treasury.address, 100, await priceFeed.getAddress(), 50_000, 7200, 0, 0);
+        await factory.connect(deployer).setTaxDefaults(treasury.address, 150, await priceFeed.getAddress(), 65_000, 7200, 0, 0);
 
         const { token: tokenAfter } = await createCustomToken(factory, creator, { name: "Second", symbol: "SCND" });
-        expect(await tokenAfter.platformFeeBps()).to.equal(100n);
+        expect(await tokenAfter.platformFeeBps()).to.equal(150n);
         expect(await tokenAfter.platformFeeWallet()).to.equal(treasury.address);
-        expect(await tokenAfter.graduationTargetUsd()).to.equal(50_000n);
+        expect(await tokenAfter.graduationTargetUsd()).to.equal(65_000n);
 
         // the earlier token keeps whatever it was configured with
-        expect(await tokenBefore.platformFeeBps()).to.equal(25n);
+        expect(await tokenBefore.platformFeeBps()).to.equal(100n);
       });
 
       it("rejects a feeBps default above the MAX_FEE_BPS ceiling", async function () {
@@ -1601,8 +1601,8 @@ describe("CustomToken / CustomTokenFactory", function () {
   });
 
   describe("platform tax (graduating)", function () {
-    const PLATFORM_FEE_BPS = 25n; // 0.25%, the CustomTokenFactory default
-    const GRADUATION_TARGET_USD = 80_000n;
+    const PLATFORM_FEE_BPS = 100n; // 1.00%, the CustomTokenFactory default
+    const GRADUATION_TARGET_USD = 50_000n;
 
     function computeMarketCap(tokenReserve, ethReserve, ethUsdPrice, totalSupply_) {
       const pricePerTokenWei = (ethReserve * 10n ** 18n) / tokenReserve;
@@ -2268,7 +2268,7 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         // The fee configuration itself never moved.
         expect((await token.buyFees()).burnBps).to.equal(300n);
-        expect(await token.platformFeeBps()).to.equal(25n);
+        expect(await token.platformFeeBps()).to.equal(100n);
       });
 
       it("an exempt seller's own sell adds nothing to pending fees, but an earlier non-exempt seller's pending fee still processes normally", async function () {

@@ -73,29 +73,30 @@ describe("lib/launchStore.js (per-network deployed-contracts/ directories)", fun
     expect(mainnetRecord.tokenAddress).to.equal("0xMAINNETTOKEN00000000000000000000000000");
   });
 
-  it("keeps each network's JSON ledger and CSV mirror separate and append-only", function () {
-    launchStore.recordLaunch(baseEntry({ network: "robinhoodTestnet", symbol: "ONE" }));
-    launchStore.recordLaunch(baseEntry({ network: "robinhoodTestnet", symbol: "TWO" }));
-    launchStore.recordLaunch(baseEntry({ network: "robinhoodMainnet", symbol: "ONE" }));
+  it("keeps each network's JSON ledger and CSV mirror separate and append-only", async function () {
+    await launchStore.recordLaunch(baseEntry({ network: "robinhoodTestnet", symbol: "ONE" }));
+    await launchStore.recordLaunch(baseEntry({ network: "robinhoodTestnet", symbol: "TWO" }));
+    await launchStore.recordLaunch(baseEntry({ network: "robinhoodMainnet", symbol: "ONE" }));
 
-    expect(launchStore.readLedger("robinhoodTestnet")).to.have.lengthOf(2);
-    expect(launchStore.readLedger("robinhoodMainnet")).to.have.lengthOf(1);
+    expect(await launchStore.readLedger("robinhoodTestnet")).to.have.lengthOf(2);
+    expect(await launchStore.readLedger("robinhoodMainnet")).to.have.lengthOf(1);
 
     const csv = fs.readFileSync(path.join(scratchDir, "robinhoodTestnet", "launched-tokens.csv"), "utf8");
     expect(csv.split("\n").filter(Boolean)).to.have.lengthOf(3); // header + 2 rows
   });
 
-  it("readAllLedgers() combines every network, and listNetworks() reports them all", function () {
-    launchStore.recordLaunch(baseEntry({ network: "robinhoodTestnet" }));
-    launchStore.recordLaunch(baseEntry({ network: "robinhoodMainnet", symbol: "OTHER" }));
-    launchStore.recordLaunch(baseEntry({ network: "hardhat", symbol: "LOCAL" }));
+  it("readAllLedgers() combines every network, and listNetworks() reports them all", async function () {
+    await launchStore.recordLaunch(baseEntry({ network: "robinhoodTestnet" }));
+    await launchStore.recordLaunch(baseEntry({ network: "robinhoodMainnet", symbol: "OTHER" }));
+    await launchStore.recordLaunch(baseEntry({ network: "hardhat", symbol: "LOCAL" }));
 
-    expect(launchStore.listNetworks().sort()).to.deep.equal(["hardhat", "robinhoodMainnet", "robinhoodTestnet"].sort());
-    expect(launchStore.readAllLedgers()).to.have.lengthOf(3);
+    const networks = await launchStore.listNetworks();
+    expect(networks.sort()).to.deep.equal(["hardhat", "robinhoodMainnet", "robinhoodTestnet"].sort());
+    expect(await launchStore.readAllLedgers()).to.have.lengthOf(3);
   });
 
-  it("reading a network with no launches yet returns an empty array rather than throwing", function () {
-    expect(launchStore.readLedger("neverLaunchedHere")).to.deep.equal([]);
+  it("reading a network with no launches yet returns an empty array rather than throwing", async function () {
+    expect(await launchStore.readLedger("neverLaunchedHere")).to.deep.equal([]);
   });
 
   it("sanitizes an unsafe/missing network name into a safe directory segment instead of failing", function () {

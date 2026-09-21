@@ -37,13 +37,13 @@ describe("lib/relayerStore.js (per-network relayer-data/ directory)", function (
     expect(relayerStore.RELAYER_DATA_DIR).to.equal(path.join(scratchDir, "hardhat"));
   });
 
-  it("writes vouchers and cursors under that per-network directory", function () {
-    relayerStore.upsertVoucher("0xhash1", { status: "received" });
-    relayerStore.setCursor("0xfactory", 12345);
+  it("writes vouchers and cursors under that per-network directory", async function () {
+    await relayerStore.upsertVoucher("0xhash1", { status: "received" });
+    await relayerStore.setCursor("0xfactory", 12345);
 
     expect(fs.existsSync(path.join(scratchDir, "hardhat", "vouchers.json"))).to.equal(true);
     expect(fs.existsSync(path.join(scratchDir, "hardhat", "cursors.json"))).to.equal(true);
-    expect(relayerStore.getVoucher("0xhash1").status).to.equal("received");
-    expect(relayerStore.getCursor("0xfactory")).to.equal(12345);
+    expect((await relayerStore.getVoucher("0xhash1")).status).to.equal("received");
+    expect(await relayerStore.getCursor("0xfactory")).to.equal(12345);
   });
 });

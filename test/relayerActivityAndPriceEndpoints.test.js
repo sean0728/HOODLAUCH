@@ -32,14 +32,14 @@ describe("GET /activity and GET /price-history/:tokenAddress (relayer API)", fun
   }
 
   function mountRoutes(app) {
-    app.get("/activity", (_req, res) => {
-      res.status(200).json({ network: NETWORK, activity: activityStore.readActivity(NETWORK) });
+    app.get("/activity", async (_req, res) => {
+      res.status(200).json({ network: NETWORK, activity: await activityStore.readActivity(NETWORK) });
     });
-    app.get("/price-history/:tokenAddress", (req, res) => {
+    app.get("/price-history/:tokenAddress", async (req, res) => {
       res.status(200).json({
         network: NETWORK,
         tokenAddress: req.params.tokenAddress,
-        history: priceHistoryStore.readPriceHistory(NETWORK, req.params.tokenAddress),
+        history: await priceHistoryStore.readPriceHistory(NETWORK, req.params.tokenAddress),
       });
     });
   }
@@ -75,7 +75,7 @@ describe("GET /activity and GET /price-history/:tokenAddress (relayer API)", fun
     });
 
     it("returns recorded trades with the documented shape, oldest first", async function () {
-      activityStore.appendActivity(NETWORK, {
+      await activityStore.appendActivity(NETWORK, {
         t: 1000,
         txHash: "0xabc",
         logIndex: 0,
@@ -86,7 +86,7 @@ describe("GET /activity and GET /price-history/:tokenAddress (relayer API)", fun
         tokenAmount: "500000000000000000000",
         usdValue: 42.5,
       });
-      activityStore.appendActivity(NETWORK, {
+      await activityStore.appendActivity(NETWORK, {
         t: 2000,
         txHash: "0xdef",
         logIndex: 1,
@@ -119,7 +119,7 @@ describe("GET /activity and GET /price-history/:tokenAddress (relayer API)", fun
     });
 
     it("returns recorded price points with the documented shape", async function () {
-      priceHistoryStore.appendPricePoint(NETWORK, TOKEN, {
+      await priceHistoryStore.appendPricePoint(NETWORK, TOKEN, {
         t: 1000,
         p: 0.03,
         mcapUsd: 30000,
@@ -143,8 +143,8 @@ describe("GET /activity and GET /price-history/:tokenAddress (relayer API)", fun
 
     it("keeps two tokens' histories fully independent", async function () {
       const otherToken = "0x4444444444444444444444444444444444444444";
-      priceHistoryStore.appendPricePoint(NETWORK, TOKEN, { t: 1000, p: 0.03 });
-      priceHistoryStore.appendPricePoint(NETWORK, otherToken, { t: 2000, p: 0.09 });
+      await priceHistoryStore.appendPricePoint(NETWORK, TOKEN, { t: 1000, p: 0.03 });
+      await priceHistoryStore.appendPricePoint(NETWORK, otherToken, { t: 2000, p: 0.09 });
 
       const res = await fetch(`${baseUrl}/price-history/${TOKEN}`);
       const body = await res.json();

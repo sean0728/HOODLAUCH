@@ -48,10 +48,10 @@ describe("Admin-gated relayer routes (POST /active-network, POST /platform-confi
   function mountRoutes(app) {
     app.use(express.json());
 
-    app.get("/active-network", (_req, res) => {
-      res.status(200).json({ network: relayerStore.getActiveNetwork() });
+    app.get("/active-network", async (_req, res) => {
+      res.status(200).json({ network: await relayerStore.getActiveNetwork() });
     });
-    app.post("/active-network", (req, res) => {
+    app.post("/active-network", async (req, res) => {
       const { network: targetNetwork, timestamp, signature } = req.body || {};
       if (targetNetwork !== "demo" && targetNetwork !== "live") {
         return res.status(400).json({ error: 'network must be "demo" or "live"' });
@@ -63,14 +63,14 @@ describe("Admin-gated relayer routes (POST /active-network, POST /platform-confi
       if (!verifyAgainstTestAdmin(message, signature)) {
         return res.status(401).json({ error: "Signature does not match the admin wallet." });
       }
-      relayerStore.setActiveNetwork(targetNetwork);
+      await relayerStore.setActiveNetwork(targetNetwork);
       res.status(200).json({ network: targetNetwork });
     });
 
-    app.get("/platform-config", (_req, res) => {
-      res.status(200).json({ config: relayerStore.getPlatformConfig() });
+    app.get("/platform-config", async (_req, res) => {
+      res.status(200).json({ config: await relayerStore.getPlatformConfig() });
     });
-    app.post("/platform-config", (req, res) => {
+    app.post("/platform-config", async (req, res) => {
       const { config, timestamp, signature } = req.body || {};
       if (!config || typeof config !== "object") return res.status(400).json({ error: "config is required" });
       if (!isFreshTimestamp(timestamp)) {
@@ -81,7 +81,7 @@ describe("Admin-gated relayer routes (POST /active-network, POST /platform-confi
         return res.status(401).json({ error: "Signature does not match the admin wallet." });
       }
       const canonical = canonicalizePlatformConfig(config);
-      relayerStore.setPlatformConfig(canonical);
+      await relayerStore.setPlatformConfig(canonical);
       res.status(200).json({ config: canonical });
     });
   }

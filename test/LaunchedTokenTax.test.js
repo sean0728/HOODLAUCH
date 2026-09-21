@@ -6,8 +6,8 @@ describe("LaunchedToken — transfer tax", function () {
   const LAUNCH_FEE = ethers.parseEther("0.04"); // "Deploy and Add Liquidity (Launch)" — the fee this file actually exercises
   const LP_LOCK_DURATION = 15 * 24 * 60 * 60; // 15 days
   const ETH_USD_PRICE = 3000n * 10n ** 8n; // $3000, 8 decimals
-  const FEE_BPS = 25n; // 0.25%
-  const GRADUATION_TARGET_USD = 80_000n;
+  const FEE_BPS = 100n; // 1.00%
+  const GRADUATION_TARGET_USD = 50_000n;
 
   function computeMarketCap(tokenReserve, ethReserve, ethUsdPrice, totalSupply) {
     const pricePerTokenWei = (ethReserve * 10n ** 18n) / tokenReserve;

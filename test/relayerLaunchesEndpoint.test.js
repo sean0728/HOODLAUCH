@@ -27,8 +27,8 @@ describe("GET /launches (relayer API — public launch feed)", function () {
 
   // Mirrors the handler added to scripts/relayer.js's app.get("/launches", ...).
   function mountLaunchesRoute(app, network) {
-    app.get("/launches", (_req, res) => {
-      const ledger = launchStore.readLedger(network);
+    app.get("/launches", async (_req, res) => {
+      const ledger = await launchStore.readLedger(network);
       const launches = ledger.map((entry) => {
         const publicEntry = {};
         for (const field of launchStore.PUBLIC_FIELDS) publicEntry[field] = entry[field] ?? null;
@@ -38,11 +38,11 @@ describe("GET /launches (relayer API — public launch feed)", function () {
     });
   }
 
-  beforeEach(function (done) {
+  beforeEach(async function () {
     scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "relayer-launches-test-"));
     launchStore = freshLaunchStore(scratchDir);
 
-    launchStore.recordLaunch({
+    await launchStore.recordLaunch({
       name: "Aurora Ledger",
       symbol: "AURA",
       mode: "liquidity",
@@ -71,9 +71,11 @@ describe("GET /launches (relayer API — public launch feed)", function () {
 
     const app = express();
     mountLaunchesRoute(app, "robinhoodTestnet");
-    server = app.listen(0, () => {
-      baseUrl = `http://127.0.0.1:${server.address().port}`;
-      done();
+    await new Promise((resolve) => {
+      server = app.listen(0, () => {
+        baseUrl = `http://127.0.0.1:${server.address().port}`;
+        resolve();
+      });
     });
   });
 

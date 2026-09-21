@@ -8,7 +8,7 @@ describe("TokenFactory", function () {
   const LP_LOCK_DURATION = 15 * 24 * 60 * 60; // 15 days
   const TOTAL_SUPPLY = ethers.parseEther("1000000000"); // 1B tokens, 18 decimals
   const ETH_USD_PRICE = 3000n * 10n ** 8n; // $3000, 8 decimals
-  const FEE_BPS = 25n; // 0.25%
+  const FEE_BPS = 100n; // 1.00%
 
   // Distinct CREATE2 salts across calls to the helpers below — several
   // tests deploy more than one token against the very same factory
@@ -290,7 +290,7 @@ describe("TokenFactory", function () {
       expect(await token.pair()).to.equal(pairAddress);
       expect(await token.feeWallet()).to.equal(platformFeeWallet.address);
       expect(await token.feeBps()).to.equal(FEE_BPS);
-      expect(await token.graduationTargetUsd()).to.equal(80_000n);
+      expect(await token.graduationTargetUsd()).to.equal(50_000n);
     });
 
     it("reverts if the platform fee wallet or price feed aren't configured", async function () {
@@ -600,13 +600,13 @@ describe("TokenFactory", function () {
       const { token: tokenBefore } = await createWithLiquidity(factory, creator, { name: "First", symbol: "FRST" });
       const feeBpsBefore = await tokenBefore.feeBps();
 
-      await factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 100, await priceFeed.getAddress(), 100_000, 3600, 0, 0);
+      await factory.connect(deployer).setTaxDefaults(platformFeeWallet.address, 150, await priceFeed.getAddress(), 100_000, 3600, 0, 0);
 
       const { token: tokenAfter } = await createWithLiquidity(factory, creator, { name: "Second", symbol: "SCND" });
 
-      expect(feeBpsBefore).to.equal(25n);
-      expect(await tokenBefore.feeBps()).to.equal(25n); // unchanged retroactively
-      expect(await tokenAfter.feeBps()).to.equal(100n); // picked up the new default
+      expect(feeBpsBefore).to.equal(100n);
+      expect(await tokenBefore.feeBps()).to.equal(100n); // unchanged retroactively
+      expect(await tokenAfter.feeBps()).to.equal(150n); // picked up the new default
     });
 
     it("rejects a feeBps default above the MAX_FEE_BPS ceiling", async function () {

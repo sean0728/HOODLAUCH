@@ -28,12 +28,12 @@ describe("lib/deploymentStore.js (per-network deployments/ directories)", functi
     fs.rmSync(scratchDir, { recursive: true, force: true });
   });
 
-  it("writes a network's deployment into its own subdirectory, separate from other networks", function () {
-    deploymentStore.recordDeployment("robinhoodTestnet", { tokenFactory: "0xTESTNET" });
-    deploymentStore.recordDeployment("robinhoodMainnet", { tokenFactory: "0xMAINNET" });
+  it("writes a network's deployment into its own subdirectory, separate from other networks", async function () {
+    await deploymentStore.recordDeployment("robinhoodTestnet", { tokenFactory: "0xTESTNET" });
+    await deploymentStore.recordDeployment("robinhoodMainnet", { tokenFactory: "0xMAINNET" });
 
-    const testnetCurrent = deploymentStore.readCurrentDeployment("robinhoodTestnet");
-    const mainnetCurrent = deploymentStore.readCurrentDeployment("robinhoodMainnet");
+    const testnetCurrent = await deploymentStore.readCurrentDeployment("robinhoodTestnet");
+    const mainnetCurrent = await deploymentStore.readCurrentDeployment("robinhoodMainnet");
 
     expect(testnetCurrent.tokenFactory).to.equal("0xTESTNET");
     expect(mainnetCurrent.tokenFactory).to.equal("0xMAINNET");
@@ -41,11 +41,11 @@ describe("lib/deploymentStore.js (per-network deployments/ directories)", functi
     expect(fs.existsSync(path.join(scratchDir, "robinhoodMainnet", "current.json"))).to.equal(true);
   });
 
-  it("overwrites current.json on each run but accumulates history.json", function () {
-    deploymentStore.recordDeployment("robinhoodTestnet", { tokenFactory: "0xFIRST" });
-    deploymentStore.recordDeployment("robinhoodTestnet", { tokenFactory: "0xSECOND" });
+  it("overwrites current.json on each run but accumulates history.json", async function () {
+    await deploymentStore.recordDeployment("robinhoodTestnet", { tokenFactory: "0xFIRST" });
+    await deploymentStore.recordDeployment("robinhoodTestnet", { tokenFactory: "0xSECOND" });
 
-    const current = deploymentStore.readCurrentDeployment("robinhoodTestnet");
+    const current = await deploymentStore.readCurrentDeployment("robinhoodTestnet");
     expect(current.tokenFactory).to.equal("0xSECOND");
 
     const history = JSON.parse(fs.readFileSync(path.join(scratchDir, "robinhoodTestnet", "history.json"), "utf8"));
@@ -54,7 +54,7 @@ describe("lib/deploymentStore.js (per-network deployments/ directories)", functi
     expect(history[1].tokenFactory).to.equal("0xSECOND");
   });
 
-  it("returns null for a network that has never been deployed to, rather than throwing", function () {
-    expect(deploymentStore.readCurrentDeployment("neverDeployedHere")).to.equal(null);
+  it("returns null for a network that has never been deployed to, rather than throwing", async function () {
+    expect(await deploymentStore.readCurrentDeployment("neverDeployedHere")).to.equal(null);
   });
 });
