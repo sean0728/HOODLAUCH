@@ -3972,6 +3972,22 @@
   // launchCustomOnChainFlow already build for a real launch made from this
   // browser, so every existing render/detail/portfolio/live-price code path
   // treats a merged token exactly like a locally-launched one.
+  // entry.tokenStatus (0 deployed / 1 launched / 2 graduated — see
+  // TOKEN_STATUS in scripts/relayer.js) is the relayer's own persisted,
+  // server-side-computed lifecycle stage for this token, kept current by its
+  // price-poll loop regardless of whether anyone's wallet is connected. Map
+  // it straight onto the same `status` strings index.html already renders
+  // everywhere (STATUS_LABEL, the "tc-status" badge, the filter chips,
+  // tokenBottomHTML's bond bar) instead of inventing a second, parallel
+  // status system — an older relayer that doesn't send tokenStatus yet just
+  // falls back to the old isLiquidity-only guess (never "graduated", same as
+  // before this field existed).
+  function statusFromTokenStatus(entry, isLiquidity){
+    if(typeof entry.tokenStatus !== "number") return isLiquidity ? "taxed" : "creator-held";
+    if(entry.tokenStatus >= 2) return "graduated";
+    if(entry.tokenStatus === 1) return "taxed";
+    return "creator-held";
+  }
   function remoteLaunchToTokenObject(entry, mode){
     const isLiquidity = !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS);
     const createdAtMs = entry.createdAt ? Date.parse(entry.createdAt) : Date.now();
@@ -3992,7 +4008,7 @@
       holders: 1, mcap: 0, vol: 0, // illustrative only, same as every other launch — see the footer disclaimer
       catColor: "var(--signal-500)",
       mode: isLiquidity ? "liquidity" : "just",
-      status: isLiquidity ? "taxed" : "creator-held",
+      status: statusFromTokenStatus(entry, isLiquidity),
       lpDaysLeft: isLiquidity ? lpLockDurationDays : 0,
       liquidityEth: weiStringToEthNumber(entry.liquidityEthAmount),
       creatorBuyInEth: weiStringToEthNumber(entry.creatorBuyEthAmount),
@@ -4034,21 +4050,44 @@
     const launches = Array.isArray(payload && payload.launches) ? payload.launches : [];
     if(!launches.length) return;
 
-    const known = new Set(tokens.filter(t=>t.tokenAddress).map(t=>remoteLaunchKey(t.tokenAddress, t.networkMode)));
-    let added = false;
+    // Rank of each status in the one-way DEPLOYED -> LAUNCHED -> GRADUATED
+    // progression, so an already-known token's status can be advanced below
+    // without ever regressing it (e.g. a stale/slow relayer response should
+    // never un-graduate a token this browser already knows graduated).
+    const STATUS_RANK = { "creator-held": 0, "pool-detected": 0, "taxed": 1, "live-pool": 1, "graduated": 2 };
+    const byKey = new Map(tokens.filter(t=>t.tokenAddress).map(t=>[remoteLaunchKey(t.tokenAddress, t.networkMode), t]));
+    let added = false, updated = false;
     for(const entry of launches){
       if(!entry || !entry.tokenAddress) continue;
       const key = remoteLaunchKey(entry.tokenAddress, mode);
-      if(known.has(key)) continue;
-      known.add(key);
-      tokens.push(remoteLaunchToTokenObject(entry, mode));
-      added = true;
+      const existing = byKey.get(key);
+      if(!existing){
+        const t = remoteLaunchToTokenObject(entry, mode);
+        byKey.set(key, t);
+        tokens.push(t);
+        added = true;
+        continue;
+      }
+      // Already known (from this same GET /launches call earlier, or from a
+      // token launched directly in this browser) — the relayer's own
+      // price-poll loop keeps tokenStatus current server-side even with no
+      // wallet connected here, so pick up any advance it made since the last
+      // time this tab fetched /launches, the same way checkPendingLiquidity
+      // does for a connected wallet, but working for every visitor.
+      if(typeof entry.tokenStatus !== "number") continue;
+      const nextStatus = statusFromTokenStatus(entry, !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS));
+      if((STATUS_RANK[nextStatus]||0) > (STATUS_RANK[existing.status]||0)){
+        existing.status = nextStatus;
+        if(entry.pairAddress) existing.pairAddress = entry.pairAddress;
+        if(existing.mode==="just" && nextStatus!=="creator-held") existing.mode = "liquidity";
+        updated = true;
+      }
     }
-    if(added){
+    if(added || updated){
       renderGrid();
       renderStats();
       if(views.portfolio.classList.contains("active")) renderPortfolio();
-      refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real price for what just got merged in
+      refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real price for what just got merged/advanced in
     }
   }
 
