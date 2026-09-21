@@ -108,6 +108,34 @@ const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore
 const { ROBINHOOD_NETWORKS } = require("../lib/networks");
 const { isDbConfigured, ensureSchema } = require("../lib/db");
 
+// A token's lifecycle stage, persisted per (network, tokenAddress) in
+// lib/trackedTokensStore's `tokenStatus` field so it survives restarts and
+// backs GET /launches' own `tokenStatus` (see that route below). Deliberately
+// a separate concept/field from relayerStore's voucher `status` strings
+// ("received"/"deposited"/"relayed"/"failed" — that's about the relay
+// pipeline for one specific launch attempt) and from index.html's own richer
+// `status` strings ("creator-held"/"pool-detected"/"live-pool"/"taxed"/
+// "graduated" — that also covers pools detected independently of this
+// platform). This numeric field only tracks the three stages every token
+// actually launched *through* Hood Launch's own factories passes through, in
+// order, and never regresses once set:
+//   0 DEPLOYED  — token contract exists on-chain, no liquidity pool yet
+//                 (TokenFactory.createToken's "Deploy Token" mode, i.e.
+//                 addLiquidityAtLaunch=false — CustomTokenFactory has no
+//                 such mode, so every custom token starts at LAUNCHED).
+//   1 LAUNCHED  — a pool exists (TokenCreated.pair was already set at
+//                 creation, or one was added later and picked up by
+//                 pollTokenPrices' "Just Launch" pairAddress backfill below)
+//                 and the token's own bonding-curve tax is still active.
+//   2 GRADUATED — the token's own taxActive()/platformTaxActive() has read
+//                 false at least once (permanent on-chain, once flipped it
+//                 never flips back) — set the moment pollTokenPrices below
+//                 observes that.
+// See discoverLaunchedTokens (sets the initial 0/1) and pollTokenPrices
+// (advances 0->1 on a late pool, and 1->2 on graduation) for where this is
+// actually written.
+const TOKEN_STATUS = { DEPLOYED: 0, LAUNCHED: 1, GRADUATED: 2 };
+
 // Managed Node.js hosts (GoDaddy Node.js Hosting among them) inject the
 // port an app must listen on via the platform-standard PORT env var and
 // route their own domain/subdomain to it — a hardcoded port is ignored (or
@@ -796,9 +824,25 @@ async function main() {
   const network = hre.network.name;
   app.get("/launches", async (_req, res) => {
     const ledger = await readLedger(network);
+    // tokenStatus (0 = deployed/no pool, 1 = launched/pool live, 2 =
+    // graduated/tax disabled) lives in lib/trackedTokensStore, not the
+    // launch ledger itself — see TOKEN_STATUS and the comment on
+    // discoverLaunchedTokens/pollTokenPrices below for where it's actually
+    // computed and kept up to date. Joined in here by tokenAddress so every
+    // consumer of GET /launches (index.html's remoteLaunchToTokenObject/
+    // refreshRemoteLaunches) gets a single, already-current field instead of
+    // having to separately poll tracked-token state itself.
+    const tracked = await readTrackedTokens(network);
     const launches = ledger.map((entry) => {
       const publicEntry = {};
       for (const field of PUBLIC_FIELDS) publicEntry[field] = entry[field] ?? null;
+      const trackedEntry = entry.tokenAddress ? tracked[entry.tokenAddress.toLowerCase()] : null;
+      publicEntry.tokenStatus =
+        trackedEntry && typeof trackedEntry.tokenStatus === "number"
+          ? trackedEntry.tokenStatus
+          : entry.pairAddress
+            ? TOKEN_STATUS.LAUNCHED
+            : TOKEN_STATUS.DEPLOYED;
       return publicEntry;
     });
     sendJson(res, 200, { network, launches });
@@ -1452,6 +1496,12 @@ async function main() {
         name,
         symbol,
         pairAddress,
+        // See TOKEN_STATUS's own comment above — a "token" kind can be
+        // deployed with no pool (TokenCreated.pair == address(0)) via
+        // TokenFactory's "Deploy Token" mode; a "custom" kind always has a
+        // pool from CustomTokenCreated (CustomTokenFactory has no
+        // deploy-only mode), so it always starts LAUNCHED, never DEPLOYED.
+        tokenStatus: pairAddress ? TOKEN_STATUS.LAUNCHED : TOKEN_STATUS.DEPLOYED,
         discoveredAt: new Date().toISOString(),
       });
       console.log(`[discovery] tracking ${watcher.kind} token $${symbol} (${token})${pairAddress ? ` with pair ${pairAddress}` : ""}.`);
@@ -1724,7 +1774,15 @@ async function main() {
             const onChainPair = await watcher.factory.pairOf(entry.tokenAddress);
             if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
               entry.pairAddress = onChainPair;
-              await upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
+              // A DEPLOYED (no-pool) token just gained one — advance it to
+              // LAUNCHED. Guarded so this never clobbers GRADUATED, though
+              // in practice a token can't graduate before it has a pool.
+              const patch = { pairAddress: onChainPair };
+              if (entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
+                entry.tokenStatus = TOKEN_STATUS.LAUNCHED;
+                patch.tokenStatus = TOKEN_STATUS.LAUNCHED;
+              }
+              await upsertTrackedToken(network, entry.tokenAddress, patch);
             }
           }
         }
@@ -1746,6 +1804,17 @@ async function main() {
           entry.kind === "custom" ? token.platformTaxActive() : token.taxActive(),
         ]);
         if (entry.priceFeed !== feedAddress) await upsertTrackedToken(network, entry.tokenAddress, { priceFeed: feedAddress });
+        // Graduation is permanent on-chain once taxActive()/
+        // platformTaxActive() reads false — flip TOKEN_STATUS the first
+        // time this tick observes that, same signal index.html's own
+        // client-side refreshLiveTokenPrices already uses to flip its
+        // "taxed"->"graduated" status string (see the comment there), just
+        // persisted here so GET /launches reports it correctly too, even to
+        // a visitor whose browser hasn't sampled price-history itself yet.
+        if (taxActive === false && entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
+          entry.tokenStatus = TOKEN_STATUS.GRADUATED;
+          await upsertTrackedToken(network, entry.tokenAddress, { tokenStatus: TOKEN_STATUS.GRADUATED });
+        }
 
         const ethUsd = await fetchEthUsdFromFeed(feedAddress);
         const priceUsd = computeTokenPriceUsd(tokenReserve, wethReserve, ethUsd);
