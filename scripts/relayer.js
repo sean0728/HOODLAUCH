@@ -100,7 +100,9 @@ const {
   RELAYER_DATA_ROOT,
 } = require("../lib/relayerStore");
 const { verifyAdminSignature, isFreshTimestamp } = require("../lib/adminAuth");
+const { verifySignatureFrom } = require("../lib/signedMessage");
 const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
+const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/tokenMetadata");
 const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
 const { readTrackedTokens, upsertTrackedToken } = require("../lib/trackedTokensStore");
 const { readActivity, appendActivity } = require("../lib/activityStore");
@@ -843,6 +845,13 @@ async function main() {
           : entry.pairAddress
             ? TOKEN_STATUS.LAUNCHED
             : TOKEN_STATUS.DEPLOYED;
+      // Logo/banner/socials (see POST /token-metadata/:tokenAddress) live
+      // in the same tracked-tokens JSON blob as tokenStatus above, not the
+      // launch ledger itself — merged in here the same way so every
+      // consumer of GET /launches gets one already-current object.
+      publicEntry.logo = trackedEntry && trackedEntry.logo != null ? trackedEntry.logo : null;
+      publicEntry.banner = trackedEntry && trackedEntry.banner != null ? trackedEntry.banner : null;
+      publicEntry.socials = trackedEntry && trackedEntry.socials ? trackedEntry.socials : {};
       return publicEntry;
     });
     sendJson(res, 200, { network, launches });
@@ -1047,6 +1056,105 @@ async function main() {
     } catch (err) {
       sendJson(res, 500, { error: `Couldn't resolve this token against the router/factory: ${err.message}` });
     }
+  });
+
+  // ---- per-token logo/banner/socials (creator-gated, NOT admin-gated)
+  // ----
+  // Lets a token's logo/banner/website/twitter/telegram/discord persist
+  // server-side (and so into MySQL once lib/db.js is configured — see
+  // lib/trackedTokensStore.js) instead of living only as data: URIs in the
+  // localStorage of whichever single browser launched the token (see
+  // index.html's own comment on saveCustomTokens()). Stored as a plain
+  // patch into that token's tracked-tokens JSON blob — no schema change
+  // needed, same as tokenStatus/kind/manuallyTracked above.
+  //
+  // WHY THIS NEEDS REAL SIGNATURE VERIFICATION (same reasoning
+  // lib/adminAuth.js documents for its own admin gate, applied per-token
+  // instead of platform-wide): index.html's "Edit token" button is shown
+  // only when isOwner is true, which is computed entirely client-side by
+  // comparing the connected wallet to t.creatorWallet — anyone can bypass
+  // that by editing the page's own JS, or by skipping the page entirely and
+  // POSTing straight to this route. If this route trusted the request body
+  // alone, anyone could overwrite ANY token's logo/banner/social links —
+  // including with phishing URLs or an offensive image — for every visitor
+  // who ever loads that token's card. So the real access control here is
+  // server-side: recover the actual signer of a personal_sign signature and
+  // require it to match the token's own recorded on-chain creator (from the
+  // launch ledger, or the tracked-tokens registry for a token this relayer
+  // knows about but that has no ledger entry), not a fixed admin wallet and
+  // not whatever the request body merely claims.
+  //
+  // Body: { logo, banner, socials, timestamp, signature }. `signature` must
+  // be a personal_sign signature (from that token's own creator wallet) of
+  // tokenMetadataMessage(tokenAddress, {logo,banner,socials}, timestamp) —
+  // this MUST stay byte-identical to the message index.html's own
+  // syncTokenMetadataToServer() builds (see lib/tokenMetadata.js's own
+  // "kept in sync by hand" comment), or a real creator's signature will
+  // simply fail to verify here (the safe failure direction).
+  app.post("/token-metadata/:tokenAddress", async (req, res) => {
+    const { tokenAddress } = req.params;
+    if (!tokenAddress || !hre.ethers.isAddress(tokenAddress)) {
+      return sendJson(res, 400, { error: "tokenAddress must be a valid address" });
+    }
+    const { logo, banner, socials, timestamp, signature } = req.body || {};
+
+    // Validate shape/size BEFORE building the signed message, so the client
+    // and server always canonicalize the exact same accepted-or-rejected
+    // payload — an oversized/malformed field is rejected outright rather
+    // than silently truncated or coerced into whatever the signed message
+    // ends up embedding.
+    if (logo) {
+      if (typeof logo !== "string" || !logo.startsWith("data:image/") || logo.length > 400000) {
+        return sendJson(res, 400, { error: "logo image is too large or not a data: URI (max ~400KB encoded)" });
+      }
+    }
+    if (banner) {
+      if (typeof banner !== "string" || !banner.startsWith("data:image/") || banner.length > 700000) {
+        return sendJson(res, 400, { error: "banner image is too large or not a data: URI (max ~700KB encoded)" });
+      }
+    }
+    if (socials != null && (typeof socials !== "object" || Array.isArray(socials))) {
+      return sendJson(res, 400, { error: "socials must be an object" });
+    }
+    const URL_SHAPE = /^https?:\/\//i;
+    for (const field of ["website", "twitter", "telegram", "discord"]) {
+      const value = socials ? socials[field] : null;
+      if (!value) continue;
+      if (typeof value !== "string" || value.length > 200 || !URL_SHAPE.test(value)) {
+        return sendJson(res, 400, { error: `socials.${field} must be a valid http(s) URL` });
+      }
+    }
+
+    // Only something the server already has an on-chain creator on file for
+    // can have its metadata written — never let a request bootstrap
+    // metadata for a token address this relayer has never seen a creator
+    // for (that would make this route a way to plant phishing links against
+    // an address nobody has actually launched yet, with nothing to verify
+    // the signature against in the first place).
+    const ledger = await readLedger(network);
+    const ledgerEntry = ledger.find(
+      (entry) => entry.tokenAddress && entry.tokenAddress.toLowerCase() === tokenAddress.toLowerCase()
+    );
+    let creatorAddress = ledgerEntry ? ledgerEntry.creator : null;
+    if (!creatorAddress) {
+      const tracked = (await readTrackedTokens(network))[tokenAddress.toLowerCase()];
+      creatorAddress = tracked ? tracked.creator : null;
+    }
+    if (!creatorAddress) {
+      return sendJson(res, 404, { error: "Hood Launch has no record of this token yet." });
+    }
+
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is stale — try again." });
+    }
+    const message = tokenMetadataMessage(tokenAddress, { logo, banner, socials }, timestamp);
+    if (!verifySignatureFrom(message, signature, creatorAddress)) {
+      return sendJson(res, 403, { error: "Signature does not match this token's creator." });
+    }
+
+    const canonical = canonicalizeTokenMetadata({ logo, banner, socials });
+    await upsertTrackedToken(network, tokenAddress, canonical);
+    sendJson(res, 200, { tokenAddress, ...canonical });
   });
 
   // ---- real trade activity / price history (see pollTokenActivity /
