@@ -1147,6 +1147,27 @@ describe("CustomToken / CustomTokenFactory", function () {
         await malicious.setMode(0); // Mode.Accept
         await expect(malicious.claim()).to.not.be.reverted;
       });
+
+      it("a holder that empties its own balance from receive() cannot make pushReflections revert the whole batch, even if it shrinks the holder registry mid-loop", async function () {
+        const { token, malicious, goodHolder } = await setupWithMaliciousHolder(500);
+        const [, , , , , sink] = await ethers.getSigners();
+        await malicious.setTransferSink(sink.address);
+        await malicious.setMode(5); // Mode.TransferAway
+
+        const goodClaimable = await token.withdrawableDividendOf(goodHolder.address);
+        const goodEthBefore = await ethers.provider.getBalance(goodHolder.address);
+
+        // Whether or not the nested transfer actually completes within the
+        // fixed PUSH_GAS_STIPEND, the batch itself must never revert — a
+        // stale `total`/out-of-bounds read into a registry that shrank
+        // mid-loop must not be able to panic the whole call.
+        await expect(token.pushReflections(10)).to.not.be.reverted;
+
+        // Whatever happened to the malicious holder's own entitlement, the
+        // rest of the batch (the well-behaved holder) must still be paid
+        // in full.
+        expect(await ethers.provider.getBalance(goodHolder.address)).to.equal(goodEthBefore + goodClaimable);
+      });
     });
 
     it("pushReflections is a harmless no-op when there are no holders yet, and reverts on a zero batch size", async function () {
@@ -1844,6 +1865,65 @@ describe("CustomToken / CustomTokenFactory", function () {
 
         await buyTokens(router, token, buyer, ethIn);
         expect(await token.platformTaxActive()).to.equal(true);
+      });
+
+      it("shuts the 1% platform tax off exactly at the admin panel's configured $50,000 graduation target — realistic pool, no overrides", async function () {
+        // Unlike the other graduation tests above (thin 0.001 ETH pool, for
+        // convenience), this uses the real default liquidity (10 ETH) with
+        // NO tax-default overrides — exactly what CustomTokenFactory's live
+        // constructor defaults give a real launch: platformFeeBps=100
+        // (1.00%), graduationTargetUsd=50_000, the same numbers the admin
+        // panel currently shows for both factories.
+        const { token, router, buyer, supply, liquidityEth } = await deployWithPlatformTax();
+
+        expect(await token.platformFeeBps()).to.equal(PLATFORM_FEE_BPS);
+        expect(await token.graduationTargetUsd()).to.equal(GRADUATION_TARGET_USD);
+
+        // marketCap after a buy = (liquidityEth + ethIn)^2 * ethUsdPrice /
+        // liquidityEth — independent of totalSupply (it cancels out), so
+        // these ETH amounts land in the same place as LaunchedToken's
+        // equivalent test even though this file's default supply differs.
+        // ~2.8 ETH lands just under $50,000; a further ~0.5 ETH crosses it.
+        const underEthIn = ethers.parseEther("2.8");
+        const underBuy = computePlatformBuy(supply, liquidityEth, underEthIn, PLATFORM_FEE_BPS);
+        const marketCapUnder = computeMarketCap(underBuy.tokenReserveAfter, underBuy.ethReserveAfter, ETH_USD_PRICE, supply);
+        expect(marketCapUnder).to.be.lt(GRADUATION_TARGET_USD * 10n ** 8n);
+
+        await buyTokens(router, token, buyer, underEthIn);
+        expect(await token.platformTaxActive()).to.equal(true);
+        // Still under target — a poke here must not even start a candidacy.
+        await buyTokens(router, token, buyer, 1n);
+        expect(await token.graduationCandidateAt()).to.equal(0n);
+        expect(await token.platformTaxActive()).to.equal(true);
+
+        const overEthIn = ethers.parseEther("0.5");
+        const overBuy = computePlatformBuy(underBuy.tokenReserveAfter, underBuy.ethReserveAfter, overEthIn, PLATFORM_FEE_BPS);
+        const marketCapOver = computeMarketCap(overBuy.tokenReserveAfter, overBuy.ethReserveAfter, ETH_USD_PRICE, supply);
+        expect(marketCapOver).to.be.gt(GRADUATION_TARGET_USD * 10n ** 8n);
+
+        await buyTokens(router, token, buyer, overEthIn); // crosses $50,000 — this transfer's own check still sees pre-trade reserves
+        expect(await token.platformTaxActive()).to.equal(true);
+
+        const pokeTx = await buyTokensTx(router, token, buyer, 1n);
+        await expect(pokeTx).to.emit(token, "GraduationCandidateObserved");
+        expect(await token.platformTaxActive()).to.equal(true);
+
+        await buyTokens(router, token, buyer, 1n); // too early — confirms nothing yet
+        expect(await token.platformTaxActive()).to.equal(true);
+
+        await ethers.provider.send("evm_increaseTime", [GRADUATION_CONFIRMATION_WINDOW + 1]);
+        await ethers.provider.send("evm_mine");
+        const confirmTx = await buyTokensTx(router, token, buyer, 1n);
+        await expect(confirmTx).to.emit(token, "PlatformTaxDisabled");
+        expect(await token.platformTaxActive()).to.equal(false);
+
+        // Stays off permanently — a later sell pays no platform fee at all.
+        const feeWalletAddr = await token.platformFeeWallet();
+        const feeWalletBefore = await token.balanceOf(feeWalletAddr);
+        const held = await token.balanceOf(buyer.address);
+        await sellTokens(router, token, buyer, held);
+        expect(await token.balanceOf(feeWalletAddr)).to.equal(feeWalletBefore);
+        expect(await token.platformTaxActive()).to.equal(false);
       });
     });
 
