@@ -1140,6 +1140,65 @@ async function main() {
       const tracked = (await readTrackedTokens(network))[tokenAddress.toLowerCase()];
       creatorAddress = tracked ? tracked.creator : null;
     }
+    // FIX: neither the ledger nor tracked-tokens is guaranteed to know this
+    // token's creator YET, even for a perfectly real, just-launched token.
+    // readLedger() only ever contains launches relayed through THIS
+    // process's own relayedCreateToken/relayedCreateCustomToken path (see
+    // lib/trackedTokensStore.js's own doc comment) — a direct, non-relayed
+    // launch (the creator's own wallet calling
+    // TokenFactory.createToken()/CustomTokenFactory.createCustomToken()
+    // straight against the contract) never gets a ledger entry at all, ever.
+    // And even a RELAYED launch's ledger entry isn't written until
+    // postLaunchPipeline's recordLaunch() call finishes — which happens
+    // AFTER contract verification, well after the client already sees
+    // GET /status/:voucherHash report "relayed" and moves on (see
+    // relayMatchedDeposit above). tracked-tokens is populated by
+    // discoverLaunchedTokens, a background poll that only picks up a token
+    // once its block has actually been scanned (up to
+    // TOKEN_DISCOVERY_POLL_INTERVAL_MS, often longer under load). index.html's
+    // syncTokenMetadataToServer fires immediately after the launch tx
+    // confirms in-browser, well within that window for either path — so the
+    // very first metadata save for a freshly-launched token routinely landed
+    // here with no creator on file yet, 404'd, and (since
+    // syncTokenMetadataToServer swallows every error silently) the logo/
+    // banner/socials the user just set were quietly never saved, only to be
+    // wiped from the local view once a later refreshRemoteLaunches() merged
+    // back the server's (metadata-less) state.
+    //
+    // Closes the race for good, rather than just narrowing the window:
+    // TokenFactory/CustomTokenFactory both expose a public `creatorOf`
+    // mapping getter that's set synchronously, on-chain, in the very same
+    // transaction that creates the token — for BOTH the direct and relayed
+    // paths (see `creatorOf[token] = ...` in each factory contract). Falling
+    // back to reading it directly means this route never has to wait on a
+    // background poller at all. Tried against every configured factory (a
+    // token created by one factory simply isn't known to the other's
+    // `creatorOf`, which reads back address(0) rather than reverting, but
+    // this is wrapped in try/catch anyway so one factory misbehaving can
+    // never block checking the other).
+    if (!creatorAddress) {
+      for (const watcher of watchers) {
+        try {
+          const onChainCreator = await watcher.factory.creatorOf(tokenAddress);
+          if (onChainCreator && onChainCreator !== hre.ethers.ZeroAddress) {
+            creatorAddress = onChainCreator;
+            break;
+          }
+        } catch (err) {
+          // Not known to this factory (or a transient RPC error) — keep
+          // trying the others.
+        }
+      }
+      // Best-effort cache so the next lookup (or discoverLaunchedTokens'
+      // next tick) doesn't need to hit the chain again. upsertTrackedToken
+      // merges into whatever's already there rather than replacing it (see
+      // lib/trackedTokensStore.js), so this can never clobber a fuller
+      // record discoverLaunchedTokens writes moments later — worst case
+      // both write the same `creator` value.
+      if (creatorAddress) {
+        await upsertTrackedToken(network, tokenAddress, { creator: creatorAddress });
+      }
+    }
     if (!creatorAddress) {
       return sendJson(res, 404, { error: "Hood Launch has no record of this token yet." });
     }
@@ -1913,14 +1972,34 @@ async function main() {
         }
 
         // A "Just Launch" token can gain a pool later via independently-
-        // added liquidity (see index.html's checkPendingLiquidity) — recheck
-        // the owning factory's own pairOf mapping each tick until one shows
-        // up, same on-chain source of truth TokenFactory/CustomTokenFactory
-        // themselves use.
+        // added liquidity (see index.html's checkPendingLiquidity), including
+        // via LaunchedToken/CustomToken's own _maybeAutoActivateTax()/
+        // _activatePoolIfFound() — the token contract detects the pool and
+        // sets ITS OWN `pair` state variable directly, with zero factory
+        // involvement. TokenFactory/CustomTokenFactory's `pairOf` mapping is
+        // ONLY ever written from inside the atomic "Launch + Add Liquidity"
+        // codepath (_launchWithLiquidity/_relayedLaunchWithLiquidity) — a
+        // "Deploy Only" token's pairOf entry stays address(0) forever, no
+        // matter how or when a pool later shows up for it, since nothing else
+        // in either factory ever assigns it. So querying pairOf() here would
+        // never notice this transition. Recheck the DEX factory's own
+        // getPair() directly instead — the same real on-chain source of truth
+        // the "platform" branch above and index.html's checkPendingLiquidity
+        // both already use, and the only thing that actually reflects a pair
+        // a token contract set on itself.
         if (!entry.pairAddress) {
           const watcher = watchers.find((w) => w.kind === entry.kind);
           if (watcher) {
-            const onChainPair = await watcher.factory.pairOf(entry.tokenAddress);
+            let onChainPair = null;
+            try {
+              const routerAddress = await watcher.factory.router();
+              const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
+              const [wethAddress, dexFactoryAddress] = await Promise.all([router.WETH(), router.factory()]);
+              const univ2Factory = await hre.ethers.getContractAt(UNIV2_FACTORY_ABI, dexFactoryAddress, hre.ethers.provider);
+              onChainPair = await univ2Factory.getPair(entry.tokenAddress, wethAddress);
+            } catch (err) {
+              onChainPair = null; // best-effort backfill only — next tick tries again
+            }
             if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
               entry.pairAddress = onChainPair;
               // A DEPLOYED (no-pool) token just gained one — advance it to
