@@ -1442,6 +1442,20 @@
   // rejected signature or an unreachable relayer is silently swallowed
   // rather than nagging the user about a background sync they didn't
   // explicitly ask to watch.
+  // Best-effort sync of logo/banner/socials up to the relayer, called right
+  // after a launch confirms (or an edit is saved) — see saveCustomTokens'
+  // own callers. The server now has an on-chain creatorOf() fallback for a
+  // token it hasn't discovered yet (see POST /token-metadata/:tokenAddress
+  // in relayer.js), which closes the race that used to make the very first
+  // save attempt 404 for a freshly-launched token. That fallback can still
+  // itself fail transiently though — an RPC hiccup reading creatorOf(), a
+  // dropped connection, a relayer restart mid-request — so this retries a
+  // few times with a short backoff before giving up. Still silent on final
+  // failure (this stays a background best-effort sync, not something worth
+  // nagging the user over): the local edit already took effect via
+  // saveCustomTokens regardless of whether the server round-trip lands.
+  const SYNC_TOKEN_METADATA_MAX_ATTEMPTS = 3;
+  const SYNC_TOKEN_METADATA_RETRY_DELAY_MS = 2000;
   async function syncTokenMetadataToServer(t){
     if(!(t && t.onChain && t.tokenAddress && window.ethereum)) return;
     const url = relayerApiUrl(t.networkMode);
@@ -1453,13 +1467,22 @@
     try{
       signature = await window.ethereum.request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
     }catch(err){ return; } // rejected — this is a best-effort background sync, don't nag the user
-    try{
-      await fetch(`${url}/token-metadata/${t.tokenAddress}`, {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ ...metadata, timestamp, signature }),
-      });
-    }catch(err){ /* best-effort — the local edit already succeeded via saveCustomTokens */ }
+    for(let attempt=1; attempt<=SYNC_TOKEN_METADATA_MAX_ATTEMPTS; attempt++){
+      try{
+        const res = await fetch(`${url}/token-metadata/${t.tokenAddress}`, {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ ...metadata, timestamp, signature }),
+        });
+        if(res.ok) return; // saved — done
+      }catch(err){ /* network error — fall through to retry/give up below */ }
+      if(attempt < SYNC_TOKEN_METADATA_MAX_ATTEMPTS){
+        await new Promise(r=>setTimeout(r, SYNC_TOKEN_METADATA_RETRY_DELAY_MS));
+      }
+    }
+    // Every attempt failed — best-effort, no toast. The local edit already
+    // succeeded via saveCustomTokens; the next successful sync (a later
+    // edit, or a future retry mechanism) will still catch this up.
   }
 
   // Same admin-signed pattern as requestActiveNetworkChange above, for the
