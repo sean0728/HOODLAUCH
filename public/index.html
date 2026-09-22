@@ -3383,12 +3383,14 @@
     // words 2/3/4/5 regardless of the strings' actual tail content.
     const createdWords = splitWords(createdLog.data);
     const pairAddress = decodeAddress("0x"+createdWords[3]);
-    // The factory resolves CustomTokenFactory.SELF_REFLECTION_ASSET (see
-    // that constant's comment) to the real clone address before this event
-    // is ever emitted, so reading it straight off the log — rather than
-    // trusting whatever draft.customFees.reflectionAsset happened to hold
-    // client-side — is what lets "This Token" ever get labeled correctly
-    // afterward (reflectionAssetLabel compares against this real value).
+    // Read straight off the log rather than trusting whatever
+    // draft.customFees.reflectionAsset happened to hold client-side — the
+    // contract echoes back exactly whatever address was actually recorded
+    // on-chain, which is what reflectionAssetLabel needs to display
+    // correctly (this also matters for a legacy token launched before the
+    // "This Token" wizard option was removed — see the comment above
+    // reflectionAssetMode — whose recorded reflectionAsset is the
+    // SELF_REFLECTION_ASSET sentinel itself, not a real address).
     const reflectionAssetResolved = decodeAddress("0x"+createdWords[4]);
     onStep("deploy", "done", `Contract deployed at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · tx <span class="num">${fmtAddrSafe(txHash)}</span>`);
 
@@ -3627,9 +3629,7 @@
     // build doesn't send it, so this still works without a lockstep upgrade.
     // reflectionAsset isn't in that /status response at all yet, so it's
     // always read straight off this log — see performOnChainCustomLaunch's
-    // matching comment for why the resolved on-chain value (not the raw
-    // draft/voucher value, which may still be the SELF_REFLECTION_ASSET
-    // sentinel) is what reflectionAssetLabel needs.
+    // matching comment.
     let reflectionAssetResolved = null;
     const createdLog = (receipt.logs||[]).find(l =>
       l.address && l.address.toLowerCase()===factoryAddress.toLowerCase() &&
@@ -3757,15 +3757,19 @@
   const ROUTER_WETH_SELECTOR = "ad5c4648";       // IUniswapV2Router02.WETH()
   const FACTORY_GET_PAIR_SELECTOR = "e6a43905";  // IUniswapV2Factory.getPair(address,address)
   const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-  // Sentinel CustomTokenFactory.SELF_REFLECTION_ASSET() reports on-chain —
-  // pass this as the reflections asset to mean "pay reflections in the
-  // token being launched itself." The clone's real address doesn't exist
-  // yet at the point this wizard builds calldata (or, for a relayed
-  // launch, at the point the creator signs their voucher, well before any
-  // contract call happens), so there's no way to send the real address
-  // directly — the factory resolves this placeholder to the freshly-
-  // cloned token's own address right after creating it. Lowercase because
-  // every comparison against it below normalizes to lowercase first.
+  // Legacy sentinel from a "This Token" reflections option that used to be
+  // offered in the launch wizard (pass this as the reflections asset to
+  // mean "pay reflections in the token being launched itself"). It has
+  // been removed from the wizard — see the comment above
+  // reflectionAssetMode for the full reasoning — because nothing in
+  // CustomTokenFactory.sol/CustomToken.sol (or scripts/relayer.js) ever
+  // actually resolved this placeholder to anything real: a token launched
+  // with it ended up with reflectionAsset permanently set to this literal
+  // address, which isn't a contract, so every reflection distribution for
+  // it silently fails and re-queues forever. Kept here only so
+  // reflectionAssetLabel can still recognize and correctly label a token
+  // that was already launched this way before the fix. Lowercase because
+  // every comparison against it normalizes to lowercase first.
   const SELF_REFLECTION_ASSET = "0x0000000000000000000000000000000000000001";
   // Selectors for reading real wallet/pool state in the Portfolio tab
   // (below) — computed via ethers.Interface the same way as the selectors
@@ -5639,20 +5643,12 @@
         renderPreview();
       });
     });
-    // Native Token and This Token both lock the address input closed —
-    // there's nothing to type for either, so any address a creator had
-    // typed while on Custom Token is discarded the moment they leave it.
+    // Native Token locks the address input closed — there's nothing to type
+    // for it, so any address a creator had typed while on Custom Token is
+    // discarded the moment they leave it.
     if(byId("fReflectNative")) byId("fReflectNative").addEventListener("change", e=>{
       if(e.target.checked){
         draft.customFees.reflectionAsset="";
-        const inp=byId("fReflectionAsset"); if(inp){ inp.value=""; inp.disabled=true; }
-        reflectionTokenCheck = { address:"", status:"idle", info:null };
-        renderReflectionTokenInfo();
-      }
-    });
-    if(byId("fReflectSelf")) byId("fReflectSelf").addEventListener("change", e=>{
-      if(e.target.checked){
-        draft.customFees.reflectionAsset=SELF_REFLECTION_ASSET;
         const inp=byId("fReflectionAsset"); if(inp){ inp.value=""; inp.disabled=true; }
         reflectionTokenCheck = { address:"", status:"idle", info:null };
         renderReflectionTokenInfo();
@@ -5731,15 +5727,40 @@
   function isAddressLike(s){ return /^0x[0-9a-fA-F]{40}$/.test(s||""); }
   function isUrlLike(s){ try{ const u = new URL(s); return u.protocol==="http:"||u.protocol==="https:"; }catch(e){ return false; } }
 
-  // ---- Reflections payout asset: Native Token / This Token / Custom Token ----
-  // draft.customFees.reflectionAsset is the single source of truth for all
-  // three choices: "" means Native Token, SELF_REFLECTION_ASSET means This
-  // Token (the token being launched itself — see that constant's comment),
-  // and anything else is a creator-typed Custom Token address. Kept as one
-  // field (rather than a separate mode flag) so every existing call site
-  // that already sends this value straight to the contract or into a
-  // signed voucher needs no change at all — the sentinel is just another
-  // address as far as encoding is concerned.
+  // ---- Reflections payout asset: Native Token / Custom Token ----
+  // draft.customFees.reflectionAsset is the single source of truth for both
+  // choices: "" means Native Token, and anything else is a creator-typed
+  // Custom Token address.
+  //
+  // A third option ("This Token" — reflections paid out directly in the
+  // token being launched, via the SELF_REFLECTION_ASSET sentinel below) used
+  // to be offered here. It has been removed from the picker: nothing in
+  // CustomTokenFactory.sol or CustomToken.sol ever resolves that sentinel to
+  // the freshly-cloned token's real address the way the comments on
+  // SELF_REFLECTION_ASSET (and in performOnChainCustomLaunch) describe —
+  // there is no such logic anywhere in the contracts or in scripts/
+  // relayer.js. CustomToken.initialize() also explicitly reverts with
+  // ReflectionAssetIsSelf() if reflectionAsset is ever the token's own real
+  // address, so a genuine "pay reflections in the token itself" mode isn't
+  // just unresolved, it's actively blocked at the contract level (this was
+  // a deliberate fix — see AUDIT-CustomToken.md Finding 6 — because the
+  // dividend-per-share accounting this contract uses assumes the payout
+  // asset is independent of the balance driving the entitlement formula;
+  // paying out in the same token would make claiming a distribution also
+  // move the very balance the distribution math is keyed on).
+  //
+  // Net effect before this fix: selecting "This Token" silently set
+  // reflectionAsset to the meaningless address 0x…0001 (the sentinel
+  // itself, never resolved to anything real) — not a revert at launch, so
+  // nothing looked wrong to the creator, but every future
+  // _processReflections() attempt would fail against a non-contract address
+  // and get caught by CustomToken's own try/catch, quietly re-queuing the
+  // fee tokens forever. Reflections configured this way never pay out to
+  // anyone; they just accumulate, unswapped, inside the token contract.
+  // SELF_REFLECTION_ASSET/reflectionAssetLabel's "self" recognition are left
+  // in place purely so any token that was already launched this way before
+  // this fix still gets labeled "This token" (rather than a raw address) on
+  // its own detail page — see reflectionAssetLabel below.
   function reflectionAssetMode(raw){
     if(!raw) return "native";
     return raw.toLowerCase()===SELF_REFLECTION_ASSET ? "self" : "custom";
@@ -5800,8 +5821,8 @@
     const raw = (draft.customFees.reflectionAsset||"").trim();
     const mode = reflectionAssetMode(raw);
     if(mode==="native") return { color:"var(--paper-500)", text:"" };
-    if(mode==="self") return { color:"var(--good-500)", text:`Reflections pay out directly in $${draft.ticker||"this token"} — no swap needed, holders just receive more of it.` };
-    // mode === "custom" from here on.
+    // mode === "custom" from here on ("self" can no longer be chosen from
+    // the wizard — see the comment above reflectionAssetMode).
     if(raw.toLowerCase() !== reflectionTokenCheck.address.toLowerCase()){
       // Not checked yet for this exact address (a fresh keystroke, or a
       // step re-render for an address typed before this cache existed) —
@@ -5879,10 +5900,10 @@
     }, 500);
   }
   // Builds the shared "Reflections payout asset" field for both custom-tax
-  // wizard steps (customFeeStepHTML/customDeployFeeStepHTML) — Native
-  // Token and This Token both lock the address input closed (there's
-  // nothing to type for either), and only Custom Token opens it, with the
-  // on-chain validity check above surfacing right underneath it.
+  // wizard steps (customFeeStepHTML/customDeployFeeStepHTML) — Native Token
+  // locks the address input closed (there's nothing to type for it), and
+  // only Custom Token opens it, with the on-chain validity check above
+  // surfacing right underneath it.
   function reflectionAssetFieldHTML(reflectionOnHint){
     const raw = draft.customFees.reflectionAsset || "";
     const mode = reflectionAssetMode(raw);
@@ -5892,7 +5913,6 @@
         <label style="margin-bottom:8px; display:block;">Reflections payout asset</label>
         <div style="display:flex; gap:16px; margin-bottom:8px; flex-wrap:wrap;">
           <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectNative" ${mode==="native"?"checked":""}> Native Token</label>
-          <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectSelf" ${mode==="self"?"checked":""}> This Token</label>
           <label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="reflectionAssetMode" id="fReflectCustom" ${mode==="custom"?"checked":""}> Custom Token</label>
         </div>
         <input id="fReflectionAsset" type="text" placeholder="0x… token address" value="${mode==="custom"?escapeHtml(raw):""}" ${mode==="custom"?"":"disabled"}>
@@ -5920,12 +5940,12 @@
       wizStep=3; renderWizard();
       return false;
     }
-    // Custom Token specifically (Native Token and This Token both skip
-    // this — see reflectionAssetMode) must have already come back as a
-    // real, on-chain ERC20 from scheduleReflectionTokenLookup before this
-    // wizard lets it launch. "offline" (no injected wallet at all) is left
-    // to fail at launchDraftToken's own wallet checks instead of blocked
-    // here, since it isn't specific to this address.
+    // Custom Token specifically (Native Token skips this — see
+    // reflectionAssetMode) must have already come back as a real, on-chain
+    // ERC20 from scheduleReflectionTokenLookup before this wizard lets it
+    // launch. "offline" (no injected wallet at all) is left to fail at
+    // launchDraftToken's own wallet checks instead of blocked here, since
+    // it isn't specific to this address.
     if(reflectionAssetMode(draft.customFees.reflectionAsset)==="custom"){
       const raw = draft.customFees.reflectionAsset.trim();
       const stale = reflectionTokenCheck.address.toLowerCase() !== raw.toLowerCase();
@@ -5936,7 +5956,7 @@
         return false;
       }
       if(status==="invalid"){
-        toast("No ERC20 token was found at that reflections address on the current network — fix it, or switch to Native Token / This Token.");
+        toast("No ERC20 token was found at that reflections address on the current network — fix it, or switch to Native Token.");
         wizStep=3; renderWizard();
         return false;
       }
