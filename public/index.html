@@ -1456,17 +1456,31 @@
   // saveCustomTokens regardless of whether the server round-trip lands.
   const SYNC_TOKEN_METADATA_MAX_ATTEMPTS = 3;
   const SYNC_TOKEN_METADATA_RETRY_DELAY_MS = 2000;
+  // Returns true iff the server actually confirmed the save, false for every
+  // other outcome (no wallet, no relayer configured, the personal_sign
+  // prompt was rejected/missed, or every retry failed) — the caller decides
+  // whether that's worth surfacing. This used to return nothing at all and
+  // every caller wrapped it in .catch(()=>{}), which is exactly why a failed
+  // sync was invisible: the automatic call right after a launch confirms is
+  // still fired the same fire-and-forget way (a launch already succeeded
+  // on-chain by that point — a secondary branding sync failing shouldn't
+  // undercut that moment), but editTokenSave below now awaits this return
+  // value so an explicit "Save" action can actually tell the creator when
+  // their logo/banner/socials change didn't reach the server — previously
+  // it unconditionally toasted "updated" the instant this fired, regardless
+  // of whether personal_sign was ever even answered.
   async function syncTokenMetadataToServer(t){
-    if(!(t && t.onChain && t.tokenAddress && window.ethereum)) return;
+    if(!(t && t.onChain && t.tokenAddress)) return false;
+    if(!window.ethereum) return false; // no injected wallet to sign with (e.g. WalletConnect-only) — nothing this call can do about that here
     const url = relayerApiUrl(t.networkMode);
-    if(!url) return;
+    if(!url) return false;
     const metadata = { logo: t.logo||null, banner: t.banner||null, socials: t.socials||{} };
     const timestamp = Date.now();
     const message = tokenMetadataMessage(t.tokenAddress, metadata, timestamp);
     let signature;
     try{
       signature = await window.ethereum.request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
-    }catch(err){ return; } // rejected — this is a best-effort background sync, don't nag the user
+    }catch(err){ return false; } // rejected or the prompt was missed
     for(let attempt=1; attempt<=SYNC_TOKEN_METADATA_MAX_ATTEMPTS; attempt++){
       try{
         const res = await fetch(`${url}/token-metadata/${t.tokenAddress}`, {
@@ -1474,15 +1488,18 @@
           headers: {"Content-Type":"application/json"},
           body: JSON.stringify({ ...metadata, timestamp, signature }),
         });
-        if(res.ok) return; // saved — done
+        if(res.ok) return true; // saved — done
       }catch(err){ /* network error — fall through to retry/give up below */ }
       if(attempt < SYNC_TOKEN_METADATA_MAX_ATTEMPTS){
         await new Promise(r=>setTimeout(r, SYNC_TOKEN_METADATA_RETRY_DELAY_MS));
       }
     }
-    // Every attempt failed — best-effort, no toast. The local edit already
-    // succeeded via saveCustomTokens; the next successful sync (a later
-    // edit, or a future retry mechanism) will still catch this up.
+    // Every attempt failed. The local edit already succeeded via
+    // saveCustomTokens — that's why this still returns false rather than
+    // throwing — but the server round-trip genuinely never landed, so
+    // nobody else (another browser, another device, a fresh visitor) will
+    // ever see this change until it's retried successfully.
+    return false;
   }
 
   // Same admin-signed pattern as requestActiveNetworkChange above, for the
@@ -8166,7 +8183,7 @@
     catch(err){ toast(err.message || "Couldn't load that image."); }
   });
   document.getElementById("editBannerRemove").addEventListener("click", ()=>{ editImages.banner=""; renderEditImagePreview("banner"); });
-  document.getElementById("editTokenSave").addEventListener("click", ()=>{
+  document.getElementById("editTokenSave").addEventListener("click", async ()=>{
     const t = tokens.find(x=>x.id===editingTokenId);
     if(!t){ closeEditToken(); return; }
     t.desc = document.getElementById("editDesc").value.trim() || t.desc;
@@ -8179,12 +8196,23 @@
     t.logo = editImages.logo;
     t.banner = editImages.banner;
     saveCustomTokens();
-    syncTokenMetadataToServer(t).catch(()=>{});
     closeEditToken();
-    toast(`$${t.ticker} updated.`);
     renderGrid();
     if(views.detail.classList.contains("active")) openDetail(t.id);
     if(views.portfolio.classList.contains("active")) renderPortfolio();
+    // Local save always succeeds instantly (localStorage), so the grid/detail
+    // views above already reflect the change on this device. The server sync
+    // is what makes the logo/banner/socials visible to everyone else, and it
+    // depends on a wallet signature the creator might reject, miss, or not
+    // even get prompted for (no injected wallet). We now wait for the real
+    // outcome instead of guessing, and say plainly which case happened.
+    toast(`$${t.ticker} saved. Syncing to server…`);
+    const synced = await syncTokenMetadataToServer(t);
+    if(synced){
+      toast(`$${t.ticker} updated — live everywhere.`);
+    }else{
+      toast(`$${t.ticker} saved on this device, but the server sync failed. Check your wallet for a signature request, then hit Edit → Save again.`);
+    }
   });
 
   /* ---------------- live feed (real trade activity only) ---------------- */
