@@ -911,7 +911,29 @@
   // multi-megabyte phone photo from silently eating localStorage's ~5-10MB
   // per-origin budget; a handful of tokens with a small logo (PNG, kept
   // for transparency) and a compressed banner (JPEG) stays well within it.
-  function readAndResizeImage(file, {maxW, maxH, mime="image/jpeg", quality=0.85}={}){
+  //
+  // maxBytes is the OTHER limit this has to respect: POST
+  // /token-metadata/:tokenAddress (scripts/relayer.js) hard-rejects a logo
+  // over ~400,000 encoded chars / banner over ~700,000 with a 400. The old
+  // version resized to fixed pixel dimensions and returned whatever
+  // canvas.toDataURL() produced with NO check against that actual limit.
+  // That's fine for a banner (JPEG, quality knob, comfortably under budget
+  // at 1400x440) but PNG has no quality knob at all — a busy, detailed
+  // 200x200 logo can easily land north of 400KB — so a save that "worked"
+  // locally (saveCustomTokens is just localStorage, no size limit anywhere
+  // near that low) could silently 400 the instant syncTokenMetadataToServer
+  // posted it, and since every caller of that function swallows its errors
+  // (by design — see its own comment), the creator never learned why their
+  // logo/banner never reached the server for anyone else to see.
+  //
+  // Fix: after encoding, check the result against maxBytes. If it's over,
+  // retry — tightening JPEG quality first (cheap, no visible resize) if the
+  // format supports it, then shrinking the canvas dimensions themselves
+  // (the only lever PNG has) — up to MAX_ENCODE_ATTEMPTS times. If it still
+  // doesn't fit after shrinking that far, reject with a clear, specific
+  // message instead of ever handing the caller an oversized data URI.
+  const MAX_ENCODE_ATTEMPTS = 8;
+  function readAndResizeImage(file, {maxW, maxH, mime="image/jpeg", quality=0.85, maxBytes=Infinity}={}){
     return new Promise((resolve, reject)=>{
       if(!file.type || !file.type.startsWith("image/")){ reject(new Error("That file doesn't look like an image.")); return; }
       const reader = new FileReader();
@@ -920,22 +942,48 @@
         const img = new Image();
         img.onerror = ()=> reject(new Error("That doesn't look like a valid image."));
         img.onload = ()=>{
-          const scale = Math.min(1, maxW/img.width, maxH/img.height);
-          const w = Math.max(1, Math.round(img.width*scale));
-          const h = Math.max(1, Math.round(img.height*scale));
-          const canvas = document.createElement("canvas");
-          canvas.width = w; canvas.height = h;
-          canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-          try{ resolve(canvas.toDataURL(mime, quality)); }
-          catch(e){ reject(new Error("Couldn't process that image.")); }
+          const baseScale = Math.min(1, maxW/img.width, maxH/img.height);
+          let q = quality;
+          let attempt = 0;
+          const tryEncode = ()=>{
+            attempt++;
+            // Each retry shrinks the target dimensions a further 15% on top
+            // of the original fit-to-box scale, always recomputed from the
+            // source image's real width/height so the aspect ratio never
+            // drifts across attempts.
+            const shrink = Math.pow(0.85, attempt-1);
+            const w = Math.max(16, Math.round(img.width*baseScale*shrink));
+            const h = Math.max(16, Math.round(img.height*baseScale*shrink));
+            const canvas = document.createElement("canvas");
+            canvas.width = w; canvas.height = h;
+            canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+            let dataUrl;
+            try{ dataUrl = canvas.toDataURL(mime, q); }
+            catch(e){ reject(new Error("Couldn't process that image.")); return; }
+            if(dataUrl.length <= maxBytes){ resolve(dataUrl); return; }
+            if(attempt >= MAX_ENCODE_ATTEMPTS){
+              reject(new Error(`That image is still too large (${Math.round(dataUrl.length/1024)}KB) even after shrinking it as much as we reasonably can. Try a smaller or simpler source image.`));
+              return;
+            }
+            // Lossy formats: tighten quality first, down to a floor of 0.4,
+            // before the next pass also shrinks dimensions again. PNG has
+            // no quality knob, so it always falls straight through to
+            // dimension-shrinking on the next attempt.
+            if(mime !== "image/png" && q > 0.4) q = Math.max(0.4, q - 0.15);
+            tryEncode();
+          };
+          tryEncode();
         };
         img.src = reader.result;
       };
       reader.readAsDataURL(file);
     });
   }
-  const LOGO_IMAGE_OPTS = { maxW:200, maxH:200, mime:"image/png" };
-  const BANNER_IMAGE_OPTS = { maxW:1400, maxH:440, mime:"image/jpeg", quality:0.82 };
+  // maxBytes mirrors the server's own limits exactly (see the comment
+  // above and POST /token-metadata/:tokenAddress in scripts/relayer.js) so
+  // a file that passes here is guaranteed to pass there too.
+  const LOGO_IMAGE_OPTS = { maxW:200, maxH:200, mime:"image/png", maxBytes:400000 };
+  const BANNER_IMAGE_OPTS = { maxW:1400, maxH:440, mime:"image/jpeg", quality:0.82, maxBytes:700000 };
 
   // Swaps the initials avatar for an uploaded logo wherever a token's mark
   // is shown, without duplicating the initials-vs-image branch at each
