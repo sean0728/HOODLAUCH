@@ -6888,7 +6888,7 @@
           <div class="field"><label>Creator reward diversion (bps, out of the tax bps above)</label><input type="number" step="1" min="0" max="10000" id="admin_${key}_taxCreatorRewardBps" placeholder="${state.creatorRewardBps}"></div>
         </div>
         <div class="admin-action-row">
-          <span class="hint" style="flex-basis:100%;">Leave the wallet/price-feed fields blank to set them to address(0) — the documented way to leave the platform tax unconfigured for future launches. Reward diversion and creator reward diversion bps are both carved OUT OF the tax bps above (never on top of it, and never overlapping each other) — together they must not exceed it. Reward diversion only takes effect once a rewards distributor is set below; creator reward diversion only takes effect once a creator rewards distributor is set below that.</span>
+          <span class="hint" style="flex-basis:100%;">Leave the wallet/price-feed fields blank to leave them exactly as they are now (shown in the placeholder above) — only the fields you actually fill in get changed. To deliberately pause the platform tax for future launches, type the zero address (0x0000000000000000000000000000000000000000) into both fields yourself. Reward diversion and creator reward diversion bps are both carved OUT OF the tax bps above (never on top of it, and never overlapping each other) — together they must not exceed it. Reward diversion only takes effect once a rewards distributor is set below; creator reward diversion only takes effect once a creator rewards distributor is set below that.</span>
           <button class="btn btn-primary btn-sm" data-admin-action="taxDefaults" data-factory-key="${key}">Update tax defaults</button>
         </div>
 
@@ -7884,18 +7884,44 @@
         const rewardBpsN = rewardBpsRaw === "" ? 0 : parseInt(rewardBpsRaw, 10);
         const creatorRewardBpsRaw = field("taxCreatorRewardBps").value.trim();
         const creatorRewardBpsN = creatorRewardBpsRaw === "" ? 0 : parseInt(creatorRewardBpsRaw, 10);
-        if(walletVal && !isAddressLike(walletVal)) throw new Error("Platform fee wallet must be a valid address, or left blank to unset it.");
-        if(feedVal && !isAddressLike(feedVal)) throw new Error("Price feed must be a valid address, or left blank to unset it.");
+        if(walletVal && !isAddressLike(walletVal)) throw new Error("Platform fee wallet must be a valid address, or left blank to leave it unchanged.");
+        if(feedVal && !isAddressLike(feedVal)) throw new Error("Price feed must be a valid address, or left blank to leave it unchanged.");
         if(isNaN(bpsN) || bpsN<0 || bpsN>10000) throw new Error("Tax bps must be between 0 and 10000.");
         if(isNaN(gradN) || gradN<=0) throw new Error("Graduation target must be a positive whole-dollar amount.");
         if(isNaN(staleN) || staleN<=0) throw new Error("Max oracle staleness must be a positive number of seconds.");
         if(isNaN(rewardBpsN) || rewardBpsN<0) throw new Error("Reward diversion bps must be 0 or more.");
         if(isNaN(creatorRewardBpsN) || creatorRewardBpsN<0) throw new Error("Creator reward diversion bps must be 0 or more.");
         if(rewardBpsN + creatorRewardBpsN > bpsN) throw new Error("Reward diversion plus creator reward diversion bps must not exceed the tax bps above (together they're carved out of it, never added on top).");
+        // FIX: a blank wallet/price-feed field used to submit address(0)
+        // straight to setTaxDefaults() — silently disabling the platform
+        // tax for every launch from that point on, since the contract has
+        // no way to tell "leave this alone" apart from "actually zero it
+        // out" (both are valid, intentional on-chain states — zeroing
+        // either is a documented way to pause the platform tax, see
+        // TokenFactory.test.js/CustomToken.test.js). Re-reading each
+        // value's CURRENT on-chain state here and falling back to that
+        // (instead of ZERO_ADDRESS) when its field is left blank closes
+        // the accidental-zeroing case entirely: the only way to actually
+        // set either to address(0) now is to type it in explicitly, the
+        // same deliberate action scripts/updateTaxDefaults.js already
+        // requires.
+        let walletFallback = ZERO_ADDRESS, feedFallback = ZERO_ADDRESS;
+        if(!walletVal || !feedVal){
+          try{
+            const [currentWalletHex, currentFeedHex] = await Promise.all([
+              ethCall(address, "0x"+PLATFORM_FEE_WALLET_SELECTOR),
+              ethCall(address, "0x"+PRICE_FEED_SELECTOR),
+            ]);
+            walletFallback = decodeAddress(currentWalletHex);
+            feedFallback = decodeAddress(currentFeedHex);
+          }catch(err){
+            throw new Error("Couldn't read the current on-chain wallet/price-feed to preserve them — try again, or fill in both fields explicitly.");
+          }
+        }
         data = encodeSetTaxDefaultsCalldata(SET_TAX_DEFAULTS_SELECTOR, {
-          platformFeeWallet: walletVal || ZERO_ADDRESS,
+          platformFeeWallet: walletVal || walletFallback,
           feeBps: BigInt(bpsN),
-          priceFeed: feedVal || ZERO_ADDRESS,
+          priceFeed: feedVal || feedFallback,
           graduationTargetUsd: BigInt(gradN),
           maxOracleStaleness: BigInt(staleN),
           rewardBps: BigInt(rewardBpsN),
