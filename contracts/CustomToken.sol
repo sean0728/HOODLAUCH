@@ -1252,14 +1252,28 @@ contract CustomToken is ERC20, ReentrancyGuard {
 
     function pushReflections(uint256 maxHolders) external nonReentrant returns (uint256 holdersPaid, uint256 totalPaid) {
         if (maxHolders == 0) revert MaxHoldersMustBePositive();
-        uint256 total = _reflectionHolders.length;
-        if (total == 0) return (0, 0);
-
         uint256 cursor = reflectionPushCursor;
-        if (cursor >= total) cursor = 0;
 
-        uint256 steps = maxHolders < total ? maxHolders : total;
+        // Re-reads `_reflectionHolders.length` on every iteration (a single
+        // warm SLOAD) rather than caching it once before the loop. The ETH
+        // send below is an arbitrary external call to `holder` — gas-capped
+        // at PUSH_GAS_STIPEND specifically so a hostile receive() can't
+        // complete a further token transfer of its own (confirmed by a
+        // dedicated test: within that stipend, a nested transfer that would
+        // shrink this registry via swap-and-pop reliably runs out of gas
+        // and reverts harmlessly before it can mutate anything) — but this
+        // loop no longer *depends* on that margin for safety. A stale
+        // `total` combined with a swap-and-pop that shrank the array mid-loop
+        // would otherwise let `_reflectionHolders[cursor]` read out of
+        // bounds and panic-revert the entire batch; re-checking the current
+        // length here removes that possibility even if PUSH_GAS_STIPEND, the
+        // registry-mutation cost, or the EVM's own gas schedule ever change.
+        uint256 steps = maxHolders;
         for (uint256 visited = 0; visited < steps; visited++) {
+            uint256 total = _reflectionHolders.length;
+            if (total == 0) break;
+            if (cursor >= total) cursor = 0;
+
             address holder = _reflectionHolders[cursor];
             cursor = cursor + 1 == total ? 0 : cursor + 1;
 
