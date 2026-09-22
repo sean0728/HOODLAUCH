@@ -110,6 +110,32 @@ const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore
 const { ROBINHOOD_NETWORKS } = require("../lib/networks");
 const { isDbConfigured, ensureSchema } = require("../lib/db");
 
+// Safety net: log and keep running instead of letting one unexpected error
+// take the entire site down. This is what's missing from the 2025-09
+// outage this comment documents — a MySQL pooled connection got dropped by
+// the DB server for sitting idle past its own wait_timeout
+// (ER_CLIENT_INTERACTION_TIMEOUT), lib/db.js had no listener for the
+// resulting pool 'error' event, and with nothing here either, Node's
+// default behavior for an unhandled error is to crash the whole process —
+// which then stayed down until someone noticed and restarted it by hand,
+// since nothing in this repo (no pm2 ecosystem file, no systemd unit) was
+// supervising it. lib/db.js's own pool.on("error", ...) + query()'s
+// retry-once-on-disconnect now fix that specific cause directly; this is
+// the general-purpose backstop for anything similarly shaped that isn't
+// specifically a DB connection error, so a genuinely unexpected bug logs
+// loudly (check hosting logs after seeing one of these) rather than
+// silently taking the whole platform offline. This does NOT replace having
+// the host actually supervise/restart the process — it only stops a
+// recoverable async error from being fatal in the first place.
+process.on("uncaughtException", (err) => {
+  // eslint-disable-next-line no-console
+  console.error("[relayer] uncaughtException — logged and continuing (this process was NOT restarted):", err);
+});
+process.on("unhandledRejection", (reason) => {
+  // eslint-disable-next-line no-console
+  console.error("[relayer] unhandledRejection — logged and continuing (this process was NOT restarted):", reason);
+});
+
 // A token's lifecycle stage, persisted per (network, tokenAddress) in
 // lib/trackedTokensStore's `tokenStatus` field so it survives restarts and
 // backs GET /launches' own `tokenStatus` (see that route below). Deliberately
