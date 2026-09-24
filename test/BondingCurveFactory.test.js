@@ -8,11 +8,11 @@ describe("BondingCurveFactory", function () {
   const ETH_USD_PRICE = 3000n * 10n ** 8n; // $3000, 8 decimals
   const CURVE_FEE_BPS = 100n; // 1.00% -- matches the contract's curveFeeBps default
   // Deliberately below the curve's constant-product exhaustion point -- see
-  // the contract's own comment on ethGraduationTarget. At the defaults used
+  // the contract's own comment on poolSeedTargetWei. At the defaults used
   // here, exhausting the entire curve supply in one trade would require
   // slightly more than 3 ETH of real reserve; 1.5 ETH leaves real headroom
   // so a crossing buy never also trips "exceeds curve supply".
-  const ETH_GRADUATION_TARGET = ethers.parseEther("1.5");
+  const POOL_SEED_TARGET = ethers.parseEther("1.5");
 
   // Mirrors BondingCurveFactory's exact integer math (fee-first on buys,
   // fee-last on sells) so test expectations are derived the same way the
@@ -65,7 +65,7 @@ describe("BondingCurveFactory", function () {
       await priceFeed.getAddress()
     );
     await locker.setFactory(await factory.getAddress());
-    await factory.setEthGraduationTarget(ETH_GRADUATION_TARGET);
+    await factory.setPoolSeedTargetWei(POOL_SEED_TARGET);
 
     return {
       factory,
@@ -128,7 +128,8 @@ describe("BondingCurveFactory", function () {
       expect(state.tokensRemaining).to.equal(state.curveSupply);
       expect(state.virtualEthReserve).to.equal(ethers.parseEther("3"));
       expect(state.virtualTokenReserve).to.equal((TOTAL_SUPPLY * 8000n) / 10_000n);
-      expect(state.ethGraduationTarget_).to.equal(ETH_GRADUATION_TARGET);
+      expect(state.poolSeedTargetWei_).to.equal(POOL_SEED_TARGET);
+      expect(state.curveFeeBps_).to.equal(CURVE_FEE_BPS);
       expect(state.graduated).to.equal(false);
     });
 
@@ -412,13 +413,13 @@ describe("BondingCurveFactory", function () {
   describe("graduation", function () {
     async function crossingBuyEth(factory, tokenAddress) {
       const state = await factory.curveState(tokenAddress);
-      const remaining = state.ethGraduationTarget_ > state.realEthReserve ? state.ethGraduationTarget_ - state.realEthReserve : 0n;
+      const remaining = state.poolSeedTargetWei_ > state.realEthReserve ? state.poolSeedTargetWei_ - state.realEthReserve : 0n;
       // Gross up for the 1% curve fee, plus a comfortable margin so rounding
       // never leaves the buy just short of the target.
       return (remaining * 10_000n) / (10_000n - CURVE_FEE_BPS) + ethers.parseEther("0.05");
     }
 
-    it("auto-graduates the transaction that crosses ethGraduationTarget", async function () {
+    it("auto-graduates the transaction that crosses poolSeedTargetWei", async function () {
       const { factory, creator, buyer } = await deployStack();
       const { tokenAddress, token } = await createCurveToken(factory, creator);
 
@@ -689,7 +690,231 @@ describe("BondingCurveFactory", function () {
         factory,
         "OwnableUnauthorizedAccount"
       );
-      await expect(factory.connect(buyer).setEthGraduationTarget(ethers.parseEther("1"))).to.be.revertedWithCustomError(
+      await expect(factory.connect(buyer).setPoolSeedTargetWei(ethers.parseEther("1"))).to.be.revertedWithCustomError(
+        factory,
+        "OwnableUnauthorizedAccount"
+      );
+    });
+  });
+
+  // ---- AUDIT-BondingCurveFactory.md Finding 1 (High) ----
+  // _distributeEthFee used to revert the entire buy()/sell()/
+  // createCurveToken() call if feeTreasury or rewardsDistributor rejected
+  // the transfer -- for sell(), that meant a misbehaving fee recipient could
+  // block every holder's only way to exit a live curve. Post-fix, a failed
+  // transfer is tracked in strandedFees instead of reverting anything.
+  describe("fee distribution resilience (Finding 1)", function () {
+    async function deployWithRevertingTreasury() {
+      const stack = await deployStack();
+      const RevertingReceiver = await ethers.getContractFactory("RevertingReceiver");
+      const revertingTreasury = await RevertingReceiver.deploy();
+      await stack.factory.setFeeTreasury(await revertingTreasury.getAddress());
+      return { ...stack, revertingTreasury };
+    }
+
+    it("sell() succeeds and tracks the failed fee in strandedFees when feeTreasury reverts", async function () {
+      const { factory, creator, buyer, revertingTreasury } = await deployWithRevertingTreasury();
+      const { tokenAddress, token } = await createCurveToken(factory, creator);
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("0.3") });
+
+      const tokenBalance = await token.balanceOf(buyer.address);
+      await token.connect(buyer).approve(await factory.getAddress(), tokenBalance);
+
+      const state = await factory.curveState(tokenAddress);
+      const expected = expectedSell(
+        state.virtualEthReserve,
+        state.realEthReserve,
+        state.virtualTokenReserve,
+        state.tokensRemaining,
+        tokenBalance,
+        CURVE_FEE_BPS
+      );
+
+      const buyerEthBefore = await ethers.provider.getBalance(buyer.address);
+      const tx = await factory.connect(buyer).sell(tokenAddress, tokenBalance, 0);
+      const receipt = await tx.wait();
+      const gasCost = receipt.gasUsed * receipt.gasPrice;
+      const buyerEthAfter = await ethers.provider.getBalance(buyer.address);
+
+      // The seller was paid in full, in the same transaction, despite the
+      // treasury rejecting its cut -- this is the core Finding 1 fix.
+      expect(buyerEthAfter - buyerEthBefore + gasCost).to.equal(expected.netEthOut);
+      expect(await factory.strandedFees()).to.equal(expected.feeAmount);
+      expect(await ethers.provider.getBalance(await revertingTreasury.getAddress())).to.equal(0n);
+
+      await expect(tx).to.emit(factory, "FeeTransferFailed").withArgs(await revertingTreasury.getAddress(), expected.feeAmount);
+    });
+
+    it("buy() still succeeds (fee simply strands) when feeTreasury reverts", async function () {
+      const { factory, creator, buyer } = await deployWithRevertingTreasury();
+      const { tokenAddress } = await createCurveToken(factory, creator);
+      await expect(factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("0.3") })).to.not.be.reverted;
+      expect(await factory.strandedFees()).to.be.greaterThan(0n);
+    });
+
+    it("createCurveToken() still succeeds (launch fee simply strands) when feeTreasury reverts", async function () {
+      const { factory, creator } = await deployWithRevertingTreasury();
+      await expect(createCurveToken(factory, creator)).to.not.be.reverted;
+      expect(await factory.strandedFees()).to.equal(CURVE_LAUNCH_FEE);
+    });
+
+    it("splits correctly and strands only the rewardsDistributor's half when only that side reverts", async function () {
+      const { factory, creator, buyer, treasury } = await deployStack();
+      const RevertingReceiver = await ethers.getContractFactory("RevertingReceiver");
+      const revertingRewards = await RevertingReceiver.deploy();
+      await factory.setRewardsDistributor(await revertingRewards.getAddress());
+
+      const { tokenAddress } = await createCurveToken(factory, creator);
+      const treasuryBefore = await ethers.provider.getBalance(treasury.address);
+      const ethSent = ethers.parseEther("0.3");
+      const state = await factory.curveState(tokenAddress);
+      const expected = expectedBuy(
+        state.virtualEthReserve,
+        state.realEthReserve,
+        state.virtualTokenReserve,
+        state.tokensRemaining,
+        ethSent,
+        CURVE_FEE_BPS
+      );
+
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethSent });
+
+      const toRewards = expected.feeAmount / 2n;
+      const toTreasury = expected.feeAmount - toRewards;
+      const treasuryAfter = await ethers.provider.getBalance(treasury.address);
+      expect(treasuryAfter - treasuryBefore).to.equal(toTreasury);
+      expect(await factory.strandedFees()).to.equal(toRewards);
+    });
+  });
+
+  // ---- AUDIT-BondingCurveFactory.md Findings 3 & 4 (Medium / Low) ----
+  // curveFeeBps and the seven post-graduation tax parameters are now
+  // snapshotted per curve at createCurveToken() time -- an owner change
+  // afterward must only affect curves created from that point forward.
+  describe("curve-parameter snapshotting (Findings 3 & 4)", function () {
+    it("an existing curve keeps its own curveFeeBps after setCurveFeeBps() changes the global default", async function () {
+      const { factory, creator, buyer } = await deployStack();
+      const { tokenAddress } = await createCurveToken(factory, creator, { salt: 21n });
+
+      await factory.setCurveFeeBps(500); // 5.00%, up from the 1.00% default
+
+      // A brand-new curve created AFTER the change picks up the new fee...
+      const { tokenAddress: newTokenAddress } = await createCurveToken(factory, creator, { salt: 22n });
+      const newState = await factory.curveState(newTokenAddress);
+      expect(newState.curveFeeBps_).to.equal(500n);
+
+      // ...but the curve created BEFORE the change is unaffected, both in
+      // its stored state and in what a real trade against it actually pays.
+      const oldState = await factory.curveState(tokenAddress);
+      expect(oldState.curveFeeBps_).to.equal(CURVE_FEE_BPS);
+
+      const ethSent = ethers.parseEther("0.3");
+      const expected = expectedBuy(
+        oldState.virtualEthReserve,
+        oldState.realEthReserve,
+        oldState.virtualTokenReserve,
+        oldState.tokensRemaining,
+        ethSent,
+        CURVE_FEE_BPS // the ORIGINAL 1%, not the new 5%
+      );
+      await expect(factory.connect(buyer).buy(tokenAddress, 0, { value: ethSent }))
+        .to.emit(factory, "CurveBought")
+        .withArgs(tokenAddress, buyer.address, ethSent, expected.feeAmount, expected.tokensOut, expected.netEthIn);
+    });
+
+    it("graduates under the tax terms in effect when the curve was CREATED, not whatever setTaxDefaults() says later", async function () {
+      const { factory, creator, buyer, platformFeeWallet } = await deployStack();
+      const { tokenAddress } = await createCurveToken(factory, creator);
+
+      const originalConfig = await factory.curveTaxConfig(tokenAddress);
+      expect(originalConfig.taxFeeBps).to.equal(100n);
+      expect(originalConfig.taxPlatformFeeWallet).to.equal(platformFeeWallet.address);
+
+      // Change the platform-wide tax defaults well after this curve was
+      // created, but before it graduates. Signer index 7 -- deployStack
+      // already uses indices 0-6, so this is guaranteed to be a distinct
+      // address from platformFeeWallet.
+      const signers = await ethers.getSigners();
+      const newFeeWallet = signers[7];
+      const currentPriceFeed = await factory.priceFeed();
+      await factory.setTaxDefaults(newFeeWallet.address, 777, currentPriceFeed, 99_000, 7200, 0, 0);
+
+      // This curve's own snapshot must be unchanged...
+      const configAfterGlobalChange = await factory.curveTaxConfig(tokenAddress);
+      expect(configAfterGlobalChange.taxFeeBps).to.equal(100n);
+      expect(configAfterGlobalChange.taxPlatformFeeWallet).to.equal(platformFeeWallet.address);
+
+      // ...and graduation must actually configure the token with the
+      // ORIGINAL snapshotted terms, not the newly-changed globals.
+      const ethIn = ethers.parseEther("2");
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethIn });
+
+      const token = await ethers.getContractAt("LaunchedToken", tokenAddress);
+      expect(await token.feeWallet()).to.equal(platformFeeWallet.address);
+      expect(await token.feeWallet()).to.not.equal(newFeeWallet.address);
+    });
+  });
+
+  // ---- AUDIT-BondingCurveFactory.md Finding 5 (Low) ----
+  describe("rescue functions (Finding 5)", function () {
+    it("rescueStrandedFees sweeps only the tracked stranded amount, never a live curve's own ETH", async function () {
+      const { factory, creator, buyer, deployer } = await deployStack();
+      const RevertingReceiver = await ethers.getContractFactory("RevertingReceiver");
+      const revertingTreasury = await RevertingReceiver.deploy();
+      await factory.setFeeTreasury(await revertingTreasury.getAddress());
+
+      const { tokenAddress } = await createCurveToken(factory, creator);
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("0.3") });
+      const stranded = await factory.strandedFees();
+      expect(stranded).to.be.greaterThan(0n);
+
+      // Cannot rescue more than what's actually tracked as stranded, even
+      // though the contract's real ETH balance also includes this curve's
+      // own live realEthReserve.
+      await expect(factory.rescueStrandedFees(deployer.address, stranded + 1n)).to.be.revertedWith(
+        "BondingCurveFactory: exceeds stranded fees"
+      );
+
+      const before = await ethers.provider.getBalance(deployer.address);
+      const tx = await factory.rescueStrandedFees(deployer.address, stranded);
+      const receipt = await tx.wait();
+      const gasCost = receipt.gasUsed * receipt.gasPrice;
+      const after = await ethers.provider.getBalance(deployer.address);
+      expect(after - before + gasCost).to.equal(stranded);
+      expect(await factory.strandedFees()).to.equal(0n);
+
+      // The curve's own accounting is untouched by the rescue.
+      const state = await factory.curveState(tokenAddress);
+      expect(state.realEthReserve).to.be.greaterThan(0n);
+    });
+
+    it("rescueToken refuses to rescue a curve's own token, live or graduated", async function () {
+      const { factory, creator, deployer } = await deployStack();
+      const { tokenAddress } = await createCurveToken(factory, creator);
+      await expect(factory.rescueToken(tokenAddress, deployer.address, 1)).to.be.revertedWith(
+        "BondingCurveFactory: cannot rescue a curve's own token"
+      );
+    });
+
+    it("rescueToken recovers an unrelated ERC20 sent to the factory by mistake", async function () {
+      const { factory, deployer } = await deployStack();
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const strayToken = await MockERC20.deploy("Stray", "STRAY", ethers.parseEther("1000"));
+      await strayToken.transfer(await factory.getAddress(), ethers.parseEther("10"));
+
+      await expect(factory.rescueToken(await strayToken.getAddress(), deployer.address, ethers.parseEther("10")))
+        .to.emit(factory, "TokenRescued")
+        .withArgs(await strayToken.getAddress(), deployer.address, ethers.parseEther("10"));
+      expect(await strayToken.balanceOf(deployer.address)).to.equal(ethers.parseEther("1000"));
+    });
+
+    it("only the owner can call either rescue function", async function () {
+      const { factory, buyer, attacker } = await deployStack();
+      await expect(factory.connect(buyer).rescueStrandedFees(attacker.address, 0)).to.be.revertedWithCustomError(
+        factory,
+        "OwnableUnauthorizedAccount"
+      );
+      await expect(factory.connect(buyer).rescueToken(ethers.ZeroAddress, attacker.address, 0)).to.be.revertedWithCustomError(
         factory,
         "OwnableUnauthorizedAccount"
       );
