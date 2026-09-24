@@ -109,7 +109,26 @@ import "./interfaces/IUniswapV2Router02.sol";
 ///     unrelated, USD-denominated, post-pool graduationTargetUsd.
 contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     address public immutable tokenImplementation;
-    IUniswapV2Router02 public immutable router;
+    /// @notice Private, not public -- see the Finding 8 hardening note below
+    /// on platformFeeWallet/feeBps/etc. `router` is included in that same
+    /// fix here specifically because LaunchedToken._maybeAutoActivateTax
+    /// calls `ITokenFactoryTaxDefaults(factory).router()` as its very FIRST
+    /// external call (CustomToken's equivalent function never calls
+    /// factory.router() at all, using its own `router` state variable
+    /// instead -- see AUDIT-CustomBondingCurveFactory.md's Finding 1 for
+    /// why that sibling contract could safely leave `router` public).
+    /// Leaving this public here would leave that first call in the chain
+    /// still succeeding, deferring the actual break to the feeBps() call
+    /// one line later -- which still closes the vulnerability (the whole
+    /// external call still reverts and rolls back), but there's no reason
+    /// to leave any part of the interface matching when folding this into
+    /// taxDefaults() below closes it completely. Still readable off-chain
+    /// via taxDefaults() -- this is a deliberate, disclosed inconsistency
+    /// with TokenFactory/CustomTokenFactory/CustomBondingCurveFactory, all
+    /// of which keep `router` public, because none of THEIR cloned tokens'
+    /// auto-activation paths call back into `router()` on the factory
+    /// itself the way LaunchedToken's does.
+    IUniswapV2Router02 private immutable router;
     LiquidityLocker public immutable locker;
 
     /// @notice See TokenFactory.MAX_FEE_BPS -- identical hard ceiling, same
@@ -161,6 +180,62 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     address public feeTreasury;
     uint256 public lpLockDuration;
 
+    // ---- post-graduation LaunchedToken tax defaults, PLUS the two
+    // reward-diversion addresses/bps below -- identical fields, identical
+    // meaning, and identical setTaxDefaults() bounds to
+    // TokenFactory/CustomTokenFactory's own copies. Unlike TokenFactory
+    // (where "at launch" and "at configuration" are the same instant), a
+    // curve can sit unsold for an arbitrary time before graduating, so the
+    // seven tax values are snapshotted into the Curve struct at
+    // createCurveToken() time and applied from there -- see the Curve.tax*
+    // fields and Finding 4. The globals below remain the CURRENT defaults
+    // applied to curves created from this point forward; changing them
+    // never touches a curve that already exists. The two reward-diversion
+    // fields are deliberately NOT snapshotted -- see their own comments.
+    //
+    // --- Post-audit hardening (see AUDIT-BondingCurveFactory.md
+    // Finding 8) ---
+    // These were all individual `public` state variables. That was a
+    // genuine vulnerability, identical in shape to
+    // AUDIT-CustomBondingCurveFactory.md's Finding 1 on the sibling
+    // contract: their auto-generated getters happened to match
+    // ITokenFactoryTaxDefaults's exact shape (see ITokenFactoryTaxDefaults.
+    // sol), the interface LaunchedToken._update's own independent-pool
+    // auto-detection (`_maybeAutoActivateTax`) calls into via
+    // `ITokenFactoryTaxDefaults(factory)` -- and `factory` on every token
+    // this contract clones really is this contract's own address. That
+    // meant anyone could permanently hijack a curve-phase token's `pair`/
+    // `taxConfigured` -- and thus permanently brick its graduation, with no
+    // recovery path -- just by getting a real Uniswap pair to exist for
+    // (token, WETH) before this factory's own explicit configureTax() call
+    // runs (as cheap and permissionless as calling the DEX factory's own
+    // createPair(), even before the curve is created, since
+    // predictTokenAddress() is public). LaunchedToken's auto-activation is
+    // safe against a genuine "Just Launch" LaunchedToken (TokenFactory's own
+    // use case, where `factory` really is the right source of tax
+    // defaults) -- it was never safe against a curve-phase token whose
+    // `factory` field happens to satisfy the same interface for an
+    // unrelated reason.
+    //
+    // Making these fields private (no individual getters at all) closes
+    // this: ITokenFactoryTaxDefaults(factory).router()/.feeBps() now hit no
+    // matching function on this contract and revert immediately -- and
+    // since `_maybeAutoActivateTax` calls `tokenFactory.router()` before it
+    // ever tentatively writes `pair = detectedPair`, that write never even
+    // gets a chance to happen. Every value is still fully readable
+    // off-chain, just through the one combined taxDefaults() view below
+    // instead of individual getters -- the same shape curveTaxConfig()
+    // already uses for the per-curve snapshot. This has zero effect on
+    // legitimate post-graduation behavior: once this factory's own
+    // configureTax() call succeeds, `taxConfigured` is permanently true,
+    // which already permanently disables _maybeAutoActivateTax from ever
+    // running again on that token regardless.
+    address private platformFeeWallet;
+    uint256 private feeBps = 100; // 1.00%
+    address private priceFeed;
+    uint256 private graduationTargetUsd = 50_000; // whole dollars; the POST-graduation tax permanently disables once the pool's live market cap crosses this -- unrelated to poolSeedTargetWei above, see its own doc comment
+    uint256 private maxOracleStaleness = 1 hours;
+
     /// @notice PlatformRewardsDistributor's address. Used for TWO unrelated
     /// things here: (1) 50% of curveLaunchFee/curveFeeBps revenue, in native
     /// ETH, exactly like TokenFactory._finalizeLaunch (see _distributeEthFee)
@@ -171,39 +246,71 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// graduates from here on configures its token with no reward diversion.
     /// Deliberately read LIVE at every trade and at graduation time, never
     /// snapshotted -- this is "is the feature live yet," not a term any
-    /// buyer bought into (see the contract-level note on Finding 4).
-    address public rewardsDistributor;
-    uint256 public rewardBps = 45; // 0.45% -- POST-graduation tax carve-out only, see LaunchedToken.configureTax -- snapshotted into Curve.taxRewardBps at creation (see Finding 4)
+    /// buyer bought into (see the contract-level note on Finding 4). Private
+    /// for the same Finding 8 reason as the tax-default fields above.
+    address private rewardsDistributor;
+    uint256 private rewardBps = 45; // 0.45% -- POST-graduation tax carve-out only, see LaunchedToken.configureTax -- snapshotted into Curve.taxRewardBps at creation (see Finding 4)
 
     /// @notice CreatorRewardsDistributor's address -- POST-graduation
     /// LaunchedToken transfer-tax carve-out only (see the contract-level
     /// note on why curve-phase fees never use this). address(0) disables it
     /// entirely for curves graduating from here on. Live, not snapshotted --
     /// see the note on rewardsDistributor above.
-    address public creatorRewardsDistributor;
-    uint256 public creatorRewardBps = 10; // 0.10% -- POST-graduation tax carve-out only -- snapshotted into Curve.taxCreatorRewardBps at creation
+    address private creatorRewardsDistributor;
+    uint256 private creatorRewardBps = 10; // 0.10% -- POST-graduation tax carve-out only -- snapshotted into Curve.taxCreatorRewardBps at creation
 
     /// @notice FeeWalletDistributor's address -- POST-graduation
     /// LaunchedToken transfer-tax remainder only, same convention as every
     /// other factory. address(0) disables it entirely. Live, not
     /// snapshotted -- see the note on rewardsDistributor above.
-    address public feeWalletDistributor;
+    address private feeWalletDistributor;
 
-    // ---- post-graduation LaunchedToken tax defaults -- identical fields,
-    // identical meaning, and identical setTaxDefaults() bounds to
-    // TokenFactory/CustomTokenFactory's own copies. Unlike TokenFactory
-    // (where "at launch" and "at configuration" are the same instant), a
-    // curve can sit unsold for an arbitrary time before graduating, so these
-    // seven values are snapshotted into the Curve struct at createCurveToken()
-    // time and applied from there -- see the Curve.tax* fields and Finding 4.
-    // The globals below remain the CURRENT defaults applied to curves
-    // created from this point forward; changing them never touches a curve
-    // that already exists. ----
-    address public platformFeeWallet;
-    uint256 public feeBps = 100; // 1.00%
-    address public priceFeed;
-    uint256 public graduationTargetUsd = 50_000; // whole dollars; the POST-graduation tax permanently disables once the pool's live market cap crosses this -- unrelated to poolSeedTargetWei above, see its own doc comment
-    uint256 public maxOracleStaleness = 1 hours;
+    /// @notice The combined replacement for what used to be eleven separate
+    /// public getters -- router plus the ten tax-default/reward-diversion
+    /// fields above (see the Finding 8 hardening note). The CURRENT live
+    /// defaults applied to curves created from this point forward. For any
+    /// already-created curve's own locked-in terms, use curveTaxConfig(token)
+    /// instead, which is unaffected by this change.
+    function taxDefaults()
+        external
+        view
+        returns (
+            address router_,
+            address platformFeeWallet_,
+            uint256 feeBps_,
+            address priceFeed_,
+            uint256 graduationTargetUsd_,
+            uint256 maxOracleStaleness_,
+            address rewardsDistributor_,
+            uint256 rewardBps_,
+            address creatorRewardsDistributor_,
+            uint256 creatorRewardBps_,
+            address feeWalletDistributor_
+        )
+    {
+        return (
+            address(router), platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness,
+            rewardsDistributor, rewardBps, creatorRewardsDistributor, creatorRewardBps, feeWalletDistributor
+        );
+    }
+
+    /// @notice Cheap monitoring helper for the exact failure mode Finding 8
+    /// describes: true iff this token's own `pair`/`taxConfigured` has been
+    /// set (by LaunchedToken's independent-pool auto-detection, triggered by
+    /// anyone once a real Uniswap pair exists for it) while this factory's
+    /// own curve still thinks it hasn't graduated. If this is ever true,
+    /// that curve's graduate()/buy()-triggered-graduation calls will keep
+    /// failing -- surfaced here explicitly rather than left to be discovered
+    /// only when graduate() reverts with a generic reason. The restructuring
+    /// above prevents this from ever becoming true again for curves created
+    /// from this point forward, but this stays in place as a permanent,
+    /// cheap tripwire rather than being removed once the root cause is
+    /// fixed.
+    function isGraduationBlocked(address token) external view returns (bool) {
+        Curve storage curve = curves[token];
+        if (curve.totalSupply == 0 || curve.graduated) return false;
+        return LaunchedToken(token).pair() != address(0);
+    }
 
     /// @notice See TokenFactory.liquiditySlippageBps -- identical
     /// protection, applied to _doGraduate's own addLiquidityETH call (the
