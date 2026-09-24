@@ -1,5 +1,31 @@
 # Security Audit: CustomBondingCurveFactory.sol
 
+> **Remediation status:** Finding 1 (High) is fixed. The ten post-graduation
+> tax-default fields (`platformFeeWallet`, `feeBps`, `priceFeed`,
+> `graduationTargetUsd`, `maxOracleStaleness`, `rewardsDistributor`,
+> `rewardBps`, `creatorRewardsDistributor`, `creatorRewardBps`,
+> `feeWalletDistributor`) are now `private` instead of `public`, replaced by
+> a single combined `taxDefaults()` view (mirroring `curveTaxConfig()`'s
+> existing shape) — so this contract no longer satisfies
+> `ITokenFactoryTaxDefaults`, and `CustomToken._activatePoolIfFound()`'s call
+> into it reverts immediately instead of succeeding, rolling back the
+> pending `pair` write in the same revert. A companion monitoring view,
+> `isGraduationBlocked(token)`, was added as a permanent tripwire. Regression
+> coverage lives in `CustomBondingCurveFactory.test.js` under "Finding 1
+> fix: independent-pair hijack via ITokenFactoryTaxDefaults" (4 new tests),
+> which required adding one small, purely-additive `createPair()` function
+> to the shared `MockRouter.sol` test double so the attack could actually be
+> reproduced in a test (see that file's own comment on the new function) —
+> that mock change is included in this delivery and needs to be merged into
+> the real `contracts/mocks/MockRouter.sol` for the new tests to run.
+> Finding 2 (Low) and Finding 3 (Informational) don't call for a contract
+> change — Finding 2 is a deploy-script sanity check, and Finding 3 was
+> already documenting an intentional design choice — so both are left as
+> written below, unchanged, for the record. The cross-reference note under
+> Finding 1 about `BondingCurveFactory.sol` likely sharing this same root
+> cause is also unaddressed here — that contract wasn't in this audit's
+> scope and needs its own pass first.
+
 **Scope:** `contracts/CustomBondingCurveFactory.sol` (~590 lines), plus its
 integration points with the unmodified `contracts/CustomToken.sol` and
 `contracts/LiquidityLocker.sol` it clones from / deploys against. The
