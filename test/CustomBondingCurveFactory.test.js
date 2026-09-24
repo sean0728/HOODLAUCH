@@ -146,7 +146,10 @@ describe("CustomBondingCurveFactory", function () {
 
       const state = await factory.curveState(tokenAddress);
       expect(state.creator).to.equal(creator.address);
-      expect(state.totalSupply).to.equal(TOTAL_SUPPLY);
+      // curveState()'s second return value is named totalSupply_ (trailing
+      // underscore, to avoid shadowing), not totalSupply -- same convention
+      // as the sibling BondingCurveFactory.test.js fix.
+      expect(state.totalSupply_).to.equal(TOTAL_SUPPLY);
       expect(state.curveSupply).to.equal((TOTAL_SUPPLY * 8000n) / 10_000n);
       expect(state.tokensRemaining).to.equal(state.curveSupply);
       expect(state.poolSeedTargetWei_).to.equal(POOL_SEED_TARGET);

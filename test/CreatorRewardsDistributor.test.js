@@ -128,19 +128,42 @@ describe("CreatorRewardsDistributor", function () {
       );
     });
 
-    it("reverts for any caller other than the token's own creator", async function () {
-      const { distributor, deployer, owner, other, token } = await deployStack();
+    it("is permissionless — any caller can trigger the swap, and it still credits the token's own creator", async function () {
+      const { distributor, deployer, owner, other, creator, token } = await deployStack();
       await token.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("10"));
 
-      // Neither an unrelated wallet nor the distributor's own owner gets a
-      // pass here — creator-only means exactly that, not
-      // creator-or-privileged-role.
-      await expect(distributor.connect(other).triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
-        "CreatorRewardsDistributor: caller is not this token's creator"
-      );
-      await expect(distributor.connect(owner).triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
-        "CreatorRewardsDistributor: caller is not this token's creator"
-      );
+      // Neither an unrelated wallet nor the distributor's own owner needs to
+      // BE the creator to call this -- see the contract's own header comment
+      // (an off-chain keeper calls this, not the creator's own wallet). The
+      // swap always credits the token's real creator, never the caller.
+      let tx = await distributor.connect(other).triggerCreatorSwap(await token.getAddress(), 0);
+      let receipt = await tx.wait();
+      let evt = receipt.logs
+        .map((l) => {
+          try {
+            return distributor.interface.parseLog(l);
+          } catch {
+            return null;
+          }
+        })
+        .find((p) => p && p.name === "CreatorSwapTriggered");
+      expect(evt.args.creator).to.equal(creator.address);
+
+      // A privileged role (this contract's own owner) gets no special
+      // treatment either -- still just an ordinary permissionless caller.
+      await token.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("10"));
+      tx = await distributor.connect(owner).triggerCreatorSwap(await token.getAddress(), 0);
+      receipt = await tx.wait();
+      evt = receipt.logs
+        .map((l) => {
+          try {
+            return distributor.interface.parseLog(l);
+          } catch {
+            return null;
+          }
+        })
+        .find((p) => p && p.name === "CreatorSwapTriggered");
+      expect(evt.args.creator).to.equal(creator.address);
     });
 
     it("reverts with a zero balance of the token, even when called by the actual creator", async function () {
@@ -188,20 +211,27 @@ describe("CreatorRewardsDistributor", function () {
       expect(await distributor.claimableEth(await token.getAddress())).to.equal(ethOut);
     });
 
-    it("a CustomToken-style creator transfer immediately changes who's allowed to trigger the swap", async function () {
+    it("a CustomToken-style creator transfer immediately changes who gets credited by the swap", async function () {
       const { distributor, deployer, creator, other, token } = await deployStack();
       await token.connect(creator).setCreator(other.address);
       await token.connect(deployer).transfer(await distributor.getAddress(), ethers.parseEther("10"));
 
-      // The old creator no longer passes the check...
-      await expect(distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0)).to.be.revertedWith(
-        "CreatorRewardsDistributor: caller is not this token's creator"
-      );
-      // ...only the new one does, read live via creator() at call time.
-      await expect(distributor.connect(other).triggerCreatorSwap(await token.getAddress(), 0)).to.emit(
-        distributor,
-        "CreatorSwapTriggered"
-      );
+      // Permissionless, so the OLD creator can still call this themselves --
+      // but creator() is read LIVE at call time, so the swap credits
+      // whoever the token's creator is NOW, not whoever it was when the
+      // balance accrued, and not the caller either.
+      const tx = await distributor.connect(creator).triggerCreatorSwap(await token.getAddress(), 0);
+      const receipt = await tx.wait();
+      const evt = receipt.logs
+        .map((l) => {
+          try {
+            return distributor.interface.parseLog(l);
+          } catch {
+            return null;
+          }
+        })
+        .find((p) => p && p.name === "CreatorSwapTriggered");
+      expect(evt.args.creator).to.equal(other.address);
     });
 
     // Anti-dump: a token that's accumulated a large balance (heavy trading
@@ -298,17 +328,27 @@ describe("CreatorRewardsDistributor", function () {
       );
     });
 
-    it("reverts for any caller other than the token's own creator", async function () {
-      const { distributor, owner, other, token } = await deployStack();
-      // Neither an unrelated wallet nor the distributor's own owner gets a
-      // pass — same creator-only-means-creator-only rule as
-      // triggerCreatorSwap, and it fires before the "nothing to claim"
-      // check even though claimableEth is still 0 here.
-      await expect(distributor.connect(other).claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
-        "CreatorRewardsDistributor: caller is not this token's creator"
-      );
+    it("is permissionless — any caller can claim, but the payout always goes to the token's own creator", async function () {
+      const ctx = await deployStack();
+      const { distributor, owner, other, creator, token } = ctx;
+      const claimable = await fundAndSwap(ctx);
+      expect(claimable).to.be.gt(0n);
+
+      const creatorBefore = await ethers.provider.getBalance(creator.address);
+      // Neither an unrelated wallet nor the distributor's own owner needs to
+      // BE the creator to call this -- but the ETH still only ever goes to
+      // the token's actual creator, never the caller.
+      const tx = await distributor.connect(other).claimCreatorRewards(await token.getAddress());
+      await expect(tx)
+        .to.emit(distributor, "CreatorRewardsClaimed")
+        .withArgs(await token.getAddress(), creator.address, other.address, claimable);
+      expect(await ethers.provider.getBalance(creator.address)).to.equal(creatorBefore + claimable);
+
+      // A privileged role (this contract's own owner) gets no special
+      // treatment either -- there's simply nothing left to claim now, same
+      // as any other caller would see.
       await expect(distributor.connect(owner).claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
-        "CreatorRewardsDistributor: caller is not this token's creator"
+        "CreatorRewardsDistributor: nothing to claim"
       );
     });
 
@@ -343,7 +383,7 @@ describe("CreatorRewardsDistributor", function () {
       );
     });
 
-    it("a CustomToken-style creator transfer immediately changes who's allowed to claim, and pays the new creator", async function () {
+    it("a CustomToken-style creator transfer immediately changes who claimCreatorRewards pays, even when the OLD creator calls it", async function () {
       const ctx = await deployStack();
       const { distributor, creator, other, token } = ctx;
       const claimable = await fundAndSwap(ctx);
@@ -353,21 +393,21 @@ describe("CreatorRewardsDistributor", function () {
       // BEFORE it's claimed.
       await token.connect(creator).setCreator(other.address);
 
-      // The old creator no longer passes the check...
-      await expect(distributor.connect(creator).claimCreatorRewards(await token.getAddress())).to.be.revertedWith(
-        "CreatorRewardsDistributor: caller is not this token's creator"
-      );
-
-      // ...only the new one does, and the payout follows creator() read live
-      // at claim time, never a stale snapshot from when the reward accrued.
+      // Permissionless, so the OLD creator can still call claimCreatorRewards
+      // themselves -- but the payout follows creator() read live at claim
+      // time, so it goes to the NEW creator, never to the caller and never
+      // to a stale snapshot from when the reward accrued.
       const oldCreatorBefore = await ethers.provider.getBalance(creator.address);
       const newCreatorBefore = await ethers.provider.getBalance(other.address);
-      const tx = await distributor.connect(other).claimCreatorRewards(await token.getAddress());
+      const tx = await distributor.connect(creator).claimCreatorRewards(await token.getAddress());
       const receipt = await tx.wait();
       const gasCost = receipt.gasUsed * receipt.gasPrice;
 
-      expect(await ethers.provider.getBalance(other.address)).to.equal(newCreatorBefore + claimable - gasCost);
-      expect(await ethers.provider.getBalance(creator.address)).to.equal(oldCreatorBefore); // untouched
+      await expect(tx)
+        .to.emit(distributor, "CreatorRewardsClaimed")
+        .withArgs(await token.getAddress(), other.address, creator.address, claimable);
+      expect(await ethers.provider.getBalance(other.address)).to.equal(newCreatorBefore + claimable);
+      expect(await ethers.provider.getBalance(creator.address)).to.equal(oldCreatorBefore - gasCost); // paid gas, received nothing
     });
 
     it("keeps balances for different tokens fully independent", async function () {
