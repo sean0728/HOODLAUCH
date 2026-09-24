@@ -317,6 +317,75 @@ describe("CustomBondingCurveFactory", function () {
     });
   });
 
+  // Regression coverage for AUDIT-CustomBondingCurveFactory.md Finding 1 --
+  // uses MockRouter's new createPair() (a pure addition to that shared mock,
+  // mirroring real Uniswap V2Factory's own permissionless createPair) to
+  // reproduce "an independent pool already exists for this curve token
+  // before graduation" end to end.
+  describe("Finding 1 fix: independent-pair hijack via ITokenFactoryTaxDefaults", function () {
+    it("a pre-existing Uniswap pair for the curve token does not hijack pair or block graduation", async function () {
+      const { factory, router, creator, buyer } = await deployStack();
+      const { tokenAddress, token } = await createCurveToken(factory, creator);
+
+      // Attacker (or an opportunistic pair-sniping bot) pre-creates a real,
+      // empty pair for this curve token -- cheap and permissionless, exactly
+      // like the real DEX factory's own createPair().
+      await router.createPair(tokenAddress);
+      expect(await router.getPair(tokenAddress, ethers.ZeroAddress)).to.not.equal(ethers.ZeroAddress);
+
+      // An ordinary sell (transferFrom with from != factory) is exactly what
+      // triggers CustomToken._update's own independent-pool auto-detection
+      // on every curve-phase transfer. Before the fix this would have
+      // permanently set token.pair() to the attacker's empty pair.
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("0.05") });
+      await token.connect(buyer).approve(await factory.getAddress(), ethers.parseEther("1"));
+      await factory.connect(buyer).sell(tokenAddress, ethers.parseEther("1"), 0);
+
+      expect(await token.pair()).to.equal(ethers.ZeroAddress);
+      expect(await factory.isGraduationBlocked(tokenAddress)).to.equal(false);
+
+      // Graduation still succeeds normally afterward, through this
+      // factory's own explicit setPair()/configurePlatformTax() wiring.
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("1") });
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("1") });
+      expect((await factory.curveState(tokenAddress)).graduated).to.equal(true);
+      expect(await token.pair()).to.not.equal(ethers.ZeroAddress);
+    });
+
+    it("activateIndependentPair() on the curve token also fails to hijack pair once a pre-existing pool is found", async function () {
+      const { factory, router, creator } = await deployStack();
+      const { tokenAddress, token } = await createCurveToken(factory, creator);
+      await router.createPair(tokenAddress);
+
+      // Used to succeed and permanently set `pair` before the fix; now it
+      // can't complete without the (now-nonexistent) tax-default getters
+      // succeeding, so the whole call reverts and pair stays untouched.
+      await expect(token.activateIndependentPair()).to.be.reverted;
+      expect(await token.pair()).to.equal(ethers.ZeroAddress);
+    });
+
+    it("taxDefaults() exposes the combined live defaults that replaced ten separate public getters", async function () {
+      const { factory, platformFeeWallet, priceFeed } = await deployStack();
+      const defaults = await factory.taxDefaults();
+      expect(defaults.platformFeeWallet_).to.equal(platformFeeWallet.address);
+      expect(defaults.feeBps_).to.equal(100n);
+      expect(defaults.priceFeed_).to.equal(await priceFeed.getAddress());
+      expect(defaults.graduationTargetUsd_).to.equal(50_000n);
+      expect(defaults.maxOracleStaleness_).to.equal(3600n);
+    });
+
+    it("isGraduationBlocked reports false for both a healthy live curve and a healthy graduated curve", async function () {
+      const { factory, creator, buyer } = await deployStack();
+      const { tokenAddress } = await createCurveToken(factory, creator);
+      expect(await factory.isGraduationBlocked(tokenAddress)).to.equal(false);
+
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("1") });
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("1") });
+      expect((await factory.curveState(tokenAddress)).graduated).to.equal(true);
+      expect(await factory.isGraduationBlocked(tokenAddress)).to.equal(false);
+    });
+  });
+
   describe("rescue functions and admin surface", function () {
     it("rescueToken refuses a curve's own token but allows an unrelated one", async function () {
       const { factory, creator, deployer } = await deployStack();
