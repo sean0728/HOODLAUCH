@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import "./LaunchedToken.sol";
 import "./LiquidityLocker.sol";
@@ -74,10 +75,14 @@ import "./interfaces/IUniswapV2Router02.sol";
 /// POST-graduation LaunchedToken transfer tax (_doGraduate's configureTax
 /// call) -- just never for the curve-phase fee itself.
 ///
-/// Ships without gasless relay support (creators/traders pay their own gas
-/// for createCurveToken/buy/sell in v1); the EIP-712 voucher pattern the
-/// other factories use is a deliberate fast-follow once this contract has
-/// live testnet mileage.
+/// Gasless relayed launches (fast-follow to v1's direct-wallet-only
+/// createCurveToken -- see the "gasless relayed launches" section below):
+/// mirrors TokenFactory's LaunchVoucher/deposit/relay/settle pattern as
+/// closely as createCurveToken's own no-liquidity shape allows. buy()/sell()
+/// remain direct-wallet-only in this revision -- only launching a curve is
+/// gasless, matching the front end's own current scope (Quick Launch is the
+/// one gasless-relay ask; ongoing curve trading still costs the trader their
+/// own gas, exactly like every other factory's post-launch trading).
 ///
 /// --- Post-audit hardening (see AUDIT-BondingCurveFactory.md) ---
 /// This revision fixes every finding from that audit:
@@ -410,6 +415,78 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     event FeeWalletDistributorUpdated(address newDistributor);
     event TokenPriceFeedUpdated(address indexed token, address newPriceFeed, uint256 newMaxOracleStaleness);
 
+    // ---- gasless relayed launches ----
+    //
+    // Fast-follow to v1's direct-wallet-only createCurveToken -- see the
+    // contract-level note above. Mirrors TokenFactory's LaunchVoucher/
+    // deposit/relay/settle pattern (see that contract's own "gasless
+    // relayed launches" comment for the full three-step explanation: sign a
+    // voucher off-chain, escrow one plain ETH deposit, the relayer submits)
+    // with one structural difference: CurveLaunchVoucher has no
+    // addLiquidityAtLaunch/liquidityEthAmount fields at all, since
+    // createCurveToken() itself has nothing to seed a pool with at creation
+    // time -- there is no liquidity branch to relay, only the curve-creation
+    // + optional creator-buy-in branch that already exists.
+    address public relayer;
+    uint256 public maxRelayerGasReimbursementWei;
+    uint256 public constant RELAY_GAS_OVERHEAD = 60_000;
+
+    struct Deposit {
+        uint256 amount;
+        uint256 deadline;
+        bool settled;
+        bool reclaimed;
+    }
+
+    /// @notice creator => voucher hash => their escrowed deposit -- see
+    /// TokenFactory.deposits for the full front-running-proofing explanation.
+    mapping(address => mapping(bytes32 => Deposit)) public deposits;
+
+    struct CurveLaunchVoucher {
+        address creator;
+        string name;
+        string symbol;
+        uint256 totalSupply;
+        uint256 creatorBuyEthAmount;
+        uint256 minCreatorTokensOut;
+        uint256 fee; // curveLaunchFee the creator locked in and escrowed at deposit time
+        // Doubles as the CREATE2 salt relayedCreateCurveToken deploys the
+        // clone with -- see TokenFactory.LaunchVoucher.salt for the full
+        // explanation, applies identically here.
+        uint256 salt;
+        uint256 deadline; // both the voucher's and the matching deposit's expiry
+    }
+
+    bytes32 private constant CURVE_LAUNCH_VOUCHER_TYPEHASH = keccak256(
+        "CurveLaunchVoucher(address creator,string name,string symbol,uint256 totalSupply,uint256 creatorBuyEthAmount,uint256 minCreatorTokensOut,uint256 fee,uint256 salt,uint256 deadline)"
+    );
+
+    // Hand-rolled EIP-712 domain separator -- see TokenFactory's own
+    // _domainSeparator for why this avoids OpenZeppelin's EIP712 base
+    // (mcopy/Cancun dependency).
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 private immutable _domainSeparator;
+
+    event RelayerUpdated(address newRelayer);
+    event MaxRelayerGasReimbursementUpdated(uint256 newCapWei);
+    event LaunchDeposited(bytes32 indexed voucherHash, address indexed creator, uint256 amount, uint256 deadline);
+    event DepositReclaimed(bytes32 indexed voucherHash, address indexed creator, uint256 amount);
+    event RelayedFeeSettled(
+        bytes32 indexed voucherHash,
+        address indexed token,
+        uint256 feeCollected,
+        uint256 gasReimbursed,
+        uint256 toTreasury,
+        uint256 toRewards
+    );
+
+    modifier onlyRelayer() {
+        require(msg.sender == relayer, "BondingCurveFactory: caller is not the relayer");
+        _;
+    }
+
     constructor(
         address tokenImplementation_,
         address router_,
@@ -433,6 +510,16 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         lpLockDuration = lpLockDuration_;
         platformFeeWallet = platformFeeWallet_;
         priceFeed = priceFeed_;
+
+        _domainSeparator = keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes("HoodLaunchBondingCurveFactory")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(this)
+            )
+        );
     }
 
     /// @notice Absorbs any ETH the router refunds mid-addLiquidityETH (real
@@ -644,6 +731,203 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         }
 
         _distributeEthFee(curveLaunchFee);
+    }
+
+    /// @notice Computes the exact EIP-712 digest a creator must sign to
+    /// authorize a relayed curve launch. See TokenFactory.hashLaunchVoucher
+    /// for the full explanation -- front ends call this (or reproduce it
+    /// off-chain with an identical typed-data structure) to build the
+    /// eth_signTypedData_v4 payload, and it's recomputed here again inside
+    /// relayedCreateCurveToken to check the relayer-submitted voucher
+    /// against that signature.
+    function hashCurveLaunchVoucher(CurveLaunchVoucher calldata voucher) public view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                CURVE_LAUNCH_VOUCHER_TYPEHASH,
+                voucher.creator,
+                keccak256(bytes(voucher.name)),
+                keccak256(bytes(voucher.symbol)),
+                voucher.totalSupply,
+                voucher.creatorBuyEthAmount,
+                voucher.minCreatorTokensOut,
+                voucher.fee,
+                voucher.salt,
+                voucher.deadline
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator, structHash));
+    }
+
+    /// @notice Step 2 of a relayed launch -- see TokenFactory.
+    /// depositForRelayedLaunch for the full explanation; behaves identically
+    /// here. Cheap -- an ordinary ETH transfer plus one storage write,
+    /// nowhere near what createCurveToken's own deploy costs. msg.sender is
+    /// always the escrow's owner for this hash: depositing under someone
+    /// else's address is impossible, so a deposit here can never be
+    /// front-run or squatted by anyone but the creator themselves.
+    function depositForRelayedLaunch(bytes32 voucherHash, uint256 deadline) external payable nonReentrant {
+        require(msg.value > 0, "BondingCurveFactory: no ETH sent");
+        require(deadline > block.timestamp, "BondingCurveFactory: deadline already passed");
+        Deposit storage d = deposits[msg.sender][voucherHash];
+        require(d.amount == 0, "BondingCurveFactory: voucher already funded");
+        d.amount = msg.value;
+        d.deadline = deadline;
+        emit LaunchDeposited(voucherHash, msg.sender, msg.value, deadline);
+    }
+
+    /// @notice Lets a depositor pull their full escrowed ETH back once its
+    /// deadline has passed without being relayed -- the safety valve if the
+    /// relayer service never picks up a deposit (down, misconfigured, or
+    /// simply never launched because relayer is unset). See
+    /// TokenFactory.reclaimDeposit.
+    function reclaimDeposit(bytes32 voucherHash) external nonReentrant {
+        Deposit storage d = deposits[msg.sender][voucherHash];
+        require(d.amount > 0, "BondingCurveFactory: no such deposit");
+        require(!d.settled, "BondingCurveFactory: voucher already relayed");
+        require(!d.reclaimed, "BondingCurveFactory: already reclaimed");
+        require(block.timestamp > d.deadline, "BondingCurveFactory: deadline has not passed yet");
+        d.reclaimed = true;
+        uint256 amount = d.amount;
+        (bool sent, ) = payable(msg.sender).call{value: amount}("");
+        require(sent, "BondingCurveFactory: refund transfer failed");
+        emit DepositReclaimed(voucherHash, msg.sender, amount);
+    }
+
+    /// @notice Step 3 of a relayed curve launch, called only by the trusted
+    /// relayer: verifies the creator's signature over `voucher` and that a
+    /// matching, unexpired, unsettled deposit of exactly the right amount
+    /// exists, then performs the identical curve-creation (and, for a
+    /// nonzero creatorBuyEthAmount, buy-in) logic createCurveToken() runs --
+    /// with `voucher.creator` standing in everywhere createCurveToken()
+    /// would otherwise have used msg.sender. Reuses _executeBuy/
+    /// _attemptGraduate as-is: both already take an explicit recipient/token
+    /// rather than reading msg.sender internally, so no separate "_relayed"
+    /// duplicate of either is needed the way TokenFactory needed
+    /// _relayedLaunchWithLiquidity. The relayer pays this call's gas from
+    /// its own wallet; the creator touches no gas at any point in a relayed
+    /// launch.
+    function relayedCreateCurveToken(
+        CurveLaunchVoucher calldata voucher,
+        bytes calldata signature
+    ) external onlyRelayer nonReentrant returns (address token, uint256 creatorTokensBought) {
+        uint256 gasStart = gasleft();
+
+        require(block.timestamp <= voucher.deadline, "BondingCurveFactory: voucher expired");
+        require(bytes(voucher.name).length > 0, "BondingCurveFactory: name required");
+        require(bytes(voucher.symbol).length > 0, "BondingCurveFactory: symbol required");
+        require(voucher.totalSupply > 0, "BondingCurveFactory: supply must be > 0");
+        require(platformFeeWallet != address(0), "BondingCurveFactory: platform fee wallet not configured");
+        require(priceFeed != address(0), "BondingCurveFactory: price feed not configured");
+
+        bytes32 voucherHash = hashCurveLaunchVoucher(voucher);
+        address signer = ECDSA.recover(voucherHash, signature);
+        require(signer == voucher.creator, "BondingCurveFactory: signature does not match voucher creator");
+
+        Deposit storage d = deposits[voucher.creator][voucherHash];
+        require(d.amount > 0, "BondingCurveFactory: no matching deposit");
+        require(!d.settled, "BondingCurveFactory: voucher already relayed");
+        require(!d.reclaimed, "BondingCurveFactory: deposit already reclaimed");
+        require(block.timestamp <= d.deadline, "BondingCurveFactory: deposit expired, creator must reclaim");
+
+        uint256 expectedDeposit = voucher.fee + voucher.creatorBuyEthAmount;
+        require(d.amount == expectedDeposit, "BondingCurveFactory: deposit does not match voucher amount");
+
+        d.settled = true; // effects before interactions, same discipline as createCurveToken/_executeBuy
+
+        token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(voucher.creator, voucher.salt));
+        LaunchedToken(token).initialize(
+            voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, address(this), address(this)
+        );
+
+        uint256 curveSupply = (voucher.totalSupply * curveSupplyBps) / 10_000;
+        require(curveSupply > 0, "BondingCurveFactory: curve supply rounds to zero");
+
+        Curve storage curve = curves[token];
+        curve.creator = voucher.creator;
+        curve.totalSupply = voucher.totalSupply;
+        curve.curveSupply = curveSupply;
+        curve.tokensRemaining = curveSupply;
+        curve.virtualEthReserve = virtualEthReserveDefault;
+        curve.virtualTokenReserve = (voucher.totalSupply * virtualTokenReserveBps) / 10_000;
+        curve.poolSeedTargetWei = poolSeedTargetWei;
+        curve.curveFeeBps = curveFeeBps;
+        curve.createdAt = block.timestamp;
+        curve.taxPlatformFeeWallet = platformFeeWallet;
+        curve.taxFeeBps = feeBps;
+        curve.taxPriceFeed = priceFeed;
+        curve.taxGraduationTargetUsd = graduationTargetUsd;
+        curve.taxMaxOracleStaleness = maxOracleStaleness;
+        curve.taxRewardBps = rewardBps;
+        curve.taxCreatorRewardBps = creatorRewardBps;
+
+        creatorOf[token] = voucher.creator;
+        _tokensByCreator[voucher.creator].push(token);
+        _tokenList.push(token);
+
+        emit CurveTokenCreated(
+            token, voucher.creator, voucher.name, voucher.symbol, voucher.totalSupply, curveSupply,
+            curve.virtualEthReserve, curve.virtualTokenReserve, curve.poolSeedTargetWei
+        );
+
+        if (voucher.creatorBuyEthAmount > 0) {
+            (uint256 tokensOut, ) = _executeBuy(token, curve, voucher.creator, voucher.creatorBuyEthAmount, voucher.minCreatorTokensOut);
+            require(
+                tokensOut <= (voucher.totalSupply * maxCreatorBuyBps) / 10_000,
+                "BondingCurveFactory: creator buy-in exceeds max allowed share of supply"
+            );
+            creatorTokensBought = tokensOut;
+            emit CreatorBought(token, voucher.creator, voucher.creatorBuyEthAmount, tokensOut);
+
+            // Same auto-graduation attempt as createCurveToken()'s own
+            // creator buy-in branch -- a relayed buy-in large enough to
+            // cross poolSeedTargetWei on its own must not leave the curve
+            // stuck "crossed but ungraduated" either.
+            if (curve.realEthReserve >= curve.poolSeedTargetWei) {
+                try this._attemptGraduate(token) returns (address, uint256, uint256) {} catch {}
+            }
+        }
+
+        _settleRelayedFee(voucherHash, token, voucher.fee, gasStart);
+    }
+
+    /// @dev Gas-then-split settlement for a relayed launch -- see
+    /// TokenFactory._settleRelayedFee for the full explanation of the
+    /// gas-reimbursement-then-split mechanics and the circuit breaker.
+    /// Differs from TokenFactory's version in one respect: the actual
+    /// treasury/rewards transfer is delegated to this contract's own
+    /// _distributeEthFee rather than duplicated inline, so a relayed
+    /// launch's fee gets the exact same Finding-1 non-reverting-transfer /
+    /// strandedFees hardening every other fee path here already has,
+    /// instead of the reverting `require(sent...)` TokenFactory's own
+    /// (older, pre-audit-pattern) relay settlement uses. toTreasury/
+    /// toRewards below are computed only to describe what _distributeEthFee
+    /// is about to do in the event below -- if a transfer inside it actually
+    /// fails, _distributeEthFee's own FeeTransferFailed event and
+    /// strandedFees still capture that; this event is a summary, not a
+    /// second source of truth.
+    function _settleRelayedFee(bytes32 voucherHash, address token, uint256 feeCollected, uint256 gasStart) private {
+        if (feeCollected == 0) return;
+
+        uint256 gasUsed = (gasStart - gasleft()) + RELAY_GAS_OVERHEAD;
+        uint256 gasReimbursement = gasUsed * tx.gasprice;
+        if (maxRelayerGasReimbursementWei > 0 && gasReimbursement > maxRelayerGasReimbursementWei) {
+            gasReimbursement = maxRelayerGasReimbursementWei;
+        }
+        if (gasReimbursement > feeCollected) {
+            gasReimbursement = feeCollected; // relayer eats any shortfall rather than the launch reverting over it
+        }
+
+        if (gasReimbursement > 0) {
+            (bool sentGas, ) = payable(relayer).call{value: gasReimbursement}("");
+            require(sentGas, "BondingCurveFactory: relayer gas reimbursement failed");
+        }
+
+        uint256 netFee = feeCollected - gasReimbursement;
+        uint256 toRewards = (netFee > 0 && rewardsDistributor != address(0)) ? netFee / 2 : 0;
+        uint256 toTreasury = netFee - toRewards;
+        _distributeEthFee(netFee);
+
+        emit RelayedFeeSettled(voucherHash, token, feeCollected, gasReimbursement, toTreasury, toRewards);
     }
 
     /// @notice Buy curve tokens with ETH. Reverts if this curve has already
@@ -970,6 +1254,32 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     function setFeeWalletDistributor(address newDistributor) external onlyOwner {
         feeWalletDistributor = newDistributor;
         emit FeeWalletDistributorUpdated(newDistributor);
+    }
+
+    /// @notice Points relayedCreateCurveToken's onlyRelayer gate at the
+    /// platform's relayer hot wallet. See TokenFactory.setRelayer for the
+    /// full explanation -- identical convention, including the requirement
+    /// that maxRelayerGasReimbursementWei already be set to a real, non-zero
+    /// value before a relayer can be enabled. address(0) (the default)
+    /// disables gasless relayed curve launches entirely;
+    /// depositForRelayedLaunch/reclaimDeposit still work either way.
+    function setRelayer(address newRelayer) external onlyOwner {
+        if (newRelayer != address(0)) {
+            require(
+                maxRelayerGasReimbursementWei > 0,
+                "BondingCurveFactory: set maxRelayerGasReimbursementWei before enabling a relayer"
+            );
+        }
+        relayer = newRelayer;
+        emit RelayerUpdated(newRelayer);
+    }
+
+    /// @notice See TokenFactory.setMaxRelayerGasReimbursement -- identical
+    /// circuit breaker, applied to relayedCreateCurveToken's own
+    /// _settleRelayedFee.
+    function setMaxRelayerGasReimbursement(uint256 newCapWei) external onlyOwner {
+        maxRelayerGasReimbursementWei = newCapWei;
+        emit MaxRelayerGasReimbursementUpdated(newCapWei);
     }
 
     /// @notice Update the POST-graduation LaunchedToken tax defaults applied
