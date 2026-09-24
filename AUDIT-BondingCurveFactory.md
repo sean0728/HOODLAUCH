@@ -1,6 +1,29 @@
 # BondingCurveFactory Security Audit
 
-> **Remediation status: all seven findings below are fixed** (Finding 7's "fix" is a documentation note only, as its own text already said no code change was needed), pending a full `npx hardhat test` run in the real repo to confirm (this environment doesn't have `LaunchedToken.sol`/`LiquidityLocker.sol`/the OpenZeppelin dependency tree available to compile against directly — see the delivery notes). Summary:
+> **Follow-up (added after auditing the newer `CustomBondingCurveFactory.sol`):
+> Finding 8 (High) below is fixed.** It's the same root cause
+> `AUDIT-CustomBondingCurveFactory.md`'s Finding 1 describes for the sibling
+> contract, confirmed here by reading the full, real source of
+> `LaunchedToken.sol` directly (it wasn't examined for this specific
+> mechanism in the original pass below) rather than assumed to transfer over
+> unchanged. `router` and the ten tax-default/reward-diversion fields
+> (`platformFeeWallet`, `feeBps`, `priceFeed`, `graduationTargetUsd`,
+> `maxOracleStaleness`, `rewardsDistributor`, `rewardBps`,
+> `creatorRewardsDistributor`, `creatorRewardBps`, `feeWalletDistributor`)
+> are now `private` instead of `public`, replaced by a combined
+> `taxDefaults()` view — `router` needed to move here too (unlike
+> `CustomBondingCurveFactory.sol`, where it could stay public), since
+> `LaunchedToken._maybeAutoActivateTax` calls `tokenFactory.router()`
+> directly as its first step. A companion `isGraduationBlocked(token)`
+> tripwire view was added, identical in shape to the sibling contract's.
+> Regression coverage lives in `BondingCurveFactory.test.js` under "Finding 8
+> fix: independent-pair hijack via ITokenFactoryTaxDefaults" (3 new tests),
+> reusing the same `createPair()` addition to `MockRouter.sol` that Finding
+> 1's regression test added — no further mock changes needed. It's appended
+> at the end of the findings list, after the original seven (all of which
+> remain fixed, as below), to keep this document's history intact.
+>
+> **Remediation status: all seven ORIGINAL findings below are fixed** (Finding 7's "fix" is a documentation note only, as its own text already said no code change was needed), pending a full `npx hardhat test` run in the real repo to confirm (this environment doesn't have `LaunchedToken.sol`/`LiquidityLocker.sol`/the OpenZeppelin dependency tree available to compile against directly — see the delivery notes). Summary:
 >
 > - **Finding 1 (High — sell() could be frozen by a misbehaving fee recipient):** `_distributeEthFee` no longer reverts the triggering `buy()`/`sell()`/`createCurveToken()` call when `feeTreasury` or `rewardsDistributor` rejects a transfer. A failed transfer's amount is tracked in the new `strandedFees` counter (with a `FeeTransferFailed` event) instead of reverting anything — `sell()`'s "holders must always be able to exit" guarantee no longer depends on either recipient's health. See the new "fee distribution resilience (Finding 1)" test suite.
 > - **Finding 2 (Medium — stale `realEthReserve` after graduation):** `_doGraduate` now zeroes `curve.realEthReserve` immediately after reading it into `ethForPool`, before any external call. `curveState()` correctly reports `0` for every graduated curve. The delivered test suite's own `realEthReserve == 0` assertion (written before this fix) now passes against the corrected contract.
@@ -131,6 +154,151 @@ This exists specifically to absorb router refunds mid-`addLiquidityETH` (a real 
 
 `_executeBuy` requires `tokensOut <= curve.tokensRemaining`; a buy sized to demand more than the curve has left reverts outright with `"BondingCurveFactory: exceeds curve supply"` rather than filling whatever's available and returning change. This is consistent, intentional behavior (and is exactly why `ethGraduationTarget` was deliberately set below the curve's own exhaustion point — see the contract's own comment on it), not a bug — but it means a front end must call `quoteBuy`/`curveState` first and clamp the ETH amount itself for a buyer trying to ape in near the top of a curve, or that buyer's transaction simply fails.
 
+### 8. HIGH — This factory accidentally implements the exact interface `LaunchedToken` uses to self-activate its tax against an independent pool, letting anyone permanently brick a curve's graduation
+
+Identified while auditing the newer `CustomBondingCurveFactory.sol` (see
+that document's Finding 1) and re-confirmed here directly against this
+contract and the real, complete `LaunchedToken.sol` — not assumed to carry
+over unchanged.
+
+`LaunchedToken.sol` (cloned here, unmodified) has a permissionless,
+automatic mechanism built for `TokenFactory`'s "Just Launch" mode: a token
+minted with no liquidity at all, where the creator might independently pair
+it up against Uniswap at some later, unknown time. Every transfer checks
+for that on its own:
+
+```solidity
+// LaunchedToken.sol:388-395 (_update)
+bool justActivated = false;
+if (!taxConfigured && from != factory) {
+    try this._maybeAutoActivateTax() returns (bool activated) {
+        justActivated = activated;
+    } catch {
+        justActivated = false;
+    }
+}
+```
+
+```solidity
+// LaunchedToken.sol:294-318 (_maybeAutoActivateTax)
+function _maybeAutoActivateTax() external returns (bool justActivated) {
+    require(msg.sender == address(this), "LaunchedToken: internal only");
+    if (taxConfigured) return false;
+
+    ITokenFactoryTaxDefaults tokenFactory = ITokenFactoryTaxDefaults(factory);
+    IUniswapV2Router02 factoryRouter = tokenFactory.router();
+    address dexFactory = factoryRouter.factory();
+    address weth = factoryRouter.WETH();
+    address detectedPair = IUniswapV2FactoryMinimal(dexFactory).getPair(address(this), weth);
+    if (detectedPair == address(0)) return false;
+    ...
+    uint256 feeBps_ = tokenFactory.feeBps();
+    address platformFeeWallet_ = tokenFactory.platformFeeWallet();
+    ...
+    taxConfigured = true;
+    pair = detectedPair;
+    ...
+}
+```
+
+This is safe on a genuine "Just Launch" `LaunchedToken`, because there
+`factory` really is `TokenFactory`, the correct source of tax defaults for
+a token that was never going to get a pool from the factory itself.
+
+`BondingCurveFactory` reuses the same contract for a token whose `factory`
+field is **this curve factory** — for the specific, documented reason that
+`LaunchedToken._update`'s own `from == factory` guard is what keeps every
+curve-phase transfer this factory originates (buy payouts, and the
+liquidity-seeding transfer inside `_doGraduate`'s `addLiquidityETH` call)
+from racing ahead of the explicit `configureTax()` call. That reuse is
+sound. What isn't sound — confirmed by checking every one of
+`ITokenFactoryTaxDefaults`'s eleven functions against this contract's own
+declarations, the same way `AUDIT-CustomBondingCurveFactory.md`'s Finding 1
+was verified — is that this factory satisfies the interface completely:
+
+```solidity
+IUniswapV2Router02 public immutable router;      // :112 -- router() -- called FIRST by _maybeAutoActivateTax, unlike CustomToken's equivalent
+address public platformFeeWallet;                // :202 -- platformFeeWallet()
+uint256 public feeBps = 100;                      // :203 -- feeBps()
+address public priceFeed;                         // :204 -- priceFeed()
+uint256 public graduationTargetUsd = 50_000;      // :205 -- graduationTargetUsd()
+uint256 public maxOracleStaleness = 1 hours;      // :206 -- maxOracleStaleness()
+address public rewardsDistributor;                // :175 -- rewardsDistributor()
+uint256 public rewardBps = 45;                    // :176 -- rewardBps()
+address public creatorRewardsDistributor;         // :183 -- creatorRewardsDistributor()
+uint256 public creatorRewardBps = 10;             // :184 -- creatorRewardBps()
+address public feeWalletDistributor;              // :190 -- feeWalletDistributor()
+```
+
+Worth noting this is if anything MORE directly exploitable here than the
+`CustomToken` case: `LaunchedToken._maybeAutoActivateTax` calls
+`tokenFactory.router()` as its very first external call (to derive the DEX
+factory and WETH address), and `router` is this factory's own `public
+immutable` state variable — matching `ITokenFactoryTaxDefaults.router()`
+exactly. `CustomToken`'s equivalent function uses its own `router` state
+variable for that part instead and only reaches into `factory` for the tax
+getters, so `router()` collides but was never actually the exploited call
+there; here, it's the very first thing that succeeds.
+
+**The attack is identical in shape to Finding 1 of
+`AUDIT-CustomBondingCurveFactory.md`:** anyone calls the real DEX factory's
+permissionless `createPair(token, WETH)` — no liquidity required, and
+`predictTokenAddress(creator, salt)` being public means this can happen
+before the curve is even created, front-running `createCurveToken()`
+itself. The token's own first `_update()` call (the mint inside
+`initialize()`, since `from == address(0) != factory`) or, failing that,
+literally any `sell()` on the curve (`from == msg.sender != factory`)
+triggers `_maybeAutoActivateTax()`, which succeeds against this factory's
+live getters and permanently sets `pair` and `taxConfigured = true`, using
+this factory's CURRENT global tax settings rather than anything
+curve-specific (there's no snapshot involved in this path at all).
+
+When the curve later actually crosses `poolSeedTargetWei` and `_doGraduate`
+runs:
+
+```solidity
+// BondingCurveFactory.sol:680 (_doGraduate)
+LaunchedToken(token).configureTax(
+    pair, curve.taxPlatformFeeWallet, curve.taxFeeBps, ...
+);
+```
+
+`configureTax()` unconditionally reverts with `"LaunchedToken: tax already
+configured"` once `taxConfigured` is true — with no reset path anywhere in
+`LaunchedToken.sol`. Exactly as in the `CustomToken` case, the whole
+`_doGraduate` attempt (including the `addLiquidityETH` call that already
+ran) unwinds atomically on that revert, so nothing is stolen or stranded
+mid-flight — but the curve can never successfully graduate again.
+`sell()` still works throughout (it never depends on `pair`/`taxConfigured`),
+so holders can always exit at the curve's live price, but the one thing
+this whole factory exists to eventually do — seed a real, LP-locked pool —
+is permanently defeated, for the price of one ordinary, cheap, permissionless
+Uniswap action, exploitable against every curve this factory will ever
+create.
+
+**Recommendation:** identical fix to `AUDIT-CustomBondingCurveFactory.md`'s
+Finding 1 — stop this factory from satisfying `ITokenFactoryTaxDefaults` at
+all. Concretely: make `platformFeeWallet`, `feeBps`, `priceFeed`,
+`graduationTargetUsd`, `maxOracleStaleness`, `rewardsDistributor`,
+`rewardBps`, `creatorRewardsDistributor`, `creatorRewardBps`, and
+`feeWalletDistributor` private, and replace their individual getters with
+one combined view (e.g. `taxDefaults()`, mirroring this contract's own
+`curveTaxConfig()` shape). Here, `router` also needs to move — unlike
+`CustomToken`'s version, `LaunchedToken._maybeAutoActivateTax` calls
+`tokenFactory.router()` directly, so leaving `router` `public` alone would
+leave the very first call in the chain still succeeding (it would just fail
+one call later, at `feeBps()`, which is still enough to roll back the
+`pair`/`taxConfigured` write in the same revert — but there's no reason to
+leave `router()` matching when folding it into the same combined view
+closes it just as completely and keeps the interface-match surface at
+zero). A companion `isGraduationBlocked(token)` view, identical in shape to
+the one added to `CustomBondingCurveFactory.sol`, is worth adding here too.
+
+This has zero effect on legitimate post-graduation behavior, for the same
+reason as the sibling contract: once this factory's own `configureTax()`
+call succeeds, `taxConfigured` is permanently true, which already disables
+`_maybeAutoActivateTax` from running again on that token regardless.
+
 ---
 
 ## What's already solid (verified, not assumed)
@@ -156,3 +324,12 @@ The delivered `BondingCurveFactory.test.js`/`BondingCurveMath.test.js` suite (wr
 - **Finding 4** needs an equivalent test with a time gap between `createCurveToken()` and the crossing trade, with `setTaxDefaults()` called in between, confirming which set of tax terms the graduated token actually ends up with.
 
 Recommend adding one dedicated test per finding once each is resolved, the same pattern `AUDIT-CustomToken.md` and `AUDIT-LaunchedToken.md` both used for their own fixes.
+
+- **Finding 8** needs the same regression shape added for
+  `CustomBondingCurveFactory.test.js`'s Finding 1 coverage: a mock DEX
+  factory's `createPair()` called for a curve token before graduation, an
+  ordinary transfer confirmed NOT to hijack `pair`/`taxConfigured` after the
+  fix, and graduation confirmed to still succeed afterward. `MockRouter.sol`
+  already has the needed `createPair()` addition (added for the sibling
+  contract's regression test) — this suite would reuse the same mock
+  function, no further mock changes needed.
