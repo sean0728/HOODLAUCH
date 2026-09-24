@@ -18,26 +18,24 @@ import "./interfaces/IUniswapV2Router02.sol";
 /// default) trades directly against a pump.fun-style constant-product
 /// bonding curve, priced with virtual reserves layered on top of the real,
 /// growing ones so the curve never divides by zero and starts at a sane
-/// price. Once accumulated real ETH crosses ethGraduationTarget, the curve
+/// price. Once accumulated real ETH crosses poolSeedTargetWei, the curve
 /// "graduates": its remaining tokens (curveSupplyBps's unsold leftover plus
 /// the untouched (100% - curveSupplyBps) reserve) and its accumulated real
 /// ETH seed a genuine Uniswap-V2-style pool, whose LP locks to the ORIGINAL
 /// creator (never to whoever happened to call graduate()) for
 /// lpLockDuration, exactly like TokenFactory's own liquidity lock. The
-/// graduated pool then opts into the SAME ongoing 1%-until-$50k platform tax
-/// every other "launch with liquidity" mode already carries (see
-/// _doGraduate) -- this mode adds a new curve-phase revenue stream, it
-/// doesn't give up the existing one.
+/// graduated pool then opts into the SAME ongoing platform tax every other
+/// "launch with liquidity" mode already carries (see _doGraduate) -- this
+/// mode adds a new curve-phase revenue stream, it doesn't give up the
+/// existing one.
 ///
 /// NOTE: this repo also has an older, unrelated contracts/BondingCurve.sol
-/// (per-token clone, 0.25% fee, LP burned at graduation, USD-market-cap
-/// graduation via oracle) that predates this file and is not wired into
-/// TokenFactory/CustomTokenFactory/deploy.js anywhere -- confirmed by
-/// grepping both for any reference to it. This is a clean-room design
-/// built independently for the single-shared-factory architecture; it does
-/// not reuse or extend that file. See the delivery notes for the specific
-/// differences (LP destination, graduation trigger unit, fee rate) that are
-/// still open for confirmation before this ships.
+/// (per-token clone, LP burned at graduation, USD-market-cap graduation via
+/// oracle) that predates this file and is not wired into TokenFactory/
+/// CustomTokenFactory/deploy.js anywhere -- confirmed by grepping both for
+/// any reference to it. This is a clean-room design built independently for
+/// the single-shared-factory architecture; it does not reuse or extend that
+/// file.
 ///
 /// Reuses LaunchedToken.sol, LiquidityLocker.sol, and the router interfaces
 /// completely unmodified. This works because LaunchedToken.initialize()
@@ -79,7 +77,36 @@ import "./interfaces/IUniswapV2Router02.sol";
 /// Ships without gasless relay support (creators/traders pay their own gas
 /// for createCurveToken/buy/sell in v1); the EIP-712 voucher pattern the
 /// other factories use is a deliberate fast-follow once this contract has
-/// live testnet mileage, to keep this first audit's surface smaller.
+/// live testnet mileage.
+///
+/// --- Post-audit hardening (see AUDIT-BondingCurveFactory.md) ---
+/// This revision fixes every finding from that audit:
+///   - Finding 1 (High): _distributeEthFee no longer reverts the triggering
+///     buy()/sell()/createCurveToken() call when a fee recipient rejects the
+///     transfer -- see _distributeEthFee and strandedFees below. sell()'s
+///     "holders must always be able to exit" guarantee no longer depends on
+///     feeTreasury/rewardsDistributor's health.
+///   - Finding 2 (Medium): curve.realEthReserve is now zeroed in
+///     _doGraduate, so curveState() reports 0 for every graduated curve
+///     instead of a stale, pre-graduation balance forever.
+///   - Finding 3 (Medium): curveFeeBps is now snapshotted per curve (see
+///     Curve.curveFeeBps), exactly like every sibling economic parameter --
+///     setCurveFeeBps() only ever affects curves created after the change.
+///   - Finding 4 (Low): the seven post-graduation tax parameters are now
+///     snapshotted per curve at creation (see the Curve.tax* fields) rather
+///     than read live at graduation time, so a long-lived curve graduates
+///     under the terms that existed when it was created, not whatever
+///     setTaxDefaults() happens to say later. The three distributor
+///     addresses (rewardsDistributor/creatorRewardsDistributor/
+///     feeWalletDistributor) are deliberately NOT snapshotted -- they're
+///     "is this platform feature live yet" toggles, not terms a buyer
+///     bought into.
+///   - Finding 5 (Low): rescueStrandedFees()/rescueToken() add a recovery
+///     path for stray ETH/tokens, structured so neither can ever touch a
+///     live curve's own tracked balance.
+///   - Finding 6 (Informational): ethGraduationTarget is renamed
+///     poolSeedTargetWei throughout, to stop it being confused with the
+///     unrelated, USD-denominated, post-pool graduationTargetUsd.
 contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     address public immutable tokenImplementation;
     IUniswapV2Router02 public immutable router;
@@ -94,7 +121,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     // curves created after the change, never one already live. ----
 
     uint256 public curveLaunchFee; // flat fee to create a curve token -- no pool exists yet, so this is priced like TokenFactory.deployFee, not launchFee
-    uint256 public curveFeeBps = 100; // 1.00%, skimmed from the ETH leg of every buy and sell during the curve phase
+    uint256 public curveFeeBps = 100; // 1.00%, skimmed from the ETH leg of every buy and sell during the curve phase -- snapshotted into Curve.curveFeeBps at creation (see Finding 3)
     uint256 public curveSupplyBps = 8_000; // 80.00% of totalSupply_ tradable on the curve; the untouched remainder plus any unsold leftover is added to the pool at graduation -- nothing is ever burned
     uint256 public virtualEthReserveDefault = 3 ether; // absolute wei baseline added to every new curve's real ETH reserve, purely for pricing -- shapes how steeply price rises as real ETH comes in
     /// @notice Bps OF totalSupply_ (not an absolute token count) used as the
@@ -107,7 +134,8 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// different supplies for no reason connected to their actual scarcity.
     uint256 public virtualTokenReserveBps = 8_000; // 80.00% of totalSupply_
     /// @notice Real ETH (net of curveFeeBps) a curve must accumulate before
-    /// it can graduate. Deliberately kept well below the constant-product
+    /// it can graduate -- i.e. how much ETH ends up seeding the resulting
+    /// DEX pool. Deliberately kept well below the constant-product
     /// exhaustion point implied by virtualEthReserveDefault/
     /// virtualTokenReserveBps/curveSupplyBps (at these defaults, a single
     /// buy demanding the curve's ENTIRE remaining supply would require
@@ -115,7 +143,15 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// unsold curve supply still in reserve is the intended, pump.fun-like
     /// behavior (see the contract-level note on leftover supply), not an
     /// edge case to graze against.
-    uint256 public ethGraduationTarget = 1.5 ether;
+    ///
+    /// Named poolSeedTargetWei (not ethGraduationTarget) specifically to
+    /// keep it visually and semantically distinct from graduationTargetUsd
+    /// below -- the two are unrelated thresholds, in different units,
+    /// gating two completely different transitions (this one gates
+    /// curve-to-pool; that one gates the pool's own tax permanently
+    /// disabling), and the near-identical old names invited exactly the
+    /// kind of mix-up flagged in AUDIT-BondingCurveFactory.md Finding 6.
+    uint256 public poolSeedTargetWei = 1.5 ether;
 
     /// @notice See TokenFactory.maxCreatorBuyBps -- identical anti-rug
     /// safeguard, applied to the optional same-transaction creator buy-in at
@@ -133,30 +169,40 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// factory. address(0) (the default) disables both: curveLaunchFee/
     /// curveFeeBps revenue stays 100% feeTreasury, and every curve that
     /// graduates from here on configures its token with no reward diversion.
+    /// Deliberately read LIVE at every trade and at graduation time, never
+    /// snapshotted -- this is "is the feature live yet," not a term any
+    /// buyer bought into (see the contract-level note on Finding 4).
     address public rewardsDistributor;
-    uint256 public rewardBps = 45; // 0.45% -- POST-graduation tax carve-out only, see LaunchedToken.configureTax
+    uint256 public rewardBps = 45; // 0.45% -- POST-graduation tax carve-out only, see LaunchedToken.configureTax -- snapshotted into Curve.taxRewardBps at creation (see Finding 4)
 
     /// @notice CreatorRewardsDistributor's address -- POST-graduation
     /// LaunchedToken transfer-tax carve-out only (see the contract-level
     /// note on why curve-phase fees never use this). address(0) disables it
-    /// entirely for curves graduating from here on.
+    /// entirely for curves graduating from here on. Live, not snapshotted --
+    /// see the note on rewardsDistributor above.
     address public creatorRewardsDistributor;
-    uint256 public creatorRewardBps = 10; // 0.10% -- POST-graduation tax carve-out only
+    uint256 public creatorRewardBps = 10; // 0.10% -- POST-graduation tax carve-out only -- snapshotted into Curve.taxCreatorRewardBps at creation
 
     /// @notice FeeWalletDistributor's address -- POST-graduation
     /// LaunchedToken transfer-tax remainder only, same convention as every
-    /// other factory. address(0) disables it entirely.
+    /// other factory. address(0) disables it entirely. Live, not
+    /// snapshotted -- see the note on rewardsDistributor above.
     address public feeWalletDistributor;
 
     // ---- post-graduation LaunchedToken tax defaults -- identical fields,
     // identical meaning, and identical setTaxDefaults() bounds to
-    // TokenFactory/CustomTokenFactory's own copies. Snapshotted into a
-    // curve's token once, at graduation (see _doGraduate), never touched
-    // again for that token afterward. ----
+    // TokenFactory/CustomTokenFactory's own copies. Unlike TokenFactory
+    // (where "at launch" and "at configuration" are the same instant), a
+    // curve can sit unsold for an arbitrary time before graduating, so these
+    // seven values are snapshotted into the Curve struct at createCurveToken()
+    // time and applied from there -- see the Curve.tax* fields and Finding 4.
+    // The globals below remain the CURRENT defaults applied to curves
+    // created from this point forward; changing them never touches a curve
+    // that already exists. ----
     address public platformFeeWallet;
     uint256 public feeBps = 100; // 1.00%
     address public priceFeed;
-    uint256 public graduationTargetUsd = 50_000; // whole dollars; the POST-graduation tax permanently disables once the pool's live market cap crosses this
+    uint256 public graduationTargetUsd = 50_000; // whole dollars; the POST-graduation tax permanently disables once the pool's live market cap crosses this -- unrelated to poolSeedTargetWei above, see its own doc comment
     uint256 public maxOracleStaleness = 1 hours;
 
     /// @notice See TokenFactory.liquiditySlippageBps -- identical
@@ -179,10 +225,19 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         uint256 tokensRemaining; // curve-held tokens still available to sell; starts at curveSupply, falls on buys, rises on sells
         uint256 virtualEthReserve;
         uint256 virtualTokenReserve;
-        uint256 realEthReserve; // real ETH accumulated net of curveFeeBps -- this, and only this, is what actually seeds the pool at graduation
-        uint256 ethGraduationTarget; // snapshotted at creation
+        uint256 realEthReserve; // real ETH accumulated net of curveFeeBps -- this, and only this, is what actually seeds the pool at graduation. Zeroed in _doGraduate (Finding 2) once that ETH has actually left for the pool.
+        uint256 poolSeedTargetWei; // snapshotted at creation -- see the state variable's own doc comment
+        uint256 curveFeeBps; // snapshotted at creation (Finding 3) -- this curve's trading fee is fixed for its lifetime regardless of later setCurveFeeBps() calls
         bool graduated;
         uint256 createdAt;
+        // ---- post-graduation tax terms, snapshotted at creation (Finding 4) ----
+        address taxPlatformFeeWallet;
+        uint256 taxFeeBps;
+        address taxPriceFeed;
+        uint256 taxGraduationTargetUsd;
+        uint256 taxMaxOracleStaleness;
+        uint256 taxRewardBps;
+        uint256 taxCreatorRewardBps;
     }
 
     mapping(address => Curve) private curves;
@@ -190,6 +245,14 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     mapping(address => address) public pairOf; // token => its DEX pair once graduated, address(0) before then
     address[] private _tokenList;
     mapping(address => address[]) private _tokensByCreator;
+
+    /// @notice ETH that _distributeEthFee tried to forward to feeTreasury or
+    /// rewardsDistributor but couldn't, because the recipient's receive/
+    /// fallback reverted (see Finding 1). Stays on this contract's own
+    /// balance, tracked here rather than lost, until an owner sweeps it via
+    /// rescueStrandedFees() -- typically after fixing whichever address was
+    /// rejecting the transfer.
+    uint256 public strandedFees;
 
     event CurveTokenCreated(
         address indexed token,
@@ -200,7 +263,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         uint256 curveSupply,
         uint256 virtualEthReserve,
         uint256 virtualTokenReserve,
-        uint256 ethGraduationTarget
+        uint256 poolSeedTargetWei
     );
     event CreatorBought(address indexed token, address indexed creator, uint256 ethIn, uint256 tokensOut);
     event CurveBought(address indexed token, address indexed buyer, uint256 ethIn, uint256 feeAmount, uint256 tokensOut, uint256 realEthReserveAfter);
@@ -215,11 +278,20 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         uint256 indexed lockId
     );
 
+    /// @notice Emitted whenever _distributeEthFee couldn't deliver a fee
+    /// share to `recipient` -- see Finding 1 and strandedFees above. Never
+    /// reverts the trade that generated it; purely informational so this
+    /// can be monitored and acted on (fix the recipient, or sweep via
+    /// rescueStrandedFees()).
+    event FeeTransferFailed(address indexed recipient, uint256 amount);
+    event StrandedFeesRescued(address indexed to, uint256 amount);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
+
     event CurveFeeBpsUpdated(uint256 newBps);
     event CurveSupplyBpsUpdated(uint256 newBps);
     event VirtualEthReserveDefaultUpdated(uint256 newDefault);
     event VirtualTokenReserveBpsUpdated(uint256 newBps);
-    event EthGraduationTargetUpdated(uint256 newTarget);
+    event PoolSeedTargetUpdated(uint256 newTarget);
     event CurveLaunchFeeUpdated(uint256 newFee);
     event LpLockDurationUpdated(uint256 newDuration);
     event MaxCreatorBuyBpsUpdated(uint256 newBps);
@@ -263,7 +335,9 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// worse outcome here than on TokenFactory's atomic one-shot launch,
     /// since it would permanently strand a curve's accumulated ETH and
     /// tokens instead of just failing one deploy transaction that can be
-    /// resubmitted.
+    /// resubmitted. Also, unavoidably, accepts a stray direct ETH transfer
+    /// from anyone else -- see rescueStrandedFees()/rescueToken() (Finding 5)
+    /// for how that gets recovered rather than permanently stuck.
     receive() external payable {}
 
     /// @dev See TokenFactory._deriveTokenSalt for the full reasoning --
@@ -274,11 +348,12 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @dev Constant-product quote against this curve's CURRENT effective
-    /// reserves (virtual + real), fee-first: curveFeeBps is skimmed off the
-    /// incoming ETH before it ever touches the constant-product formula, so
-    /// the fee is never itself priced as if it were a trade.
+    /// reserves (virtual + real), fee-first: this curve's own snapshotted
+    /// curveFeeBps (Finding 3) is skimmed off the incoming ETH before it
+    /// ever touches the constant-product formula, so the fee is never
+    /// itself priced as if it were a trade.
     function _quoteBuy(Curve storage curve, uint256 ethIn) private view returns (uint256 tokensOut, uint256 feeAmount, uint256 netEthIn) {
-        feeAmount = (ethIn * curveFeeBps) / 10_000;
+        feeAmount = (ethIn * curve.curveFeeBps) / 10_000;
         netEthIn = ethIn - feeAmount;
         uint256 effEth = curve.virtualEthReserve + curve.realEthReserve;
         uint256 effToken = curve.virtualTokenReserve + curve.tokensRemaining;
@@ -286,15 +361,15 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @dev Constant-product quote for a sell, fee-last: the gross ETH the
-    /// constant-product formula implies is computed first, then curveFeeBps
-    /// is skimmed off that gross amount -- symmetric with _quoteBuy applying
-    /// its fee before pricing, since here the ETH being priced is the OUTPUT
-    /// leg, not the input.
+    /// constant-product formula implies is computed first, then this
+    /// curve's own snapshotted curveFeeBps is skimmed off that gross amount
+    /// -- symmetric with _quoteBuy applying its fee before pricing, since
+    /// here the ETH being priced is the OUTPUT leg, not the input.
     function _quoteSell(Curve storage curve, uint256 tokenAmountIn) private view returns (uint256 ethOutGross, uint256 feeAmount, uint256 netEthOut) {
         uint256 effEth = curve.virtualEthReserve + curve.realEthReserve;
         uint256 effToken = curve.virtualTokenReserve + curve.tokensRemaining;
         ethOutGross = (tokenAmountIn * effEth) / (effToken + tokenAmountIn);
-        feeAmount = (ethOutGross * curveFeeBps) / 10_000;
+        feeAmount = (ethOutGross * curve.curveFeeBps) / 10_000;
         netEthOut = ethOutGross - feeAmount;
     }
 
@@ -302,6 +377,18 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// TokenFactory._finalizeLaunch -- see the contract-level note on why
     /// curve-phase ETH revenue reuses this instead of
     /// creatorRewardsDistributor/feeWalletDistributor.
+    ///
+    /// Post-audit (Finding 1): neither transfer's failure reverts the
+    /// caller anymore. `.call{value}("")` already returns a bool rather
+    /// than throwing -- the ONLY reason a failure used to revert the whole
+    /// buy()/sell()/createCurveToken() was this function's own `require`
+    /// right after it. Removing that `require` and instead tracking the
+    /// undelivered amount in strandedFees (recoverable later via
+    /// rescueStrandedFees) means a misbehaving fee recipient can no longer
+    /// block trading, and in particular can no longer block sell() --
+    /// closing the gap between what pause()'s own doc comment promises
+    /// ("holders must always be able to exit") and what actually held true
+    /// before this fix.
     function _distributeEthFee(uint256 amount) private {
         if (amount == 0) return;
         if (rewardsDistributor != address(0)) {
@@ -309,13 +396,22 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
             uint256 toTreasury = amount - toRewards;
             if (toRewards > 0) {
                 (bool sentRewards, ) = rewardsDistributor.call{value: toRewards}("");
-                require(sentRewards, "BondingCurveFactory: rewards transfer failed");
+                if (!sentRewards) {
+                    strandedFees += toRewards;
+                    emit FeeTransferFailed(rewardsDistributor, toRewards);
+                }
             }
             (bool sent, ) = feeTreasury.call{value: toTreasury}("");
-            require(sent, "BondingCurveFactory: fee transfer failed");
+            if (!sent) {
+                strandedFees += toTreasury;
+                emit FeeTransferFailed(feeTreasury, toTreasury);
+            }
         } else {
             (bool sent, ) = feeTreasury.call{value: amount}("");
-            require(sent, "BondingCurveFactory: fee transfer failed");
+            if (!sent) {
+                strandedFees += amount;
+                emit FeeTransferFailed(feeTreasury, amount);
+            }
         }
     }
 
@@ -363,6 +459,11 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// its first trade, capped at maxCreatorBuyBps of totalSupply_ checked
     /// against the actual net tokens received -- same anti-rug convention as
     /// every other factory's creator buy-in.
+    ///
+    /// Snapshots curveFeeBps and the seven post-graduation tax parameters
+    /// into this curve at the moment it's created (Findings 3 and 4) -- an
+    /// owner changing any of those afterward only ever affects curves
+    /// created from that point forward, never this one.
     /// @param salt Caller-chosen CREATE2 salt input -- see
     /// TokenFactory.createToken's matching parameter doc for the full
     /// explanation; applies identically here (predictTokenAddress previews
@@ -397,8 +498,16 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         curve.tokensRemaining = curveSupply;
         curve.virtualEthReserve = virtualEthReserveDefault;
         curve.virtualTokenReserve = (totalSupply_ * virtualTokenReserveBps) / 10_000;
-        curve.ethGraduationTarget = ethGraduationTarget;
+        curve.poolSeedTargetWei = poolSeedTargetWei;
+        curve.curveFeeBps = curveFeeBps;
         curve.createdAt = block.timestamp;
+        curve.taxPlatformFeeWallet = platformFeeWallet;
+        curve.taxFeeBps = feeBps;
+        curve.taxPriceFeed = priceFeed;
+        curve.taxGraduationTargetUsd = graduationTargetUsd;
+        curve.taxMaxOracleStaleness = maxOracleStaleness;
+        curve.taxRewardBps = rewardBps;
+        curve.taxCreatorRewardBps = creatorRewardBps;
 
         creatorOf[token] = msg.sender;
         _tokensByCreator[msg.sender].push(token);
@@ -406,7 +515,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
 
         emit CurveTokenCreated(
             token, msg.sender, name_, symbol_, totalSupply_, curveSupply,
-            curve.virtualEthReserve, curve.virtualTokenReserve, curve.ethGraduationTarget
+            curve.virtualEthReserve, curve.virtualTokenReserve, curve.poolSeedTargetWei
         );
 
         if (creatorBuyEthAmount > 0) {
@@ -419,10 +528,10 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
             emit CreatorBought(token, msg.sender, creatorBuyEthAmount, tokensOut);
 
             // Same auto-graduation attempt as buy() -- a creator buy-in
-            // large enough to cross ethGraduationTarget on its own must not
+            // large enough to cross poolSeedTargetWei on its own must not
             // leave the curve stuck "crossed but ungraduated" just because
             // it arrived via this code path instead of a plain buy().
-            if (curve.realEthReserve >= curve.ethGraduationTarget) {
+            if (curve.realEthReserve >= curve.poolSeedTargetWei) {
                 try this._attemptGraduate(token) returns (address, uint256, uint256) {} catch {}
             }
         }
@@ -433,10 +542,11 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Buy curve tokens with ETH. Reverts if this curve has already
     /// graduated (trade against the real pool instead, same as any other
     /// launched token). Auto-attempts graduation at the end, once
-    /// realEthReserve crosses ethGraduationTarget -- wrapped so a failure
-    /// there (e.g. a misbehaving router) degrades to "not graduated yet"
-    /// rather than reverting this buy; see graduate() for the guaranteed
-    /// fallback. Paused independently of sell() -- see pause()/unpause().
+    /// realEthReserve crosses this curve's own poolSeedTargetWei -- wrapped
+    /// so a failure there (e.g. a misbehaving router) degrades to "not
+    /// graduated yet" rather than reverting this buy; see graduate() for the
+    /// guaranteed fallback. Paused independently of sell() -- see
+    /// pause()/unpause().
     function buy(address token, uint256 minTokensOut) external payable nonReentrant whenNotPaused returns (uint256 tokensOut) {
         Curve storage curve = curves[token];
         require(curve.totalSupply > 0, "BondingCurveFactory: unknown curve");
@@ -448,13 +558,15 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
 
         emit CurveBought(token, msg.sender, msg.value, feeAmount, tokensOut, curve.realEthReserve);
 
-        if (curve.realEthReserve >= curve.ethGraduationTarget) {
+        if (curve.realEthReserve >= curve.poolSeedTargetWei) {
             try this._attemptGraduate(token) returns (address, uint256, uint256) {} catch {}
         }
     }
 
     /// @notice Sell curve tokens back for ETH. Never pausable -- holders
-    /// must always be able to exit a live curve. Checks-effects-
+    /// must always be able to exit a live curve, and (post-audit, Finding 1)
+    /// that guarantee no longer depends on feeTreasury/rewardsDistributor
+    /// accepting their cut either -- see _distributeEthFee. Checks-effects-
     /// interactions: curve storage is updated before the token pull and
     /// before the ETH payout, the first place in this codebase that pushes
     /// ETH out purely off stored state rather than forwarding it straight
@@ -489,7 +601,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @notice Permissionless graduation once a curve's realEthReserve has
-    /// crossed its own ethGraduationTarget -- the guaranteed fallback to
+    /// crossed its own poolSeedTargetWei -- the guaranteed fallback to
     /// buy()'s own best-effort inline attempt (see buy() above). A genuine
     /// failure here (e.g. the router reverting) reverts visibly to the
     /// caller, rather than being swallowed.
@@ -497,7 +609,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         Curve storage curve = curves[token];
         require(curve.totalSupply > 0, "BondingCurveFactory: unknown curve");
         require(!curve.graduated, "BondingCurveFactory: already graduated");
-        require(curve.realEthReserve >= curve.ethGraduationTarget, "BondingCurveFactory: graduation target not met");
+        require(curve.realEthReserve >= curve.poolSeedTargetWei, "BondingCurveFactory: graduation target not met");
         return _doGraduate(token, curve);
     }
 
@@ -516,7 +628,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     function _attemptGraduate(address token) external returns (address pair, uint256 lpAmount, uint256 lockId) {
         require(msg.sender == address(this), "BondingCurveFactory: internal only");
         Curve storage curve = curves[token];
-        if (curve.totalSupply == 0 || curve.graduated || curve.realEthReserve < curve.ethGraduationTarget) {
+        if (curve.totalSupply == 0 || curve.graduated || curve.realEthReserve < curve.poolSeedTargetWei) {
             return (address(0), 0, 0);
         }
         return _doGraduate(token, curve);
@@ -530,14 +642,22 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// totalSupply-curveSupply reserve -- nothing is ever burned) and this
     /// curve's full realEthReserve, locks the resulting LP to the ORIGINAL
     /// creator recorded at curve creation (never to whoever happened to call
-    /// graduate()), and opts the token into the same ongoing 1%-until-$50k
-    /// platform tax every other "launch with liquidity" mode already
-    /// carries.
+    /// graduate()), and opts the token into the SAME post-graduation tax
+    /// terms that were in effect when this curve was CREATED (Finding 4) --
+    /// curve.tax* fields, not the live platformFeeWallet/feeBps/etc.
+    /// globals.
+    ///
+    /// Post-audit (Finding 2): curve.realEthReserve is now zeroed here,
+    /// right after being read into ethForPool and before any external call
+    /// -- previously this field was left stale forever after graduation,
+    /// so curveState() kept reporting a nonzero "real ETH reserve" for a
+    /// curve whose ETH had already moved into the pool.
     function _doGraduate(address token, Curve storage curve) private returns (address pair, uint256 lpAmount, uint256 lockId) {
         curve.graduated = true;
 
         uint256 tokensForPool = IERC20(token).balanceOf(address(this));
         uint256 ethForPool = curve.realEthReserve;
+        curve.realEthReserve = 0; // Finding 2 fix -- effects before interactions, same discipline as the rest of this function
         require(tokensForPool > 0 && ethForPool > 0, "BondingCurveFactory: nothing to graduate");
 
         IERC20(token).approve(address(router), tokensForPool);
@@ -555,10 +675,10 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         require(pair != address(0), "BondingCurveFactory: pair not found after addLiquidityETH");
         pairOf[token] = pair;
 
-        uint256 effectiveRewardBps = rewardsDistributor != address(0) ? rewardBps : 0;
-        uint256 effectiveCreatorRewardBps = creatorRewardsDistributor != address(0) ? creatorRewardBps : 0;
+        uint256 effectiveRewardBps = rewardsDistributor != address(0) ? curve.taxRewardBps : 0;
+        uint256 effectiveCreatorRewardBps = creatorRewardsDistributor != address(0) ? curve.taxCreatorRewardBps : 0;
         LaunchedToken(token).configureTax(
-            pair, platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness,
+            pair, curve.taxPlatformFeeWallet, curve.taxFeeBps, curve.taxPriceFeed, curve.taxGraduationTargetUsd, curve.taxMaxOracleStaleness,
             rewardsDistributor, effectiveRewardBps, creatorRewardsDistributor, effectiveCreatorRewardBps,
             feeWalletDistributor
         );
@@ -594,7 +714,8 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
             uint256 virtualEthReserve,
             uint256 virtualTokenReserve,
             uint256 realEthReserve,
-            uint256 ethGraduationTarget_,
+            uint256 poolSeedTargetWei_,
+            uint256 curveFeeBps_,
             bool graduated,
             uint256 createdAt
         )
@@ -609,9 +730,41 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
             curve.virtualEthReserve,
             curve.virtualTokenReserve,
             curve.realEthReserve,
-            curve.ethGraduationTarget,
+            curve.poolSeedTargetWei,
+            curve.curveFeeBps,
             curve.graduated,
             curve.createdAt
+        );
+    }
+
+    /// @notice The seven post-graduation tax terms this specific curve is
+    /// locked into (Finding 4) -- snapshotted once, at createCurveToken()
+    /// time, and applied verbatim in _doGraduate whenever this curve
+    /// eventually graduates, regardless of what setTaxDefaults() has done
+    /// to the live globals in the meantime.
+    function curveTaxConfig(address token)
+        external
+        view
+        returns (
+            address taxPlatformFeeWallet,
+            uint256 taxFeeBps,
+            address taxPriceFeed,
+            uint256 taxGraduationTargetUsd,
+            uint256 taxMaxOracleStaleness,
+            uint256 taxRewardBps,
+            uint256 taxCreatorRewardBps
+        )
+    {
+        Curve storage curve = curves[token];
+        require(curve.totalSupply > 0, "BondingCurveFactory: unknown curve");
+        return (
+            curve.taxPlatformFeeWallet,
+            curve.taxFeeBps,
+            curve.taxPriceFeed,
+            curve.taxGraduationTargetUsd,
+            curve.taxMaxOracleStaleness,
+            curve.taxRewardBps,
+            curve.taxCreatorRewardBps
         );
     }
 
@@ -655,10 +808,15 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         emit VirtualTokenReserveBpsUpdated(newBps);
     }
 
-    function setEthGraduationTarget(uint256 newTarget) external onlyOwner {
+    /// @notice Updates the default real-ETH-raised threshold (in wei) new
+    /// curves must cross before they graduate into a pool. Renamed from
+    /// setEthGraduationTarget (Finding 6) to match the state variable's own
+    /// rename -- only ever affects curves created after this call; a live
+    /// curve keeps whatever value it snapshotted at its own creation.
+    function setPoolSeedTargetWei(uint256 newTarget) external onlyOwner {
         require(newTarget > 0, "BondingCurveFactory: graduation target must be > 0");
-        ethGraduationTarget = newTarget;
-        emit EthGraduationTargetUpdated(newTarget);
+        poolSeedTargetWei = newTarget;
+        emit PoolSeedTargetUpdated(newTarget);
     }
 
     function setCurveLaunchFee(uint256 newFee) external onlyOwner {
@@ -708,7 +866,10 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @notice Update the POST-graduation LaunchedToken tax defaults applied
-    /// to curves graduating from this point forward. See
+    /// to curves CREATED from this point forward (Finding 4 -- these are
+    /// snapshotted per curve at createCurveToken() time, not read live at
+    /// graduation, so this never touches an already-existing curve's own
+    /// locked-in terms, however long it's been trading). See
     /// TokenFactory.setTaxDefaults for the full explanation of every bound
     /// enforced below -- identical reasoning, identical ceiling.
     function setTaxDefaults(
@@ -737,10 +898,40 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Escape hatch for an already-graduated curve's token whose
     /// price feed has gone permanently stale -- see
     /// TokenFactory.updateTokenPriceFeed / LaunchedToken.updatePriceFeed for
-    /// the full explanation; applies identically here.
+    /// the full explanation; applies identically here. Deliberately calls
+    /// into the token directly rather than touching curve.taxPriceFeed
+    /// (which stops mattering the moment a curve graduates -- configureTax
+    /// already ran, once, with whatever value was snapshotted at that time).
     function updateTokenPriceFeed(address token, address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyOwner {
         LaunchedToken(token).updatePriceFeed(newPriceFeed_, newMaxOracleStaleness_);
         emit TokenPriceFeedUpdated(token, newPriceFeed_, newMaxOracleStaleness_);
+    }
+
+    /// @notice Sweeps ETH that _distributeEthFee couldn't deliver (Finding 1
+    /// / strandedFees) to `to`. Deliberately scoped to ONLY the tracked
+    /// strandedFees counter -- never address(this).balance directly -- so
+    /// this can never touch a live curve's own realEthReserve or a router
+    /// refund still earmarked for a specific curve's graduation.
+    function rescueStrandedFees(address to, uint256 amount) external onlyOwner {
+        require(to != address(0), "BondingCurveFactory: invalid recipient");
+        require(amount <= strandedFees, "BondingCurveFactory: exceeds stranded fees");
+        strandedFees -= amount;
+        (bool sent, ) = payable(to).call{value: amount}("");
+        require(sent, "BondingCurveFactory: rescue transfer failed");
+        emit StrandedFeesRescued(to, amount);
+    }
+
+    /// @notice Rescues an ERC20 mistakenly sent directly to this contract
+    /// (Finding 5). Cannot be used on any token this factory itself ever
+    /// created as a curve -- live or already graduated -- so this can never
+    /// be used to pull a curve's own tracked token balance; it only reaches
+    /// a token that has nothing to do with any curve at all.
+    function rescueToken(address token, address to, uint256 amount) external onlyOwner {
+        require(to != address(0), "BondingCurveFactory: invalid recipient");
+        require(creatorOf[token] == address(0), "BondingCurveFactory: cannot rescue a curve's own token");
+        bool sent = IERC20(token).transfer(to, amount);
+        require(sent, "BondingCurveFactory: token rescue failed");
+        emit TokenRescued(token, to, amount);
     }
 
     /// @notice Circuit breaker on new buy() calls only -- sell() is never
