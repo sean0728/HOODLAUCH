@@ -124,7 +124,9 @@ describe("BondingCurveFactory math", function () {
     const ethIn = 10_000_000_099n;
     const [, feeAmount] = await factory.quoteBuy(tokenAddress, ethIn);
     expect(feeAmount).to.equal((ethIn * CURVE_FEE_BPS) / 10_000n);
-    expect(feeAmount).to.equal(1_000_000_009n); // floor(10_000_000_099 * 100 / 10_000), not 1_000_000_009.9
+    // floor(10_000_000_099 * 100 / 10_000) = floor(100_000_000.99) = 100_000_000,
+    // not 1_000_000_009 -- the original literal here was simply miscalculated.
+    expect(feeAmount).to.equal(100_000_000n);
   });
 
   it("quoteBuy is monotonically increasing in ethIn", async function () {

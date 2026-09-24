@@ -123,7 +123,9 @@ describe("BondingCurveFactory", function () {
 
       const state = await factory.curveState(tokenAddress);
       expect(state.creator).to.equal(creator.address);
-      expect(state.totalSupply).to.equal(TOTAL_SUPPLY);
+      // curveState()'s second return value is named totalSupply_ (trailing
+      // underscore, to avoid shadowing), not totalSupply.
+      expect(state.totalSupply_).to.equal(TOTAL_SUPPLY);
       expect(state.curveSupply).to.equal((TOTAL_SUPPLY * 8000n) / 10_000n);
       expect(state.tokensRemaining).to.equal(state.curveSupply);
       expect(state.virtualEthReserve).to.equal(ethers.parseEther("3"));
@@ -730,6 +732,12 @@ describe("BondingCurveFactory", function () {
         CURVE_FEE_BPS
       );
 
+      // strandedFees is cumulative for this factory -- the earlier
+      // createCurveToken() launch fee and buy() fee already stranded here
+      // too, since feeTreasury has been reverting since deployWithRevertingTreasury().
+      // Snapshot it right before the sell so the assertion below checks what
+      // THIS sell contributed, not the running total.
+      const strandedFeesBefore = await factory.strandedFees();
       const buyerEthBefore = await ethers.provider.getBalance(buyer.address);
       const tx = await factory.connect(buyer).sell(tokenAddress, tokenBalance, 0);
       const receipt = await tx.wait();
@@ -739,7 +747,7 @@ describe("BondingCurveFactory", function () {
       // The seller was paid in full, in the same transaction, despite the
       // treasury rejecting its cut -- this is the core Finding 1 fix.
       expect(buyerEthAfter - buyerEthBefore + gasCost).to.equal(expected.netEthOut);
-      expect(await factory.strandedFees()).to.equal(expected.feeAmount);
+      expect((await factory.strandedFees()) - strandedFeesBefore).to.equal(expected.feeAmount);
       expect(await ethers.provider.getBalance(await revertingTreasury.getAddress())).to.equal(0n);
 
       await expect(tx).to.emit(factory, "FeeTransferFailed").withArgs(await revertingTreasury.getAddress(), expected.feeAmount);
@@ -766,6 +774,11 @@ describe("BondingCurveFactory", function () {
 
       const { tokenAddress } = await createCurveToken(factory, creator);
       const treasuryBefore = await ethers.provider.getBalance(treasury.address);
+      // rewardsDistributor was already set to the reverting mock before this
+      // createCurveToken() ran, so its own launch fee already stranded its
+      // reward-half here too -- snapshot before the buy so the assertion
+      // below checks only what THIS buy contributed.
+      const strandedFeesBefore = await factory.strandedFees();
       const ethSent = ethers.parseEther("0.3");
       const state = await factory.curveState(tokenAddress);
       const expected = expectedBuy(
@@ -783,7 +796,7 @@ describe("BondingCurveFactory", function () {
       const toTreasury = expected.feeAmount - toRewards;
       const treasuryAfter = await ethers.provider.getBalance(treasury.address);
       expect(treasuryAfter - treasuryBefore).to.equal(toTreasury);
-      expect(await factory.strandedFees()).to.equal(toRewards);
+      expect((await factory.strandedFees()) - strandedFeesBefore).to.equal(toRewards);
     });
   });
 
