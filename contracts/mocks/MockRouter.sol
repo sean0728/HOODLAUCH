@@ -56,6 +56,26 @@ contract MockRouter {
         return pairs[token];
     }
 
+    /// @notice Permissionless, zero-liquidity pair creation -- mirrors real
+    /// Uniswap V2Factory.createPair(tokenA, tokenB) exactly: callable by
+    /// anyone, needs no token balance and adds no liquidity. addLiquidityETH
+    /// below already creates a pair on first use if one doesn't exist yet;
+    /// this exposes that same creation path standalone, for a caller who
+    /// wants a pair to exist BEFORE any liquidity is ever added to it.
+    ///
+    /// Added specifically so CustomBondingCurveFactory.test.js can exercise
+    /// AUDIT-CustomBondingCurveFactory.md's Finding 1 regression test end to
+    /// end (an "attacker" pre-creating a pair for a curve token before the
+    /// factory's own graduation ever runs) -- a pure addition, everything
+    /// else in this mock is unchanged.
+    function createPair(address token) external returns (address pair) {
+        pair = pairs[token];
+        if (pair == address(0)) {
+            pair = address(new MockLPToken(token, _weth));
+            pairs[token] = pair;
+        }
+    }
+
     /// @dev Creates the pair on first use (mirroring how a real router's
     /// addLiquidityETH auto-creates a missing pair via the factory), pulls
     /// the token straight into the pair, and forwards the ETH into the pair
