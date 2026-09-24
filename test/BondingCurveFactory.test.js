@@ -836,7 +836,10 @@ describe("BondingCurveFactory", function () {
       // address from platformFeeWallet.
       const signers = await ethers.getSigners();
       const newFeeWallet = signers[7];
-      const currentPriceFeed = await factory.priceFeed();
+      // priceFeed is no longer a separate public getter (see Finding 8's
+      // hardening in AUDIT-BondingCurveFactory.md) -- read it via the
+      // combined taxDefaults() view instead.
+      const currentPriceFeed = (await factory.taxDefaults()).priceFeed_;
       await factory.setTaxDefaults(newFeeWallet.address, 777, currentPriceFeed, 99_000, 7200, 0, 0);
 
       // This curve's own snapshot must be unchanged...
@@ -918,6 +921,67 @@ describe("BondingCurveFactory", function () {
         factory,
         "OwnableUnauthorizedAccount"
       );
+    });
+  });
+
+  // Regression coverage for AUDIT-BondingCurveFactory.md Finding 8 -- uses
+  // MockRouter's createPair() (added for AUDIT-CustomBondingCurveFactory.md's
+  // Finding 1 regression test, reused here unchanged) to reproduce "an
+  // independent pool already exists for this curve token before graduation"
+  // end to end.
+  describe("Finding 8 fix: independent-pair hijack via ITokenFactoryTaxDefaults", function () {
+    it("a pre-existing Uniswap pair for the curve token does not hijack pair/taxConfigured or block graduation", async function () {
+      const { factory, router, creator, buyer } = await deployStack();
+      const { tokenAddress, token } = await createCurveToken(factory, creator);
+
+      // Attacker (or an opportunistic pair-sniping bot) pre-creates a real,
+      // empty pair for this curve token -- cheap and permissionless, exactly
+      // like the real DEX factory's own createPair().
+      await router.createPair(tokenAddress);
+      expect(await router.getPair(tokenAddress, ethers.ZeroAddress)).to.not.equal(ethers.ZeroAddress);
+
+      // An ordinary sell (transferFrom with from != factory) is exactly what
+      // triggers LaunchedToken._update's own independent-pool auto-detection
+      // on every curve-phase transfer. Before the fix this would have
+      // permanently set token.pair()/token.taxConfigured() using this
+      // factory's live (not curve-snapshotted) tax defaults.
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("0.05") });
+      await token.connect(buyer).approve(await factory.getAddress(), ethers.parseEther("1"));
+      await factory.connect(buyer).sell(tokenAddress, ethers.parseEther("1"), 0);
+
+      expect(await token.pair()).to.equal(ethers.ZeroAddress);
+      expect(await token.taxConfigured()).to.equal(false);
+      expect(await factory.isGraduationBlocked(tokenAddress)).to.equal(false);
+
+      // Graduation still succeeds normally afterward, through this
+      // factory's own explicit configureTax() wiring.
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("1") });
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("1") });
+      expect((await factory.curveState(tokenAddress)).graduated).to.equal(true);
+      expect(await token.pair()).to.not.equal(ethers.ZeroAddress);
+      expect(await token.taxConfigured()).to.equal(true);
+    });
+
+    it("taxDefaults() exposes the combined live defaults, including router, that replaced eleven separate public getters", async function () {
+      const { factory, router, platformFeeWallet, priceFeed } = await deployStack();
+      const defaults = await factory.taxDefaults();
+      expect(defaults.router_).to.equal(await router.getAddress());
+      expect(defaults.platformFeeWallet_).to.equal(platformFeeWallet.address);
+      expect(defaults.feeBps_).to.equal(100n);
+      expect(defaults.priceFeed_).to.equal(await priceFeed.getAddress());
+      expect(defaults.graduationTargetUsd_).to.equal(50_000n);
+      expect(defaults.maxOracleStaleness_).to.equal(3600n);
+    });
+
+    it("isGraduationBlocked reports false for both a healthy live curve and a healthy graduated curve", async function () {
+      const { factory, creator, buyer } = await deployStack();
+      const { tokenAddress } = await createCurveToken(factory, creator);
+      expect(await factory.isGraduationBlocked(tokenAddress)).to.equal(false);
+
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("1") });
+      await factory.connect(buyer).buy(tokenAddress, 0, { value: ethers.parseEther("1") });
+      expect((await factory.curveState(tokenAddress)).graduated).to.equal(true);
+      expect(await factory.isGraduationBlocked(tokenAddress)).to.equal(false);
     });
   });
 });
