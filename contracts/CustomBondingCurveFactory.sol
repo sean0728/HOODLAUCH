@@ -124,36 +124,118 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     address public feeTreasury;
     uint256 public lpLockDuration;
 
-    /// @notice PlatformRewardsDistributor's address -- see
-    /// BondingCurveFactory.rewardsDistributor for the identical dual role
-    /// (curve-phase fee revenue split, and the post-graduation tax carve-out
-    /// below). address(0) disables both.
-    address public rewardsDistributor;
-    uint256 public rewardBps = 45; // 0.45% -- POST-graduation tax carve-out only -- snapshotted into Curve.taxRewardBps at creation
-
-    /// @notice CreatorRewardsDistributor's address -- POST-graduation tax
-    /// carve-out only, identical to BondingCurveFactory's own copy.
-    address public creatorRewardsDistributor;
-    uint256 public creatorRewardBps = 10; // 0.10% -- snapshotted into Curve.taxCreatorRewardBps at creation
-
-    /// @notice FeeWalletDistributor's address -- POST-graduation tax
-    /// remainder only, identical to BondingCurveFactory's own copy.
-    address public feeWalletDistributor;
-
-    // ---- post-graduation CustomToken platform-tax defaults -- identical
-    // fields, identical meaning, identical setTaxDefaults() bounds to
+    // ---- post-graduation CustomToken platform-tax defaults, PLUS the two
+    // reward-diversion addresses/bps below -- identical fields, identical
+    // meaning, identical setTaxDefaults() bounds to
     // BondingCurveFactory/CustomTokenFactory's own copies. Entirely separate
     // from, and layered on top of, whatever buyFees_/sellFees_ the creator
     // configured on their own CustomToken at creation -- see
     // CustomToken.configurePlatformTax's own contract-level note on why the
     // two never overlap. Snapshotted into the Curve struct at
     // createCurveToken() time (see the Curve.tax* fields), applied verbatim
-    // whenever that curve eventually graduates. ----
-    address public platformFeeWallet;
-    uint256 public feeBps = 100; // 1.00%
-    address public priceFeed;
-    uint256 public graduationTargetUsd = 50_000; // whole dollars
-    uint256 public maxOracleStaleness = 1 hours;
+    // whenever that curve eventually graduates.
+    //
+    // --- Post-audit hardening (see AUDIT-CustomBondingCurveFactory.md
+    // Finding 1) ---
+    // These ten fields used to be individual `public` state variables. That
+    // was a genuine vulnerability: their auto-generated getters happened to
+    // match ITokenFactoryTaxDefaults's exact eleven-function shape (see
+    // ITokenFactoryTaxDefaults.sol), the interface CustomToken._update's own
+    // independent-pool auto-detection (`_activatePoolIfFound`,
+    // `activateIndependentPair`) calls into via `ITokenFactoryTaxDefaults(
+    // factory)` -- and `factory` on every token this contract clones really
+    // is this contract's own address. That meant anyone could permanently
+    // hijack a curve-phase token's `pair` -- and thus permanently brick its
+    // graduation, with no recovery path -- just by getting a real Uniswap
+    // pair to exist for (token, WETH) before this factory's own explicit
+    // setPair() call runs (as cheap and permissionless as calling the DEX
+    // factory's own createPair(), even before the curve is created, since
+    // predictTokenAddress() is public). CustomToken's auto-detection is safe
+    // against a genuine deploy-only CustomToken (CustomTokenFactory's own
+    // use case, where `factory` really is the right source of tax
+    // defaults) -- it was never safe against a curve-phase token whose
+    // `factory` field happens to satisfy the same interface for an
+    // unrelated reason.
+    //
+    // Making these ten fields private (no individual getters at all) closes
+    // this: ITokenFactoryTaxDefaults(factory).feeBps() now hits no matching
+    // function on this contract and reverts immediately -- the very first
+    // call _activatePoolIfFound() makes after tentatively writing
+    // `pair = detectedPair`, so that write rolls back in the same revert.
+    // Every value is still fully readable off-chain, just through the one
+    // combined taxDefaults() view below instead of ten separate getters --
+    // the same shape curveTaxConfig() already uses for the per-curve
+    // snapshot. This has zero effect on legitimate post-graduation
+    // behavior: once this factory's own setPair() call succeeds, `pair` is
+    // permanently non-zero, which already permanently disables
+    // _activatePoolIfFound from running again on that token regardless.
+    address private platformFeeWallet;
+    uint256 private feeBps = 100; // 1.00%
+    address private priceFeed;
+    uint256 private graduationTargetUsd = 50_000; // whole dollars
+    uint256 private maxOracleStaleness = 1 hours;
+
+    /// @notice PlatformRewardsDistributor's address -- see
+    /// BondingCurveFactory.rewardsDistributor for the identical dual role
+    /// (curve-phase fee revenue split, and the post-graduation tax carve-out
+    /// below). address(0) disables both. Private for the same Finding 1
+    /// reason as the tax-default fields above -- see taxDefaults() below.
+    address private rewardsDistributor;
+    uint256 private rewardBps = 45; // 0.45% -- POST-graduation tax carve-out only -- snapshotted into Curve.taxRewardBps at creation
+
+    /// @notice CreatorRewardsDistributor's address -- POST-graduation tax
+    /// carve-out only, identical to BondingCurveFactory's own copy.
+    address private creatorRewardsDistributor;
+    uint256 private creatorRewardBps = 10; // 0.10% -- snapshotted into Curve.taxCreatorRewardBps at creation
+
+    /// @notice FeeWalletDistributor's address -- POST-graduation tax
+    /// remainder only, identical to BondingCurveFactory's own copy.
+    address private feeWalletDistributor;
+
+    /// @notice The combined replacement for what used to be ten separate
+    /// public getters (see the Finding 1 hardening note above) -- the
+    /// CURRENT live defaults applied to curves created from this point
+    /// forward. For any already-created curve's own locked-in terms, use
+    /// curveTaxConfig(token) instead, which is unaffected by this change.
+    function taxDefaults()
+        external
+        view
+        returns (
+            address platformFeeWallet_,
+            uint256 feeBps_,
+            address priceFeed_,
+            uint256 graduationTargetUsd_,
+            uint256 maxOracleStaleness_,
+            address rewardsDistributor_,
+            uint256 rewardBps_,
+            address creatorRewardsDistributor_,
+            uint256 creatorRewardBps_,
+            address feeWalletDistributor_
+        )
+    {
+        return (
+            platformFeeWallet, feeBps, priceFeed, graduationTargetUsd, maxOracleStaleness,
+            rewardsDistributor, rewardBps, creatorRewardsDistributor, creatorRewardBps, feeWalletDistributor
+        );
+    }
+
+    /// @notice Cheap monitoring helper for the exact failure mode Finding 1
+    /// describes: true iff this token's own `pair` has been set (by
+    /// CustomToken's independent-pool auto-detection, triggered by anyone
+    /// once a real Uniswap pair exists for it) while this factory's own
+    /// curve still thinks it hasn't graduated. If this is ever true, that
+    /// curve's graduate()/buy()-triggered-graduation calls will keep
+    /// failing -- surfaced here explicitly rather than left to be
+    /// discovered only when graduate() reverts with a generic reason. The
+    /// restructuring above prevents this from ever becoming true again for
+    /// curves created from this point forward, but this stays in place as a
+    /// permanent, cheap tripwire rather than being removed once the root
+    /// cause is fixed.
+    function isGraduationBlocked(address token) external view returns (bool) {
+        Curve storage curve = curves[token];
+        if (curve.totalSupply == 0 || curve.graduated) return false;
+        return CustomToken(payable(token)).pair() != address(0);
+    }
 
     /// @notice See TokenFactory.liquiditySlippageBps -- identical protection,
     /// applied to _doGraduate's own addLiquidityETH call.
