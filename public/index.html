@@ -479,7 +479,8 @@
   .brand-drop img{width:100%; height:100%; object-fit:cover; display:block;}
   .brand-remove{background:none; border:none; color:var(--paper-500); font-family:var(--font-mono); font-size:.7rem; cursor:pointer; padding:0; text-decoration:underline; text-underline-offset:2px;}
   .brand-remove:hover{color:var(--critical-500);}
-  .curve-options{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:16px;}
+  .curve-options{display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin-bottom:16px;}
+  @media (max-width: 560px){ .curve-options{grid-template-columns:1fr;} }
   .curve-card{border:1px solid var(--line-strong); border-radius:var(--radius-sm); padding:12px; cursor:pointer; background:var(--ink-950); text-align:center;}
   .curve-card svg{width:100%; height:44px; margin-bottom:8px;}
   .curve-card.selected{border-color:var(--signal-500); background:var(--signal-wash);}
@@ -5493,24 +5494,24 @@
         <h3 style="margin-bottom:6px;">Deploy mode</h3>
         <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 6px;">Every launch is verified before anything else happens. What comes next — and what it costs — depends on which mode you pick; nothing here is reversible after you launch.</p>
         <p class="hint" style="margin:0 0 18px;">${ethPriceNote()}</p>
-        <div class="curve-options" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));">
+        <div class="curve-options">
           <div class="curve-card ${draft.mode==='just'?'selected':''}" data-mode="just" style="text-align:left; padding:16px;">
-            <div class="name" style="margin-bottom:6px;">🚀 Deploy Token</div>
+            <div class="name" style="margin-bottom:6px;">🚀 Deploy 0% Tax Token Only</div>
             <div class="desc">Create and verify — nothing else. 100% of supply goes straight to your wallet. No pool, no tax, no further involvement from Hood Launch. Adding liquidity anywhere, any time, is entirely on you.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("just")}</div>
-          </div>
-          <div class="curve-card ${draft.mode==='liquidity'?'selected':''}" data-mode="liquidity" style="text-align:left; padding:16px;">
-            <div class="name" style="margin-bottom:6px;">🔒 Deploy and Add Liquidity (Launch)</div>
-            <div class="desc">Creation and liquidity happen atomically, in one transaction. A live pool exists immediately, taxed 1.00% on buys &amp; sells until market cap hits $50,000 — then the tax shuts off for good. LP locked to you for 15 days. 0% creator tax — you don't configure a rate here.</div>
-            <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("liquidity")}</div>
           </div>
           <div class="curve-card ${draft.mode==='customDeploy'?'selected':''}" data-mode="customDeploy" style="text-align:left; padding:16px;">
             <div class="name" style="margin-bottom:6px;">🎯 Deploy Custom Tax Token</div>
             <div class="desc">Create and verify only — same as Deploy Token, but through the Custom Tax Token contract, so your reflections/marketing/liquidity/burn configuration is recorded on-chain for later. 100% of supply goes straight to your wallet. No pool, so no tax of any kind is active — not your own, not the platform's.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("customDeploy")}</div>
           </div>
+          <div class="curve-card ${draft.mode==='liquidity'?'selected':''}" data-mode="liquidity" style="text-align:left; padding:16px;">
+            <div class="name" style="margin-bottom:6px;">🔒 Launch 0% Tax Token</div>
+            <div class="desc">Creation and liquidity happen atomically, in one transaction. A live pool exists immediately, taxed 1.00% on buys &amp; sells until market cap hits $50,000 — then the tax shuts off for good. LP locked to you for 15 days. 0% creator tax — you don't configure a rate here.</div>
+            <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("liquidity")}</div>
+          </div>
           <div class="curve-card ${draft.mode==='custom'?'selected':''}" data-mode="custom" style="text-align:left; padding:16px;">
-            <div class="name" style="margin-bottom:6px;">🎛️ Deploy and Add Liquidity (Live)</div>
+            <div class="name" style="margin-bottom:6px;">🎛️ Launch Custom Tax Token</div>
             <div class="desc">Custom Tax Token: you choose the tax — reflections, marketing wallet, auto-liquidity, true burn — up to 5% total per side, buy and sell configured independently. Creation and liquidity happen atomically; a live pool exists immediately, LP locked to you for ${LP_LOCK_DAYS} days. Same platform 1.00%-until-$50,000 tax applies on top, same as every launch with a pool.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("custom")}</div>
           </div>
@@ -5573,7 +5574,7 @@
     let modeRows;
     if(draft.mode==="just"){
       modeRows = `
-        <div class="review-row"><span class="k">Deploy mode</span><span class="v">Deploy Token</span></div>
+        <div class="review-row"><span class="k">Deploy mode</span><span class="v">Deploy 0% Tax Token Only</span></div>
         <div class="review-row"><span class="k">Pool</span><span class="v">None — 100% to your wallet</span></div>
         <div class="review-row"><span class="k">Transfer tax</span><span class="v">None</span></div>
       `;
@@ -5589,7 +5590,7 @@
       `;
     } else if(draft.mode==="custom"){
       modeRows = `
-        <div class="review-row"><span class="k">Deploy mode</span><span class="v">Deploy and Add Liquidity (Live)</span></div>
+        <div class="review-row"><span class="k">Deploy mode</span><span class="v">Launch Custom Tax Token</span></div>
         <div class="review-row"><span class="k">Liquidity</span><span class="v num">${draft.liquidityEth} ETH</span></div>
         ${draft.buyInEth>0 ? `<div class="review-row"><span class="k">Your buy-in</span><span class="v num">${draft.buyInEth} ETH, same transaction</span></div>` : ""}
         <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")}</span></div>
@@ -5601,7 +5602,7 @@
       `;
     } else {
       modeRows = `
-        <div class="review-row"><span class="k">Deploy mode</span><span class="v">Deploy and Add Liquidity (Launch)</span></div>
+        <div class="review-row"><span class="k">Deploy mode</span><span class="v">Launch 0% Tax Token</span></div>
         <div class="review-row"><span class="k">Liquidity</span><span class="v num">${draft.liquidityEth} ETH</span></div>
         ${draft.buyInEth>0 ? `<div class="review-row"><span class="k">Your buy-in</span><span class="v num">${draft.buyInEth} ETH, same transaction</span></div>` : ""}
         <div class="review-row"><span class="k">Transfer tax</span><span class="v num">1.00% until $50,000 MC</span></div>
