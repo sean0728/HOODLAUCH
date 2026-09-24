@@ -131,10 +131,11 @@ describe("CustomBondingCurveFactory", function () {
 
   describe("createCurveToken", function () {
     it("deploys a CustomToken clone, mints its full supply to the factory, and records curve state", async function () {
-      const { factory, creator } = await deployStack();
+      const { factory, creator, marketing } = await deployStack();
       const { tokenAddress, token } = await createCurveToken(factory, creator, {
         buyFees: CUSTOM_BUY_FEES,
         sellFees: CUSTOM_SELL_FEES,
+        marketingWallet: marketing.address, // both fee sets carry marketingBps > 0
       });
 
       expect(await token.balanceOf(await factory.getAddress())).to.equal(TOTAL_SUPPLY);
@@ -246,10 +247,11 @@ describe("CustomBondingCurveFactory", function () {
     }
 
     it("wires setPair() then configurePlatformTax() with this curve's snapshotted tax terms, and locks LP to the creator via this factory's OWN locker", async function () {
-      const { factory, locker, creator, buyer, platformFeeWallet } = await deployStack();
+      const { factory, locker, creator, buyer, platformFeeWallet, marketing } = await deployStack();
       const { tokenAddress, token } = await createCurveToken(factory, creator, {
         buyFees: CUSTOM_BUY_FEES,
         sellFees: CUSTOM_SELL_FEES,
+        marketingWallet: marketing.address, // both fee sets carry marketingBps > 0
       });
 
       await buyPastGraduation(factory, token, buyer);
