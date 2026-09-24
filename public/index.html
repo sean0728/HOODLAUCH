@@ -333,6 +333,12 @@
   .tc-status.graduated{background:var(--good-wash); color:var(--good-500);}
   .tc-status.creator-held{background:rgba(139,147,169,.16); color:var(--paper-300);}
   .tc-status.pool-detected{background:var(--cyan-wash); color:var(--cyan-400);}
+  .tc-status.curve-trading{background:var(--signal-wash); color:var(--signal-300);}
+  /* Quick Launch mode badge — distinct from the lifecycle status pill above
+     (which flips to "graduated" once a curve crosses poolSeedTargetWei):
+     this stays visible on a card so a Quick Launch token's pump.fun-style
+     origin is never lost after graduation. */
+  .tc-quicklaunch-badge{font-family:var(--font-mono); font-size:.62rem; letter-spacing:.05em; text-transform:uppercase; padding:2px 8px; border-radius:999px; white-space:nowrap; background:var(--signal-wash); color:var(--signal-300); border:1px solid rgba(255,157,60,.35);}
 
   .tc-desc{font-size:.82rem; color:var(--paper-500); margin:0 0 14px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
   .tc-spark{width:100%; height:36px; display:block; margin-bottom:14px; overflow:hidden;}
@@ -1080,7 +1086,29 @@
     }catch(e){ /* ignore persistence errors */ }
   }
 
-  const STATUS_LABEL = { taxed:"Taxed", graduated:"Graduated", "creator-held":"Creator-held", "live-pool":"Unlocked pool", "pool-detected":"Pool found" };
+  const STATUS_LABEL = { taxed:"Taxed", graduated:"Graduated", "creator-held":"Creator-held", "live-pool":"Unlocked pool", "pool-detected":"Pool found", "curve-trading":"Bonding curve" };
+  // Quick Launch has two separate graduation points — the curve crossing
+  // its ETH seed target (which only creates a live DEX pool; the token's
+  // own tax is still climbing) and that tax later crossing $50,000 market
+  // cap (which is the only point "graduated" should ever describe). A
+  // curve-origin token in "taxed" status has only cleared the first point,
+  // so its badge reads "Live on DEX" instead of the generic "Taxed" a
+  // regular token gets; once it's actually graduated (tax permanently off),
+  // it gets BOTH badges together, since it's still live on DEX as well as
+  // graduated. Every status-badge render site (tc-status, wherever it
+  // appears) should go through this helper rather than reading
+  // STATUS_LABEL directly, so this stays consistent platform-wide.
+  function curveStatusBadges(mode, status){
+    const isCurveMode = mode==="curve" || mode==="customCurve";
+    if(isCurveMode && status==="taxed") return [{cls:"taxed", text:"Live on DEX"}];
+    if(isCurveMode && status==="graduated") return [{cls:"taxed", text:"Live on DEX"}, {cls:"graduated", text:"Graduated"}];
+    return [{cls:status, text: STATUS_LABEL[status]||status}];
+  }
+  function statusBadgeHTML(mode, status, style){
+    return curveStatusBadges(mode, status)
+      .map(b=>`<span class="tc-status ${b.cls}" style="${style||""}">${b.text}</span>`)
+      .join(" ");
+  }
   const FEE_BPS = 100; // 1.00% transfer tax on buys and sells, matches LaunchedToken.sol's default feeBps — active only while status is "taxed"
 
   /* ---------------- nav / views ---------------- */
@@ -1166,8 +1194,19 @@
   // the admin panel reads it live off the distributor's own
   // platformToken() (see rewardsDistributorPanelHTML/loadRewardsDistributorState)
   // rather than a second address that could drift out of sync with it.
-  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl"];
-  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
+  // bondingCurveFactory/customBondingCurveFactory (added for Quick Launch —
+  // the pump.fun-style bonding-curve modes) are appended at the END of both
+  // lists on purpose: canonicalizePlatformConfig's output order feeds
+  // directly into the admin-signed platformConfigMessage, which relayer.js
+  // must reproduce byte-for-byte to verify that signature (see the comment
+  // on canonicalizePlatformConfig just below). Until relayer.js's own
+  // canonicalization is updated to match (tracked separately from this
+  // front-end change), "Save platform config" to the server will fail to
+  // verify for anyone who has these two fields filled in — "Save (this
+  // browser)" and manually editing config.json both still work in the
+  // meantime, since neither goes through that signature check.
+  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl"];
+  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
 
   // Must produce byte-identical output to relayer.js's own
   // canonicalizePlatformConfig for the same input, or a signature made here
@@ -1207,6 +1246,8 @@
   const CONFIG_LABELS = {
     tokenFactory: "TokenFactory",
     customTokenFactory: "CustomTokenFactory",
+    bondingCurveFactory: "BondingCurveFactory (Quick Launch)",
+    customBondingCurveFactory: "CustomBondingCurveFactory (Quick Launch, custom tax)",
     rewardsDistributor: "PlatformRewardsDistributor",
     creatorRewardsDistributor: "CreatorRewardsDistributor",
     priceFeed: "Price feed (Chainlink AggregatorV3Interface)",
@@ -1215,6 +1256,8 @@
   const CONFIG_HELP = {
     tokenFactory: "TokenFactory address — fill in once scripts/deploy.js has run against this network. Left unset, the wizard falls back to a fully local, simulated launch instead of calling a contract that doesn't exist.",
     customTokenFactory: "CustomTokenFactory address — the separate contract behind “Custom Tax Token” launches. Same null-until-deployed convention as TokenFactory.",
+    bondingCurveFactory: "BondingCurveFactory address — backs the zero-tax “Quick Launch” mode (pump.fun-style: no manual liquidity, trades against an on-chain bonding curve until it goes live on a real DEX pool). Same null-until-deployed convention as TokenFactory.",
+    customBondingCurveFactory: "CustomBondingCurveFactory address — the custom-tax variant of Quick Launch, same bonding-curve mechanics with creator-configurable buy/sell tax layered on top once it's live on DEX. Same null-until-deployed convention as TokenFactory.",
     rewardsDistributor: "PlatformRewardsDistributor address — the platform's buyback/burn/holder-airdrop contract (see scripts/deploy.js's DEPLOY_PLATFORM_TOKEN flag). Stays unset until the platform token actually launches; until then both factories keep rewardsDistributor unset on-chain regardless of what's entered here.",
     creatorRewardsDistributor: "CreatorRewardsDistributor address — pays each token's own creator() a per-token ETH share of the ongoing trading tax (see scripts/deployCreatorRewards.js). Stays unset until deployed; until then both factories keep creatorRewardBps effectively inactive on-chain regardless of what's entered here. Unlike PlatformRewardsDistributor, nothing pools across holders — every launched token gets its own independent claimable balance, read directly off this contract from each creator's Portfolio.",
     priceFeed: "Chainlink ETH/USD AggregatorV3Interface on Robinhood Chain, used only to display a live USD price for the ETH-denominated fees. Confirmed mainnet address ships as the default below; testnet is unconfirmed (Chainlink's address directory renders that table client-side) — the price fetcher falls back to a plain HTTP API and then a hardcoded estimate when this is unset for the current network.",
@@ -1229,6 +1272,13 @@
     // default — whenever that deployment is replaced.
     tokenFactory: { demo: "0x6e295099aFA9d88a27131674531A4e6D229e59BE", live: null },
     customTokenFactory: { demo: "0xA89F8446d3a119C4e3A3350D9633509e5679f80E", live: null },
+    // Quick Launch (bonding curve) factories — unset until scripts/deploy.js
+    // is run again against this network with the BondingCurveFactory/
+    // CustomBondingCurveFactory blocks added; fill these in (or use the
+    // admin panel) once that deploy's addresses are known, same
+    // null-until-deployed convention as every other factory above.
+    bondingCurveFactory: { demo: null, live: null },
+    customBondingCurveFactory: { demo: null, live: null },
     rewardsDistributor: { demo: null, live: null },
     creatorRewardsDistributor: { demo: null, live: null },
     priceFeed: { demo: "0x96B1Ebd9daB675F41C6B5688F1601c2b0619e32f", live: "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9" }, // demo: MockAggregatorV3 deployed for robinhoodTestnet; live: Chainlink ETH/USD, Standard Proxy, Robinhood Chain Mainnet
@@ -1368,6 +1418,8 @@
 
   function tokenFactoryAddress(mode){ return platformConfig.tokenFactory[mode || appMode] || null; }
   function customTokenFactoryAddress(mode){ return platformConfig.customTokenFactory[mode || appMode] || null; }
+  function bondingCurveFactoryAddress(mode){ return platformConfig.bondingCurveFactory[mode || appMode] || null; }
+  function customBondingCurveFactoryAddress(mode){ return platformConfig.customBondingCurveFactory[mode || appMode] || null; }
   function relayerApiUrl(mode){ const v = platformConfig.relayerApiUrl[mode || appMode] || null; return v ? v.replace(/\/+$/, "") : null; }
   function rewardsDistributorAddress(mode){ return platformConfig.rewardsDistributor[mode || appMode] || null; }
   function creatorRewardsDistributorAddress(mode){ return platformConfig.creatorRewardsDistributor[mode || appMode] || null; }
@@ -1856,6 +1908,67 @@
   // comment for why that's structurally impossible here.
   const ACTIVATE_INDEPENDENT_PAIR_SELECTOR = "e316e3c3"; // CustomToken.activateIndependentPair()
 
+  // ---- BondingCurveFactory / CustomBondingCurveFactory selectors — "Quick
+  // Launch" (pump.fun-style: no manual liquidity, trades against an
+  // on-chain bonding curve until it auto-graduates to a real DEX pool once
+  // realEthReserve crosses poolSeedTargetWei). Every value below was
+  // computed with keccak256 (js-sha3) directly against the actual
+  // BondingCurveFactory.sol/CustomBondingCurveFactory.sol function/event
+  // signatures — same verification standard as every other selector in
+  // this file, just a different tool since this environment has no
+  // ethers.js/hardhat available to ask directly.
+  //
+  // curveState(address)/quoteBuy(address,uint256)/quoteSell(address,uint256)/
+  // poolSeedTargetWei()/curveLaunchFee()/maxCreatorBuyBps()/
+  // virtualEthReserveDefault()/virtualTokenReserveBps()/curveFeeBps()/
+  // curveSupplyBps()/strandedFees()/tokenImplementation()/
+  // predictTokenAddress(address,uint256) are IDENTICAL signatures on both
+  // factories, so one constant each covers both, same convention as every
+  // other cross-factory selector reuse in this file. maxCreatorBuyBps() and
+  // predictTokenAddress(address,uint256) also happen to be byte-identical
+  // to TokenFactory's own (reused directly: MAX_CREATOR_BUY_BPS_SELECTOR,
+  // PREDICT_TOKEN_ADDRESS_SELECTOR), and tokenImplementation() reuses
+  // TOKEN_IMPLEMENTATION_SELECTOR the same way.
+  const CREATE_CURVE_TOKEN_SELECTOR = "7d930070"; // createCurveToken(string,string,uint256,uint256,uint256,uint256) on BondingCurveFactory — (name_,symbol_,totalSupply_,creatorBuyEthAmount,minCreatorTokensOut,salt)
+  const CREATE_CUSTOM_CURVE_TOKEN_SELECTOR = "d370f82f"; // createCurveToken(string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,address,uint256,uint256,uint256) on CustomBondingCurveFactory — (name_,symbol_,totalSupply_,buyFees_,sellFees_,reflectionAsset_,marketingWallet_,creatorBuyEthAmount,minCreatorTokensOut,salt)
+  const CURVE_STATE_SELECTOR = "19076e27"; // curveState(address) -> (creator,totalSupply_,curveSupply,tokensRemaining,virtualEthReserve,virtualTokenReserve,realEthReserve,poolSeedTargetWei_,curveFeeBps_,graduated,createdAt)
+  const QUOTE_BUY_SELECTOR = "0d7a94f6";   // quoteBuy(address,uint256) -> (tokensOut, feeAmount)
+  const QUOTE_SELL_SELECTOR = "d98b2f5c";  // quoteSell(address,uint256) -> (ethOut, feeAmount)
+  const CURVE_BUY_SELECTOR = "cce7ec13";   // buy(address,uint256) — (token, minTokensOut), payable
+  const CURVE_SELL_SELECTOR = "6a272462";  // sell(address,uint256,uint256) — (token, tokenAmountIn, minEthOut)
+  const CURVE_GRADUATE_SELECTOR = "ff6d8d05"; // graduate(address) — guaranteed fallback if a buy/sell's own auto-graduation attempt ever silently fails (see the contract's own doc comment on graduate())
+  const POOL_SEED_TARGET_WEI_SELECTOR = "9c85bc5d"; // poolSeedTargetWei() — 1.5 ETH by default; the "graduates to a live DEX pool" threshold shown throughout the Quick Launch wizard/cards
+  const CURVE_LAUNCH_FEE_SELECTOR = "f1e6eabc";     // curveLaunchFee() — flat fee to create a curve token, priced like TokenFactory.deployFee (no pool exists yet)
+  const VIRTUAL_ETH_RESERVE_DEFAULT_SELECTOR = "167f50a4"; // virtualEthReserveDefault()
+  const VIRTUAL_TOKEN_RESERVE_BPS_SELECTOR = "052de057";   // virtualTokenReserveBps()
+  const CURVE_FEE_BPS_SELECTOR = "902ccca5";               // curveFeeBps() — 1.00% default, skimmed from the ETH leg of every curve-phase buy/sell
+  const CURVE_SUPPLY_BPS_SELECTOR = "9ad42de2";            // curveSupplyBps() — 80.00% of totalSupply_ tradable on the curve by default
+  const CURVE_TOKEN_CREATED_TOPIC0 = "0x560d5ce89beb665be18754b5b041b444c9f2151176962e9502cf81a4bb235a87"; // CurveTokenCreated(address,address,string,string,uint256,uint256,uint256,uint256,uint256) — BondingCurveFactory only (zero-tax); CustomBondingCurveFactory's own version below adds the trailing reflectionAsset/marketingWallet fields, so it hashes differently
+  const CUSTOM_CURVE_TOKEN_CREATED_TOPIC0 = "0x2f682bb469a70588c1e9ab6f778fd864bf11aa3c6b60634478186673e59043f8"; // CurveTokenCreated(...,address reflectionAsset,address marketingWallet) — CustomBondingCurveFactory only
+  const CURVE_BOUGHT_TOPIC0 = "0x658312b9f075fb2d5fa3426eb46d382b846c41af765109ab23769b2a7c94208e"; // CurveBought(address,address,uint256,uint256,uint256,uint256) — identical on both factories
+  const CURVE_SOLD_TOPIC0 = "0xcd3f6e722f338f295791a2f5ba4bb140ecfa7220c60418e052c8ac61faf54a2d"; // CurveSold(address,address,uint256,uint256,uint256,uint256) — identical on both factories
+  const CURVE_GRADUATED_TOPIC0 = "0xc5b3b57dee816bc6f160f4313a729fa2c3f1f7e0c84a2782eec156fb2047a06c"; // CurveGraduated(address,address,uint256,uint256,uint256,uint256,uint256) — identical on both factories
+  // CreatorBought's signature is byte-for-byte identical across
+  // TokenFactory/CustomTokenFactory/BondingCurveFactory/
+  // CustomBondingCurveFactory, so it shares CREATOR_BOUGHT_TOPIC0 defined
+  // above rather than needing its own constant — same convention noted at
+  // that constant's own definition.
+  //
+  // Admin setters unique to the two curve factories — every other setter
+  // they expose (setFeeTreasury/setRewardsDistributor/
+  // setCreatorRewardsDistributor/setFeeWalletDistributor/
+  // setLpLockDuration/setMaxCreatorBuyBps/setTaxDefaults) is an identical
+  // signature to TokenFactory/CustomTokenFactory's own and reuses those
+  // constants directly (SET_FEE_TREASURY_SELECTOR etc.) — not redefined
+  // here.
+  const SET_CURVE_FEE_BPS_SELECTOR = "2428b446";             // setCurveFeeBps(uint256)
+  const SET_CURVE_SUPPLY_BPS_SELECTOR = "7e6fa71b";          // setCurveSupplyBps(uint256)
+  const SET_VIRTUAL_ETH_RESERVE_DEFAULT_SELECTOR = "a1a942b6"; // setVirtualEthReserveDefault(uint256)
+  const SET_VIRTUAL_TOKEN_RESERVE_BPS_SELECTOR = "b2776cc2";   // setVirtualTokenReserveBps(uint256)
+  const SET_POOL_SEED_TARGET_WEI_SELECTOR = "196928ad";        // setPoolSeedTargetWei(uint256)
+  const SET_CURVE_LAUNCH_FEE_SELECTOR = "a4056bc9";            // setCurveLaunchFee(uint256)
+  const RESCUE_STRANDED_FEES_SELECTOR = "7d751b04";            // rescueStrandedFees(address,uint256) — owner-only sweep of fee transfers that failed to deliver (see strandedFees() / FeeTransferFailed event)
+
   // ---- Gasless relayed-launch selectors — shared by TokenFactory and
   // CustomTokenFactory (identical function signatures, identical
   // selectors). See performRelayedLaunch/performRelayedCustomLaunch below
@@ -1868,8 +1981,22 @@
   // submits the real deploy transaction and pays its own gas.
   const HASH_LAUNCH_VOUCHER_SELECTOR = "d4418d13"; // hashLaunchVoucher((address,string,string,uint256,bool,uint256,uint256,uint256,uint256,uint256,uint256))
   const HASH_CUSTOM_LAUNCH_VOUCHER_SELECTOR = "6c3a81c5"; // hashCustomLaunchVoucher((address,string,string,uint256,bool,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,address,uint256,uint256,uint256,uint256,uint256))
-  const DEPOSIT_FOR_RELAYED_LAUNCH_SELECTOR = "141d658c"; // depositForRelayedLaunch(bytes32,uint256) — identical on both factories
+  const DEPOSIT_FOR_RELAYED_LAUNCH_SELECTOR = "141d658c"; // depositForRelayedLaunch(bytes32,uint256) — identical on both factories (all four: TokenFactory/CustomTokenFactory/BondingCurveFactory/CustomBondingCurveFactory)
   const RELAYER_SELECTOR = "8406c079"; // relayer() — identical on both factories
+
+  // Quick Launch's own gasless-relay voucher hashers — a fast-follow added
+  // to BondingCurveFactory/CustomBondingCurveFactory after the two factories
+  // above already shipped this (see those contracts' own "gasless relayed
+  // launches" section). CurveLaunchVoucher/CustomCurveLaunchVoucher are
+  // CurveLaunchVoucher/CustomLaunchVoucher's own shape minus
+  // addLiquidityAtLaunch/liquidityEthAmount (createCurveToken has no
+  // liquidity leg at all to relay) — see performRelayedCurveLaunch/
+  // performRelayedCustomCurveLaunch below for the full flow, identical in
+  // spirit to performRelayedLaunch/performRelayedCustomLaunch just sized to
+  // this smaller voucher. depositForRelayedLaunch/relayer() above are
+  // reused as-is (identical selectors on every factory).
+  const HASH_CURVE_LAUNCH_VOUCHER_SELECTOR = "0141e5bf"; // hashCurveLaunchVoucher((address,string,string,uint256,uint256,uint256,uint256,uint256,uint256))
+  const HASH_CUSTOM_CURVE_LAUNCH_VOUCHER_SELECTOR = "2a876d1b"; // hashCustomCurveLaunchVoucher((address,string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,address,uint256,uint256,uint256,uint256,uint256))
 
   // ---- Admin-panel selectors — shared by TokenFactory and
   // CustomTokenFactory. Both contracts are Ownable2Step with an identical
@@ -2105,6 +2232,83 @@
     return "0x" + CREATE_TOKEN_SELECTOR + head + nameTail + symbolTail;
   }
 
+  // createCurveToken has no addLiquidity flag and no liquidityWei at all —
+  // see the contract's own doc comment: "No ETH from the creator ever pairs
+  // into a pool here, that's the entire point of this mode." msg.value is
+  // just curveLaunchFee + creatorBuyEthAmount, enforced on-chain.
+  function encodeCreateCurveTokenCalldata({name, symbol, totalSupply, buyInWei, minTokensOut, salt}){
+    const HEAD_SLOTS = 6; // name offset, symbol offset, totalSupply, creatorBuyEthAmount, minCreatorTokensOut, salt
+    const headBytes = BigInt(HEAD_SLOTS*32);
+    const nameTail = encodeAbiString(name);
+    const symbolTail = encodeAbiString(symbol);
+    const nameOffset = headBytes;
+    const symbolOffset = headBytes + BigInt(nameTail.length/2);
+    const head = [
+      toHex32(nameOffset),
+      toHex32(symbolOffset),
+      toHex32(BigInt(totalSupply)),
+      toHex32(BigInt(buyInWei)),
+      toHex32(BigInt(minTokensOut)),
+      toHex32(BigInt(salt)),
+    ].join("");
+    return "0x" + CREATE_CURVE_TOKEN_SELECTOR + head + nameTail + symbolTail;
+  }
+  // CustomBondingCurveFactory's createCurveToken — same buyFees_/sellFees_
+  // FeeSet tuples as encodeCreateCustomTokenCalldata above (reuses
+  // encodeFeeSet directly), plus reflectionAsset_/marketingWallet_, but
+  // again no addLiquidity/liquidityWei — same "no pool yet" reasoning as
+  // the zero-tax encoder just above.
+  function encodeCreateCustomCurveTokenCalldata({name, symbol, totalSupply, buyFees, sellFees, reflectionAsset, marketingWallet, buyInWei, minTokensOut, salt}){
+    const HEAD_SLOTS = 16; // name offset, symbol offset, totalSupply, buyFees_ (4 words), sellFees_ (4 words), reflectionAsset_, marketingWallet_, creatorBuyEthAmount, minCreatorTokensOut, salt
+    const headBytes = BigInt(HEAD_SLOTS*32);
+    const nameTail = encodeAbiString(name);
+    const symbolTail = encodeAbiString(symbol);
+    const nameOffset = headBytes;
+    const symbolOffset = headBytes + BigInt(nameTail.length/2);
+    const head = [
+      toHex32(nameOffset),
+      toHex32(symbolOffset),
+      toHex32(BigInt(totalSupply)),
+      encodeFeeSet(buyFees),
+      encodeFeeSet(sellFees),
+      encodeAddressParam(reflectionAsset || ZERO_ADDRESS),
+      encodeAddressParam(marketingWallet || ZERO_ADDRESS),
+      toHex32(BigInt(buyInWei)),
+      toHex32(BigInt(minTokensOut)),
+      toHex32(BigInt(salt)),
+    ].join("");
+    return "0x" + CREATE_CUSTOM_CURVE_TOKEN_SELECTOR + head + nameTail + symbolTail;
+  }
+  // Decodes curveState(address)'s 11-field static return tuple — identical
+  // shape on both factories (see CURVE_STATE_SELECTOR's own comment).
+  // Every field is static (address/uint256/bool), so this is a flat 11-word
+  // read, same splitWords+decode convention as decodeFeeSet above.
+  function decodeCurveState(hex){
+    const clean = hex.replace(/^0x/i,"");
+    const words = splitWords(clean);
+    return {
+      creator: decodeAddress("0x"+words[0]),
+      totalSupply: decodeUint256("0x"+words[1]),
+      curveSupply: decodeUint256("0x"+words[2]),
+      tokensRemaining: decodeUint256("0x"+words[3]),
+      virtualEthReserve: decodeUint256("0x"+words[4]),
+      virtualTokenReserve: decodeUint256("0x"+words[5]),
+      realEthReserve: decodeUint256("0x"+words[6]),
+      poolSeedTargetWei: decodeUint256("0x"+words[7]),
+      curveFeeBps: decodeUint256("0x"+words[8]),
+      graduated: decodeUint256("0x"+words[9]) === 1n,
+      createdAt: decodeUint256("0x"+words[10]),
+    };
+  }
+  // quoteBuy(token,ethIn)/quoteSell(token,tokenAmountIn)/buy(token,minTokensOut)
+  // are all a plain (address,uint256) pair — reuses the generic
+  // encodeAddressUint256Calldata helper defined above rather than a new
+  // one-off encoder. sell(token,tokenAmountIn,minEthOut) has a 3rd argument,
+  // so it gets its own encoder below.
+  function encodeCurveSellCalldata(tokenAddress, tokenAmountIn, minEthOut){
+    return "0x"+CURVE_SELL_SELECTOR+encodeAddressParam(tokenAddress)+toHex32(BigInt(tokenAmountIn))+toHex32(BigInt(minEthOut));
+  }
+
   // ---- Gasless relay ABI encoding. hashLaunchVoucher/hashCustomLaunchVoucher
   // each take exactly one tuple argument, which — since it contains dynamic
   // fields (the name/symbol strings) — makes the WHOLE argument dynamic: the
@@ -2168,6 +2372,57 @@
     ].join("");
     return "0x" + HASH_CUSTOM_LAUNCH_VOUCHER_SELECTOR + toHex32(32n) + tupleHead + nameTail + symbolTail;
   }
+  // Same head+tail scheme as encodeHashLaunchVoucherCalldata above, sized to
+  // CurveLaunchVoucher's smaller 9-field shape (no addLiquidityAtLaunch/
+  // liquidityEthAmount at all — see that struct's own comment in
+  // contracts/BondingCurveFactory.sol).
+  function encodeHashCurveLaunchVoucherCalldata(v){
+    const TUPLE_HEAD_SLOTS = 9; // creator, name(offset), symbol(offset), totalSupply, creatorBuyEthAmount, minCreatorTokensOut, fee, salt, deadline
+    const tupleHeadBytes = BigInt(TUPLE_HEAD_SLOTS*32);
+    const nameTail = encodeAbiString(v.name);
+    const symbolTail = encodeAbiString(v.symbol);
+    const nameOffset = tupleHeadBytes;
+    const symbolOffset = tupleHeadBytes + BigInt(nameTail.length/2);
+    const tupleHead = [
+      encodeAddressParam(v.creator),
+      toHex32(nameOffset),
+      toHex32(symbolOffset),
+      toHex32(BigInt(v.totalSupply)),
+      toHex32(BigInt(v.creatorBuyEthAmount)),
+      toHex32(BigInt(v.minCreatorTokensOut)),
+      toHex32(BigInt(v.fee)),
+      toHex32(BigInt(v.salt)),
+      toHex32(BigInt(v.deadline)),
+    ].join("");
+    return "0x" + HASH_CURVE_LAUNCH_VOUCHER_SELECTOR + toHex32(32n) + tupleHead + nameTail + symbolTail;
+  }
+  // Same scheme as above, for CustomCurveLaunchVoucher's 13 fields — adds
+  // buyFees/sellFees/reflectionAsset/marketingWallet over CurveLaunchVoucher,
+  // the identical extension CustomLaunchVoucher makes over LaunchVoucher.
+  function encodeHashCustomCurveLaunchVoucherCalldata(v){
+    const TUPLE_HEAD_SLOTS = 19; // creator, name(offset), symbol(offset), totalSupply, buyFees(4), sellFees(4), reflectionAsset, marketingWallet, creatorBuyEthAmount, minCreatorTokensOut, fee, salt, deadline
+    const tupleHeadBytes = BigInt(TUPLE_HEAD_SLOTS*32);
+    const nameTail = encodeAbiString(v.name);
+    const symbolTail = encodeAbiString(v.symbol);
+    const nameOffset = tupleHeadBytes;
+    const symbolOffset = tupleHeadBytes + BigInt(nameTail.length/2);
+    const tupleHead = [
+      encodeAddressParam(v.creator),
+      toHex32(nameOffset),
+      toHex32(symbolOffset),
+      toHex32(BigInt(v.totalSupply)),
+      encodeFeeSet(v.buyFees),
+      encodeFeeSet(v.sellFees),
+      encodeAddressParam(v.reflectionAsset || ZERO_ADDRESS),
+      encodeAddressParam(v.marketingWallet || ZERO_ADDRESS),
+      toHex32(BigInt(v.creatorBuyEthAmount)),
+      toHex32(BigInt(v.minCreatorTokensOut)),
+      toHex32(BigInt(v.fee)),
+      toHex32(BigInt(v.salt)),
+      toHex32(BigInt(v.deadline)),
+    ].join("");
+    return "0x" + HASH_CUSTOM_CURVE_LAUNCH_VOUCHER_SELECTOR + toHex32(32n) + tupleHead + nameTail + symbolTail;
+  }
   function encodeDepositForRelayedLaunchCalldata(voucherHash, deadline){
     return "0x" + DEPOSIT_FOR_RELAYED_LAUNCH_SELECTOR + voucherHash.replace(/^0x/i,"") + toHex32(BigInt(deadline));
   }
@@ -2209,6 +2464,42 @@
       { name: "totalSupply", type: "uint256" },
       { name: "addLiquidity", type: "bool" },
       { name: "liquidityEthAmount", type: "uint256" },
+      { name: "buyFees", type: "FeeSet" },
+      { name: "sellFees", type: "FeeSet" },
+      { name: "reflectionAsset", type: "address" },
+      { name: "marketingWallet", type: "address" },
+      { name: "creatorBuyEthAmount", type: "uint256" },
+      { name: "minCreatorTokensOut", type: "uint256" },
+      { name: "fee", type: "uint256" },
+      { name: "salt", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+  };
+  const CURVE_LAUNCH_VOUCHER_EIP712_TYPES = {
+    CurveLaunchVoucher: [
+      { name: "creator", type: "address" },
+      { name: "name", type: "string" },
+      { name: "symbol", type: "string" },
+      { name: "totalSupply", type: "uint256" },
+      { name: "creatorBuyEthAmount", type: "uint256" },
+      { name: "minCreatorTokensOut", type: "uint256" },
+      { name: "fee", type: "uint256" },
+      { name: "salt", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+  };
+  const CUSTOM_CURVE_LAUNCH_VOUCHER_EIP712_TYPES = {
+    FeeSet: [
+      { name: "reflectionBps", type: "uint16" },
+      { name: "marketingBps", type: "uint16" },
+      { name: "liquidityBps", type: "uint16" },
+      { name: "burnBps", type: "uint16" },
+    ],
+    CustomCurveLaunchVoucher: [
+      { name: "creator", type: "address" },
+      { name: "name", type: "string" },
+      { name: "symbol", type: "string" },
+      { name: "totalSupply", type: "uint256" },
       { name: "buyFees", type: "FeeSet" },
       { name: "sellFees", type: "FeeSet" },
       { name: "reflectionAsset", type: "address" },
@@ -2674,6 +2965,39 @@
   let liveCustomLaunchFeeEth = null;
   let liveCustomLpLockDays = null;
   let liveCustomMaxCreatorBuyBps = null;
+  // Quick Launch (bonding curve) — a single $25 flat fee for both the
+  // zero-tax and custom-tax curve variants (there's no "deploy only" vs
+  // "launch" split here: a curve token is always live and tradeable the
+  // instant it's created, so there's only ever one fee tier). Live values
+  // read straight off curveLaunchFee()/maxCreatorBuyBps()/
+  // poolSeedTargetWei()/virtualEthReserveDefault()/virtualTokenReserveBps()/
+  // curveSupplyBps()/curveFeeBps() once a real factory is configured —
+  // same display-only-estimate convention as every other live* variable
+  // above; the actual transaction always re-reads fresh.
+  const CURVE_FEE_USD = 25;
+  let liveCurveLaunchFeeEth = null;
+  let liveCurveMaxCreatorBuyBps = null;
+  let liveCurvePoolSeedTargetWei = null;
+  let liveCurveVirtualEthReserveDefault = null;
+  let liveCurveVirtualTokenReserveBps = null;
+  let liveCurveSupplyBps = null;
+  let liveCurveFeeBps = null;
+  let liveCustomCurveLaunchFeeEth = null;
+  let liveCustomCurveMaxCreatorBuyBps = null;
+  let liveCustomCurvePoolSeedTargetWei = null;
+  let liveCustomCurveVirtualEthReserveDefault = null;
+  let liveCustomCurveVirtualTokenReserveBps = null;
+  let liveCustomCurveSupplyBps = null;
+  let liveCustomCurveFeeBps = null;
+  // Contract-level defaults (see BondingCurveFactory.sol's own state-var
+  // initializers) — used as the fallback whenever no factory is configured
+  // yet, or its own live read hasn't resolved, same convention as
+  // CREATOR_BUY_CAP_BPS_DEFAULT below.
+  const CURVE_POOL_SEED_TARGET_WEI_DEFAULT = 1_500_000_000_000_000_000n; // 1.5 ETH
+  const CURVE_FEE_BPS_DEFAULT = 100; // 1.00%
+  const CURVE_SUPPLY_BPS_DEFAULT = 8_000; // 80.00% of totalSupply_
+  const CURVE_VIRTUAL_ETH_RESERVE_DEFAULT = 3_000_000_000_000_000_000n; // 3 ETH
+  const CURVE_VIRTUAL_TOKEN_RESERVE_BPS_DEFAULT = 8_000; // 80.00% of totalSupply_
   async function refreshOnChainDefaults(){
     const factoryAddress = tokenFactoryAddress();
     liveDeployFeeEth = null;
@@ -2684,6 +3008,20 @@
     liveCustomLaunchFeeEth = null;
     liveCustomLpLockDays = null;
     liveCustomMaxCreatorBuyBps = null;
+    liveCurveLaunchFeeEth = null;
+    liveCurveMaxCreatorBuyBps = null;
+    liveCurvePoolSeedTargetWei = null;
+    liveCurveVirtualEthReserveDefault = null;
+    liveCurveVirtualTokenReserveBps = null;
+    liveCurveSupplyBps = null;
+    liveCurveFeeBps = null;
+    liveCustomCurveLaunchFeeEth = null;
+    liveCustomCurveMaxCreatorBuyBps = null;
+    liveCustomCurvePoolSeedTargetWei = null;
+    liveCustomCurveVirtualEthReserveDefault = null;
+    liveCustomCurveVirtualTokenReserveBps = null;
+    liveCustomCurveSupplyBps = null;
+    liveCustomCurveFeeBps = null;
     const reads = [];
     if(factoryAddress && window.ethereum){
       reads.push((async()=>{
@@ -2718,6 +3056,52 @@
         }catch(e){ /* display estimate only — fall back silently to defaults */ }
       })());
     }
+    const curveFactoryAddress = bondingCurveFactoryAddress();
+    if(curveFactoryAddress && window.ethereum){
+      reads.push((async()=>{
+        try{
+          const [feeHex, maxBuyBpsHex, seedHex, vEthHex, vTokBpsHex, supplyBpsHex, feeBpsHex] = await Promise.all([
+            ethCall(curveFactoryAddress, "0x"+CURVE_LAUNCH_FEE_SELECTOR),
+            ethCall(curveFactoryAddress, "0x"+MAX_CREATOR_BUY_BPS_SELECTOR),
+            ethCall(curveFactoryAddress, "0x"+POOL_SEED_TARGET_WEI_SELECTOR),
+            ethCall(curveFactoryAddress, "0x"+VIRTUAL_ETH_RESERVE_DEFAULT_SELECTOR),
+            ethCall(curveFactoryAddress, "0x"+VIRTUAL_TOKEN_RESERVE_BPS_SELECTOR),
+            ethCall(curveFactoryAddress, "0x"+CURVE_SUPPLY_BPS_SELECTOR),
+            ethCall(curveFactoryAddress, "0x"+CURVE_FEE_BPS_SELECTOR),
+          ]);
+          liveCurveLaunchFeeEth = Number(weiToEtherString(decodeUint256(feeHex), 6));
+          liveCurveMaxCreatorBuyBps = Number(decodeUint256(maxBuyBpsHex));
+          liveCurvePoolSeedTargetWei = decodeUint256(seedHex);
+          liveCurveVirtualEthReserveDefault = decodeUint256(vEthHex);
+          liveCurveVirtualTokenReserveBps = Number(decodeUint256(vTokBpsHex));
+          liveCurveSupplyBps = Number(decodeUint256(supplyBpsHex));
+          liveCurveFeeBps = Number(decodeUint256(feeBpsHex));
+        }catch(e){ /* display estimate only — fall back silently to defaults */ }
+      })());
+    }
+    const customCurveFactoryAddress = customBondingCurveFactoryAddress();
+    if(customCurveFactoryAddress && window.ethereum){
+      reads.push((async()=>{
+        try{
+          const [feeHex, maxBuyBpsHex, seedHex, vEthHex, vTokBpsHex, supplyBpsHex, feeBpsHex] = await Promise.all([
+            ethCall(customCurveFactoryAddress, "0x"+CURVE_LAUNCH_FEE_SELECTOR),
+            ethCall(customCurveFactoryAddress, "0x"+MAX_CREATOR_BUY_BPS_SELECTOR),
+            ethCall(customCurveFactoryAddress, "0x"+POOL_SEED_TARGET_WEI_SELECTOR),
+            ethCall(customCurveFactoryAddress, "0x"+VIRTUAL_ETH_RESERVE_DEFAULT_SELECTOR),
+            ethCall(customCurveFactoryAddress, "0x"+VIRTUAL_TOKEN_RESERVE_BPS_SELECTOR),
+            ethCall(customCurveFactoryAddress, "0x"+CURVE_SUPPLY_BPS_SELECTOR),
+            ethCall(customCurveFactoryAddress, "0x"+CURVE_FEE_BPS_SELECTOR),
+          ]);
+          liveCustomCurveLaunchFeeEth = Number(weiToEtherString(decodeUint256(feeHex), 6));
+          liveCustomCurveMaxCreatorBuyBps = Number(decodeUint256(maxBuyBpsHex));
+          liveCustomCurvePoolSeedTargetWei = decodeUint256(seedHex);
+          liveCustomCurveVirtualEthReserveDefault = decodeUint256(vEthHex);
+          liveCustomCurveVirtualTokenReserveBps = Number(decodeUint256(vTokBpsHex));
+          liveCustomCurveSupplyBps = Number(decodeUint256(supplyBpsHex));
+          liveCustomCurveFeeBps = Number(decodeUint256(feeBpsHex));
+        }catch(e){ /* display estimate only — fall back silently to defaults */ }
+      })());
+    }
     await Promise.all(reads);
     if(views.create.classList.contains("active")) renderWizard();
   }
@@ -2725,6 +3109,7 @@
     if(mode==="just") return DEPLOY_FEE_USD;
     if(mode==="customDeploy") return CUSTOM_DEPLOY_FEE_USD;
     if(mode==="custom") return CUSTOM_FEE_USD;
+    if(mode==="curve" || mode==="customCurve") return CURVE_FEE_USD;
     return LAUNCH_FEE_USD;
   }
   function feeEthForMode(mode){
@@ -2732,6 +3117,8 @@
     if(mode==="liquidity" && liveLaunchFeeEth!=null) return liveLaunchFeeEth;
     if(mode==="customDeploy" && liveCustomDeployFeeEth!=null) return liveCustomDeployFeeEth;
     if(mode==="custom" && liveCustomLaunchFeeEth!=null) return liveCustomLaunchFeeEth;
+    if(mode==="curve" && liveCurveLaunchFeeEth!=null) return liveCurveLaunchFeeEth;
+    if(mode==="customCurve" && liveCustomCurveLaunchFeeEth!=null) return liveCustomCurveLaunchFeeEth;
     return feeUsdForMode(mode) / (ethUsdPrice || FALLBACK_ETH_USD);
   }
   function depFeeEth(){ return feeEthForMode(draft.mode); }
@@ -2739,6 +3126,16 @@
     if(draft.mode==="custom") return liveCustomLpLockDays!=null ? liveCustomLpLockDays : LP_LOCK_DAYS;
     return liveLpLockDays!=null ? liveLpLockDays : LP_LOCK_DAYS;
   }
+  // Quick Launch's graduation target — the real ETH threshold
+  // (poolSeedTargetWei) a curve must accumulate before it auto-graduates to
+  // a live DEX pool. Read live once a factory is configured; falls back to
+  // the contract's own 1.5 ETH default otherwise, same convention as
+  // creatorBuyCapBps below.
+  function curvePoolSeedTargetWei(mode){
+    if(mode==="customCurve") return liveCustomCurvePoolSeedTargetWei!=null ? liveCustomCurvePoolSeedTargetWei : CURVE_POOL_SEED_TARGET_WEI_DEFAULT;
+    return liveCurvePoolSeedTargetWei!=null ? liveCurvePoolSeedTargetWei : CURVE_POOL_SEED_TARGET_WEI_DEFAULT;
+  }
+  function curvePoolSeedEthDisplay(mode){ return weiToEtherString(curvePoolSeedTargetWei(mode), 4).replace(/\.?0+$/,""); }
 
   // ---- LP-lock countdown (My Tokens / detail view) ----
   // unlockAt is a real epoch-ms timestamp captured at launch (from the
@@ -2788,6 +3185,8 @@
   const CREATOR_BUY_CAP_BPS_DEFAULT = 500;
   function creatorBuyCapBps(){
     if(draft.mode==="custom") return liveCustomMaxCreatorBuyBps!=null ? liveCustomMaxCreatorBuyBps : CREATOR_BUY_CAP_BPS_DEFAULT;
+    if(draft.mode==="curve") return liveCurveMaxCreatorBuyBps!=null ? liveCurveMaxCreatorBuyBps : CREATOR_BUY_CAP_BPS_DEFAULT;
+    if(draft.mode==="customCurve") return liveCustomCurveMaxCreatorBuyBps!=null ? liveCustomCurveMaxCreatorBuyBps : CREATOR_BUY_CAP_BPS_DEFAULT;
     return liveMaxCreatorBuyBps!=null ? liveMaxCreatorBuyBps : CREATOR_BUY_CAP_BPS_DEFAULT;
   }
   function creatorBuyCapPct(){ return (creatorBuyCapBps()/100).toFixed(2).replace(/\.?0+$/,""); }
@@ -2809,6 +3208,46 @@
   // true boundary.
   function creatorBuyInSliderMax(liquidityEth){
     return Math.max(0.00001, maxSafeCreatorBuyEth(liquidityEth) * 0.999);
+  }
+  // Quick Launch's own version of the same anti-rug cap above — but a curve
+  // token has no liquidityEth to size against (createCurveToken has no such
+  // parameter at all), so this solves the actual constant-product formula
+  // _quoteBuy uses instead: tokensOut = netEthIn*effToken0/(effEth0+netEthIn),
+  // netEthIn = ethIn*(1-curveFeeBps/10000), effEth0 = virtualEthReserveDefault,
+  // effToken0 = totalSupply_*(virtualTokenReserveBps+curveSupplyBps)/10000 —
+  // for the ethIn that makes tokensOut exactly maxCreatorBuyBps of
+  // totalSupply_. totalSupply_ cancels out of that solve (same reason it
+  // cancels out of maxSafeCreatorBuyEth above), so — pleasantly — this
+  // doesn't need to know draft.supply at all, just the bps parameters and
+  // virtualEthReserveDefault, all read live once a factory is configured
+  // and falling back to the contract's own defaults otherwise.
+  function curveMaxSafeCreatorBuyEth(mode){
+    const isCustom = mode==="customCurve";
+    const capBps = isCustom
+      ? (liveCustomCurveMaxCreatorBuyBps!=null ? liveCustomCurveMaxCreatorBuyBps : CREATOR_BUY_CAP_BPS_DEFAULT)
+      : (liveCurveMaxCreatorBuyBps!=null ? liveCurveMaxCreatorBuyBps : CREATOR_BUY_CAP_BPS_DEFAULT);
+    const feeBps = isCustom
+      ? (liveCustomCurveFeeBps!=null ? liveCustomCurveFeeBps : CURVE_FEE_BPS_DEFAULT)
+      : (liveCurveFeeBps!=null ? liveCurveFeeBps : CURVE_FEE_BPS_DEFAULT);
+    const supplyBps = isCustom
+      ? (liveCustomCurveSupplyBps!=null ? liveCustomCurveSupplyBps : CURVE_SUPPLY_BPS_DEFAULT)
+      : (liveCurveSupplyBps!=null ? liveCurveSupplyBps : CURVE_SUPPLY_BPS_DEFAULT);
+    const virtualTokenBps = isCustom
+      ? (liveCustomCurveVirtualTokenReserveBps!=null ? liveCustomCurveVirtualTokenReserveBps : CURVE_VIRTUAL_TOKEN_RESERVE_BPS_DEFAULT)
+      : (liveCurveVirtualTokenReserveBps!=null ? liveCurveVirtualTokenReserveBps : CURVE_VIRTUAL_TOKEN_RESERVE_BPS_DEFAULT);
+    const virtualEthWei = isCustom
+      ? (liveCustomCurveVirtualEthReserveDefault!=null ? liveCustomCurveVirtualEthReserveDefault : CURVE_VIRTUAL_ETH_RESERVE_DEFAULT)
+      : (liveCurveVirtualEthReserveDefault!=null ? liveCurveVirtualEthReserveDefault : CURVE_VIRTUAL_ETH_RESERVE_DEFAULT);
+    const virtualEthEth = Number(weiToEtherString(virtualEthWei, 8));
+    const capFraction = capBps/10000;
+    const reserveFraction = (virtualTokenBps+supplyBps)/10000;
+    const feeFraction = feeBps/10000;
+    if(capFraction<=0 || capFraction>=reserveFraction || feeFraction>=1) return 0;
+    const netEthIn = capFraction*virtualEthEth/(reserveFraction-capFraction);
+    return netEthIn/(1-feeFraction);
+  }
+  function curveCreatorBuyInSliderMax(mode){
+    return Math.max(0.00001, curveMaxSafeCreatorBuyEth(mode) * 0.999);
   }
   // Consistent ETH-amount formatting: enough decimals that a $50 fee at a
   // realistic ETH price (≈0.016 ETH) doesn't get rounded away to "0.02"
@@ -3807,6 +4246,584 @@
     }
   }
 
+  /* ---------------- on-chain launch (calls the real BondingCurveFactory /
+     CustomBondingCurveFactory) ----------------
+     "Quick Launch" — pump.fun-style: no addLiquidity flag, no liquidityWei
+     at all (createCurveToken has no such parameter — see that function's
+     own doc comment). The curve is live and tradeable the instant this
+     transaction confirms; it later graduates to a real DEX pool entirely on
+     its own once realEthReserve crosses poolSeedTargetWei — see
+     wireCurveTradePanel in the detail view for that pre-graduation trading
+     phase. Mirrors performOnChainLaunch/performOnChainCustomLaunch above as
+     closely as the shape of createCurveToken allows; kept as its own
+     function so neither existing flow risks the other.
+  */
+  async function performOnChainCurveLaunch(factoryAddress, onStep){
+    if(!onStep) onStep = ()=>{};
+    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!wallet) throw new Error("Connect your wallet first.");
+
+    const expected = NETWORKS[appMode].chainIdHex;
+    if(expected){
+      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+        await ensureNetwork(appMode);
+        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+          throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
+        }
+      }
+    }
+
+    const [feeHex, implementationHex] = await Promise.all([
+      ethCall(factoryAddress, "0x"+CURVE_LAUNCH_FEE_SELECTOR),
+      ethCall(factoryAddress, "0x"+TOKEN_IMPLEMENTATION_SELECTOR),
+    ]);
+    const feeWei = decodeUint256(feeHex);
+    const implementationAddress = decodeAddress(implementationHex);
+
+    const buyInWei = parseEtherToWei(draft.buyInEth);
+    const totalWei = feeWei + buyInWei;
+
+    onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
+    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
+    const predictedAddress = decodeAddress(predictedHex);
+    if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
+      throw new Error("Vanity address prediction didn't match on-chain — aborting before spending anything. Please try again.");
+    }
+
+    // minCreatorTokensOut left at 0, same MVP tradeoff as every other launch
+    // flow in this file — no slippage-tolerance field in this wizard yet.
+    const data = encodeCreateCurveTokenCalldata({
+      name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
+      buyInWei, minTokensOut: 0n, salt,
+    });
+
+    onStep("deploy", "active", "Confirm the transaction in your wallet…");
+    toast("Confirm the transaction in your wallet…");
+    const txHash = await window.ethereum.request({
+      method:"eth_sendTransaction",
+      params:[{ from: wallet, to: factoryAddress, value: "0x"+totalWei.toString(16), data }],
+    });
+
+    onStep("deploy", "active", "Transaction sent — waiting for confirmation…");
+    toast("Transaction sent — waiting for confirmation…");
+    const receipt = await waitForReceipt(txHash);
+    if(receipt.status !== "0x1"){
+      onStep("deploy", "error", "The transaction reverted on-chain — nothing was launched.");
+      throw new Error("The transaction reverted on-chain — nothing was launched.");
+    }
+
+    const createdLog = (receipt.logs||[]).find(l =>
+      l.address && l.address.toLowerCase()===factoryAddress.toLowerCase() &&
+      l.topics && l.topics[0] && l.topics[0].toLowerCase()===CURVE_TOKEN_CREATED_TOPIC0.toLowerCase()
+    );
+    if(!createdLog){
+      onStep("deploy", "error", "Transaction confirmed, but no CurveTokenCreated event was found — check the explorer.");
+      throw new Error("Transaction confirmed, but no CurveTokenCreated event was found — check the explorer.");
+    }
+    const tokenAddress = decodeAddress(createdLog.topics[1]);
+    onStep("deploy", "done", `Contract deployed at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · tx <span class="num">${fmtAddrSafe(txHash)}</span>`);
+
+    const { poolSeedTargetWei, realEthReserve } = await finishCurveFactoryVerification({
+      factoryAddress, tokenAddress, receipt, buyInWei, onStep,
+    });
+
+    return {
+      txHash, tokenAddress, buyInEth: Number(draft.buyInEth), factoryAddress,
+      poolSeedTargetWei, realEthReserve,
+    };
+  }
+
+  // CustomBondingCurveFactory's createCurveToken — same buyFees_/sellFees_/
+  // reflectionAsset_/marketingWallet_ shape as performOnChainCustomLaunch
+  // above, laid over the same no-liquidity Quick Launch mechanics as
+  // performOnChainCurveLaunch just above.
+  async function performOnChainCustomCurveLaunch(factoryAddress, onStep){
+    if(!onStep) onStep = ()=>{};
+    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!wallet) throw new Error("Connect your wallet first.");
+
+    const expected = NETWORKS[appMode].chainIdHex;
+    if(expected){
+      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+        await ensureNetwork(appMode);
+        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+          throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
+        }
+      }
+    }
+
+    const [feeHex, implementationHex] = await Promise.all([
+      ethCall(factoryAddress, "0x"+CURVE_LAUNCH_FEE_SELECTOR),
+      ethCall(factoryAddress, "0x"+TOKEN_IMPLEMENTATION_SELECTOR),
+    ]);
+    const feeWei = decodeUint256(feeHex);
+    const implementationAddress = decodeAddress(implementationHex);
+
+    const buyInWei = parseEtherToWei(draft.buyInEth);
+    const totalWei = feeWei + buyInWei;
+    const reflectionAsset = draft.customFees.reflectionAsset || ZERO_ADDRESS;
+    const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
+
+    onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
+    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
+    const predictedAddress = decodeAddress(predictedHex);
+    if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
+      throw new Error("Vanity address prediction didn't match on-chain — aborting before spending anything. Please try again.");
+    }
+
+    const data = encodeCreateCustomCurveTokenCalldata({
+      name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
+      buyFees: draft.customFees.buy, sellFees: draft.customFees.sell,
+      reflectionAsset, marketingWallet, buyInWei, minTokensOut: 0n, salt,
+    });
+
+    onStep("deploy", "active", "Confirm the transaction in your wallet…");
+    toast("Confirm the transaction in your wallet…");
+    const txHash = await window.ethereum.request({
+      method:"eth_sendTransaction",
+      params:[{ from: wallet, to: factoryAddress, value: "0x"+totalWei.toString(16), data }],
+    });
+
+    onStep("deploy", "active", "Transaction sent — waiting for confirmation…");
+    toast("Transaction sent — waiting for confirmation…");
+    const receipt = await waitForReceipt(txHash);
+    if(receipt.status !== "0x1"){
+      onStep("deploy", "error", "The transaction reverted on-chain — nothing was launched.");
+      throw new Error("The transaction reverted on-chain — nothing was launched.");
+    }
+
+    const createdLog = (receipt.logs||[]).find(l =>
+      l.address && l.address.toLowerCase()===factoryAddress.toLowerCase() &&
+      l.topics && l.topics[0] && l.topics[0].toLowerCase()===CUSTOM_CURVE_TOKEN_CREATED_TOPIC0.toLowerCase()
+    );
+    if(!createdLog){
+      onStep("deploy", "error", "Transaction confirmed, but no CurveTokenCreated event was found — check the explorer.");
+      throw new Error("Transaction confirmed, but no CurveTokenCreated event was found — check the explorer.");
+    }
+    const tokenAddress = decodeAddress(createdLog.topics[1]);
+    onStep("deploy", "done", `Contract deployed at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · tx <span class="num">${fmtAddrSafe(txHash)}</span>`);
+
+    const { poolSeedTargetWei, realEthReserve } = await finishCurveFactoryVerification({
+      factoryAddress, tokenAddress, receipt, buyInWei, onStep,
+    });
+
+    return {
+      txHash, tokenAddress, buyInEth: Number(draft.buyInEth), factoryAddress,
+      poolSeedTargetWei, realEthReserve,
+    };
+  }
+
+  // Shared by both curve launch flows above — reads the curve back via
+  // curveState() rather than pairOf()/LiquidityAdded (there's no pool at
+  // creation time to confirm), and parses CreatorBought exactly like
+  // finishTokenFactoryVerification does for the non-curve flows.
+  async function finishCurveFactoryVerification({factoryAddress, tokenAddress, receipt, buyInWei, onStep}){
+    onStep("verify", "active", "Reading the deployed contract back on-chain…");
+    let realEthReserve = 0n;
+    let poolSeedTargetWei = CURVE_POOL_SEED_TARGET_WEI_DEFAULT;
+    try{
+      const [nameHex, symbolHex, supplyHex, stateHex] = await Promise.all([
+        ethCall(tokenAddress, "0x"+NAME_SELECTOR),
+        ethCall(tokenAddress, "0x"+SYMBOL_SELECTOR),
+        ethCall(tokenAddress, "0x"+TOTAL_SUPPLY_SELECTOR),
+        ethCall(factoryAddress, "0x"+CURVE_STATE_SELECTOR+encodeAddressParam(tokenAddress)),
+      ]);
+      const onChainName = decodeAbiString(nameHex);
+      const onChainSymbol = decodeAbiString(symbolHex);
+      const onChainSupply = decodeUint256(supplyHex);
+      const expectedSupply = BigInt(draft.supply) * (10n**18n);
+      const state = decodeCurveState(stateHex);
+      realEthReserve = state.realEthReserve;
+      poolSeedTargetWei = state.poolSeedTargetWei;
+      const nameSymbolMatch = onChainName===draft.name && onChainSymbol===draft.ticker;
+      if(nameSymbolMatch && onChainSupply===expectedSupply){
+        onStep("verify", "done", "Confirmed on-chain: name, symbol, and total supply all match what you launched.");
+      }else if(nameSymbolMatch){
+        onStep("verify", "done", "Confirmed on-chain: name and symbol match what you launched.");
+      }else{
+        onStep("verify", "error", `On-chain contract reports "${escapeHtml(onChainName)}" ($${escapeHtml(onChainSymbol)}) — doesn't match what you launched. The token exists, but double-check it before trusting it.`);
+      }
+    }catch(err){
+      onStep("verify", "error", "Couldn't read the contract back to verify it — it may still be fine, but check it on the explorer.");
+    }
+
+    onStep("explorerVerify", "active", "Confirming block-explorer verification…");
+    {
+      const explorerStatus = await checkExplorerVerified(tokenAddress, NETWORKS[appMode]);
+      if(explorerStatus.verified){
+        onStep("explorerVerify", "done", `Verified on ${escapeHtml(NETWORKS[appMode].chainName)}'s explorer — source and ABI are public.`);
+      }else if(explorerStatus.checked){
+        onStep("explorerVerify", "error", "Not showing as verified yet on the explorer — this is a one-time, implementation-level step the platform handles separately, and can take a few minutes to index. The contract itself is unaffected either way.");
+      }else{
+        onStep("explorerVerify", "error", "Couldn't confirm verification status automatically — check the explorer directly.");
+      }
+    }
+
+    if(buyInWei>0n){
+      onStep("bought", "active", "Confirming your buy-in…");
+      const boughtLog = (receipt.logs||[]).find(l =>
+        l.address && l.address.toLowerCase()===factoryAddress.toLowerCase() &&
+        l.topics && l.topics[0] && l.topics[0].toLowerCase()===CREATOR_BOUGHT_TOPIC0.toLowerCase()
+      );
+      if(boughtLog){
+        const words = splitWords(boughtLog.data);
+        const tokensOut = decodeUint256("0x"+words[1]); // (ethIn, tokensOut) — tokensOut is the 2nd data word
+        onStep("bought", "done", `<span class="num">${fmtInt(Number(weiToEtherString(tokensOut,2)))}</span> $${escapeHtml(draft.ticker)} bought and sent to your wallet.`);
+      }else{
+        onStep("bought", "error", "Buy-in ETH was sent, but no CreatorBought event was found — check the explorer.");
+      }
+    }
+
+    return { poolSeedTargetWei, realEthReserve };
+  }
+
+  // Gasless relayed Quick Launch: the same three-step flow as
+  // performRelayedLaunch above (sign a free EIP-712 voucher, send one cheap
+  // ETH deposit into escrow, the configured relayer — see relayerApiUrl()/
+  // hoodlaunch-contracts/scripts/relayer.js — submits the real
+  // createCurveToken-equivalent transaction and pays its own gas), sized to
+  // CurveLaunchVoucher's smaller shape: no addLiquidityAtLaunch/
+  // liquidityEthAmount fields at all (createCurveToken has no liquidity leg
+  // to relay — see that struct's own comment in
+  // contracts/BondingCurveFactory.sol), so the deposit is simply
+  // fee + creatorBuyEthAmount. Everything from "verify" onward reuses
+  // finishCurveFactoryVerification(), same as the direct-wallet flow above —
+  // once the relayer reports a tokenAddress, the rest of this dialog can't
+  // tell a relayed launch from a direct one, because on-chain there isn't
+  // one.
+  async function performRelayedCurveLaunch(factoryAddress, relayerUrl, onStep){
+    if(!onStep) onStep = ()=>{};
+    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!wallet) throw new Error("Connect your wallet first.");
+
+    const expected = NETWORKS[appMode].chainIdHex;
+    if(expected){
+      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+        await ensureNetwork(appMode);
+        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+          throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
+        }
+      }
+    }
+
+    const [feeHex, implementationHex] = await Promise.all([
+      ethCall(factoryAddress, "0x"+CURVE_LAUNCH_FEE_SELECTOR),
+      ethCall(factoryAddress, "0x"+TOKEN_IMPLEMENTATION_SELECTOR),
+    ]);
+    const feeWei = decodeUint256(feeHex);
+    const implementationAddress = decodeAddress(implementationHex);
+    const buyInWei = parseEtherToWei(draft.buyInEth);
+    const depositWei = feeWei + buyInWei;
+
+    onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
+    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
+    const predictedAddress = decodeAddress(predictedHex);
+    if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
+      throw new Error("Vanity address prediction didn't match on-chain — aborting before you sign anything. Please try again.");
+    }
+
+    const voucher = {
+      creator: wallet, name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
+      creatorBuyEthAmount: buyInWei, minCreatorTokensOut: 0n, fee: feeWei, salt,
+      deadline: BigInt(Math.floor(Date.now()/1000) + RELAY_VOUCHER_TTL_SECONDS),
+    };
+    const voucherForSigning = {
+      creator: voucher.creator, name: voucher.name, symbol: voucher.symbol,
+      totalSupply: voucher.totalSupply.toString(), creatorBuyEthAmount: voucher.creatorBuyEthAmount.toString(),
+      minCreatorTokensOut: voucher.minCreatorTokensOut.toString(), fee: voucher.fee.toString(),
+      salt: voucher.salt.toString(), deadline: voucher.deadline.toString(),
+    };
+
+    onStep("deploy", "active", "Waiting for your signature — this is free, no gas, and no transaction yet…");
+    const domain = {
+      name: "HoodLaunchBondingCurveFactory", version: "1",
+      chainId: parseInt(NETWORKS[appMode].chainIdHex, 16), verifyingContract: factoryAddress,
+    };
+    const signature = await window.ethereum.request({
+      method: "eth_signTypedData_v4",
+      params: [wallet, JSON.stringify({
+        domain, primaryType: "CurveLaunchVoucher",
+        types: { EIP712Domain: EIP712_DOMAIN_TYPE, ...CURVE_LAUNCH_VOUCHER_EIP712_TYPES },
+        message: voucherForSigning,
+      })],
+    });
+
+    const voucherHash = await ethCall(factoryAddress, encodeHashCurveLaunchVoucherCalldata(voucher));
+
+    onStep("deploy", "active", "Confirm the deposit in your wallet — a small, ordinary transfer, not the deploy transaction itself…");
+    toast("Confirm the deposit in your wallet…");
+    const depositTxHash = await window.ethereum.request({
+      method:"eth_sendTransaction",
+      params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
+    });
+    onStep("deploy", "active", "Deposit sent — waiting for confirmation…");
+    const depositReceipt = await waitForReceipt(depositTxHash);
+    if(depositReceipt.status !== "0x1"){
+      onStep("deploy", "error", "The deposit transaction reverted — nothing was deployed, and no fee was collected.");
+      throw new Error("The deposit transaction reverted — nothing was deployed.");
+    }
+
+    onStep("deploy", "active", "Deposit confirmed — handing your signed voucher to the relayer…");
+    const submitRes = await fetch(`${relayerUrl}/vouchers/curve`, {
+      method:"POST", headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ voucher: voucherForSigning, signature }),
+    }).catch(()=>null);
+    if(!submitRes || !submitRes.ok){
+      const bodyText = submitRes ? await submitRes.text().catch(()=>"") : "the relayer didn't respond";
+      onStep("deploy", "error", `The relayer couldn't accept this launch (${escapeHtml(bodyText)}). Your deposit is untouched and reclaimable once it expires — see the admin panel or contact support.`);
+      throw new Error(`Relayer rejected voucher: ${bodyText}`);
+    }
+
+    onStep("deploy", "active", "Waiting for the relayer to submit the deploy transaction (it pays that transaction's own gas)…");
+    let relayedTxHash = null, tokenAddress = null;
+    const pollUntil = Date.now() + RELAY_POLL_TIMEOUT_MS;
+    while(Date.now() < pollUntil){
+      await new Promise(r=>setTimeout(r, RELAY_POLL_INTERVAL_MS));
+      let status;
+      try{
+        const statusRes = await fetch(`${relayerUrl}/status/${voucherHash}`);
+        status = await statusRes.json();
+      }catch(e){ continue; }
+      if(status.status === "relayed"){ relayedTxHash = status.txHash; tokenAddress = status.tokenAddress; break; }
+      if(status.status === "failed"){
+        onStep("deploy", "error", `The relayer couldn't complete this launch (${escapeHtml(status.error||"unknown error")}). Your deposit is untouched and reclaimable once it expires.`);
+        throw new Error(`Relay failed: ${status.error||"unknown error"}`);
+      }
+    }
+    if(!tokenAddress){
+      onStep("deploy", "error", "Timed out waiting for the relayer. Your deposit is safe on-chain and reclaimable once it expires — try again shortly or contact support.");
+      throw new Error("Timed out waiting for the relayer.");
+    }
+    onStep("deploy", "done", `Contract deployed (gasless) at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · relay tx <span class="num">${fmtAddrSafe(relayedTxHash)}</span>`);
+
+    const receipt = await waitForReceipt(relayedTxHash);
+    const { poolSeedTargetWei, realEthReserve } = await finishCurveFactoryVerification({
+      factoryAddress, tokenAddress, receipt, buyInWei, onStep,
+    });
+
+    return {
+      txHash: relayedTxHash, tokenAddress, buyInEth: Number(draft.buyInEth), factoryAddress,
+      poolSeedTargetWei, realEthReserve,
+    };
+  }
+
+  // Same gasless flow as performRelayedCurveLaunch just above, over
+  // CustomCurveLaunchVoucher's larger shape — adds buyFees/sellFees/
+  // reflectionAsset/marketingWallet, the identical extension
+  // CustomLaunchVoucher makes over LaunchVoucher for the non-curve gasless
+  // path.
+  async function performRelayedCustomCurveLaunch(factoryAddress, relayerUrl, onStep){
+    if(!onStep) onStep = ()=>{};
+    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!wallet) throw new Error("Connect your wallet first.");
+
+    const expected = NETWORKS[appMode].chainIdHex;
+    if(expected){
+      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+        await ensureNetwork(appMode);
+        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+          throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
+        }
+      }
+    }
+
+    const [feeHex, implementationHex] = await Promise.all([
+      ethCall(factoryAddress, "0x"+CURVE_LAUNCH_FEE_SELECTOR),
+      ethCall(factoryAddress, "0x"+TOKEN_IMPLEMENTATION_SELECTOR),
+    ]);
+    const feeWei = decodeUint256(feeHex);
+    const implementationAddress = decodeAddress(implementationHex);
+    const buyInWei = parseEtherToWei(draft.buyInEth);
+    const depositWei = feeWei + buyInWei;
+    const reflectionAsset = draft.customFees.reflectionAsset || ZERO_ADDRESS;
+    const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
+
+    onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
+    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
+    const predictedAddress = decodeAddress(predictedHex);
+    if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
+      throw new Error("Vanity address prediction didn't match on-chain — aborting before you sign anything. Please try again.");
+    }
+
+    const voucher = {
+      creator: wallet, name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
+      buyFees: {...draft.customFees.buy}, sellFees: {...draft.customFees.sell},
+      reflectionAsset, marketingWallet,
+      creatorBuyEthAmount: buyInWei, minCreatorTokensOut: 0n, fee: feeWei, salt,
+      deadline: BigInt(Math.floor(Date.now()/1000) + RELAY_VOUCHER_TTL_SECONDS),
+    };
+    const voucherForSigning = {
+      creator: voucher.creator, name: voucher.name, symbol: voucher.symbol,
+      totalSupply: voucher.totalSupply.toString(),
+      buyFees: {...voucher.buyFees}, sellFees: {...voucher.sellFees},
+      reflectionAsset: voucher.reflectionAsset, marketingWallet: voucher.marketingWallet,
+      creatorBuyEthAmount: voucher.creatorBuyEthAmount.toString(),
+      minCreatorTokensOut: voucher.minCreatorTokensOut.toString(), fee: voucher.fee.toString(),
+      salt: voucher.salt.toString(), deadline: voucher.deadline.toString(),
+    };
+
+    onStep("deploy", "active", "Waiting for your signature — this is free, no gas, and no transaction yet…");
+    const domain = {
+      name: "HoodLaunchCustomBondingCurveFactory", version: "1",
+      chainId: parseInt(NETWORKS[appMode].chainIdHex, 16), verifyingContract: factoryAddress,
+    };
+    const signature = await window.ethereum.request({
+      method: "eth_signTypedData_v4",
+      params: [wallet, JSON.stringify({
+        domain, primaryType: "CustomCurveLaunchVoucher",
+        types: { EIP712Domain: EIP712_DOMAIN_TYPE, ...CUSTOM_CURVE_LAUNCH_VOUCHER_EIP712_TYPES },
+        message: voucherForSigning,
+      })],
+    });
+
+    const voucherHash = await ethCall(factoryAddress, encodeHashCustomCurveLaunchVoucherCalldata(voucher));
+
+    onStep("deploy", "active", "Confirm the deposit in your wallet — a small, ordinary transfer, not the deploy transaction itself…");
+    toast("Confirm the deposit in your wallet…");
+    const depositTxHash = await window.ethereum.request({
+      method:"eth_sendTransaction",
+      params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
+    });
+    onStep("deploy", "active", "Deposit sent — waiting for confirmation…");
+    const depositReceipt = await waitForReceipt(depositTxHash);
+    if(depositReceipt.status !== "0x1"){
+      onStep("deploy", "error", "The deposit transaction reverted — nothing was deployed, and no fee was collected.");
+      throw new Error("The deposit transaction reverted — nothing was deployed.");
+    }
+
+    onStep("deploy", "active", "Deposit confirmed — handing your signed voucher to the relayer…");
+    const submitRes = await fetch(`${relayerUrl}/vouchers/custom-curve`, {
+      method:"POST", headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ voucher: voucherForSigning, signature }),
+    }).catch(()=>null);
+    if(!submitRes || !submitRes.ok){
+      const bodyText = submitRes ? await submitRes.text().catch(()=>"") : "the relayer didn't respond";
+      onStep("deploy", "error", `The relayer couldn't accept this launch (${escapeHtml(bodyText)}). Your deposit is untouched and reclaimable once it expires — see the admin panel or contact support.`);
+      throw new Error(`Relayer rejected voucher: ${bodyText}`);
+    }
+
+    onStep("deploy", "active", "Waiting for the relayer to submit the deploy transaction (it pays that transaction's own gas)…");
+    let relayedTxHash = null, tokenAddress = null;
+    const pollUntil = Date.now() + RELAY_POLL_TIMEOUT_MS;
+    while(Date.now() < pollUntil){
+      await new Promise(r=>setTimeout(r, RELAY_POLL_INTERVAL_MS));
+      let status;
+      try{
+        const statusRes = await fetch(`${relayerUrl}/status/${voucherHash}`);
+        status = await statusRes.json();
+      }catch(e){ continue; }
+      if(status.status === "relayed"){ relayedTxHash = status.txHash; tokenAddress = status.tokenAddress; break; }
+      if(status.status === "failed"){
+        onStep("deploy", "error", `The relayer couldn't complete this launch (${escapeHtml(status.error||"unknown error")}). Your deposit is untouched and reclaimable once it expires.`);
+        throw new Error(`Relay failed: ${status.error||"unknown error"}`);
+      }
+    }
+    if(!tokenAddress){
+      onStep("deploy", "error", "Timed out waiting for the relayer. Your deposit is safe on-chain and reclaimable once it expires — try again shortly or contact support.");
+      throw new Error("Timed out waiting for the relayer.");
+    }
+    onStep("deploy", "done", `Contract deployed (gasless) at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · relay tx <span class="num">${fmtAddrSafe(relayedTxHash)}</span>`);
+
+    const receipt = await waitForReceipt(relayedTxHash);
+    const { poolSeedTargetWei, realEthReserve } = await finishCurveFactoryVerification({
+      factoryAddress, tokenAddress, receipt, buyInWei, onStep,
+    });
+
+    return {
+      txHash: relayedTxHash, tokenAddress, buyInEth: Number(draft.buyInEth), factoryAddress,
+      poolSeedTargetWei, realEthReserve,
+    };
+  }
+
+  // Wrapper mirroring launchOnChainFlow/launchCustomOnChainFlow — builds the
+  // new token record with status "curve-trading" (see tokenBottomHTML/
+  // openDetail for how that status renders: a progress bar toward
+  // poolSeedTargetWei instead of a tax-progress bar, and a curve-native
+  // trade panel instead of the router-based one). Once this curve
+  // graduates, its status flips to the existing "graduated" status and it
+  // seamlessly starts using the existing real-pool trading path — see
+  // checkPendingLiquidity/refreshCurveTokenPanel for that transition.
+  async function launchCurveOnChainFlow(factoryAddress){
+    const isCustom = draft.mode==="customCurve";
+    const launchBtn = document.getElementById("wizLaunch");
+    const originalLabel = launchBtn ? launchBtn.textContent : "";
+    if(launchBtn){ launchBtn.disabled = true; launchBtn.textContent = "Confirm in wallet…"; }
+    const steps = [{ key:"deploy", label:"Deploying" }, { key:"verify", label:"Verifying" }, { key:"explorerVerify", label:"Confirming verification" }];
+    if(draft.buyInEth>0) steps.push({ key:"bought", label:"Buying tokens" });
+    steps.push({ key:"live", label:"Curve live" });
+    startLaunchProgress(steps);
+
+    try{
+      const relayerUrl = relayerApiUrl();
+      const result = relayerUrl
+        ? (isCustom
+            ? await performRelayedCustomCurveLaunch(factoryAddress, relayerUrl, setLaunchStep)
+            : await performRelayedCurveLaunch(factoryAddress, relayerUrl, setLaunchStep))
+        : (isCustom
+            ? await performOnChainCustomCurveLaunch(factoryAddress, setLaunchStep)
+            : await performOnChainCurveLaunch(factoryAddress, setLaunchStep));
+      const newToken = {
+        id: result.tokenAddress, name: draft.name, ticker: draft.ticker,
+        desc: draft.desc || "A freshly launched community token.",
+        // Two identical placeholder points, not one — same convention
+        // performOnChainLaunch's own liquidity-mode tokens already use (see
+        // that flow's own newToken literal). openDetail's noPriceChart is no
+        // longer unconditionally true for a real curve token (see that
+        // function's own comment on isCurveToken/noPriceChart) now that
+        // relayer.js's pollTokenPrices prices one directly off curveState()
+        // pre-graduation — a single-point hist would crash
+        // detailChartSVG/wireChartHover's layout math (division by zero on
+        // hist.length-1) in the moment before that first real sample lands.
+        price: 0, change24h: 0, hist: [0.0000001, 0.0000001],
+        holders: result.buyInEth>0 ? 2 : 1, mcap: 0, vol: 0,
+        catColor:"var(--signal-500)", mode: draft.mode, status:"curve-trading", createdCustom:true,
+        onChain:true, tokenAddress: result.tokenAddress, txHash: result.txHash, factoryAddress: result.factoryAddress,
+        creatorBuyInEth: result.buyInEth,
+        curveRealEthReserveWei: result.realEthReserve.toString(), curvePoolSeedTargetWeiVal: result.poolSeedTargetWei.toString(),
+        isCustomCurve: isCustom,
+        customTax: isCustom, buyFees: isCustom ? {...draft.customFees.buy} : undefined, sellFees: isCustom ? {...draft.customFees.sell} : undefined,
+        reflectionAsset: isCustom ? (draft.customFees.reflectionAsset || null) : undefined,
+        marketingWallet: isCustom ? (draft.customFees.marketingWallet || null) : undefined,
+        networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(),
+      };
+      tokens.unshift(newToken);
+      saveCustomTokens();
+      syncTokenMetadataToServer(newToken).catch(()=>{});
+      refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real curve price for what just launched
+      setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on the bonding curve on ${escapeHtml(NETWORKS[appMode].chainName)} — trades against the curve immediately, and goes live on a real DEX pool once it holds ${curvePoolSeedEthDisplay(draft.mode)} ETH.`);
+      toast(`⚡ $${newToken.ticker} Quick Launched on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
+      appendLaunchActions(newToken);
+      renderStats();
+      renderGrid();
+      seedFeed();
+      resetLaunchDraft();
+    }catch(err){
+      console.error(err);
+      const message = (err && err.code===4001) ? "Transaction was rejected in your wallet." : ("Launch failed: " + ((err && err.message) ? err.message : String(err)));
+      toast(message);
+      const activeStep = launchProgressSteps.find(s=>s.state==="active");
+      if(activeStep) setLaunchStep(activeStep.key, "error", escapeHtml(message));
+      else clearLaunchProgress();
+      const wrap = document.querySelector(".wizard-wrap");
+      if(wrap) wrap.hidden = false;
+    }finally{
+      if(launchBtn){ launchBtn.disabled = false; launchBtn.textContent = originalLabel; }
+    }
+  }
+
   /* ---------------- liquidity detection (Deploy Token -> Unlocked pool) ----------------
      TokenFactory itself has no way to know if a "Deploy Token" creator later
      adds liquidity somewhere else entirely (e.g. straight through Uniswap's
@@ -3961,8 +4978,15 @@
   const REMOTE_LAUNCHES_POLL_MS = 5 * 60 * 1000; // which launches exist changes far less often than their price — a slower cadence than LIVE_TOKEN_POLL_MS is plenty
 
   function isLiveTrackedToken(t){
-    return !!(t && t.onChain && t.networkMode===appMode && (t.status==="taxed"||t.status==="graduated")
-      && t.pairAddress && t.pairAddress.toLowerCase()!==ZERO_ADDRESS && t.tokenAddress);
+    if(!(t && t.onChain && t.networkMode===appMode && t.tokenAddress)) return false;
+    // Quick Launch, pre-graduation: no pairAddress at all yet (there's no
+    // pool until the curve graduates), but relayer.js's pollTokenPrices now
+    // samples it directly off curveState() — see that function's own curve
+    // branch — so GET /price-history/:tokenAddress already has real points
+    // to fetch for it, same as any other launched token.
+    if(t.status==="curve-trading" && (t.mode==="curve"||t.mode==="customCurve")) return true;
+    return !!((t.status==="taxed"||t.status==="graduated")
+      && t.pairAddress && t.pairAddress.toLowerCase()!==ZERO_ADDRESS);
   }
 
   // Mirrors LaunchedToken._computeMarketCapFromPair/CustomToken's identical
@@ -4065,6 +5089,40 @@
         if(typeof latest.taxProgressPct === "number" && isFinite(latest.taxProgressPct)) t.taxProgress = latest.taxProgressPct;
         if(latest.taxActive === false && t.status==="taxed") t.status = "graduated";
         else if(latest.taxActive === true && t.status==="graduated") t.status = "taxed"; // shouldn't happen (graduation is permanent on-chain) — corrects an earlier bad read rather than getting stuck wrong forever
+        // Quick Launch graduation: the curve-token equivalent of the
+        // taxActive flip just above. A curve token has no taxActive at all
+        // pre-graduation — instead, relayer.js's pollTokenPrices backfills
+        // pairAddress into the tracked-tokens record the same tick
+        // curveState().graduated flips true (see that function's own curve
+        // branch), and GET /price-history piggybacks it onto this same
+        // response (see that route's own comment on why). This is what lets
+        // a visitor with NO connected wallet see a curve token graduate at
+        // all — checkPendingLiquidity/refreshCurveTokenPanel's own
+        // detection only ever runs against a connected wallet's own
+        // eth_call. Once pairAddress is set here, this token stops matching
+        // isLiveTrackedToken's curve-trading branch and starts matching the
+        // ordinary taxed/graduated+pairAddress branch on every later call,
+        // so this only ever needs to fire once.
+        //
+        // FIX: the curve graduating (pool created) only starts this token's
+        // OWN post-graduation tax climbing toward its separate $50,000
+        // market-cap target — it does not mean the tax is already off. Land
+        // on "taxed" (the same status refreshCurveTokenPanel's own wallet-
+        // based detection now lands on), not "graduated" — the
+        // latest.taxActive===false check above is what genuinely advances a
+        // token to "graduated" once its tax has actually disabled, and it
+        // picks this token up automatically now that it matches
+        // isLiveTrackedToken's taxed+pairAddress branch on the next call.
+        if(t.status==="curve-trading" && payload.pairAddress && payload.pairAddress.toLowerCase()!==ZERO_ADDRESS && !t.pairAddress){
+          t.pairAddress = payload.pairAddress;
+          t.status = "taxed";
+          if(t.taxProgress==null) t.taxProgress = 0;
+          // Same LP_LOCK_DAYS approximation refreshCurveTokenPanel's own
+          // wallet-based detection uses when it's first to notice — whoever
+          // notices first sets it; a connected wallet reading the real
+          // on-chain unlock time later never overwrites an already-set value.
+          if(!t.unlockAt) t.unlockAt = Date.now() + LP_LOCK_DAYS*86400000;
+        }
         // Holders: relayer.js now asks the block explorer for a real count
         // (see fetchHolderCount there) instead of this staying the static
         // 1/2 set at launch. Same "leave it as-is until a real number
@@ -4152,6 +5210,19 @@
     const lpLockDurationDays = (isLiquidity && unlockAtMs && createdAtMs && unlockAtMs>createdAtMs)
       ? Math.max(1, Math.round((unlockAtMs - createdAtMs) / 86400000))
       : LP_LOCK_DAYS;
+    // recordLaunch's own `mode` field (see postLaunchPipeline in
+    // relayer.js — currently only ever `relayed-token`/`relayed-custom`/
+    // `relayed-curve`/`relayed-custom-curve`, since GET /launches' ledger
+    // only ever gets entries from a RELAYED launch; a direct wallet-paid
+    // one is never recorded to it at all) was never read here before this
+    // fix — every entry was guessed as "liquidity"/"just" purely from
+    // whether pairAddress was set. That's right for the two TokenFactory/
+    // CustomTokenFactory kinds, but wrong for a Quick Launch entry: a
+    // curve token has no pairAddress pre-graduation either, and the old
+    // guess would render it as a plain "just"-mode, tax-active pool token —
+    // wiring a router-based trade panel against a pair that doesn't exist.
+    const isCurveEntry = typeof entry.mode === "string" && entry.mode.indexOf("curve") !== -1;
+    const isCustomCurveEntry = isCurveEntry && entry.mode.indexOf("custom") !== -1;
     return {
       id: entry.tokenAddress,
       name: entry.name || entry.symbol || "Unnamed token",
@@ -4161,8 +5232,13 @@
       taxProgress: 0,
       holders: 1, mcap: 0, vol: 0, // illustrative only, same as every other launch — see the footer disclaimer
       catColor: "var(--signal-500)",
-      mode: isLiquidity ? "liquidity" : "just",
-      status: statusFromTokenStatus(entry, isLiquidity),
+      mode: isCurveEntry ? (isCustomCurveEntry ? "customCurve" : "curve") : (isLiquidity ? "liquidity" : "just"),
+      isCustomCurve: isCurveEntry ? isCustomCurveEntry : undefined,
+      // A graduated curve token behaves exactly like any other graduated
+      // pool token from here on (same statusFromTokenStatus progression,
+      // same trade panel) — only the pre-graduation, no-pool-yet window
+      // needs its own "curve-trading" status.
+      status: (isCurveEntry && !isLiquidity) ? "curve-trading" : statusFromTokenStatus(entry, isLiquidity),
       lpDaysLeft: isLiquidity ? lpLockDurationDays : 0,
       liquidityEth: weiStringToEthNumber(entry.liquidityEthAmount),
       creatorBuyInEth: weiStringToEthNumber(entry.creatorBuyEthAmount),
@@ -4171,6 +5247,17 @@
       onChain: true,
       tokenAddress: entry.tokenAddress,
       pairAddress: isLiquidity ? entry.pairAddress : null,
+      // The ledger has no per-token factoryAddress column at all (every
+      // other factory call this page makes for a remote token goes through
+      // a DEX router instead, which needs no factory address) — but Quick
+      // Launch trading (wireCurveTradePanel) calls buy()/sell() straight on
+      // the factory, so a curve entry needs one. There's only ever one
+      // bonding-curve factory (zero-tax) and one custom-tax variant per
+      // network, both admin-configured platform-wide, not per-launch — read
+      // straight from platformConfig instead of the ledger.
+      factoryAddress: isCurveEntry
+        ? (isCustomCurveEntry ? customBondingCurveFactoryAddress(mode) : bondingCurveFactoryAddress(mode))
+        : null,
       txHash: entry.deploymentTxHash || null,
       lockId: entry.liquidityLockId!=null ? String(entry.liquidityLockId) : null,
       unlockAt: isLiquidity ? unlockAtMs : null,
@@ -4213,7 +5300,7 @@
     // progression, so an already-known token's status can be advanced below
     // without ever regressing it (e.g. a stale/slow relayer response should
     // never un-graduate a token this browser already knows graduated).
-    const STATUS_RANK = { "creator-held": 0, "pool-detected": 0, "taxed": 1, "live-pool": 1, "graduated": 2 };
+    const STATUS_RANK = { "creator-held": 0, "pool-detected": 0, "curve-trading": 0, "taxed": 1, "live-pool": 1, "graduated": 2 };
     const byKey = new Map(tokens.filter(t=>t.tokenAddress).map(t=>[remoteLaunchKey(t.tokenAddress, t.networkMode), t]));
     let added = false, updated = false;
     for(const entry of launches){
@@ -4252,7 +5339,15 @@
         updated = true;
       }
       if(typeof entry.tokenStatus !== "number") continue;
-      const nextStatus = statusFromTokenStatus(entry, !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS));
+      const isLiquidityNow = !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS);
+      // A curve-mode token (existing.mode — set once, correctly, by
+      // remoteLaunchToTokenObject above and never changed by this update
+      // path) stays "curve-trading" until it actually has a pool, same as
+      // the initial mapping — statusFromTokenStatus's plain LAUNCHED->"taxed"
+      // guess only applies to the two pool-based kinds, and would otherwise
+      // wrongly promote a still-pre-pool curve token to "taxed".
+      const isCurveNow = existing.mode==="curve" || existing.mode==="customCurve";
+      const nextStatus = (isCurveNow && !isLiquidityNow) ? "curve-trading" : statusFromTokenStatus(entry, isLiquidityNow);
       if((STATUS_RANK[nextStatus]||0) > (STATUS_RANK[existing.status]||0)){
         existing.status = nextStatus;
         if(entry.pairAddress) existing.pairAddress = entry.pairAddress;
@@ -4333,34 +5428,70 @@
   async function checkPendingLiquidity(){
     if(!window.ethereum) return;
     const pending = tokens.filter(t=> t.onChain && t.mode==="just" && (t.status==="creator-held"||t.status==="pool-detected") && t.tokenAddress && t.networkMode===appMode);
-    if(!pending.length) return;
-    const info = await getDexInfo(appMode);
-    if(!info) return;
+    // Quick Launch tokens still trading on their curve — polled here too so
+    // a graduation gets picked up (and the card's progress bars/status flip
+    // to "taxed", the intermediate stage — see refreshCurveTokenPanel's own
+    // comment on why it's "taxed" and not "graduated") even if nobody
+    // happens to have the detail view open trading against it when it
+    // crosses poolSeedTargetWei. Also keeps polling a token whose curve
+    // already graduated but whose pair-lookup didn't resolve yet (missing/
+    // zero pairAddress, regardless of whether it's since reached "taxed" or
+    // gone all the way to real "graduated") — refreshCurveTokenPanel only
+    // retries that lookup while pairAddress is still missing, so without
+    // this second clause a lookup that failed on the very poll tick that
+    // caught the graduation would never get retried at all, permanently
+    // stuck showing the simulated trade widget instead of the real pool it
+    // actually graduated onto.
+    const pendingCurves = tokens.filter(t=> t.onChain && t.tokenAddress && t.factoryAddress && t.networkMode===appMode
+      && (t.status==="curve-trading" || ((t.status==="taxed"||t.status==="graduated") && (t.mode==="curve"||t.mode==="customCurve") && (!t.pairAddress || t.pairAddress.toLowerCase()===ZERO_ADDRESS))));
+    if(!pending.length && !pendingCurves.length) return;
     let changed = false;
-    for(const t of pending){
-      try{
-        if(t.status==="creator-held"){
-          const pairData = "0x"+FACTORY_GET_PAIR_SELECTOR+encodeAddressParam(t.tokenAddress)+encodeAddressParam(info.weth);
-          const pairAddress = decodeAddress(await ethCall(info.dexFactory, pairData));
-          if(pairAddress.toLowerCase() !== ZERO_ADDRESS){
-            t.pairAddress = pairAddress;
-            changed = true;
-            if(t.customTax){
-              t.status = "pool-detected";
-              toast(`👀 $${t.ticker} now has a pool — activate your configured tax from its detail page whenever you're ready.`);
-            } else {
-              t.status = "live-pool";
-              toast(`👀 $${t.ticker} now has a pool — liquidity was added independently.`);
+    if(pending.length){
+      const info = await getDexInfo(appMode);
+      if(info){
+        for(const t of pending){
+          try{
+            if(t.status==="creator-held"){
+              const pairData = "0x"+FACTORY_GET_PAIR_SELECTOR+encodeAddressParam(t.tokenAddress)+encodeAddressParam(info.weth);
+              const pairAddress = decodeAddress(await ethCall(info.dexFactory, pairData));
+              if(pairAddress.toLowerCase() !== ZERO_ADDRESS){
+                t.pairAddress = pairAddress;
+                changed = true;
+                if(t.customTax){
+                  t.status = "pool-detected";
+                  toast(`👀 $${t.ticker} now has a pool — activate your configured tax from its detail page whenever you're ready.`);
+                } else {
+                  t.status = "live-pool";
+                  toast(`👀 $${t.ticker} now has a pool — liquidity was added independently.`);
+                }
+              }
+            } else { // "pool-detected" — customTax tokens only
+              const onChainPair = decodeAddress(await ethCall(t.tokenAddress, "0x"+CUSTOM_PAIR_SELECTOR));
+              if(onChainPair.toLowerCase() !== ZERO_ADDRESS){
+                t.status = "live-pool";
+                changed = true;
+                toast(`🎉 $${t.ticker}'s tax is now active on its pool.`);
+              }
             }
-          }
-        } else { // "pool-detected" — customTax tokens only
-          const onChainPair = decodeAddress(await ethCall(t.tokenAddress, "0x"+CUSTOM_PAIR_SELECTOR));
-          if(onChainPair.toLowerCase() !== ZERO_ADDRESS){
-            t.status = "live-pool";
-            changed = true;
-            toast(`🎉 $${t.ticker}'s tax is now active on its pool.`);
-          }
+          }catch(e){ /* transient RPC error — retried on the next poll tick */ }
         }
+      }
+    }
+    let openDetailGraduated = false, justEnteredTaxPhase = false;
+    for(const t of pendingCurves){
+      try{
+        const beforeReserve = t.curveRealEthReserveWei;
+        const beforeStatus = t.status;
+        const beforePair = t.pairAddress;
+        await refreshCurveTokenPanel(t);
+        if(t.curveRealEthReserveWei !== beforeReserve || t.pairAddress !== beforePair) changed = true;
+        // Only redraw an open detail view for an actual status change this
+        // tick — pendingCurves also re-includes a token whose curve already
+        // graduated but whose pair lookup is still retrying, and that alone
+        // shouldn't force a redraw on every single poll until the lookup
+        // lands.
+        if(t.status !== beforeStatus && t.id===currentDetailTokenId) openDetailGraduated = true;
+        if(beforeStatus==="curve-trading" && t.status==="taxed") justEnteredTaxPhase = true;
       }catch(e){ /* transient RPC error — retried on the next poll tick */ }
     }
     if(changed){
@@ -4368,6 +5499,19 @@
       renderStats();
       renderGrid();
       if(views.portfolio.classList.contains("active")) renderPortfolio();
+      if(openDetailGraduated){
+        // A curve token whose detail view happens to be open just graduated
+        // via this background poll rather than a trade made in this tab —
+        // redraw so the open panel switches over to the real-pool view
+        // instead of sitting on a stale "still on the curve" display.
+        openDetail(currentDetailTokenId);
+      }
+      // A curve just entered its post-graduation tax phase — it's now
+      // eligible for isLiveTrackedToken (see that function's own comment),
+      // so fetch its real tax-progress-toward-$50,000 figure right away
+      // rather than leaving the new tax gauge sitting at a placeholder 0%
+      // for up to a full 60s poll interval.
+      if(justEnteredTaxPhase) refreshLiveTokenPrices();
     }
   }
 
@@ -4405,12 +5549,76 @@
   // into the "Launched" tab since they do have a live pool, same as "taxed",
   // rather than inventing a 5th tab for what's a rare edge case.
   function matchesStatusFilter(t, filter){
-    if(filter==="launched") return t.status==="taxed" || t.status==="live-pool" || t.status==="pool-detected";
+    // "curve-trading" folds into "launched" — a Quick Launch token has a
+    // real, live, tradeable market (against the curve) from the moment it's
+    // created, same reasoning "taxed" gets grouped there.
+    if(filter==="launched") return t.status==="taxed" || t.status==="live-pool" || t.status==="pool-detected" || t.status==="curve-trading";
     if(filter==="deployed") return t.status==="creator-held";
     if(filter==="graduated") return t.status==="graduated";
     return true;
   }
+  // Cached curve reserves (updated at launch time, and whenever the detail
+  // view's curve trade panel is opened/traded against — see
+  // refreshCurveTokenPanel) rather than a live read per card: reading
+  // curveState() for every card in the grid would mean one RPC call per
+  // Quick Launch token just to paint the grid, which doesn't scale the way
+  // a single cached number per token does. Falls back to the contract's own
+  // 1.5 ETH default if a token predates these fields.
+  function curveProgressPct(t){
+    const target = BigInt(t.curvePoolSeedTargetWeiVal || CURVE_POOL_SEED_TARGET_WEI_DEFAULT.toString());
+    if(target<=0n) return 0;
+    const real = BigInt(t.curveRealEthReserveWei || "0");
+    return Math.min(100, Math.round(Number(real*10000n/target))/100);
+  }
   function tokenBottomHTML(t){
+    // Quick Launch's two-step graduation (see CustomBondingCurveFactory's
+    // own header comment) is two independent progress numbers, not one: the
+    // curve itself climbing toward its ETH seed target, then — once that
+    // pool exists — this token's own post-graduation tax separately
+    // climbing toward its $50,000 market-cap target. One bar can only ever
+    // show whichever of the two is currently live, so a Quick Launch token
+    // gets both, stacked (an explicit margin-top since .bond-wrap carries no
+    // spacing of its own). Regular (non-curve) tokens keep the single $50K
+    // tax bar they already had below — this branch only ever matches
+    // t.mode==="curve"/"customCurve".
+    const isCurveMode = t.mode==="curve" || t.mode==="customCurve";
+    if(isCurveMode && (t.status==="curve-trading" || t.status==="taxed" || t.status==="graduated")){
+      // Bar ① tracks curve→pool graduation (the 1.5 ETH target); once that's
+      // done it shows the SAME LP-lock countdown the old single-bar
+      // "graduated" fallthrough used (unlockAt is set the moment the curve
+      // itself graduates — see refreshCurveTokenPanel — not once the tax
+      // later disables), so this bar's post-graduation state is identical
+      // to that fallthrough's, just reached one stage earlier. Bar ② tracks
+      // this token's own post-graduation tax (the $50,000 target) — pending
+      // until bar ① completes, live while "taxed", frozen done once
+      // "graduated" (tax permanently disabled).
+      const curveDone = t.status!=="curve-trading";
+      const curvePct = curveDone ? lpElapsedPct(t) : curveProgressPct(t);
+      const targetEth = weiToEtherString(BigInt(t.curvePoolSeedTargetWeiVal || CURVE_POOL_SEED_TARGET_WEI_DEFAULT.toString()), 2);
+      const lockLabel = t.lpWithdrawn ? "LP withdrawn" : fmtTimeLeft(lpMsLeft(t));
+      const taxDone = t.status==="graduated";
+      const taxPending = t.status==="curve-trading";
+      const taxPct = taxDone ? 100 : (taxPending ? 0 : (t.taxProgress||0));
+      const taxBg = taxPending ? "background:var(--paper-700);" : taxDone ? "background:linear-gradient(90deg, var(--good-500), var(--cyan-400));" : "";
+      return `
+      <div class="bond-wrap">
+        <div class="bond-labels"><span>${curveDone ? "① Live on DEX · LP locked" : "① Bonding curve · to "+targetEth+" ETH"}</span><span>${curveDone ? lockLabel : curvePct+"%"}</span></div>
+        <div class="bond-track"><div class="bond-fill" style="width:${curvePct}%; background:linear-gradient(90deg, ${curveDone ? "var(--good-500), var(--cyan-400)" : "var(--signal-600), var(--cyan-400)"})"></div><div class="bond-ticks"></div></div>
+      </div>
+      <div class="bond-wrap" style="margin-top:8px;">
+        <div class="bond-labels"><span>${taxDone ? "② Graduated · tax disabled" : "② 1.00% tax · to $50K"}</span><span>${taxPending ? "Pending" : (taxDone ? "✓ Done" : taxPct+"%")}</span></div>
+        <div class="bond-track"><div class="bond-fill" style="width:${taxPct}%; ${taxBg}"></div><div class="bond-ticks"></div></div>
+      </div>`;
+    }
+    if(t.status==="curve-trading"){
+      const pct = curveProgressPct(t);
+      const targetEth = weiToEtherString(BigInt(t.curvePoolSeedTargetWeiVal || CURVE_POOL_SEED_TARGET_WEI_DEFAULT.toString()), 2);
+      return `
+      <div class="bond-wrap">
+        <div class="bond-labels"><span>Bonding curve · to ${targetEth} ETH</span><span>${pct}%</span></div>
+        <div class="bond-track"><div class="bond-fill" style="width:${pct}%; background:linear-gradient(90deg, var(--signal-600), var(--cyan-400))"></div><div class="bond-ticks"></div></div>
+      </div>`;
+    }
     if(t.status==="creator-held"){
       return `
       <div class="bond-wrap">
@@ -4451,6 +5659,11 @@
         <div class="bond-track"><div class="bond-fill" style="width:100%; background:var(--signal-600)"></div><div class="bond-ticks"></div></div>
       </div>`;
     }
+    // Falls through here for "graduated" on a regular (non-curve) token
+    // only — a Quick Launch token in any of its three statuses is always
+    // caught by the isCurveMode branch above instead, which has its own
+    // dedicated two-bar rendering (and never says "Graduated" until the
+    // $50,000 tax target, not the curve's own ETH target).
     return `
       <div class="bond-wrap">
         <div class="bond-labels"><span>Tax disabled · LP locked</span><span>${fmtTimeLeft(lpMsLeft(t))}</span></div>
@@ -4461,19 +5674,35 @@
     const isCreatorHeld = t.status==="creator-held";
     const isPoolDetected = t.status==="pool-detected";
     const isLivePool = t.status==="live-pool";
-    const noSimulatedMarket = isCreatorHeld || isPoolDetected || isLivePool;
+    const isCurveTrading = t.status==="curve-trading";
+    // Quick Launch tokens DO have a real, live market (the curve itself),
+    // and relayer.js's pollTokenPrices now samples it directly off
+    // curveState() (see that function's own curve branch) the same way it
+    // samples a real pool for every other token — so a curve token actually
+    // viewable on-chain (real deploy, correct network, known factory — same
+    // gating as openDetail's own isCurveToken) gets the real price/sparkline
+    // here too. Only a still-simulated curve token (never deployed, or
+    // viewed on the wrong network — nothing for refreshLiveTokenPrices to
+    // fetch) falls back to the plain placeholder.
+    const isRealCurveToken = isCurveTrading && t.onChain && t.networkMode===appMode && t.tokenAddress && t.factoryAddress;
+    const noSimulatedMarket = isCreatorHeld || isPoolDetected || isLivePool || (isCurveTrading && !isRealCurveToken);
     const emptyText = isPoolDetected
       ? "A pool was found for this token, added independently — but its configured tax stays inactive until the creator activates it. Price isn't tracked here."
       : isLivePool
         ? (t.customTax
           ? "Liquidity was detected on-chain for this token — added independently, outside Hood Launch. Its creator's configured tax is active, but there's no platform tax or LP lock, and price isn't tracked here."
           : "Liquidity was detected on-chain for this token — added independently, outside Hood Launch. No platform tax, no LP lock, and price isn't tracked here.")
-        : "Deployed and verified — 100% of supply is in the creator's wallet. No pool exists here.";
+        : isCurveTrading
+          ? "Trading live on the bonding curve on its own network — switch networks (or check back once it's really deployed) to see its live price here."
+          : "Deployed and verified — 100% of supply is in the creator's wallet. No pool exists here.";
     return `
       <div class="tc-head">
         ${tcMarkHTML(t)}
         <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)}</div></div>
-        <div class="tc-status ${t.status}">${STATUS_LABEL[t.status]||t.status}</div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
+          ${(t.mode==="curve"||t.mode==="customCurve") ? `<span class="tc-quicklaunch-badge">⚡ Quick Launch</span>` : ""}
+          <div style="display:flex; gap:6px;">${statusBadgeHTML(t.mode, t.status)}</div>
+        </div>
       </div>
       <p class="tc-desc">${escapeHtml(t.desc)}</p>
       ${noSimulatedMarket
@@ -4634,7 +5863,31 @@
     const isCreatorHeld = t.status==="creator-held";
     const isPoolDetected = t.status==="pool-detected";
     const isLivePool = t.status==="live-pool";
+    const isCurveTrading = t.status==="curve-trading";
+    // Gates the router-based/simulated trade panel dispatch further down —
+    // isCurveTrading is deliberately NOT folded in here, since a curve
+    // token gets its own trade panel branch (isCurveToken below) rather
+    // than either the real-pool or fully-simulated ones this flag chooses
+    // between.
     const noSimulatedMarket = isCreatorHeld || isPoolDetected || isLivePool;
+    // A curve token viewed on the network it actually lives on, with a
+    // known factory address to call back into — same on-chain/networkMode
+    // gating as isRealLiquidityToken below, just against the curve factory
+    // instead of a DEX pair.
+    const isCurveToken = isCurveTrading && t.onChain && t.networkMode===appMode && t.tokenAddress && t.factoryAddress;
+    // Separately gates the price/mcap/chart block below. relayer.js's
+    // pollTokenPrices now samples a curve token's price directly off
+    // curveState() pre-graduation (see that function's own curve branch),
+    // so a REAL curve token (isCurveToken) gets a real chart same as any
+    // other launched token, fed by refreshLiveTokenPrices' relayer fetch —
+    // it just launches with a flat 2-point placeholder (see
+    // launchCurveOnChainFlow) until that first sample lands, same
+    // convention performOnChainLaunch's own liquidity-mode tokens already
+    // use. Only a still-simulated curve token (never deployed at all, or
+    // viewed on the wrong network — genuinely nothing to fetch) keeps the
+    // old "no chart, no on-chain source" treatment: showing a chart there
+    // would render a permanent, meaningless "$0.00".
+    const noPriceChart = noSimulatedMarket || (isCurveTrading && !isCurveToken);
     // Real buy/sell turns on for a token that (a) was actually deployed
     // on-chain through Hood Launch's own "Deploy and Add Liquidity" flow,
     // with a real recorded pair, and (b) is being viewed on whichever
@@ -4663,7 +5916,56 @@
     // to ask for, so its panel says so instead of guessing.
 
     let progressHTML = "";
-    if(isTaxed){
+    const isCurveModeToken = t.mode==="curve" || t.mode==="customCurve";
+    if(isCurveModeToken && (isCurveTrading || isTaxed || t.status==="graduated")){
+      // Same two-bar split as tokenBottomHTML's grid-card version (see that
+      // function's own comment for the full rationale) — just rendered with
+      // this view's bigger .bond-gauge + hint-text treatment instead of the
+      // compact grid .bond-wrap. Bar ① reuses the old isCurveTrading/
+      // "graduated" branches' own copy verbatim for each of its two states;
+      // bar ② reuses the old isTaxed branch's copy verbatim for its own two
+      // active states, so nothing below is new wording, only new layout.
+      const curveDone = !isCurveTrading;
+      const targetEth4 = weiToEtherString(BigInt(t.curvePoolSeedTargetWeiVal || CURVE_POOL_SEED_TARGET_WEI_DEFAULT.toString()), 4);
+      const curveBuyInNote = (t.creatorBuyInEth>0)
+        ? ` The creator also bought in for ${fmtEthAmt(t.creatorBuyInEth)} ETH in the same transaction the curve was created — an ordinary curve buy, guaranteed to be its first trade.`
+        : "";
+      const lockLabel = t.lpWithdrawn ? "LP withdrawn" : fmtTimeLeft(lpMsLeft(t));
+      const unlockCta = (isOwner && lpIsUnlockable(t))
+        ? `<button class="btn btn-primary btn-sm" id="detailUnlockBtn" style="margin-top:10px;">🔓 Unlock LP now</button>`
+        : "";
+      const curveBarHTML = curveDone ? `
+          <div class="bond-gauge">
+            <div class="bond-labels"><span>① Live on DEX · LP locked</span><span>${lockLabel}</span></div>
+            <div class="bond-track"><div class="bond-fill" style="width:${lpElapsedPct(t)}%; background:linear-gradient(90deg, var(--good-500), var(--cyan-400))"></div><div class="bond-ticks"></div></div>
+            <div class="hint" style="margin-top:8px;">This bonding curve reached ${targetEth4} ETH and automatically went live on a real DEX pool — trading now happens against that pool instead of the curve, with LP tokens locked in this launch's own liquidity locker. This is separate from full graduation: a 1.00% tax now applies until this token's market cap crosses $50,000 (see below).${curveBuyInNote}</div>
+            ${unlockCta}
+          </div>` : `
+          <div class="bond-gauge">
+            <div class="bond-labels"><span>① Bonding curve · to ${targetEth4} ETH</span><span>${curveProgressPct(t)}%</span></div>
+            <div class="bond-track"><div class="bond-fill" style="width:${curveProgressPct(t)}%; background:linear-gradient(90deg, var(--signal-600), var(--cyan-400))"></div><div class="bond-ticks"></div></div>
+            <div class="hint" style="margin-top:8px;">A 1.00% fee applies on every buy and sell against this curve — once its real ETH reserve crosses ${targetEth4} ETH, it automatically goes live on an LP-locked DEX pool and this page switches over to real-pool trading on its own.${curveBuyInNote}</div>
+          </div>`;
+      const taxDone = t.status==="graduated";
+      const taxPending = isCurveTrading;
+      const taxBarHTML = taxPending ? `
+          <div class="bond-gauge" style="margin-top:12px;">
+            <div class="bond-labels"><span>② 1.00% tax · to $50,000</span><span>Pending</span></div>
+            <div class="bond-track"><div class="bond-fill" style="width:0%; background:var(--paper-700)"></div><div class="bond-ticks"></div></div>
+            <div class="hint" style="margin-top:8px;">This stage hasn't started yet — it begins the moment the curve above goes live on a pool. From then on, a 1.00% fee applies on every buy and sell here until this token's market cap crosses $50,000, at which point the tax disables permanently and this token fully graduates.</div>
+          </div>` : taxDone ? `
+          <div class="bond-gauge" style="margin-top:12px;">
+            <div class="bond-labels"><span>② Graduated · tax disabled</span><span>✓ Done</span></div>
+            <div class="bond-track"><div class="bond-fill" style="width:100%; background:linear-gradient(90deg, var(--good-500), var(--cyan-400))"></div><div class="bond-ticks"></div></div>
+            <div class="hint" style="margin-top:8px;">This pool crossed $50,000 in market cap — the 1.00% transfer tax disabled permanently. This token has now fully graduated; trading continues here with no protocol fee.</div>
+          </div>` : `
+          <div class="bond-gauge" style="margin-top:12px;">
+            <div class="bond-labels"><span>② Tax progress · $50,000 target</span><span>${t.taxProgress}%</span></div>
+            <div class="bond-track"><div class="bond-fill" style="width:${t.taxProgress}%"></div><div class="bond-ticks"></div></div>
+            <div class="hint" style="margin-top:8px;">A 1.00% fee applies on every buy and sell here, forwarded to the platform fee wallet, funding the climb toward the fixed $50,000 target — once crossed, the tax disables permanently, in the same transaction that crosses it.</div>
+          </div>`;
+      progressHTML = curveBarHTML + taxBarHTML;
+    } else if(isTaxed){
       progressHTML = `
           <div class="bond-gauge">
             <div class="bond-labels"><span>Tax progress · $50,000 target</span><span>${t.taxProgress}%</span></div>
@@ -4671,6 +5973,11 @@
             <div class="hint" style="margin-top:8px;">A 1.00% fee applies on every buy and sell here, forwarded to the platform fee wallet, funding the climb toward the fixed $50,000 target — once crossed, the tax disables permanently, in the same transaction that crosses it.</div>
           </div>`;
     } else if(t.status==="graduated"){
+      // A regular (non-curve) token only — a Quick Launch token in any
+      // status is always caught by the isCurveModeToken branch above
+      // instead, which has its own dedicated two-bar rendering (and only
+      // ever says "Graduated" once the $50,000 tax target is hit, not the
+      // curve's own ETH target).
       const buyInNote = hasCreatorBuyIn
         ? ` The creator also bought in for ${t.creatorBuyInEth} ETH in the same transaction the pool was created — an ordinary swap, guaranteed to be the first trade against it.`
         : "";
@@ -4678,11 +5985,12 @@
       const unlockCta = (isOwner && lpIsUnlockable(t))
         ? `<button class="btn btn-primary btn-sm" id="detailUnlockBtn" style="margin-top:10px;">🔓 Unlock LP now</button>`
         : "";
+      const graduatedHint = `This pool crossed $50,000 in market cap — the 1.00% transfer tax disabled permanently. LP tokens stay locked to the creator until the lock matures; trading continues here with no protocol fee.${buyInNote}`;
       progressHTML = `
           <div class="bond-gauge">
             <div class="bond-labels"><span>Tax disabled · LP locked to creator</span><span>${lockLabel}</span></div>
             <div class="bond-track"><div class="bond-fill" style="width:${lpElapsedPct(t)}%; background:linear-gradient(90deg, var(--good-500), var(--cyan-400))"></div><div class="bond-ticks"></div></div>
-            <div class="hint" style="margin-top:8px;">This pool crossed $50,000 in market cap — the 1.00% transfer tax disabled permanently. LP tokens stay locked to the creator until the lock matures; trading continues here with no protocol fee.${buyInNote}</div>
+            <div class="hint" style="margin-top:8px;">${graduatedHint}</div>
             ${unlockCta}
           </div>`;
     } else if(isPoolDetected){
@@ -4712,8 +6020,42 @@
             <div class="hint" style="margin-top:8px;">Hood Launch periodically checks Deploy Token tokens for a pool the creator may have added independently — this one now has one. Because it wasn't created through Hood Launch's Deploy and Add Liquidity (Launch) flow, it carries none of that flow's protections: no transfer tax, and no LP lock securing the liquidity.</div>
           </div>`;
     }
+    // Note: isCurveTrading has no branch here — a Quick Launch token in
+    // this status is always caught by the isCurveModeToken branch above.
 
-    const tradePanelHTML = isPoolDetected ? `
+    const tradePanelHTML = isCurveTrading ? (isCurveToken ? `
+      <div class="panel">
+        <div class="trade-tabs">
+          <button class="trade-tab" aria-selected="true" data-side="buy">Buy</button>
+          <button class="trade-tab" aria-selected="false" data-side="sell">Sell</button>
+        </div>
+        <div class="field">
+          <label for="tradeAmt" id="tradeAmtLabel">Amount (ETH)</label>
+          <input id="tradeAmt" type="number" min="0" step="any" placeholder="0.00" ${wallet ? "" : "disabled"}>
+        </div>
+        <div class="trade-out">
+          <span id="tradeOutLabel">Est. $${escapeHtml(t.ticker)} received</span>
+          <span class="num" id="tradeOut">0</span>
+        </div>
+        <div class="field" style="margin-top:10px;">
+          <label for="tradeSlippage">Slippage tolerance (%)</label>
+          <input id="tradeSlippage" type="number" min="0.1" max="49" step="0.1" value="2" ${wallet ? "" : "disabled"}>
+        </div>
+        <button class="btn btn-primary btn-block" id="tradeSubmit">${wallet ? "Buy" : "Connect wallet to trade"}</button>
+        <p class="disclaimer-line">Live trade — sends a real transaction on ${escapeHtml(tokenNetwork.chainName)} from your connected wallet, straight to this curve (not a DEX pool — there isn't one yet). The estimate above is a live quote from quoteBuy()/quoteSell() against the curve's current reserves; raise slippage tolerance if a trade fails. Sell requires one extra approval the first time.</p>
+      </div>
+    ` : t.onChain ? `
+      <div class="panel">
+        <div class="eyebrow" style="margin-bottom:10px;">Bonding curve — different network</div>
+        <p style="color:var(--paper-500); font-size:.88rem; margin:0 0 14px;">This token was Quick Launched on ${escapeHtml(tokenNetwork.chainName)} — switch to that network (the Demo/Live toggle above) to trade against its curve directly.</p>
+      </div>
+    ` : `
+      <div class="panel">
+        <div class="eyebrow" style="margin-bottom:10px;">Simulated Quick Launch</div>
+        <p style="color:var(--paper-500); font-size:.88rem; margin:0 0 14px;">This curve was launched through the demo wizard rather than a real transaction (no wallet was connected, or no curve factory is configured for this network yet) — there's no real contract behind it to trade against.</p>
+        <p class="disclaimer-line" style="text-align:left; margin-top:0;">Demo only — reflects the wizard's inputs, not a real transaction.</p>
+      </div>
+    `) : isPoolDetected ? `
       <div class="panel">
         <div class="eyebrow" style="margin-bottom:10px;">Pool found — tax not active yet</div>
         <p style="color:var(--paper-500); font-size:.88rem; margin:0 0 14px;">Liquidity now exists for this token, added independently outside Hood Launch — but the contract itself applies no tax at all until activated (see above). Once activated, your configured buy/sell rates apply here going forward; the platform's own 1.00% tax is never available on this launch path either way. Use the contract address below with a DEX interface on ${escapeHtml(tokenNetwork.chainName)} to trade it.</p>
@@ -4781,11 +6123,11 @@
           ${safeImageSrc(t.banner) ? `<div class="detail-banner"><img src="${safeImageSrc(t.banner)}" alt=""></div>` : ""}
           <div class="detail-head">
             ${tcMarkHTML(t)}
-            <div style="flex:1;"><h2>${escapeHtml(t.name)}</h2><div class="tc-ticker">$${escapeHtml(t.ticker)} · <span class="tc-status ${t.status}" style="display:inline-block; margin-left:4px;">${STATUS_LABEL[t.status]||t.status}</span></div></div>
+            <div style="flex:1;"><h2>${escapeHtml(t.name)}</h2><div class="tc-ticker">$${escapeHtml(t.ticker)} · ${statusBadgeHTML(t.mode, t.status, "display:inline-block; margin-left:4px;")}</div></div>
             ${isOwner ? `<button class="btn btn-ghost" id="detailEditBtn" style="padding:8px 14px; font-size:.8rem;">Edit token</button>` : ""}
           </div>
           ${isCreatorHeld ? `<p style="color:var(--paper-500); margin:18px 0 0;">No pool — 100% of the supply is in the creator's wallet. Hood Launch has no further role here: if this creator adds liquidity, it happens off-platform, on their own terms.</p>` : ""}
-          ${noSimulatedMarket ? "" : `
+          ${noPriceChart ? "" : `
           <div class="detail-price num">${fmtUSD(t.price)}</div>
           <div class="detail-delta num" style="color:${t.change24h>=0?'var(--good-500)':'var(--critical-500)'}">${fmtPct(t.change24h)} · ${changeLabelFor(t)}</div>
           ${isLiveTrackedToken(t) ? `<div class="hint" style="margin-top:2px;">Live price, sampled from this pool's own reserves${t.livePriceUpdatedAt ? ` · updated ${fmtAgo(Date.now()-t.livePriceUpdatedAt)}` : ""}.</div>` : ""}
@@ -4797,7 +6139,7 @@
 
           ${progressHTML}
 
-          ${noSimulatedMarket ? "" : `
+          ${noPriceChart ? "" : `
           <div class="stat-mini-row">
             <div class="stat-mini"><div class="v num">${fmtUSD(t.mcap)}</div><div class="l">Market cap</div></div>
             <div class="stat-mini"><div class="v num">${fmtUSD(t.vol)}</div><div class="l">24h volume</div></div>
@@ -4839,7 +6181,7 @@
     const detailActivateBtn = document.getElementById("detailActivateBtn");
     if(detailActivateBtn) detailActivateBtn.addEventListener("click", ()=> activateCustomTokenTax(t.id, detailActivateBtn) );
 
-    if(!noSimulatedMarket && t.onChain && t.tokenAddress) fetchAndRenderHolderDistribution(t);
+    if(!noPriceChart && t.onChain && t.tokenAddress) fetchAndRenderHolderDistribution(t);
 
     if(!noSimulatedMarket){
       tradeSide = "buy";
@@ -4848,7 +6190,7 @@
           document.querySelectorAll(".trade-tab").forEach(x=>x.setAttribute("aria-selected","false"));
           tb.setAttribute("aria-selected","true");
           tradeSide = tb.dataset.side;
-          if(isRealLiquidityToken){
+          if(isRealLiquidityToken || isCurveToken){
             const amtLabel = document.getElementById("tradeAmtLabel");
             const outLabel = document.getElementById("tradeOutLabel");
             if(amtLabel) amtLabel.textContent = tradeSide==="buy" ? "Amount (ETH)" : `Amount ($${t.ticker})`;
@@ -4861,8 +6203,14 @@
           }
         });
       });
-      if(isRealLiquidityToken){
+      if(isCurveToken){
+        wireCurveTradePanel(t);
+      } else if(isRealLiquidityToken){
         wireRealTradePanel(t);
+      } else if(isCurveTrading){
+        // Quick Launch token, but viewed on the wrong network (the "switch
+        // networks" panel above) — that panel has no .trade-tab/tradeAmt/
+        // tradeSubmit elements to wire at all, so there's nothing to do here.
       } else {
         document.getElementById("tradeAmt").addEventListener("input", ()=>updateTradeOut(t, isTaxed));
         document.getElementById("tradeSubmit").addEventListener("click", ()=>{
@@ -5088,6 +6436,254 @@
       }
     }
     submitBtn.addEventListener("click", submitTrade);
+  }
+
+  /* ---------------- curve buy/sell (pre-graduation Quick Launch trading) ----------------
+     Only ever wired up when openDetail() set isCurveToken — a Quick Launch
+     token still trading on its own bonding curve (not yet graduated), viewed
+     on the network it actually lives on. Sends buy()/sell() straight to the
+     curve factory itself (BondingCurveFactory or CustomBondingCurveFactory —
+     both share byte-identical quoteBuy/quoteSell/buy/sell selectors, so this
+     one function serves either mode with no branching needed), quoting off
+     the contract's own quoteBuy()/quoteSell() rather than getAmountOut()+
+     cached reserves the way wireRealTradePanel does for a real pool — there's
+     no pool yet, just the curve's own virtual+real reserves, and those move
+     with every trade anyone makes against it, so each quote is a fresh
+     eth_call rather than a client-side replica of _quoteBuy/_quoteSell's math.
+     Sell needs one extra approval the first time, exactly like a real-pool
+     sell, reusing the same generic encodeApproveCalldata/
+     encodeAllowanceCalldata helpers wireRealTradePanel already uses — the
+     curve factory itself is the spender instead of the DEX router.
+  */
+  async function wireCurveTradePanel(t){
+    const amtInput = document.getElementById("tradeAmt");
+    const outEl = document.getElementById("tradeOut");
+    const slippageInput = document.getElementById("tradeSlippage");
+    const submitBtn = document.getElementById("tradeSubmit");
+    if(!amtInput || !outEl || !slippageInput || !submitBtn) return;
+
+    async function fetchQuote(){
+      const amtStr = amtInput.value;
+      const amt = parseFloat(amtStr);
+      if(!amtStr || isNaN(amt) || amt<=0) return null;
+      try{
+        if(tradeSide==="buy"){
+          const ethIn = parseEtherToWei(amtStr);
+          if(ethIn<=0n) return null;
+          const raw = await ethCall(t.factoryAddress, encodeAddressUint256Calldata(QUOTE_BUY_SELECTOR, t.tokenAddress, ethIn));
+          const words = splitWords(raw);
+          return { out: decodeUint256("0x"+words[0]), fee: decodeUint256("0x"+words[1]) };
+        } else {
+          const tokensIn = parseEtherToWei(amtStr); // curve tokens are always 18 decimals, same as ETH
+          if(tokensIn<=0n) return null;
+          const raw = await ethCall(t.factoryAddress, encodeAddressUint256Calldata(QUOTE_SELL_SELECTOR, t.tokenAddress, tokensIn));
+          const words = splitWords(raw);
+          return { out: decodeUint256("0x"+words[0]), fee: decodeUint256("0x"+words[1]) };
+        }
+      }catch(e){ return null; }
+    }
+
+    // A quote here is an async eth_call, unlike wireRealTradePanel's
+    // synchronous client-side math against cached reserves — a sequence
+    // number guards against an in-flight quote for a stale amount landing
+    // after a newer keystroke's quote already rendered.
+    let quoteSeq = 0;
+    async function renderQuote(){
+      const amtStr = amtInput.value;
+      const amt = parseFloat(amtStr);
+      if(!amtStr || isNaN(amt) || amt<=0){ outEl.textContent = "0"; return; }
+      const seq = ++quoteSeq;
+      const q = await fetchQuote();
+      if(seq !== quoteSeq) return; // superseded by a newer keystroke
+      if(!document.body.contains(outEl)) return; // detail view moved on while this was in flight
+      if(!q){ outEl.textContent = "0"; return; }
+      outEl.textContent = tradeSide==="buy"
+        ? fmtInt(Number(weiToEtherString(q.out,6))) + " " + t.ticker
+        : weiToEtherString(q.out,6) + " ETH";
+    }
+
+    realTradeQuoteRefresh = renderQuote;
+    amtInput.addEventListener("input", renderQuote);
+    renderQuote();
+
+    async function submitTrade(){
+      if(!window.ethereum){ toast("No browser wallet detected."); return; }
+      if(!wallet){ connectWallet(); return; }
+
+      const amtStr = amtInput.value;
+      const amt = parseFloat(amtStr);
+      if(!amtStr || isNaN(amt) || amt<=0){ toast("Enter an amount greater than 0."); return; }
+      const slippagePct = parseFloat(slippageInput.value);
+      if(isNaN(slippagePct) || slippagePct<0.1 || slippagePct>49){ toast("Slippage tolerance must be between 0.1% and 49%."); return; }
+      const slippageBps = BigInt(Math.round(slippagePct*100));
+
+      const originalLabel = submitBtn.textContent;
+      submitBtn.disabled = true;
+      try{
+        const net = NETWORKS[t.networkMode] || NETWORKS[appMode];
+        if(net.chainIdHex){
+          let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+          if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
+            await ensureNetwork(t.networkMode);
+            currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+            if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
+              throw new Error(`Switch your wallet to ${net.chainName} and try again.`);
+            }
+          }
+        }
+
+        // Always re-quote right before building the transaction — same
+        // "don't trust a possibly-stale on-screen estimate" pattern
+        // wireRealTradePanel uses when it re-reads pool reserves here.
+        if(tradeSide==="buy"){
+          const ethIn = parseEtherToWei(amtStr);
+          if(ethIn<=0n) throw new Error("Enter an amount greater than 0.");
+          const q = await fetchQuote();
+          if(!q || q.out<=0n) throw new Error("This curve can't quote that amount right now — try a smaller amount.");
+          const minTokensOut = (q.out*(10000n-slippageBps))/10000n;
+
+          submitBtn.textContent = "Confirm in your wallet…";
+          toast("Confirm the buy in your wallet…");
+          const data = encodeAddressUint256Calldata(CURVE_BUY_SELECTOR, t.tokenAddress, minTokensOut);
+          const txHash = await window.ethereum.request({
+            method:"eth_sendTransaction",
+            params:[{ from: wallet, to: t.factoryAddress, value: "0x"+ethIn.toString(16), data }],
+          });
+          submitBtn.textContent = "Waiting for confirmation…";
+          toast("Transaction sent — waiting for confirmation…");
+          const receipt = await waitForReceipt(txHash);
+          if(receipt.status !== "0x1") throw new Error("The buy reverted on-chain — try a smaller amount or a higher slippage tolerance.");
+          toast(`✅ Bought $${t.ticker} — check your wallet or the explorer for the exact amount received.`);
+        } else {
+          const tokensIn = parseEtherToWei(amtStr);
+          if(tokensIn<=0n) throw new Error("Enter an amount greater than 0.");
+
+          const allowance = decodeUint256(await ethCall(t.tokenAddress, encodeAllowanceCalldata(wallet, t.factoryAddress)));
+          if(allowance < tokensIn){
+            submitBtn.textContent = "Approve in your wallet…";
+            toast(`Approve $${t.ticker} for trading — confirm in your wallet…`);
+            const approveTxHash = await window.ethereum.request({
+              method:"eth_sendTransaction",
+              params:[{ from: wallet, to: t.tokenAddress, data: encodeApproveCalldata(t.factoryAddress, tokensIn) }],
+            });
+            toast("Approval sent — waiting for confirmation…");
+            const approveReceipt = await waitForReceipt(approveTxHash);
+            if(approveReceipt.status !== "0x1") throw new Error("The approval reverted on-chain — nothing was sold.");
+          }
+
+          const q = await fetchQuote();
+          if(!q || q.out<=0n) throw new Error("This curve can't quote that amount right now — try a smaller amount.");
+          const minEthOut = (q.out*(10000n-slippageBps))/10000n;
+
+          submitBtn.textContent = "Confirm in your wallet…";
+          toast("Confirm the sell in your wallet…");
+          const data = encodeCurveSellCalldata(t.tokenAddress, tokensIn, minEthOut);
+          const txHash = await window.ethereum.request({
+            method:"eth_sendTransaction",
+            params:[{ from: wallet, to: t.factoryAddress, data }],
+          });
+          submitBtn.textContent = "Waiting for confirmation…";
+          toast("Transaction sent — waiting for confirmation…");
+          const receipt = await waitForReceipt(txHash);
+          if(receipt.status !== "0x1") throw new Error("The sell reverted on-chain — try a smaller amount or a higher slippage tolerance.");
+          toast(`✅ Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
+        }
+        amtInput.value = "";
+        renderQuote();
+
+        // A trade either nudges realEthReserve toward poolSeedTargetWei or,
+        // on whichever trade crosses it, graduates the curve outright —
+        // refresh the cached reserve fields and, if this was the graduating
+        // trade, flip status/pairAddress and redraw the whole detail view so
+        // it switches over to the real-pool panel immediately rather than
+        // waiting for the next checkPendingLiquidity() poll tick.
+        const wasCurveTrading = t.status==="curve-trading";
+        await refreshCurveTokenPanel(t);
+        saveCustomTokens();
+        renderGrid();
+        if(wasCurveTrading && t.status!=="curve-trading" && currentDetailTokenId===t.id){
+          openDetail(t.id);
+        }
+        // If this was the graduating trade, the pool now exists and the
+        // token's own tax just switched on — fetch its real tax-progress
+        // immediately rather than waiting for the next 60s poll, same as
+        // checkPendingLiquidity's justEnteredTaxPhase nudge.
+        if(wasCurveTrading && t.status==="taxed") refreshLiveTokenPrices();
+      }catch(err){
+        console.error(err);
+        if(err && err.code===4001) toast("Transaction was rejected in your wallet.");
+        else toast("Trade failed: " + ((err && err.message) ? err.message : String(err)));
+      }finally{
+        submitBtn.disabled = false;
+        submitBtn.textContent = wallet ? originalLabel : "Connect wallet to trade";
+      }
+    }
+    submitBtn.addEventListener("click", submitTrade);
+  }
+
+  // Shared by wireCurveTradePanel (after every trade) and checkPendingLiquidity
+  // (its 45s poll, for a curve token nobody happens to be trading against
+  // right now) — reads curveState() fresh, updates the token's cached
+  // reserve fields, and the moment graduated reads true, flips status to
+  // "graduated" and looks up the real pair via the same
+  // FACTORY_GET_PAIR_SELECTOR the creator-held → pool-detected path already
+  // uses below (a curve graduation seeds an ordinary router pool no
+  // differently than any other launch, so the same getPair() lookup applies).
+  // Deliberately approximate on two fronts, both flagged rather than hidden:
+  // the graduation moment is only known to within however long it's been
+  // since the last poll/trade (not the exact block timestamp), and the LP
+  // this graduation locks lives in this curve's OWN dedicated
+  // LiquidityLocker (a separate deploy per factory), not the one
+  // unlockLiquidity() calls for the plain/custom-tax flows — so unlockAt is
+  // set for an honest countdown display, but lpIsUnlockable() (which
+  // requires mode==="liquidity") correctly keeps the "Unlock LP now" button
+  // hidden here rather than wiring it to the wrong locker. Wiring that up is
+  // follow-up work, not a bug in what's shipped now.
+  async function refreshCurveTokenPanel(t){
+    const stateHex = await ethCall(t.factoryAddress, "0x"+CURVE_STATE_SELECTOR+encodeAddressParam(t.tokenAddress));
+    const state = decodeCurveState(stateHex);
+    t.curveRealEthReserveWei = state.realEthReserve.toString();
+    t.curvePoolSeedTargetWeiVal = state.poolSeedTargetWei.toString();
+    // Split into "just graduated" (flip status, set the unlock countdown,
+    // toast once) vs. "already graduated but the pair lookup hasn't landed
+    // yet" (missing/zero pairAddress — retried here with neither a re-flip
+    // nor a repeat toast) so that a transient RPC failure on the very poll
+    // tick that catches the graduation doesn't strand the token with no
+    // pairAddress forever — see checkPendingLiquidity's pendingCurves
+    // filter, which keeps re-including exactly this case.
+    //
+    // FIX: this used to flip status straight to "graduated" the instant the
+    // CURVE graduated (pool created) — but a curve graduating only means a
+    // pool now exists and this token's OWN post-graduation transfer tax has
+    // just switched ON, climbing toward its separate $50,000 market-cap
+    // target exactly like a regular launch's "taxed" stage. Calling that
+    // "graduated" hid the tax-progress bar for the entire time it was
+    // actually still ticking, and mislabeled an actively-taxed pool as
+    // fully done. "taxed" is the correct intermediate status — the SAME
+    // taxActive()-based check refreshLiveTokenPrices already runs for every
+    // other launched token (see that function's own comment) picks this
+    // token up too the moment it has a pairAddress, and is what actually
+    // advances it to "graduated" for real once taxActive() reads false.
+    const justGraduated = state.graduated && t.status==="curve-trading";
+    const pairStillMissing = state.graduated && (t.status==="taxed"||t.status==="graduated")
+      && (!t.pairAddress || t.pairAddress.toLowerCase()===ZERO_ADDRESS);
+    if(justGraduated) t.status = "taxed";
+    if(justGraduated || pairStillMissing){
+      try{
+        const info = await getDexInfo(t.networkMode);
+        if(info){
+          const pairData = "0x"+FACTORY_GET_PAIR_SELECTOR+encodeAddressParam(t.tokenAddress)+encodeAddressParam(info.weth);
+          const pairAddress = decodeAddress(await ethCall(info.dexFactory, pairData));
+          if(pairAddress.toLowerCase() !== ZERO_ADDRESS) t.pairAddress = pairAddress;
+        }
+      }catch(e){ /* still missing — pendingCurves keeps retrying this on the next poll tick */ }
+      if(justGraduated){
+        t.unlockAt = Date.now() + LP_LOCK_DAYS*86400000;
+        if(t.taxProgress==null) t.taxProgress = 0; // refreshLiveTokenPrices fills this in for real momentarily — see the call right after this function's callers
+        toast(`🎉 $${t.ticker} is now live on DEX — it trades on a live, LP-locked pool. A 1.00% tax applies until it crosses $50,000 in market cap, when it fully graduates.`);
+      }
+    }
+    return state;
   }
 
   function detailChartSVG(hist){
@@ -5453,6 +7049,76 @@
     `;
   }
 
+  // ---- Quick Launch (bonding curve) step 3 — zero-tax variant ----
+  // No liquidity slider at all: createCurveToken has no liquidity parameter
+  // (see the contract's own doc comment — "No ETH from the creator ever
+  // pairs into a pool here, that's the entire point of this mode"), so
+  // there's nothing to size one against. The buy-in slider's ceiling comes
+  // from curveCreatorBuyInSliderMax, not creatorBuyInSliderMax — a
+  // different formula, since it solves the curve's own constant-product
+  // math instead of a plain pool ratio (see that function's own comment).
+  function curveStepHTML(){
+    const buyInSliderMax = curveCreatorBuyInSliderMax(draft.mode);
+    if(draft.buyInEth > buyInSliderMax) draft.buyInEth = Math.round(buyInSliderMax*1e6)/1e6;
+    return `
+      <h3 style="margin-bottom:6px;">Quick Launch terms</h3>
+      <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 18px;">No liquidity to provide — your token is tradeable the instant this confirms, against an on-chain bonding curve. It goes live on a real, LP-locked DEX pool on its own once the curve holds ${curvePoolSeedEthDisplay(draft.mode)} ETH; nothing further to do before then.</p>
+      <div class="field">
+        <label for="fBuyInEth">Your buy-in (optional)</label>
+        <div class="range-row"><input id="fBuyInEth" type="range" min="0" max="${buyInSliderMax}" step="any" value="${draft.buyInEth}"><span class="range-val num" id="buyInEthVal">${fmtEthAmt(draft.buyInEth)} ETH</span></div>
+        <div class="hint">Optional: buy your own token the instant it's created, in the same transaction — guaranteed to be the curve's first trade. It's an ordinary curve buy (pays the same 1.00% curve fee as anyone else), not free tokens.</div>
+        <div class="hint" style="margin-top:6px;">Capped at ~${creatorBuyCapPct()}% of total supply — the same anti-rug safeguard as every launch mode, enforced on-chain regardless of what this slider shows.</div>
+      </div>
+      <div class="review-list" style="margin-top:16px;">
+        <div class="review-row"><span class="k">Launch fee</span><span class="v num">$${CURVE_FEE_USD} ≈ ${fmtEthAmt(depFeeEth())} ETH</span></div>
+        <div class="review-row"><span class="k">Your buy-in</span><span class="v num" id="buyInRowVal">${fmtEthAmt(draft.buyInEth)} ETH</span></div>
+        <div class="review-row"><span class="k">Live on DEX at</span><span class="v num">${curvePoolSeedEthDisplay(draft.mode)} ETH</span></div>
+        <div class="review-row" style="background:var(--ink-850);"><span class="k" style="color:var(--paper-100); font-weight:600;">Total to send</span><span class="v num" id="totalCostVal" style="color:var(--signal-300);">${fmtEthAmt(depFeeEth()+draft.buyInEth)} ETH</span></div>
+      </div>
+      <div class="hint" style="margin-top:8px;">${ethPriceNote()}.</div>
+      <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizNext">Continue</button></div>
+    `;
+  }
+  // ---- Quick Launch (bonding curve) step 3 — custom-tax variant ----
+  // Same tax-configuration fields as customFeeStepHTML (reusing the exact
+  // same input ids, so bindWizardFields' existing generic listeners wire
+  // these up unchanged) — but no liquidity slider, same reasoning as
+  // curveStepHTML above. The tax rates only take effect after this curve
+  // graduates to a real pool; until then they're recorded but inactive,
+  // same as any custom-tax token without a live pool yet.
+  function customCurveStepHTML(){
+    const buyInSliderMax = curveCreatorBuyInSliderMax(draft.mode);
+    if(draft.buyInEth > buyInSliderMax) draft.buyInEth = Math.round(buyInSliderMax*1e6)/1e6;
+    const reflectionOn = draft.customFees.buy.reflectionBps>0 || draft.customFees.sell.reflectionBps>0;
+    const marketingOn = draft.customFees.buy.marketingBps>0 || draft.customFees.sell.marketingBps>0;
+    return `
+      <h3 style="margin-bottom:6px;">Quick Launch terms — custom tax</h3>
+      <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 18px;">No liquidity to provide — your token trades against an on-chain bonding curve from the instant this confirms, and goes live on a real, LP-locked DEX pool on its own once the curve holds ${curvePoolSeedEthDisplay(draft.mode)} ETH. Your configured tax below only takes effect once it's live on DEX — capped at 5% total, buy and sell configured independently.</p>
+      ${feeSideHTML("buy","Buy")}
+      ${feeSideHTML("sell","Sell")}
+      ${reflectionAssetFieldHTML(reflectionOn ? "Only takes effect once this curve is live on a real pool and holders start trading against it." : "Only matters once a reflection % is set above, on either side.")}
+      <div class="field">
+        <label for="fMarketingWallet">Marketing wallet ${marketingOn ? "(required — a marketing % is set above)" : "(optional — only needed if you set a marketing % above)"}</label>
+        <input id="fMarketingWallet" type="text" placeholder="0x… wallet address" value="${escapeHtml(draft.customFees.marketingWallet)}">
+        <div class="hint" style="margin-top:6px;">Can be changed later, any time, by the creator's own wallet — every tax rate above is locked in for good the moment you launch.</div>
+      </div>
+      <div class="field">
+        <label for="fBuyInEth">Your buy-in (optional)</label>
+        <div class="range-row"><input id="fBuyInEth" type="range" min="0" max="${buyInSliderMax}" step="any" value="${draft.buyInEth}"><span class="range-val num" id="buyInEthVal">${fmtEthAmt(draft.buyInEth)} ETH</span></div>
+        <div class="hint">Optional: buy your own token the instant it's created, in the same transaction — guaranteed to be the curve's first trade. It pays the curve's 1.00% fee, not your configured tax above (that stays inactive until it's live on DEX).</div>
+        <div class="hint" style="margin-top:6px;">Capped at ~${creatorBuyCapPct()}% of total supply — the same anti-rug safeguard as every launch mode, enforced on-chain regardless of what this slider shows.</div>
+      </div>
+      <div class="review-list" style="margin-top:16px;">
+        <div class="review-row"><span class="k">Launch fee</span><span class="v num">$${CURVE_FEE_USD} ≈ ${fmtEthAmt(depFeeEth())} ETH</span></div>
+        <div class="review-row"><span class="k">Your buy-in</span><span class="v num" id="buyInRowVal">${fmtEthAmt(draft.buyInEth)} ETH</span></div>
+        <div class="review-row"><span class="k">Live on DEX at</span><span class="v num">${curvePoolSeedEthDisplay(draft.mode)} ETH</span></div>
+        <div class="review-row" style="background:var(--ink-850);"><span class="k" style="color:var(--paper-100); font-weight:600;">Total to send</span><span class="v num" id="totalCostVal" style="color:var(--signal-300);">${fmtEthAmt(depFeeEth()+draft.buyInEth)} ETH</span></div>
+      </div>
+      <div class="hint" style="margin-top:8px;">${ethPriceNote()}.</div>
+      <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizNext">Continue</button></div>
+    `;
+  }
+
   function wizardStepHTML(){
     if(wizStep===1){
       return `
@@ -5515,6 +7181,16 @@
             <div class="desc">Custom Tax Token: you choose the tax — reflections, marketing wallet, auto-liquidity, true burn — up to 5% total per side, buy and sell configured independently. Creation and liquidity happen atomically; a live pool exists immediately, LP locked to you for ${LP_LOCK_DAYS} days. Same platform 1.00%-until-$50,000 tax applies on top, same as every launch with a pool.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("custom")}</div>
           </div>
+          <div class="curve-card ${draft.mode==='curve'?'selected':''}" data-mode="curve" style="text-align:left; padding:16px;">
+            <div class="name" style="margin-bottom:6px;">⚡ Quick Launch (0% tax)</div>
+            <div class="desc">Pump.fun-style: no liquidity to provide. Your token trades immediately against an on-chain bonding curve, then goes live on its own on a real, LP-locked DEX pool once the curve holds ${curvePoolSeedEthDisplay("curve")} ETH. 0% creator tax — you don't configure a rate here.</div>
+            <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("curve")}</div>
+          </div>
+          <div class="curve-card ${draft.mode==='customCurve'?'selected':''}" data-mode="customCurve" style="text-align:left; padding:16px;">
+            <div class="name" style="margin-bottom:6px;">⚡ Quick Launch (custom tax)</div>
+            <div class="desc">Same Quick Launch mechanics — no liquidity to provide, live on a bonding curve immediately — plus your own configured buy/sell tax, up to 5% total per side. Your tax activates once this curve goes live on a real DEX pool at ${curvePoolSeedEthDisplay("customCurve")} ETH; it stays recorded but inactive until then.</div>
+            <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("customCurve")}</div>
+          </div>
         </div>
         <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizNext">Continue</button></div>
       `;
@@ -5524,6 +7200,12 @@
     }
     if(wizStep===3 && draft.mode==="customDeploy"){
       return customDeployFeeStepHTML();
+    }
+    if(wizStep===3 && draft.mode==="curve"){
+      return curveStepHTML();
+    }
+    if(wizStep===3 && draft.mode==="customCurve"){
+      return customCurveStepHTML();
     }
     if(wizStep===3){
       if(draft.mode==="just"){
@@ -5600,6 +7282,26 @@
         <div class="review-row"><span class="k">Plus platform tax</span><span class="v num">1.00% until $50,000 MC</span></div>
         <div class="review-row"><span class="k">LP lock</span><span class="v num">${lpLockDaysDisplay()} days</span></div>
       `;
+    } else if(draft.mode==="curve"){
+      modeRows = `
+        <div class="review-row"><span class="k">Deploy mode</span><span class="v">Quick Launch (0% tax)</span></div>
+        <div class="review-row"><span class="k">Liquidity</span><span class="v">None — bonding curve only</span></div>
+        ${draft.buyInEth>0 ? `<div class="review-row"><span class="k">Your buy-in</span><span class="v num">${fmtEthAmt(draft.buyInEth)} ETH, same transaction</span></div>` : ""}
+        <div class="review-row"><span class="k">Curve fee</span><span class="v num">1.00% until live on DEX</span></div>
+        <div class="review-row"><span class="k">Live on DEX at</span><span class="v num">${curvePoolSeedEthDisplay("curve")} ETH</span></div>
+      `;
+    } else if(draft.mode==="customCurve"){
+      modeRows = `
+        <div class="review-row"><span class="k">Deploy mode</span><span class="v">Quick Launch (custom tax)</span></div>
+        <div class="review-row"><span class="k">Liquidity</span><span class="v">None — bonding curve only</span></div>
+        ${draft.buyInEth>0 ? `<div class="review-row"><span class="k">Your buy-in</span><span class="v num">${fmtEthAmt(draft.buyInEth)} ETH, same transaction</span></div>` : ""}
+        <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")} (active once live on DEX)</span></div>
+        <div class="review-row"><span class="k">Sell tax</span><span class="v num">${feeSideSummaryText("sell")} (active once live on DEX)</span></div>
+        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
+        <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${draft.customFees.marketingWallet ? fmtAddrSafe(draft.customFees.marketingWallet) : "—"}</span></div>
+        <div class="review-row"><span class="k">Curve fee</span><span class="v num">1.00% until live on DEX</span></div>
+        <div class="review-row"><span class="k">Live on DEX at</span><span class="v num">${curvePoolSeedEthDisplay("customCurve")} ETH</span></div>
+      `;
     } else {
       modeRows = `
         <div class="review-row"><span class="k">Deploy mode</span><span class="v">Launch 0% Tax Token</span></div>
@@ -5609,11 +7311,18 @@
         <div class="review-row"><span class="k">LP lock</span><span class="v num">${lpLockDaysDisplay()} days</span></div>
       `;
     }
-    const liquidityCost = (draft.mode==="liquidity" || draft.mode==="custom") ? draft.liquidityEth + draft.buyInEth : 0;
+    const liquidityCost = (draft.mode==="liquidity" || draft.mode==="custom") ? draft.liquidityEth + draft.buyInEth
+      : (draft.mode==="curve" || draft.mode==="customCurve") ? draft.buyInEth
+      : 0;
     const totalEth = fmtEthAmt(depFeeEth() + liquidityCost);
     const usesCustomFactory = draft.mode==="custom" || draft.mode==="customDeploy";
-    const isRealLaunch = usesCustomFactory ? !!customTokenFactoryAddress() : !!tokenFactoryAddress();
-    const factoryLabel = usesCustomFactory ? "CustomTokenFactory" : "TokenFactory";
+    const usesCurveFactory = draft.mode==="curve" || draft.mode==="customCurve";
+    const isRealLaunch = usesCurveFactory
+      ? (draft.mode==="customCurve" ? !!customBondingCurveFactoryAddress() : !!bondingCurveFactoryAddress())
+      : usesCustomFactory ? !!customTokenFactoryAddress() : !!tokenFactoryAddress();
+    const factoryLabel = usesCurveFactory
+      ? (draft.mode==="customCurve" ? "CustomBondingCurveFactory" : "BondingCurveFactory")
+      : usesCustomFactory ? "CustomTokenFactory" : "TokenFactory";
     const agreeLabel = isRealLaunch
       ? `<span><strong>This sends a real transaction</strong> from your connected wallet on ${escapeHtml(NETWORKS[appMode].chainName)}, spending the ${totalEth} ETH above (plus gas). I've reviewed the details and want to launch.</span>`
       : `<span>I understand Hood Launch is a demo interface — this will not deploy a real token or move real funds.</span>`;
@@ -5637,9 +7346,15 @@
 
   function updateLiquidityCostSummary(){
     const set = (id, text) => { const el=document.getElementById(id); if(el) el.textContent = text; };
-    set("liqRowVal", draft.liquidityEth+" ETH");
+    // Quick Launch modes have no liquidity leg at all (see curveStepHTML's
+    // own comment) — draft.liquidityEth is just whatever was left over from
+    // a previous mode selection, so it must not be added into these modes'
+    // totals even though the field itself still exists on the draft object.
+    const isCurve = draft.mode==="curve" || draft.mode==="customCurve";
+    const liquidityComponent = isCurve ? 0 : draft.liquidityEth;
+    if(!isCurve) set("liqRowVal", draft.liquidityEth+" ETH");
     set("buyInRowVal", fmtEthAmt(draft.buyInEth)+" ETH");
-    set("totalCostVal", fmtEthAmt(depFeeEth()+draft.liquidityEth+draft.buyInEth)+" ETH");
+    set("totalCostVal", fmtEthAmt(depFeeEth()+liquidityComponent+draft.buyInEth)+" ETH");
   }
   function bindWizardFields(){
     const byId = (id)=>document.getElementById(id);
@@ -6038,6 +7753,16 @@
   async function launchDraftToken(){
     if(!draft.name || !draft.ticker){ toast("Add a name and ticker before launching."); wizStep=1; renderWizard(); return; }
 
+    if(draft.mode==="curve" || draft.mode==="customCurve"){
+      if(draft.mode==="customCurve" && !validateCustomFeesOrToast()) return;
+      const curveFactoryAddress = draft.mode==="customCurve" ? customBondingCurveFactoryAddress() : bondingCurveFactoryAddress();
+      if(curveFactoryAddress){
+        launchCurveOnChainFlow(curveFactoryAddress);
+        return;
+      }
+      return launchCurveDraftToken();
+    }
+
     if(draft.mode==="custom" || draft.mode==="customDeploy"){
       if(!validateCustomFeesOrToast()) return;
       const customFactoryAddress = customTokenFactoryAddress();
@@ -6229,6 +7954,71 @@
       setLaunchStep("live", "done", `✅ $${escapeHtml(newToken.ticker)} is deployed and verified (simulated) — 100% of supply is in your wallet. <strong>It has no liquidity pool yet, so it isn't tradeable and none of your configured tax is active.</strong> You'd need to add liquidity yourself (e.g. on Uniswap) to make it live.`);
       toast(`✅ $${newToken.ticker} created and verified — 100% of supply is in your wallet, your tax configuration is recorded but inactive until you add liquidity (demo).`);
     }
+    appendLaunchActions(newToken);
+    renderStats();
+    renderGrid();
+    seedFeed();
+    if(launchBtn){ launchBtn.disabled = false; launchBtn.textContent = originalLabel; }
+    resetLaunchDraft();
+  }
+
+  // Simulated Quick Launch — same no-wallet-transaction, always-labeled-
+  // "(simulated)" shape as launchCustomDraftToken above, used whenever
+  // neither bondingCurveFactoryAddress()/customBondingCurveFactoryAddress()
+  // is configured yet for this network. Handles both "curve" and
+  // "customCurve" sub-modes.
+  async function launchCurveDraftToken(){
+    const isCustom = draft.mode==="customCurve";
+    const launchBtn = document.getElementById("wizLaunch");
+    const originalLabel = launchBtn ? launchBtn.textContent : "";
+    if(launchBtn){ launchBtn.disabled = true; launchBtn.textContent = "Launching…"; }
+    const pause = (ms)=> new Promise(r=>setTimeout(r, REDUCE_MOTION ? 0 : ms));
+    const buyInEth = draft.buyInEth;
+
+    const steps = [{ key:"deploy", label:"Deploying" }, { key:"verify", label:"Verifying" }, { key:"explorerVerify", label:"Confirming verification" }];
+    if(buyInEth>0) steps.push({ key:"bought", label:"Buying tokens" });
+    steps.push({ key:"live", label:"Curve live" });
+    startLaunchProgress(steps);
+
+    setLaunchStep("deploy", "active", "Simulating deployment — no wallet transaction, nothing on-chain.");
+    await pause(700);
+    setLaunchStep("deploy", "done", "Contract created (simulated) — no real address, nothing was deployed on-chain.");
+
+    setLaunchStep("verify", "active", "Simulating verification…");
+    await pause(500);
+    setLaunchStep("verify", "done", "Name, symbol, and supply match (simulated).");
+
+    setLaunchStep("explorerVerify", "active", "Simulating explorer verification…");
+    await pause(400);
+    setLaunchStep("explorerVerify", "done", "Verified on the block explorer (simulated) — source and ABI would be public.");
+
+    if(buyInEth>0){
+      setLaunchStep("bought", "active", "Simulating your buy-in…");
+      await pause(500);
+      setLaunchStep("bought", "done", `Buy-in filled (simulated) — ${fmtEthAmt(buyInEth)} ETH worth of $${escapeHtml(draft.ticker)} sent to your wallet.`);
+    }
+
+    const seedTargetWei = curvePoolSeedTargetWei(draft.mode);
+    const newToken = {
+      id:"custom-"+Date.now(), name:draft.name, ticker:draft.ticker, desc: draft.desc || "A freshly launched community token.",
+      price: 0, change24h: 0, hist:[0],
+      holders: buyInEth>0?2:1, mcap: 0, vol: 0,
+      catColor:"var(--signal-500)", mode: draft.mode, status:"curve-trading", createdCustom:true,
+      creatorBuyInEth: buyInEth, onChain:false,
+      curveRealEthReserveWei: (buyInEth>0 ? parseEtherToWei(buyInEth) : 0n).toString(),
+      curvePoolSeedTargetWeiVal: seedTargetWei.toString(),
+      isCustomCurve: isCustom,
+      customTax: isCustom, buyFees: isCustom ? {...draft.customFees.buy} : undefined, sellFees: isCustom ? {...draft.customFees.sell} : undefined,
+      reflectionAsset: isCustom ? (draft.customFees.reflectionAsset || null) : undefined,
+      marketingWallet: isCustom ? (draft.customFees.marketingWallet || null) : undefined,
+      networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+      createdAtMs: Date.now(),
+    };
+
+    tokens.unshift(newToken);
+    saveCustomTokens();
+    setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on the bonding curve (simulated) — goes live on a DEX pool once it holds ${curvePoolSeedEthDisplay(draft.mode)} ETH.`);
+    toast(`⚡ $${newToken.ticker} Quick Launched — trading live on a bonding curve, no liquidity provided (demo).`);
     appendLaunchActions(newToken);
     renderStats();
     renderGrid();
@@ -6460,7 +8250,7 @@
           <div class="my-token-row">
             ${tcMarkHTML(t, "width:36px; height:36px; font-size:.85rem;")}
             <div>
-              <div class="mtr-name">${escapeHtml(t.name)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(t.ticker)}</span> <span class="tc-status ${t.status}" style="display:inline-block; margin-left:6px; vertical-align:middle;">${STATUS_LABEL[t.status]||t.status}</span></div>
+              <div class="mtr-name">${escapeHtml(t.name)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(t.ticker)}</span> ${statusBadgeHTML(t.mode, t.status, "display:inline-block; margin-left:6px; vertical-align:middle;")}</div>
               <div class="mtr-meta">${t.onChain && t.tokenAddress ? fmtAddrSafe(t.tokenAddress) : "Simulated — not deployed on-chain"}</div>
               ${lpMeta}
               ${creatorRewardsRow}
@@ -7816,7 +9606,7 @@
       return `
         <div class="my-token-row">
           <div style="flex:1; min-width:0;">
-            <div class="mtr-name">${escapeHtml(label)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(entry.symbol || "TOKEN")}</span> <span class="tc-status ${status}" style="display:inline-block; margin-left:6px; vertical-align:middle;">${STATUS_LABEL[status]||status}</span></div>
+            <div class="mtr-name">${escapeHtml(label)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(entry.symbol || "TOKEN")}</span> ${statusBadgeHTML(entry.mode, status, "display:inline-block; margin-left:6px; vertical-align:middle;")}</div>
             <div class="mtr-meta">${entry.tokenAddress ? fmtAddrSafe(entry.tokenAddress) : "Unknown address"} · ${escapeHtml(when)}</div>
           </div>
           <div class="mtr-actions">
