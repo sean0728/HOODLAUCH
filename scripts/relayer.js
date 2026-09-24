@@ -162,6 +162,18 @@ process.on("unhandledRejection", (reason) => {
 // See discoverLaunchedTokens (sets the initial 0/1) and pollTokenPrices
 // (advances 0->1 on a late pool, and 1->2 on graduation) for where this is
 // actually written.
+//
+// Quick Launch ("curve"/"custom-curve" kinds) reuses the same two live
+// values rather than adding a fourth: a curve token has no pool and would
+// otherwise look like DEPLOYED, but it's actually tradeable by anyone the
+// instant CurveTokenCreated fires (against the curve itself, not a pool) —
+// the opposite of what DEPLOYED means for the other kinds ("creator-held,
+// nobody else can trade it yet"). So a curve/custom-curve token starts at
+// LAUNCHED, and pollTokenPrices' curve branch advances it to GRADUATED the
+// moment CurveGraduated fires (curveState().graduated reads true) — the
+// same permanent, never-regresses transition taxActive()/
+// platformTaxActive() already drives for the pool-based kinds, just keyed
+// off a different on-chain signal.
 const TOKEN_STATUS = { DEPLOYED: 0, LAUNCHED: 1, GRADUATED: 2 };
 
 // Managed Node.js hosts (GoDaddy Node.js Hosting among them) inject the
@@ -410,6 +422,56 @@ const CUSTOM_LAUNCH_VOUCHER_UINT_FIELDS = [
   "deadline",
 ];
 
+// Quick Launch (bonding curve) vouchers — see BondingCurveFactory.
+// CurveLaunchVoucher / CustomBondingCurveFactory.CustomCurveLaunchVoucher.
+// No addLiquidityAtLaunch/liquidityEthAmount fields at all: createCurveToken
+// has no liquidity step to relay, only curve creation plus the optional
+// same-transaction creator buy-in that already exists on the direct-wallet
+// path.
+const CURVE_LAUNCH_VOUCHER_FIELDS = [
+  "creator",
+  "name",
+  "symbol",
+  "totalSupply",
+  "creatorBuyEthAmount",
+  "minCreatorTokensOut",
+  "fee",
+  "salt",
+  "deadline",
+];
+const CURVE_LAUNCH_VOUCHER_UINT_FIELDS = [
+  "totalSupply",
+  "creatorBuyEthAmount",
+  "minCreatorTokensOut",
+  "fee",
+  "salt",
+  "deadline",
+];
+
+const CUSTOM_CURVE_LAUNCH_VOUCHER_FIELDS = [
+  "creator",
+  "name",
+  "symbol",
+  "totalSupply",
+  "buyFees",
+  "sellFees",
+  "reflectionAsset",
+  "marketingWallet",
+  "creatorBuyEthAmount",
+  "minCreatorTokensOut",
+  "fee",
+  "salt",
+  "deadline",
+];
+const CUSTOM_CURVE_LAUNCH_VOUCHER_UINT_FIELDS = [
+  "totalSupply",
+  "creatorBuyEthAmount",
+  "minCreatorTokensOut",
+  "fee",
+  "salt",
+  "deadline",
+];
+
 function normalizeVoucher(rawVoucher, fields, uintFields) {
   const voucher = {};
   for (const field of fields) {
@@ -439,6 +501,12 @@ function expectedDepositForToken(voucher) {
 
 function expectedDepositForCustom(voucher) {
   return voucher.addLiquidity ? voucher.fee + voucher.liquidityEthAmount + voucher.creatorBuyEthAmount : voucher.fee;
+}
+
+// A curve launch never has a liquidity leg to escrow — see the voucher
+// field lists above.
+function expectedDepositForCurve(voucher) {
+  return voucher.fee + voucher.creatorBuyEthAmount;
 }
 
 // JSON.stringify chokes on BigInt — every response that might carry one
@@ -482,7 +550,12 @@ async function postLaunchPipeline({
 
   let flattenedSource = null;
   try {
-    const contractFile = kind === "custom" ? "CustomToken.sol" : "LaunchedToken.sol";
+    // "custom" (CustomTokenFactory) and "custom-curve" (CustomBondingCurveFactory)
+    // both clone CustomToken; "token" (TokenFactory) and "curve"
+    // (BondingCurveFactory) both clone the plain LaunchedToken — see each
+    // factory's own createCurveToken()/relayedCreateCurveToken() for which
+    // token contract it initializes.
+    const contractFile = kind === "custom" || kind === "custom-curve" ? "CustomToken.sol" : "LaunchedToken.sol";
     const absPath = path.join(hre.config.paths.root, "contracts", contractFile);
     flattenedSource = await hre.run("flatten:get-flattened-sources", { files: [absPath] });
   } catch (err) {
@@ -569,6 +642,8 @@ function logEnvVarPresence() {
     "RELAYER_PRIVATE_KEY",
     "TOKEN_FACTORY_ADDRESS",
     "CUSTOM_TOKEN_FACTORY_ADDRESS",
+    "BONDING_CURVE_FACTORY_ADDRESS",
+    "CUSTOM_BONDING_CURVE_FACTORY_ADDRESS",
     "FEE_WALLET_DISTRIBUTOR_ADDRESS",
     "PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS",
     "HARDHAT_NETWORK",
@@ -635,8 +710,18 @@ async function main() {
   }
   const tokenFactoryAddress = process.env.TOKEN_FACTORY_ADDRESS || null;
   const customTokenFactoryAddress = process.env.CUSTOM_TOKEN_FACTORY_ADDRESS || null;
-  if (!tokenFactoryAddress && !customTokenFactoryAddress) {
-    throw new Error("Set at least one of TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS.");
+  // Quick Launch's two bonding-curve factories — optional, same as the two
+  // above. Gasless relaying for these only works once the deployed
+  // contracts actually have this relay code (see BondingCurveFactory.sol /
+  // CustomBondingCurveFactory.sol's own "gasless relayed launches" section)
+  // and the factory owner has run scripts/setRelayer.js against them.
+  const bondingCurveFactoryAddress = process.env.BONDING_CURVE_FACTORY_ADDRESS || null;
+  const customBondingCurveFactoryAddress = process.env.CUSTOM_BONDING_CURVE_FACTORY_ADDRESS || null;
+  if (!tokenFactoryAddress && !customTokenFactoryAddress && !bondingCurveFactoryAddress && !customBondingCurveFactoryAddress) {
+    throw new Error(
+      "Set at least one of TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS / " +
+        "BONDING_CURVE_FACTORY_ADDRESS / CUSTOM_BONDING_CURVE_FACTORY_ADDRESS."
+    );
   }
 
   const relayerWallet = new hre.ethers.Wallet(relayerPrivateKey, hre.ethers.provider);
@@ -704,6 +789,69 @@ async function main() {
       // was added (visible in the ledger as a real, non-null pairAddress
       // sitting next to five null liquidity fields).
       liquidityEventName: "InitialLiquidityLocked",
+    });
+  }
+
+  if (bondingCurveFactoryAddress) {
+    const factory = await hre.ethers.getContractAt("BondingCurveFactory", bondingCurveFactoryAddress, relayerWallet);
+    const onChainRelayer = await factory.relayer();
+    if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
+      console.warn(
+        `WARNING: BondingCurveFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
+          `relayedCreateCurveToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}) ` +
+          "(see scripts/setRelayer.js)."
+      );
+    }
+    watchers.push({
+      kind: "curve",
+      factory,
+      voucherFields: CURVE_LAUNCH_VOUCHER_FIELDS,
+      voucherUintFields: CURVE_LAUNCH_VOUCHER_UINT_FIELDS,
+      hashFn: (v) => factory.hashCurveLaunchVoucher(v),
+      expectedDepositFn: expectedDepositForCurve,
+      relayFn: (v, sig) => factory.relayedCreateCurveToken(v, sig),
+      createdEventName: "CurveTokenCreated",
+      // createCurveToken has no liquidity branch at all to relay — see
+      // CurveLaunchVoucher's own comment in contracts/BondingCurveFactory.sol
+      // — so there is no liquidity event for postLaunchPipeline/
+      // relayMatchedDeposit to look for here, same as the plain (non-
+      // relayed) curve launch path already records no liquidity fields.
+      liquidityEventName: null,
+    });
+  }
+
+  if (customBondingCurveFactoryAddress) {
+    const factory = await hre.ethers.getContractAt(
+      "CustomBondingCurveFactory",
+      customBondingCurveFactoryAddress,
+      relayerWallet
+    );
+    const onChainRelayer = await factory.relayer();
+    if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
+      console.warn(
+        `WARNING: CustomBondingCurveFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
+          `relayedCreateCurveToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}) ` +
+          "(see scripts/setRelayer.js)."
+      );
+    }
+    watchers.push({
+      kind: "custom-curve",
+      factory,
+      voucherFields: CUSTOM_CURVE_LAUNCH_VOUCHER_FIELDS,
+      voucherUintFields: CUSTOM_CURVE_LAUNCH_VOUCHER_UINT_FIELDS,
+      hashFn: (v) => factory.hashCustomCurveLaunchVoucher(v),
+      // Same escrow shape as the plain curve voucher (fee +
+      // creatorBuyEthAmount, no liquidity leg) — CustomCurveLaunchVoucher
+      // only adds fee-config fields on top, nothing that changes what gets
+      // escrowed.
+      expectedDepositFn: expectedDepositForCurve,
+      relayFn: (v, sig) => factory.relayedCreateCurveToken(v, sig),
+      // Same event name as the plain curve factory (CurveTokenCreated) —
+      // this factory's own version just carries two extra fields
+      // (reflectionAsset/marketingWallet). No collision risk: each watcher
+      // queries its own factory instance.
+      createdEventName: "CurveTokenCreated",
+      liquidityEventName: null,
     });
   }
 
@@ -836,6 +984,8 @@ async function main() {
       relayer: relayerWallet.address,
       tokenFactoryAddress: tokenFactoryAddress || null,
       customTokenFactoryAddress: customTokenFactoryAddress || null,
+      bondingCurveFactoryAddress: bondingCurveFactoryAddress || null,
+      customBondingCurveFactoryAddress: customBondingCurveFactoryAddress || null,
       feeWalletDistributorAddress: FEE_WALLET_DISTRIBUTOR_ADDRESS || null,
       feeWalletAutoSweepEnabled: !!feeWalletDistributor,
       platformRewardsDistributorAddress: PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS || null,
@@ -1482,6 +1632,8 @@ async function main() {
 
   if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
   if (customTokenFactoryAddress) app.post("/vouchers/custom", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom")));
+  if (bondingCurveFactoryAddress) app.post("/vouchers/curve", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "curve")));
+  if (customBondingCurveFactoryAddress) app.post("/vouchers/custom-curve", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom-curve")));
 
   app.get("/status/:voucherHash", async (req, res) => {
     const record = await getVoucher(req.params.voucherHash);
@@ -1719,8 +1871,16 @@ async function main() {
     if (fromBlock > latestBlock) return;
     const toBlock = Math.min(latestBlock, fromBlock + TOKEN_DISCOVERY_MAX_BLOCK_RANGE);
 
-    const filter = watcher.kind === "token" ? watcher.factory.filters.TokenCreated() : watcher.factory.filters.CustomTokenCreated();
+    // FIX: this used to be a hardcoded "token" vs "custom" two-way ternary
+    // (`watcher.kind === "token" ? ... TokenCreated() : ... CustomTokenCreated()`),
+    // which silently queried the WRONG event entirely for any watcher kind
+    // added after those first two — exactly what the new "curve"/
+    // "custom-curve" watchers below would have hit. Every watcher already
+    // carries its own createdEventName (see the watchers.push() calls in
+    // main()), so look it up generically instead of enumerating kinds here.
+    const filter = watcher.factory.filters[watcher.createdEventName]();
     const events = await watcher.factory.queryFilter(filter, fromBlock, toBlock);
+    const isCurveKind = watcher.kind === "curve" || watcher.kind === "custom-curve";
     for (const event of events) {
       const { token, creator, name, symbol, pair } = event.args;
       const pairAddress = pair && pair !== hre.ethers.ZeroAddress ? pair : null;
@@ -1735,7 +1895,17 @@ async function main() {
         // TokenFactory's "Deploy Token" mode; a "custom" kind always has a
         // pool from CustomTokenCreated (CustomTokenFactory has no
         // deploy-only mode), so it always starts LAUNCHED, never DEPLOYED.
-        tokenStatus: pairAddress ? TOKEN_STATUS.LAUNCHED : TOKEN_STATUS.DEPLOYED,
+        // A "curve"/"custom-curve" kind's CurveTokenCreated never carries a
+        // `pair` at all (pair is always undefined here — there is no pool
+        // until graduation) — but unlike a plain "Deploy Token", it's
+        // immediately tradeable against its own curve the instant this
+        // event fires, so it starts at LAUNCHED too rather than DEPLOYED
+        // (which would wrongly imply "creator-held, nobody else can trade
+        // it yet"). pollTokenPrices' curve branch advances it to GRADUATED
+        // once CurveGraduated fires, the same permanent-transition pattern
+        // taxActive()/platformTaxActive() already drives for the other
+        // kinds.
+        tokenStatus: isCurveKind || pairAddress ? TOKEN_STATUS.LAUNCHED : TOKEN_STATUS.DEPLOYED,
         discoveredAt: new Date().toISOString(),
       });
       console.log(`[discovery] tracking ${watcher.kind} token $${symbol} (${token})${pairAddress ? ` with pair ${pairAddress}` : ""}.`);
@@ -1868,6 +2038,78 @@ async function main() {
     }
 
     for (const entry of Object.values(tracked)) {
+      // Quick Launch ("curve"/"custom-curve") tokens trade against their own
+      // factory contract, not a Uniswap pair, until they graduate — there is
+      // no pairAddress yet, so the ordinary Swap-event loop below (which
+      // only ever looks at a pair) would just skip them forever. Read
+      // CurveBought/CurveSold straight off the factory instead, scoped to
+      // this one token via the event's own indexed `token` topic. Once a
+      // curve graduates, pollTokenPrices' curve branch backfills
+      // pairAddress from the factory's own pairOf() the same tick it
+      // observes curveState().graduated flip true, and every later tick
+      // falls through to the ordinary pairAddress-based Swap loop below like
+      // any other launched token — this branch only ever needs to cover the
+      // pre-graduation window.
+      if ((entry.kind === "curve" || entry.kind === "custom-curve") && !entry.pairAddress) {
+        const watcher = watchers.find((w) => w.kind === entry.kind);
+        if (!watcher) continue;
+        try {
+          const factoryAddress = await watcher.factory.getAddress();
+          const cursorKey = `${factoryAddress}:curve-activity:${entry.tokenAddress}`;
+          const latestBlock = await hre.ethers.provider.getBlockNumber();
+          const storedCursor = await getCursor(cursorKey);
+          const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // skip pre-existing history, same convention as the Swap loop below
+          if (fromBlock > latestBlock) continue;
+          const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
+
+          const [boughtEvents, soldEvents] = await Promise.all([
+            watcher.factory.queryFilter(watcher.factory.filters.CurveBought(entry.tokenAddress), fromBlock, toBlock),
+            watcher.factory.queryFilter(watcher.factory.filters.CurveSold(entry.tokenAddress), fromBlock, toBlock),
+          ]);
+          const ethUsd = await fetchEthUsdFromFeed(entry.priceFeed);
+
+          for (const event of boughtEvents) {
+            const key = `${event.transactionHash}:${event.index}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const { buyer, ethIn, tokensOut } = event.args;
+            const t = await blockTimestampMs(event.blockNumber);
+            await appendActivity(network, {
+              t,
+              txHash: event.transactionHash,
+              logIndex: event.index,
+              tokenAddress: entry.tokenAddress,
+              symbol: entry.symbol || null,
+              side: "buy",
+              wallet: buyer,
+              tokenAmount: tokensOut.toString(),
+              usdValue: (Number(ethIn) / 1e18) * ethUsd,
+            });
+          }
+          for (const event of soldEvents) {
+            const key = `${event.transactionHash}:${event.index}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const { seller, tokensIn, ethOut } = event.args;
+            const t = await blockTimestampMs(event.blockNumber);
+            await appendActivity(network, {
+              t,
+              txHash: event.transactionHash,
+              logIndex: event.index,
+              tokenAddress: entry.tokenAddress,
+              symbol: entry.symbol || null,
+              side: "sell",
+              wallet: seller,
+              tokenAmount: tokensIn.toString(),
+              usdValue: (Number(ethOut) / 1e18) * ethUsd,
+            });
+          }
+          await setCursor(cursorKey, toBlock);
+        } catch (err) {
+          console.warn(`[activity] skip curve ${entry.tokenAddress}: ${err.message}`);
+        }
+        continue;
+      }
       if (!entry.pairAddress) continue;
       try {
         const pair = await hre.ethers.getContractAt(UNIV2_PAIR_ABI, entry.pairAddress, hre.ethers.provider);
@@ -1997,6 +2239,71 @@ async function main() {
           continue;
         }
 
+        // Quick Launch ("curve"/"custom-curve") tokens have no Uniswap pair
+        // at all until their curve graduates — price them off curveState()'s
+        // own reserves instead, and only once a pool actually exists does
+        // this fall through to the ordinary pair-reserve branch below like
+        // any other launched token.
+        if ((entry.kind === "curve" || entry.kind === "custom-curve") && !entry.pairAddress) {
+          const watcher = watchers.find((w) => w.kind === entry.kind);
+          if (!watcher) continue;
+          const state = await watcher.factory.curveState(entry.tokenAddress);
+          if (state.graduated) {
+            // A pool just appeared — backfill pairAddress from the
+            // factory's own pairOf() (written inside _doGraduate the same
+            // transaction the pool was created), so THIS tick's fall-through
+            // and every tick after it reads real Uniswap reserves via the
+            // ordinary pool-based branch below instead of this curve-only
+            // one. TOKEN_STATUS deliberately stays LAUNCHED here, not
+            // GRADUATED — see TOKEN_STATUS's own comment above: graduating
+            // off the curve only means a pool plus this token's OWN
+            // post-graduation tax phase now exist, not that its
+            // taxActive()/platformTaxActive() has read false yet. That real
+            // graduation is what the pool-based branch's own taxActive
+            // check below already detects and persists, exactly the same
+            // way it already does for every other launched token.
+            try {
+              const onChainPair = await watcher.factory.pairOf(entry.tokenAddress);
+              if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
+                entry.pairAddress = onChainPair;
+                await upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
+              }
+            } catch (err) {
+              // best-effort — next tick tries again
+            }
+            // Falls through below (no `continue`) so a pairAddress found
+            // just now still gets a real, pool-priced point this same tick
+            // instead of waiting a full extra poll interval for one.
+          } else {
+            // Still pre-pool: marginal spot price off this curve's own
+            // constant-product reserves (effective ETH reserve / effective
+            // token reserve — "effective" meaning virtual + real on both
+            // sides, exactly what _quoteBuy/_quoteSell price an actual trade
+            // against). Same reserve-ratio shape computeTokenPriceUsd already
+            // expects from a Uniswap pair, just sourced from curveState()
+            // instead of getReserves().
+            const effEthReserve = state.virtualEthReserve + state.realEthReserve;
+            const effTokenReserve = state.virtualTokenReserve + state.tokensRemaining;
+            const ethUsd = await fetchEthUsdFromFeed(entry.priceFeed);
+            const priceUsd = computeTokenPriceUsd(effTokenReserve, effEthReserve, ethUsd);
+            const mcapUsd = computeMarketCapUsd(priceUsd, state.totalSupply_);
+            // A curve graduates once realEthReserve crosses poolSeedTargetWei
+            // — an ETH amount, not a dollar market cap — so progress here
+            // tracks THAT crossing directly instead of reusing
+            // computeTaxProgressPct's USD-target math, which has nothing to
+            // compare against pre-pool.
+            const taxProgressPct =
+              state.poolSeedTargetWei_ > 0n
+                ? Math.min(100, (Number(state.realEthReserve) / Number(state.poolSeedTargetWei_)) * 100)
+                : null;
+            const holders = await fetchHolderCount(entry.tokenAddress);
+            const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive: true };
+            if (holders !== null) point.holders = holders;
+            await appendPricePoint(network, entry.tokenAddress, point);
+            continue;
+          }
+        }
+
         // A "Just Launch" token can gain a pool later via independently-
         // added liquidity (see index.html's checkPendingLiquidity), including
         // via LaunchedToken/CustomToken's own _maybeAutoActivateTax()/
@@ -2049,13 +2356,18 @@ async function main() {
         const tokenReserve = wethIsToken0 ? reserves.reserve1 : reserves.reserve0;
         const wethReserve = wethIsToken0 ? reserves.reserve0 : reserves.reserve1;
 
-        const stateAbi = entry.kind === "custom" ? CUSTOM_TOKEN_STATE_ABI : TOKEN_STATE_ABI;
+        // "custom" (CustomTokenFactory) and "custom-curve"
+        // (CustomBondingCurveFactory, post-graduation) both clone CustomToken,
+        // whose post-graduation tax surface is named platformTaxActive()
+        // rather than plain taxActive() — see CustomToken.sol.
+        const isCustomLike = entry.kind === "custom" || entry.kind === "custom-curve";
+        const stateAbi = isCustomLike ? CUSTOM_TOKEN_STATE_ABI : TOKEN_STATE_ABI;
         const token = await hre.ethers.getContractAt(stateAbi, entry.tokenAddress, hre.ethers.provider);
         const [totalSupply, feedAddress, graduationTargetUsd, taxActive] = await Promise.all([
           token.totalSupply(),
           token.priceFeed(),
           token.graduationTargetUsd(),
-          entry.kind === "custom" ? token.platformTaxActive() : token.taxActive(),
+          isCustomLike ? token.platformTaxActive() : token.taxActive(),
         ]);
         if (entry.priceFeed !== feedAddress) await upsertTrackedToken(network, entry.tokenAddress, { priceFeed: feedAddress });
         // Graduation is permanent on-chain once taxActive()/

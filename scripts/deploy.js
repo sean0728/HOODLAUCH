@@ -53,6 +53,16 @@ const KNOWN_PRICE_FEED_ADDRESSES = {
 const DEPLOY_FEE_USD = 50;
 const LAUNCH_FEE_USD = 100;
 
+// Quick Launch (bonding curve) pricing target — no pool exists yet at
+// curve-creation time, same "deploy only" situation deployFeeWei prices for
+// the plain/custom-tax paths, but priced independently at its own USD target
+// rather than reusing DEPLOY_FEE_USD, since the business decision here is a
+// flat $25 launch fee for both bonding-curve modes (BondingCurveFactory and
+// CustomBondingCurveFactory share this same target — see curveLaunchFeeWei
+// below). CURVE_LAUNCH_FEE_WEI in .env overrides this conversion entirely,
+// same convention as DEPLOY_FEE_WEI/LAUNCH_FEE_WEI above.
+const CURVE_LAUNCH_FEE_USD = 25;
+
 // Node's script context has no CSP restriction (that only applies to the
 // published front-end page — see index.html's own price-fetch logic),
 // so a plain public API call works fine here.
@@ -88,18 +98,26 @@ async function main() {
 
   let deployFeeWei = process.env.DEPLOY_FEE_WEI ? BigInt(process.env.DEPLOY_FEE_WEI) : null;
   let launchFeeWei = process.env.LAUNCH_FEE_WEI ? BigInt(process.env.LAUNCH_FEE_WEI) : null;
-  if (deployFeeWei == null || launchFeeWei == null) {
+  let curveLaunchFeeWei = process.env.CURVE_LAUNCH_FEE_WEI ? BigInt(process.env.CURVE_LAUNCH_FEE_WEI) : null;
+  if (deployFeeWei == null || launchFeeWei == null || curveLaunchFeeWei == null) {
     const ethUsdPrice = await fetchEthUsdPrice();
     if (ethUsdPrice != null) {
-      console.log(`Live ETH price: $${ethUsdPrice} — converting $${DEPLOY_FEE_USD}/$${LAUNCH_FEE_USD} fee targets to wei.`);
+      console.log(
+        `Live ETH price: $${ethUsdPrice} — converting $${DEPLOY_FEE_USD}/$${LAUNCH_FEE_USD}/$${CURVE_LAUNCH_FEE_USD} ` +
+          "fee targets to wei."
+      );
       if (deployFeeWei == null) deployFeeWei = hre.ethers.parseEther((DEPLOY_FEE_USD / ethUsdPrice).toFixed(18));
       if (launchFeeWei == null) launchFeeWei = hre.ethers.parseEther((LAUNCH_FEE_USD / ethUsdPrice).toFixed(18));
+      if (curveLaunchFeeWei == null)
+        curveLaunchFeeWei = hre.ethers.parseEther((CURVE_LAUNCH_FEE_USD / ethUsdPrice).toFixed(18));
     } else {
       console.log("Couldn't fetch a live ETH price — falling back to a rough $3000/ETH estimate for the initial fee. " +
-        "Update it for real once deployed: factory.setDeployFee()/setLaunchFee() (see scripts/updateFees.js).");
+        "Update it for real once deployed: factory.setDeployFee()/setLaunchFee()/setCurveLaunchFee() (see scripts/updateFees.js).");
       const FALLBACK_ETH_USD = 3000;
       if (deployFeeWei == null) deployFeeWei = hre.ethers.parseEther((DEPLOY_FEE_USD / FALLBACK_ETH_USD).toFixed(18));
       if (launchFeeWei == null) launchFeeWei = hre.ethers.parseEther((LAUNCH_FEE_USD / FALLBACK_ETH_USD).toFixed(18));
+      if (curveLaunchFeeWei == null)
+        curveLaunchFeeWei = hre.ethers.parseEther((CURVE_LAUNCH_FEE_USD / FALLBACK_ETH_USD).toFixed(18));
     }
   }
   const lpLockDurationSeconds = process.env.LP_LOCK_DURATION_SECONDS || 15 * 24 * 60 * 60; // 15 days
@@ -230,11 +248,18 @@ async function main() {
   const tokenImplementation = await LaunchedToken.deploy();
   await tokenImplementation.waitForDeployment();
   console.log(`LaunchedToken implementation deployed at ${await tokenImplementation.getAddress()}`);
+  // Real, unique bytecode (not a clone target reached the normal way, since
+  // every LAUNCHED token's own bytecode is just the ~45-byte EIP-1167 proxy
+  // pointing at this address) -- this is the address explorers and holders
+  // actually need verified source for. Was never verified by any earlier
+  // version of this script; fixed here rather than left as a standing gap.
+  const tokenImplementationVerification = await verifyContract(await tokenImplementation.getAddress(), []);
 
   const LiquidityLocker = await hre.ethers.getContractFactory("LiquidityLocker");
   const locker = await LiquidityLocker.deploy();
   await locker.waitForDeployment();
   console.log(`LiquidityLocker deployed at ${await locker.getAddress()}`);
+  const lockerVerification = await verifyContract(await locker.getAddress(), []);
 
   const tokenFactoryConstructorArgs = [
     await tokenImplementation.getAddress(),
@@ -278,10 +303,12 @@ async function main() {
   const customTokenImplementation = await CustomToken.deploy();
   await customTokenImplementation.waitForDeployment();
   console.log(`CustomToken implementation deployed at ${await customTokenImplementation.getAddress()}`);
+  const customTokenImplementationVerification = await verifyContract(await customTokenImplementation.getAddress(), []);
 
   const customLocker = await LiquidityLocker.deploy();
   await customLocker.waitForDeployment();
   console.log(`LiquidityLocker (custom) deployed at ${await customLocker.getAddress()}`);
+  const customLockerVerification = await verifyContract(await customLocker.getAddress(), []);
 
   const customTokenFactoryConstructorArgs = [
     await customTokenImplementation.getAddress(),
@@ -307,6 +334,105 @@ async function main() {
   // Same reasoning as TokenFactory above — real, unique bytecode, worth
   // verifying right away rather than waiting on the first custom launch.
   const customTokenFactoryVerification = await verifyContract(customFactoryAddress, customTokenFactoryConstructorArgs);
+
+  // ---- BondingCurveFactory: the zero-tax bonding-curve launch mode (5th
+  // mode — deploy first, trade against an internal curve, graduate to a
+  // real DEX pool once poolSeedTargetWei is crossed). Reuses the SAME
+  // LaunchedToken implementation TokenFactory clones above — the
+  // implementation contract itself can never be initialized directly (see
+  // LaunchedToken's own guard, and its "cannot be initialized twice" test),
+  // so sharing one implementation across every factory that clones
+  // LaunchedToken is safe, and avoids deploying + verifying a redundant
+  // duplicate. Still needs its OWN LiquidityLocker instance though —
+  // LiquidityLocker.setFactory() is a permanent, one-time wiring, so it can
+  // never be shared with TokenFactory's locker above.
+  const bondingCurveLocker = await LiquidityLocker.deploy();
+  await bondingCurveLocker.waitForDeployment();
+  console.log(`LiquidityLocker (bonding curve) deployed at ${await bondingCurveLocker.getAddress()}`);
+  const bondingCurveLockerVerification = await verifyContract(await bondingCurveLocker.getAddress(), []);
+
+  // curveLaunchFee: flat fee to create a curve token, priced at its own
+  // $25 target (CURVE_LAUNCH_FEE_USD above) — computed from the live ETH
+  // price alongside deployFeeWei/launchFeeWei earlier in this script.
+  // Shared by both bonding-curve factories below.
+  const bondingCurveFactoryConstructorArgs = [
+    await tokenImplementation.getAddress(),
+    routerAddress,
+    await bondingCurveLocker.getAddress(),
+    curveLaunchFeeWei,
+    feeTreasury,
+    lpLockDurationSeconds,
+    platformFeeWallet,
+    priceFeedAddress,
+  ];
+  const BondingCurveFactory = await hre.ethers.getContractFactory("BondingCurveFactory");
+  const bondingCurveFactory = await BondingCurveFactory.deploy(...bondingCurveFactoryConstructorArgs);
+  await bondingCurveFactory.waitForDeployment();
+  const bondingCurveFactoryAddress = await bondingCurveFactory.getAddress();
+  console.log(`BondingCurveFactory deployed at ${bondingCurveFactoryAddress}`);
+
+  const setBondingCurveFactoryTx = await bondingCurveLocker.setFactory(bondingCurveFactoryAddress);
+  await setBondingCurveFactoryTx.wait();
+  console.log("LiquidityLocker (bonding curve) wired to BondingCurveFactory.");
+
+  // poolSeedTargetWei defaults to 1.5 ETH in the contract itself — only
+  // touched here if POOL_SEED_TARGET_WEI is explicitly set. Applied to both
+  // bonding curve factories identically (see CustomBondingCurveFactory
+  // below), so "how much real ETH graduates a curve" means the same thing
+  // regardless of which curve variant a creator picks.
+  if (process.env.POOL_SEED_TARGET_WEI) {
+    const poolSeedTargetWei = BigInt(process.env.POOL_SEED_TARGET_WEI);
+    const setPoolSeedTx = await bondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei);
+    await setPoolSeedTx.wait();
+    console.log(`BondingCurveFactory.poolSeedTargetWei set to ${poolSeedTargetWei} wei.`);
+  }
+
+  const bondingCurveFactoryVerification = await verifyContract(
+    bondingCurveFactoryAddress,
+    bondingCurveFactoryConstructorArgs
+  );
+
+  // ---- CustomBondingCurveFactory: the creator-configurable-tax bonding-
+  // curve variant (custom tax equivalent of the mode above). Reuses the SAME
+  // CustomToken implementation CustomTokenFactory clones above, for the
+  // identical sharing-is-safe reason, and gets its own third LiquidityLocker
+  // instance, for the identical one-locker-per-factory reason.
+  const customBondingCurveLocker = await LiquidityLocker.deploy();
+  await customBondingCurveLocker.waitForDeployment();
+  console.log(`LiquidityLocker (custom bonding curve) deployed at ${await customBondingCurveLocker.getAddress()}`);
+  const customBondingCurveLockerVerification = await verifyContract(await customBondingCurveLocker.getAddress(), []);
+
+  const customBondingCurveFactoryConstructorArgs = [
+    await customTokenImplementation.getAddress(),
+    routerAddress,
+    await customBondingCurveLocker.getAddress(),
+    curveLaunchFeeWei,
+    feeTreasury,
+    lpLockDurationSeconds,
+    platformFeeWallet,
+    priceFeedAddress,
+  ];
+  const CustomBondingCurveFactory = await hre.ethers.getContractFactory("CustomBondingCurveFactory");
+  const customBondingCurveFactory = await CustomBondingCurveFactory.deploy(...customBondingCurveFactoryConstructorArgs);
+  await customBondingCurveFactory.waitForDeployment();
+  const customBondingCurveFactoryAddress = await customBondingCurveFactory.getAddress();
+  console.log(`CustomBondingCurveFactory deployed at ${customBondingCurveFactoryAddress}`);
+
+  const setCustomBondingCurveFactoryTx = await customBondingCurveLocker.setFactory(customBondingCurveFactoryAddress);
+  await setCustomBondingCurveFactoryTx.wait();
+  console.log("LiquidityLocker (custom bonding curve) wired to CustomBondingCurveFactory.");
+
+  if (process.env.POOL_SEED_TARGET_WEI) {
+    const poolSeedTargetWei = BigInt(process.env.POOL_SEED_TARGET_WEI);
+    const setCustomPoolSeedTx = await customBondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei);
+    await setCustomPoolSeedTx.wait();
+    console.log(`CustomBondingCurveFactory.poolSeedTargetWei set to ${poolSeedTargetWei} wei.`);
+  }
+
+  const customBondingCurveFactoryVerification = await verifyContract(
+    customBondingCurveFactoryAddress,
+    customBondingCurveFactoryConstructorArgs
+  );
 
   // ---- Platform rewards (buyback/burn/holder-airdrop) — entirely
   // optional, and off by default. Leaving DEPLOY_PLATFORM_TOKEN unset
@@ -378,7 +504,14 @@ async function main() {
     await setRewardsTx1.wait();
     const setRewardsTx2 = await customFactory.setRewardsDistributor(rewardsDistributorAddress);
     await setRewardsTx2.wait();
-    console.log(`TokenFactory and CustomTokenFactory both wired to PlatformRewardsDistributor at ${rewardsDistributorAddress}.`);
+    const setRewardsTx3 = await bondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress);
+    await setRewardsTx3.wait();
+    const setRewardsTx4 = await customBondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress);
+    await setRewardsTx4.wait();
+    console.log(
+      "TokenFactory, CustomTokenFactory, BondingCurveFactory, and CustomBondingCurveFactory all wired to " +
+        `PlatformRewardsDistributor at ${rewardsDistributorAddress}.`
+    );
   }
 
   // ---- Creator rewards (per-token ETH, claimable by the token's own
@@ -413,8 +546,15 @@ async function main() {
     await setCreatorRewardsTx1.wait();
     const setCreatorRewardsTx2 = await customFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
     await setCreatorRewardsTx2.wait();
+    const setCreatorRewardsTx3 = await bondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
+    await setCreatorRewardsTx3.wait();
+    const setCreatorRewardsTx4 = await customBondingCurveFactory.setCreatorRewardsDistributor(
+      creatorRewardsDistributorAddress
+    );
+    await setCreatorRewardsTx4.wait();
     console.log(
-      `TokenFactory and CustomTokenFactory both wired to CreatorRewardsDistributor at ${creatorRewardsDistributorAddress}.`
+      "TokenFactory, CustomTokenFactory, BondingCurveFactory, and CustomBondingCurveFactory all wired to " +
+        `CreatorRewardsDistributor at ${creatorRewardsDistributorAddress}.`
     );
   }
 
@@ -476,20 +616,44 @@ async function main() {
     await setFeeWalletDistributorTx1.wait();
     const setFeeWalletDistributorTx2 = await customFactory.setFeeWalletDistributor(feeWalletDistributorAddress);
     await setFeeWalletDistributorTx2.wait();
+    const setFeeWalletDistributorTx3 = await bondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress);
+    await setFeeWalletDistributorTx3.wait();
+    const setFeeWalletDistributorTx4 = await customBondingCurveFactory.setFeeWalletDistributor(
+      feeWalletDistributorAddress
+    );
+    await setFeeWalletDistributorTx4.wait();
     console.log(
-      `TokenFactory and CustomTokenFactory both wired to FeeWalletDistributor at ${feeWalletDistributorAddress}.`
+      "TokenFactory, CustomTokenFactory, BondingCurveFactory, and CustomBondingCurveFactory all wired to " +
+        `FeeWalletDistributor at ${feeWalletDistributorAddress}.`
     );
   }
 
   const deploymentSummary = {
     tokenImplementation: await tokenImplementation.getAddress(),
+    tokenImplementationVerified: tokenImplementationVerification.verified,
     liquidityLocker: await locker.getAddress(),
+    liquidityLockerVerified: lockerVerification.verified,
     tokenFactory: factoryAddress,
     tokenFactoryVerified: tokenFactoryVerification.verified,
     customTokenImplementation: await customTokenImplementation.getAddress(),
+    customTokenImplementationVerified: customTokenImplementationVerification.verified,
     customLiquidityLocker: await customLocker.getAddress(),
+    customLiquidityLockerVerified: customLockerVerification.verified,
     customTokenFactory: customFactoryAddress,
     customTokenFactoryVerified: customTokenFactoryVerification.verified,
+    // Bonding-curve launch modes (5th mode + its custom-tax variant) — both
+    // reuse the LaunchedToken/CustomToken implementations verified above,
+    // so there's nothing further to verify there; each gets its own
+    // LiquidityLocker instance, verified independently.
+    bondingCurveLiquidityLocker: await bondingCurveLocker.getAddress(),
+    bondingCurveLiquidityLockerVerified: bondingCurveLockerVerification.verified,
+    bondingCurveFactory: bondingCurveFactoryAddress,
+    bondingCurveFactoryVerified: bondingCurveFactoryVerification.verified,
+    customBondingCurveLiquidityLocker: await customBondingCurveLocker.getAddress(),
+    customBondingCurveLiquidityLockerVerified: customBondingCurveLockerVerification.verified,
+    customBondingCurveFactory: customBondingCurveFactoryAddress,
+    customBondingCurveFactoryVerified: customBondingCurveFactoryVerification.verified,
+    curveLaunchFeeWei: curveLaunchFeeWei.toString(),
     router: routerAddress,
     priceFeed: priceFeedAddress,
     deployFeeWei: deployFeeWei.toString(),
