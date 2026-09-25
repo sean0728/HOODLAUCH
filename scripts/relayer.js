@@ -730,129 +730,178 @@ async function main() {
 
   const watchers = [];
 
+  // FIX: each of these four factory loads used to run unguarded — a missing/
+  // stale Hardhat build artifact for ANY one of them (HH700) threw out of
+  // main() before app.listen() was ever reached, crashing the entire process
+  // and taking the whole site down (index.html, config.json, GET /launches,
+  // wallet-paid launches — everything) over what should only ever disable
+  // gasless relaying for that one launch type. feeWalletDistributor/
+  // platformRewardsDistributor below were already guarded this way for
+  // exactly this reason (see their own comments) — this brings the four
+  // actual factories in line with that same, more important protection.
   if (tokenFactoryAddress) {
-    const factory = await hre.ethers.getContractAt("TokenFactory", tokenFactoryAddress, relayerWallet);
-    const onChainRelayer = await factory.relayer();
-    if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
-      console.warn(
-        `WARNING: TokenFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
-          `relayedCreateToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}).`
+    try {
+      const factory = await hre.ethers.getContractAt("TokenFactory", tokenFactoryAddress, relayerWallet);
+      const onChainRelayer = await factory.relayer();
+      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
+        console.warn(
+          `WARNING: TokenFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
+            `relayedCreateToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}).`
+        );
+      }
+      watchers.push({
+        kind: "token",
+        factory,
+        voucherFields: LAUNCH_VOUCHER_FIELDS,
+        voucherUintFields: LAUNCH_VOUCHER_UINT_FIELDS,
+        hashFn: (v) => factory.hashLaunchVoucher(v),
+        expectedDepositFn: expectedDepositForToken,
+        relayFn: (v, sig) => factory.relayedCreateToken(v, sig),
+        createdEventName: "TokenCreated",
+        // TokenFactory's own liquidity event — carries ethAmount/tokenAmount
+        // in addition to lpAmount/lockId/unlockTime (see LiquidityAdded in
+        // contracts/TokenFactory.sol).
+        liquidityEventName: "LiquidityAdded",
+      });
+    } catch (err) {
+      console.error(
+        `Could not load TokenFactory at ${tokenFactoryAddress} (${err.message}). Gasless relaying for plain-token ` +
+          "launches is DISABLED for this run — everything else (the site, wallet-paid launches, other factories' " +
+          "relaying, activity/price polling) starts normally regardless. This specific error usually means the " +
+          "contract's build artifact wasn't included in this deploy (a stale/cached build) — a clean rebuild that " +
+          "actually recompiles contracts/TokenFactory.sol should fix it."
       );
     }
-    watchers.push({
-      kind: "token",
-      factory,
-      voucherFields: LAUNCH_VOUCHER_FIELDS,
-      voucherUintFields: LAUNCH_VOUCHER_UINT_FIELDS,
-      hashFn: (v) => factory.hashLaunchVoucher(v),
-      expectedDepositFn: expectedDepositForToken,
-      relayFn: (v, sig) => factory.relayedCreateToken(v, sig),
-      createdEventName: "TokenCreated",
-      // TokenFactory's own liquidity event — carries ethAmount/tokenAmount
-      // in addition to lpAmount/lockId/unlockTime (see LiquidityAdded in
-      // contracts/TokenFactory.sol).
-      liquidityEventName: "LiquidityAdded",
-    });
   }
 
   if (customTokenFactoryAddress) {
-    const factory = await hre.ethers.getContractAt("CustomTokenFactory", customTokenFactoryAddress, relayerWallet);
-    const onChainRelayer = await factory.relayer();
-    if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
-      console.warn(
-        `WARNING: CustomTokenFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
-          `relayedCreateCustomToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}).`
+    try {
+      const factory = await hre.ethers.getContractAt("CustomTokenFactory", customTokenFactoryAddress, relayerWallet);
+      const onChainRelayer = await factory.relayer();
+      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
+        console.warn(
+          `WARNING: CustomTokenFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
+            `relayedCreateCustomToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}).`
+        );
+      }
+      watchers.push({
+        kind: "custom",
+        factory,
+        voucherFields: CUSTOM_LAUNCH_VOUCHER_FIELDS,
+        voucherUintFields: CUSTOM_LAUNCH_VOUCHER_UINT_FIELDS,
+        hashFn: (v) => factory.hashCustomLaunchVoucher(v),
+        expectedDepositFn: expectedDepositForCustom,
+        relayFn: (v, sig) => factory.relayedCreateCustomToken(v, sig),
+        createdEventName: "CustomTokenCreated",
+        // FIX: CustomTokenFactory never emits "LiquidityAdded" — that event
+        // (and its ethAmount/tokenAmount fields) only exists on TokenFactory.
+        // CustomTokenFactory's own equivalent is InitialLiquidityLocked (see
+        // contracts/CustomTokenFactory.sol), which carries lpAmount/lockId/
+        // unlockTime but never the ETH/token amounts actually paired into
+        // the pool — scripts/customLaunch.js's own record-keeping already
+        // works around that same gap by falling back to the caller-supplied
+        // liquidityEthAmount instead of an event value; postLaunchPipeline
+        // below does the same for a relayed launch, from the voucher's own
+        // liquidityEthAmount. Before this fix, relayMatchedDeposit only ever
+        // looked for "LiquidityAdded", so every relayed custom-token launch
+        // recorded liquidityEthAmount/liquidityLpAmount/liquidityLockId/
+        // liquidityUnlockTime as permanently null even when liquidity really
+        // was added (visible in the ledger as a real, non-null pairAddress
+        // sitting next to five null liquidity fields).
+        liquidityEventName: "InitialLiquidityLocked",
+      });
+    } catch (err) {
+      console.error(
+        `Could not load CustomTokenFactory at ${customTokenFactoryAddress} (${err.message}). Gasless relaying for ` +
+          "custom-tax-token launches is DISABLED for this run — everything else (the site, wallet-paid launches, " +
+          "other factories' relaying, activity/price polling) starts normally regardless. This specific error " +
+          "usually means the contract's build artifact wasn't included in this deploy (a stale/cached build) — a " +
+          "clean rebuild that actually recompiles contracts/CustomTokenFactory.sol should fix it."
       );
     }
-    watchers.push({
-      kind: "custom",
-      factory,
-      voucherFields: CUSTOM_LAUNCH_VOUCHER_FIELDS,
-      voucherUintFields: CUSTOM_LAUNCH_VOUCHER_UINT_FIELDS,
-      hashFn: (v) => factory.hashCustomLaunchVoucher(v),
-      expectedDepositFn: expectedDepositForCustom,
-      relayFn: (v, sig) => factory.relayedCreateCustomToken(v, sig),
-      createdEventName: "CustomTokenCreated",
-      // FIX: CustomTokenFactory never emits "LiquidityAdded" — that event
-      // (and its ethAmount/tokenAmount fields) only exists on TokenFactory.
-      // CustomTokenFactory's own equivalent is InitialLiquidityLocked (see
-      // contracts/CustomTokenFactory.sol), which carries lpAmount/lockId/
-      // unlockTime but never the ETH/token amounts actually paired into
-      // the pool — scripts/customLaunch.js's own record-keeping already
-      // works around that same gap by falling back to the caller-supplied
-      // liquidityEthAmount instead of an event value; postLaunchPipeline
-      // below does the same for a relayed launch, from the voucher's own
-      // liquidityEthAmount. Before this fix, relayMatchedDeposit only ever
-      // looked for "LiquidityAdded", so every relayed custom-token launch
-      // recorded liquidityEthAmount/liquidityLpAmount/liquidityLockId/
-      // liquidityUnlockTime as permanently null even when liquidity really
-      // was added (visible in the ledger as a real, non-null pairAddress
-      // sitting next to five null liquidity fields).
-      liquidityEventName: "InitialLiquidityLocked",
-    });
   }
 
   if (bondingCurveFactoryAddress) {
-    const factory = await hre.ethers.getContractAt("BondingCurveFactory", bondingCurveFactoryAddress, relayerWallet);
-    const onChainRelayer = await factory.relayer();
-    if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
-      console.warn(
-        `WARNING: BondingCurveFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
-          `relayedCreateCurveToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}) ` +
-          "(see scripts/setRelayer.js)."
+    try {
+      const factory = await hre.ethers.getContractAt("BondingCurveFactory", bondingCurveFactoryAddress, relayerWallet);
+      const onChainRelayer = await factory.relayer();
+      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
+        console.warn(
+          `WARNING: BondingCurveFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
+            `relayedCreateCurveToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}) ` +
+            "(see scripts/setRelayer.js)."
+        );
+      }
+      watchers.push({
+        kind: "curve",
+        factory,
+        voucherFields: CURVE_LAUNCH_VOUCHER_FIELDS,
+        voucherUintFields: CURVE_LAUNCH_VOUCHER_UINT_FIELDS,
+        hashFn: (v) => factory.hashCurveLaunchVoucher(v),
+        expectedDepositFn: expectedDepositForCurve,
+        relayFn: (v, sig) => factory.relayedCreateCurveToken(v, sig),
+        createdEventName: "CurveTokenCreated",
+        // createCurveToken has no liquidity branch at all to relay — see
+        // CurveLaunchVoucher's own comment in contracts/BondingCurveFactory.sol
+        // — so there is no liquidity event for postLaunchPipeline/
+        // relayMatchedDeposit to look for here, same as the plain (non-
+        // relayed) curve launch path already records no liquidity fields.
+        liquidityEventName: null,
+      });
+    } catch (err) {
+      console.error(
+        `Could not load BondingCurveFactory at ${bondingCurveFactoryAddress} (${err.message}). Gasless relaying ` +
+          "for Quick Launch (zero-tax) is DISABLED for this run — everything else (the site, wallet-paid launches, " +
+          "other factories' relaying, activity/price polling) starts normally regardless. This specific error " +
+          "usually means the contract's build artifact wasn't included in this deploy (a stale/cached build) — a " +
+          "clean rebuild that actually recompiles contracts/BondingCurveFactory.sol should fix it."
       );
     }
-    watchers.push({
-      kind: "curve",
-      factory,
-      voucherFields: CURVE_LAUNCH_VOUCHER_FIELDS,
-      voucherUintFields: CURVE_LAUNCH_VOUCHER_UINT_FIELDS,
-      hashFn: (v) => factory.hashCurveLaunchVoucher(v),
-      expectedDepositFn: expectedDepositForCurve,
-      relayFn: (v, sig) => factory.relayedCreateCurveToken(v, sig),
-      createdEventName: "CurveTokenCreated",
-      // createCurveToken has no liquidity branch at all to relay — see
-      // CurveLaunchVoucher's own comment in contracts/BondingCurveFactory.sol
-      // — so there is no liquidity event for postLaunchPipeline/
-      // relayMatchedDeposit to look for here, same as the plain (non-
-      // relayed) curve launch path already records no liquidity fields.
-      liquidityEventName: null,
-    });
   }
 
   if (customBondingCurveFactoryAddress) {
-    const factory = await hre.ethers.getContractAt(
-      "CustomBondingCurveFactory",
-      customBondingCurveFactoryAddress,
-      relayerWallet
-    );
-    const onChainRelayer = await factory.relayer();
-    if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
-      console.warn(
-        `WARNING: CustomBondingCurveFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
-          `relayedCreateCurveToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}) ` +
-          "(see scripts/setRelayer.js)."
+    try {
+      const factory = await hre.ethers.getContractAt(
+        "CustomBondingCurveFactory",
+        customBondingCurveFactoryAddress,
+        relayerWallet
+      );
+      const onChainRelayer = await factory.relayer();
+      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
+        console.warn(
+          `WARNING: CustomBondingCurveFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
+            `relayedCreateCurveToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}) ` +
+            "(see scripts/setRelayer.js)."
+        );
+      }
+      watchers.push({
+        kind: "custom-curve",
+        factory,
+        voucherFields: CUSTOM_CURVE_LAUNCH_VOUCHER_FIELDS,
+        voucherUintFields: CUSTOM_CURVE_LAUNCH_VOUCHER_UINT_FIELDS,
+        hashFn: (v) => factory.hashCustomCurveLaunchVoucher(v),
+        // Same escrow shape as the plain curve voucher (fee +
+        // creatorBuyEthAmount, no liquidity leg) — CustomCurveLaunchVoucher
+        // only adds fee-config fields on top, nothing that changes what gets
+        // escrowed.
+        expectedDepositFn: expectedDepositForCurve,
+        relayFn: (v, sig) => factory.relayedCreateCurveToken(v, sig),
+        // Same event name as the plain curve factory (CurveTokenCreated) —
+        // this factory's own version just carries two extra fields
+        // (reflectionAsset/marketingWallet). No collision risk: each watcher
+        // queries its own factory instance.
+        createdEventName: "CurveTokenCreated",
+        liquidityEventName: null,
+      });
+    } catch (err) {
+      console.error(
+        `Could not load CustomBondingCurveFactory at ${customBondingCurveFactoryAddress} (${err.message}). Gasless ` +
+          "relaying for Quick Launch (custom tax) is DISABLED for this run — everything else (the site, wallet-paid " +
+          "launches, other factories' relaying, activity/price polling) starts normally regardless. This specific " +
+          "error usually means the contract's build artifact wasn't included in this deploy (a stale/cached build) " +
+          "— a clean rebuild that actually recompiles contracts/CustomBondingCurveFactory.sol should fix it."
       );
     }
-    watchers.push({
-      kind: "custom-curve",
-      factory,
-      voucherFields: CUSTOM_CURVE_LAUNCH_VOUCHER_FIELDS,
-      voucherUintFields: CUSTOM_CURVE_LAUNCH_VOUCHER_UINT_FIELDS,
-      hashFn: (v) => factory.hashCustomCurveLaunchVoucher(v),
-      // Same escrow shape as the plain curve voucher (fee +
-      // creatorBuyEthAmount, no liquidity leg) — CustomCurveLaunchVoucher
-      // only adds fee-config fields on top, nothing that changes what gets
-      // escrowed.
-      expectedDepositFn: expectedDepositForCurve,
-      relayFn: (v, sig) => factory.relayedCreateCurveToken(v, sig),
-      // Same event name as the plain curve factory (CurveTokenCreated) —
-      // this factory's own version just carries two extra fields
-      // (reflectionAsset/marketingWallet). No collision risk: each watcher
-      // queries its own factory instance.
-      createdEventName: "CurveTokenCreated",
-      liquidityEventName: null,
-    });
   }
 
   // NOTE: there used to be an analogous creatorRewardsDistributor
