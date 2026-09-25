@@ -5832,7 +5832,7 @@
       <div class="tc-head">
         ${tcMarkHTML(t)}
         <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)}</div></div>
-        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px; margin-left:auto;">
           ${(!noSimulatedMarket && t.mcap>0) ? `<div class="tc-mcap"><span class="l">Mcap</span>${fmtUSD(t.mcap)}</div>` : ""}
           ${(t.mode==="curve"||t.mode==="customCurve") ? `<span class="tc-quicklaunch-badge">⚡ Quick Launch</span>` : ""}
           <div style="display:flex; gap:6px;">${statusBadgeHTML(t.mode, t.status)}</div>
