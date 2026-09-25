@@ -2350,24 +2350,45 @@
   }
   // Decodes BondingCurveFactory/CustomBondingCurveFactory's combined
   // taxDefaults() view (see CURVE_TAX_DEFAULTS_SELECTOR's own comment on why
-  // this replaces individual getters) — 11 static (address/uint256) return
-  // values, so this is just 11 concatenated 32-byte words in order, same
-  // decoding pattern as decodeCurveState above.
-  function decodeCurveTaxDefaults(hex){
+  // this replaces individual getters) — same address/uint256 fields on both
+  // contracts, in the same order, EXCEPT that BondingCurveFactory.taxDefaults()
+  // returns an 11th, LEADING field (`router_`) that CustomBondingCurveFactory's
+  // own taxDefaults() doesn't return at all (see each contract's own
+  // taxDefaults() NatSpec/return list — CustomBondingCurveFactory has no
+  // public router() either, for an unrelated reason noted right above its
+  // own declaration). Every field below shifts one 32-byte word earlier for
+  // CustomBondingCurveFactory than for BondingCurveFactory as a result.
+  //
+  // FIX: this used to decode both contracts through the exact same fixed
+  // word indices (written for BondingCurveFactory's router-first, 11-word
+  // shape). Against CustomBondingCurveFactory's real 10-word return, that
+  // silently shifted every field one word out of place — feeBps' raw value
+  // (e.g. 100) rendered as if it were the platform fee wallet ADDRESS,
+  // priceFeed's real address rendered as an enormous "post-graduation tax"
+  // percentage, graduationTargetUsd's value rendered as the price feed
+  // address, and so on all the way down — and read one word PAST the end of
+  // the actual return data for feeWalletDistributor, producing the literal
+  // string "0x0xundefined" in the admin panel. Passing hasRouter=false for
+  // CustomBondingCurveFactory (see both call sites below) reads the correct
+  // 10-word shape instead; hasRouter defaults to true so an existing call
+  // written for BondingCurveFactory keeps working unchanged.
+  function decodeCurveTaxDefaults(hex, hasRouter){
+    if(hasRouter===undefined) hasRouter = true;
     const clean = hex.replace(/^0x/i,"");
     const words = splitWords(clean);
+    const i = hasRouter ? 1 : 0; // every field below sits one word later when router_ is the leading field
     return {
-      router: decodeAddress("0x"+words[0]),
-      platformFeeWallet: decodeAddress("0x"+words[1]),
-      feeBps: decodeUint256("0x"+words[2]),
-      priceFeed: decodeAddress("0x"+words[3]),
-      graduationTargetUsd: decodeUint256("0x"+words[4]),
-      maxOracleStaleness: decodeUint256("0x"+words[5]),
-      rewardsDistributor: decodeAddress("0x"+words[6]),
-      rewardBps: decodeUint256("0x"+words[7]),
-      creatorRewardsDistributor: decodeAddress("0x"+words[8]),
-      creatorRewardBps: decodeUint256("0x"+words[9]),
-      feeWalletDistributor: decodeAddress("0x"+words[10]),
+      router: hasRouter ? decodeAddress("0x"+words[0]) : null,
+      platformFeeWallet: decodeAddress("0x"+words[i]),
+      feeBps: decodeUint256("0x"+words[i+1]),
+      priceFeed: decodeAddress("0x"+words[i+2]),
+      graduationTargetUsd: decodeUint256("0x"+words[i+3]),
+      maxOracleStaleness: decodeUint256("0x"+words[i+4]),
+      rewardsDistributor: decodeAddress("0x"+words[i+5]),
+      rewardBps: decodeUint256("0x"+words[i+6]),
+      creatorRewardsDistributor: decodeAddress("0x"+words[i+7]),
+      creatorRewardBps: decodeUint256("0x"+words[i+8]),
+      feeWalletDistributor: decodeAddress("0x"+words[i+9]),
     };
   }
   // quoteBuy(token,ethIn)/quoteSell(token,tokenAmountIn)/buy(token,minTokensOut)
@@ -8938,7 +8959,13 @@
   // tax-default cluster differs, since it comes from one taxDefaults() call
   // instead of ten individual getters (see CURVE_TAX_DEFAULTS_SELECTOR's own
   // comment on why).
-  async function loadCurveFactoryAdminState(address){
+  // hasRouter: true for BondingCurveFactory, false for
+  // CustomBondingCurveFactory — see decodeCurveTaxDefaults' own comment for
+  // why the two contracts' taxDefaults() returns can't be decoded with the
+  // same fixed word indices. Defaults to true so an existing caller written
+  // before this parameter existed keeps reading BondingCurveFactory's shape.
+  async function loadCurveFactoryAdminState(address, hasRouter){
+    if(hasRouter===undefined) hasRouter = true;
     const [
       ownerHex, pendingOwnerHex, curveLaunchFeeHex, curveFeeBpsHex, curveSupplyBpsHex,
       virtualEthReserveDefaultHex, virtualTokenReserveBpsHex, poolSeedTargetWeiHex,
@@ -8961,7 +8988,7 @@
       ethCall(address, "0x"+MAX_RELAYER_GAS_REIMBURSEMENT_SELECTOR),
       ethCall(address, "0x"+CURVE_TAX_DEFAULTS_SELECTOR),
     ]);
-    const tax = decodeCurveTaxDefaults(taxDefaultsHex);
+    const tax = decodeCurveTaxDefaults(taxDefaultsHex, hasRouter);
     return {
       owner: decodeAddress(ownerHex),
       pendingOwner: decodeAddress(pendingOwnerHex),
@@ -10035,8 +10062,8 @@
     const [tfState, ctfState, bcfState, cbcfState, prdState, fwdState] = await Promise.all([
       tfAddress ? loadFactoryAdminState(tfAddress).catch(()=>null) : Promise.resolve(null),
       ctfAddress ? loadFactoryAdminState(ctfAddress).catch(()=>null) : Promise.resolve(null),
-      bcfAddress ? loadCurveFactoryAdminState(bcfAddress).catch(()=>null) : Promise.resolve(null),
-      cbcfAddress ? loadCurveFactoryAdminState(cbcfAddress).catch(()=>null) : Promise.resolve(null),
+      bcfAddress ? loadCurveFactoryAdminState(bcfAddress, true).catch(()=>null) : Promise.resolve(null),
+      cbcfAddress ? loadCurveFactoryAdminState(cbcfAddress, false).catch(()=>null) : Promise.resolve(null),
       prdAddress ? loadRewardsDistributorState(prdAddress).catch(()=>null) : Promise.resolve(null),
       fwdAddress ? loadFeeWalletDistributorState(fwdAddress).catch(()=>null) : Promise.resolve(null),
     ]);
@@ -10193,7 +10220,20 @@
         if(!walletVal || !feedVal){
           try{
             if(isCurveFactoryKey){
-              const tax = decodeCurveTaxDefaults(await ethCall(address, "0x"+CURVE_TAX_DEFAULTS_SELECTOR));
+              // FIX: this always decoded through BondingCurveFactory's
+              // router-first, 11-word taxDefaults() shape, even for "cbcf"
+              // (CustomBondingCurveFactory), whose own taxDefaults() returns
+              // no router_ field at all — 10 words, not 11 (see
+              // decodeCurveTaxDefaults' own comment). That silently handed
+              // walletFallback/feedFallback the WRONG on-chain values (e.g.
+              // feeBps' raw integer decoded as if it were an address) for
+              // every CustomBondingCurveFactory save where either field was
+              // left blank to mean "leave this alone" — writing garbage into
+              // platformFeeWallet/priceFeed on save instead of actually
+              // preserving them, which is exactly the accidental-zeroing-
+              // shaped bug the comment above this block already exists to
+              // prevent, just via a different route.
+              const tax = decodeCurveTaxDefaults(await ethCall(address, "0x"+CURVE_TAX_DEFAULTS_SELECTOR), key==="bcf");
               walletFallback = tax.platformFeeWallet;
               feedFallback = tax.priceFeed;
             } else {
