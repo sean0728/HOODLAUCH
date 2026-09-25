@@ -1511,7 +1511,27 @@ async function main() {
     }
 
     const canonical = canonicalizeTokenMetadata({ logo, banner, socials });
-    await upsertTrackedToken(network, tokenAddress, canonical);
+    // FIX: this call was never wrapped — Express 4's router does NOT catch a
+    // rejected promise from an async handler on its own, so a failed write
+    // here (a transient MySQL error not covered by lib/db.js's retry-once,
+    // or a genuine schema/size problem) used to become an unhandled
+    // rejection that this file's own process-level handler just logs, with
+    // the request left hanging until the client's own timeout — no error
+    // response, and (per index.html's syncTokenMetadataToServer, which
+    // swallows every error silently) the creator would see no indication
+    // their logo/banner save actually failed. Catching it here and replying
+    // with a real 500 is also what surfaces a genuinely oversized payload:
+    // logo/banner are capped client- and server-side at ~400KB/~700KB
+    // encoded each (see the validation above), which is comfortably under
+    // MySQL's default max_allowed_packet, but a server whose DBA has lowered
+    // that setting would now fail loudly and traceably here instead of
+    // silently.
+    try {
+      await upsertTrackedToken(network, tokenAddress, canonical);
+    } catch (err) {
+      console.error(`[token-metadata] failed to save logo/banner/socials for ${tokenAddress}: ${err.message}`);
+      return sendJson(res, 500, { error: "Couldn't save — try again in a moment." });
+    }
     sendJson(res, 200, { tokenAddress, ...canonical });
   });
 
