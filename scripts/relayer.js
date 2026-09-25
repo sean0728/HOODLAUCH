@@ -83,7 +83,7 @@ const fs = require("fs"); // used only by the temporary /debug/data-dirs route b
 const express = require("express");
 const hre = require("hardhat");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
-const { recordLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = require("../lib/launchStore");
+const { recordLaunch, updateLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = require("../lib/launchStore");
 const {
   getVoucher,
   upsertVoucher,
@@ -1119,10 +1119,29 @@ async function main() {
       const publicEntry = {};
       for (const field of PUBLIC_FIELDS) publicEntry[field] = entry[field] ?? null;
       const trackedEntry = entry.tokenAddress ? tracked[entry.tokenAddress.toLowerCase()] : null;
+      // FIX: a ledger row's pairAddress (entry.pairAddress, from
+      // lib/launchStore) is written exactly once, at launch time, by
+      // postLaunchPipeline — nothing ever patches it afterward.
+      // discoverLaunchedTokens/pollTokenPrices below only ever write a
+      // newly-found or newly-graduated pool address into trackedTokensStore,
+      // never back into the ledger. That's invisible for a "custom" launch
+      // (CustomTokenCreated always carries a pool from creation) but was
+      // silently stale forever for two real cases: a relayed "Deploy Token"
+      // (addLiquidityAtLaunch=false) that gains a pool later, and — the one
+      // that actually surfaced this — every relayed curve/custom-curve
+      // launch, which NEVER has a pair at creation (CurveTokenCreated has no
+      // `pair` field at all) and would report pairAddress: null here forever,
+      // even long after its curve graduated to a real Uniswap pool server-
+      // side. Prefer trackedEntry's pairAddress whenever it has one — it's
+      // the same field discoverLaunchedTokens/pollTokenPrices already keep
+      // current for every kind, ledger-backed or not — so a relayed launch's
+      // API response catches up the moment the tracked record does, instead
+      // of only ever reflecting whatever was true the instant it was relayed.
+      if (trackedEntry && trackedEntry.pairAddress) publicEntry.pairAddress = trackedEntry.pairAddress;
       publicEntry.tokenStatus =
         trackedEntry && typeof trackedEntry.tokenStatus === "number"
           ? trackedEntry.tokenStatus
-          : entry.pairAddress
+          : publicEntry.pairAddress
             ? TOKEN_STATUS.LAUNCHED
             : TOKEN_STATUS.DEPLOYED;
       // Logo/banner/socials (see POST /token-metadata/:tokenAddress) live
@@ -2377,6 +2396,30 @@ async function main() {
                   patch.tokenStatus = TOKEN_STATUS.LAUNCHED;
                 }
                 await upsertTrackedToken(network, entry.tokenAddress, patch);
+                // Also backfill lib/launchStore's own launched_tokens ledger
+                // row, not just trackedTokensStore above — GET /launches
+                // already prefers trackedTokensStore's pairAddress (see that
+                // route's own comment), so this isn't needed for the API/
+                // front end, but the ledger itself (queried directly, e.g.
+                // launched-tokens.csv or a raw SELECT against
+                // launched_tokens) was otherwise left showing the null it was
+                // recorded with at launch time forever, since
+                // CurveTokenCreated never carries a pair for
+                // postLaunchPipeline/recordLaunch to capture in the first
+                // place. Only ever throws for a DIRECT (creator-paid-gas)
+                // curve launch, which has no ledger row at all to update —
+                // updateLaunch() is deliberately not upsert-like (see its own
+                // doc comment in lib/launchStore.js), so that's an expected,
+                // silent no-op here, not a real failure; anything else gets
+                // logged so a genuine problem (e.g. a DB hiccup) isn't
+                // swallowed silently.
+                try {
+                  await updateLaunch(network, entry.tokenAddress, { pairAddress: onChainPair });
+                } catch (ledgerErr) {
+                  if (!/no existing entry/i.test(ledgerErr.message || "")) {
+                    console.warn(`[price] couldn't backfill launched_tokens.pairAddress for ${entry.tokenAddress}: ${ledgerErr.message}`);
+                  }
+                }
               }
             } catch (err) {
               // best-effort — next tick tries again
