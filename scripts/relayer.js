@@ -978,7 +978,18 @@ async function main() {
 
   // ---- HTTP API ----
   const app = express();
-  app.use(express.json());
+  // Default express.json() body limit is 100kb, which is well under what
+  // POST /token-metadata/:tokenAddress needs to accept: the front end's own
+  // LOGO_IMAGE_OPTS/BANNER_IMAGE_OPTS cap a logo at ~400,000 encoded chars
+  // and a banner at ~700,000 (see the matching checks below and index.html's
+  // readAndResizeImage comment), so a banner update alone already exceeds
+  // the default limit before this route's own size validation ever runs.
+  // Express's body-parser throws PayloadTooLargeError (413) straight from
+  // this middleware in that case, which surfaced to creators as a silent
+  // "server sync failed" toast on the front end with no useful explanation.
+  // 2mb leaves comfortable headroom above the ~1.1MB worst case (logo +
+  // banner + socials + signature) without opening the door to abuse.
+  app.use(express.json({ limit: "2mb" }));
   // index.html is served from a different origin than this API almost
   // always (its own domain, a different subdomain, or a GoDaddy Node.js
   // Hosting preview URL) — without permissive CORS here, the browser
