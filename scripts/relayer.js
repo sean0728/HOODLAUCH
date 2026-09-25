@@ -1011,7 +1011,56 @@ async function main() {
     // refreshRemoteLaunches) gets a single, already-current field instead of
     // having to separately poll tracked-token state itself.
     const tracked = await readTrackedTokens(network);
-    const launches = ledger.map((entry) => {
+    // FIX: a token launched by the creator paying their own gas directly
+    // against a factory — no gasless relay involved at all — was never
+    // recorded here. readLedger() only ever contains launches that went
+    // through THIS relayer's own relay path (see lib/launchStore.js's own
+    // comment on why), so a real, live, on-chain token could be permanently
+    // invisible on every visitor's "Recently launched" grid even though
+    // discoverLaunchedTokens (below) already found it and has been quietly
+    // tracking its price/activity the whole time via lib/trackedTokensStore.
+    // That module's own header comment says exactly this — it exists to
+    // cover "every token that exists," not just relayed ones — but nothing
+    // downstream of discovery ever actually read it for that purpose until
+    // now. Fold in any tracked token with no matching ledger row as a
+    // minimal synthetic entry (every PUBLIC_FIELDS column it can't supply —
+    // totalSupply, deploymentTxHash, verification, liquidity/creator-buy
+    // amounts, explorerUrl — stays null, same as a genuinely missing field
+    // on a real ledger entry) so it shows up everywhere a ledger-backed
+    // launch already does.
+    const ledgerAddresses = new Set(
+      ledger.filter((e) => e.tokenAddress).map((e) => e.tokenAddress.toLowerCase())
+    );
+    const trackedOnlyEntries = Object.values(tracked)
+      .filter((t) => t && t.tokenAddress && !ledgerAddresses.has(t.tokenAddress.toLowerCase()))
+      .map((t) => ({
+        symbol: t.symbol || null,
+        name: t.name || null,
+        // "token"/"custom"/"curve"/"custom-curve" — lacks the "relayed-"
+        // prefix a real relayed launch's mode carries, but index.html's
+        // remoteLaunchToTokenObject only ever checks this string for the
+        // substring "curve" (and, within that, "custom"), so it's fully
+        // compatible as-is.
+        mode: t.kind || null,
+        tokenAddress: t.tokenAddress,
+        pairAddress: t.pairAddress || null,
+        creator: t.creator || null,
+        totalSupply: null,
+        network,
+        deploymentTxHash: null,
+        verified: null,
+        proxyVerified: null,
+        liquidityEthAmount: null,
+        liquidityTokenAmount: null,
+        liquidityLpAmount: null,
+        liquidityLockId: null,
+        liquidityUnlockTime: null,
+        creatorBuyEthAmount: null,
+        creatorTokensBought: null,
+        explorerUrl: null,
+        createdAt: t.discoveredAt || null,
+      }));
+    const launches = [...ledger, ...trackedOnlyEntries].map((entry) => {
       const publicEntry = {};
       for (const field of PUBLIC_FIELDS) publicEntry[field] = entry[field] ?? null;
       const trackedEntry = entry.tokenAddress ? tracked[entry.tokenAddress.toLowerCase()] : null;
