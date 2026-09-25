@@ -143,37 +143,43 @@ process.on("unhandledRejection", (reason) => {
 // ("received"/"deposited"/"relayed"/"failed" — that's about the relay
 // pipeline for one specific launch attempt) and from index.html's own richer
 // `status` strings ("creator-held"/"pool-detected"/"live-pool"/"taxed"/
-// "graduated" — that also covers pools detected independently of this
-// platform). This numeric field only tracks the three stages every token
-// actually launched *through* Hood Launch's own factories passes through, in
-// order, and never regresses once set:
-//   0 DEPLOYED  — token contract exists on-chain, no liquidity pool yet
-//                 (TokenFactory.createToken's "Deploy Token" mode, i.e.
-//                 addLiquidityAtLaunch=false — CustomTokenFactory has no
-//                 such mode, so every custom token starts at LAUNCHED).
-//   1 LAUNCHED  — a pool exists (TokenCreated.pair was already set at
-//                 creation, or one was added later and picked up by
-//                 pollTokenPrices' "Just Launch" pairAddress backfill below)
-//                 and the token's own bonding-curve tax is still active.
+// "graduated"/"curve-trading" — that also covers pools detected independently
+// of this platform). This numeric field tracks the same three MEANINGS for
+// every kind this platform launches — "no live tradeable market yet" / "a
+// live market exists and this platform's own tax on it is still active" /
+// "that tax has been permanently disabled" — even though which on-chain
+// signal actually flips each transition differs by kind. Never regresses
+// once set:
+//   0 DEPLOYED  — no live market this platform created yet.
+//                 - "token" (TokenFactory): the "Deploy Token" mode (i.e.
+//                   addLiquidityAtLaunch=false) with no pool — CustomToken-
+//                   Factory has no such mode, so every "custom" token starts
+//                   at LAUNCHED instead, never DEPLOYED.
+//                 - "curve"/"custom-curve" (Quick Launch): still trading only
+//                   against its own bonding curve, not yet graduated to a
+//                   real Uniswap pool. It's fully tradeable by anyone the
+//                   instant CurveTokenCreated fires, just not "live on DEX"
+//                   yet in the sense this field tracks — see below.
+//   1 LAUNCHED  — a live market exists and its tax is still active.
+//                 - "token"/"custom": a Uniswap pool exists (TokenCreated.pair
+//                   was already set at creation, or one was added later and
+//                   picked up by pollTokenPrices' "Just Launch" pairAddress
+//                   backfill below) and the token's own tax is still active.
+//                 - "curve"/"custom-curve": the curve has graduated to a real
+//                   Uniswap pool (curveState().graduated reads true, i.e. it
+//                   crossed its ETH pool-seed target) — "live on DEX" — and
+//                   this token's own post-graduation platform tax is still
+//                   counting up toward its market-cap target.
 //   2 GRADUATED — the token's own taxActive()/platformTaxActive() has read
 //                 false at least once (permanent on-chain, once flipped it
 //                 never flips back) — set the moment pollTokenPrices below
-//                 observes that.
+//                 observes that. Same signal, same meaning, for every kind:
+//                 a curve/custom-curve token graduates here at its $50,000
+//                 post-pool market-cap target, exactly like a plain "token"/
+//                 "custom" one does.
 // See discoverLaunchedTokens (sets the initial 0/1) and pollTokenPrices
-// (advances 0->1 on a late pool, and 1->2 on graduation) for where this is
-// actually written.
-//
-// Quick Launch ("curve"/"custom-curve" kinds) reuses the same two live
-// values rather than adding a fourth: a curve token has no pool and would
-// otherwise look like DEPLOYED, but it's actually tradeable by anyone the
-// instant CurveTokenCreated fires (against the curve itself, not a pool) —
-// the opposite of what DEPLOYED means for the other kinds ("creator-held,
-// nobody else can trade it yet"). So a curve/custom-curve token starts at
-// LAUNCHED, and pollTokenPrices' curve branch advances it to GRADUATED the
-// moment CurveGraduated fires (curveState().graduated reads true) — the
-// same permanent, never-regresses transition taxActive()/
-// platformTaxActive() already drives for the pool-based kinds, just keyed
-// off a different on-chain signal.
+// (advances 0->1 on a late pool or a curve's own DEX graduation, and 1->2 on
+// tax-disable graduation) for where this is actually written.
 const TOKEN_STATUS = { DEPLOYED: 0, LAUNCHED: 1, GRADUATED: 2 };
 
 // Managed Node.js hosts (GoDaddy Node.js Hosting among them) inject the
@@ -1978,7 +1984,6 @@ async function main() {
     // main()), so look it up generically instead of enumerating kinds here.
     const filter = watcher.factory.filters[watcher.createdEventName]();
     const events = await watcher.factory.queryFilter(filter, fromBlock, toBlock);
-    const isCurveKind = watcher.kind === "curve" || watcher.kind === "custom-curve";
     for (const event of events) {
       const { token, creator, name, symbol, pair } = event.args;
       const pairAddress = pair && pair !== hre.ethers.ZeroAddress ? pair : null;
@@ -1994,16 +1999,17 @@ async function main() {
         // pool from CustomTokenCreated (CustomTokenFactory has no
         // deploy-only mode), so it always starts LAUNCHED, never DEPLOYED.
         // A "curve"/"custom-curve" kind's CurveTokenCreated never carries a
-        // `pair` at all (pair is always undefined here — there is no pool
-        // until graduation) — but unlike a plain "Deploy Token", it's
-        // immediately tradeable against its own curve the instant this
-        // event fires, so it starts at LAUNCHED too rather than DEPLOYED
-        // (which would wrongly imply "creator-held, nobody else can trade
-        // it yet"). pollTokenPrices' curve branch advances it to GRADUATED
-        // once CurveGraduated fires, the same permanent-transition pattern
-        // taxActive()/platformTaxActive() already drives for the other
-        // kinds.
-        tokenStatus: isCurveKind || pairAddress ? TOKEN_STATUS.LAUNCHED : TOKEN_STATUS.DEPLOYED,
+        // `pair` at all (pair is always undefined here — there is no real
+        // Uniswap pool until the curve itself graduates), which is exactly
+        // what DEPLOYED (0) now means for this kind too — "no live DEX
+        // market yet" — even though, unlike a plain "Deploy Token", it's
+        // already fully tradeable against its own bonding curve the instant
+        // this event fires. pollTokenPrices' curve branch advances it to
+        // LAUNCHED (1) the moment CurveGraduated fires (a real pool now
+        // exists — "live on DEX") and on to GRADUATED (2) once that pool's
+        // own tax later disables at the $50,000 market-cap target, the same
+        // two-step, never-regresses progression every other kind follows.
+        tokenStatus: pairAddress ? TOKEN_STATUS.LAUNCHED : TOKEN_STATUS.DEPLOYED,
         discoveredAt: new Date().toISOString(),
       });
       console.log(`[discovery] tracking ${watcher.kind} token $${symbol} (${token})${pairAddress ? ` with pair ${pairAddress}` : ""}.`);
@@ -2352,19 +2358,25 @@ async function main() {
             // transaction the pool was created), so THIS tick's fall-through
             // and every tick after it reads real Uniswap reserves via the
             // ordinary pool-based branch below instead of this curve-only
-            // one. TOKEN_STATUS deliberately stays LAUNCHED here, not
-            // GRADUATED — see TOKEN_STATUS's own comment above: graduating
-            // off the curve only means a pool plus this token's OWN
-            // post-graduation tax phase now exist, not that its
-            // taxActive()/platformTaxActive() has read false yet. That real
-            // graduation is what the pool-based branch's own taxActive
-            // check below already detects and persists, exactly the same
-            // way it already does for every other launched token.
+            // one. This is also the "live on DEX" transition for a curve
+            // token — advance TOKEN_STATUS from DEPLOYED (0, curve-only) to
+            // LAUNCHED (1, live pool + this token's own post-graduation tax
+            // now counting up), never past GRADUATED (2) if that somehow
+            // already landed first. Real graduation — this token's own tax
+            // permanently disabling at its $50,000 market-cap target — is
+            // still what the pool-based branch's own taxActive check below
+            // detects and persists, exactly the same way it already does for
+            // every other launched token.
             try {
               const onChainPair = await watcher.factory.pairOf(entry.tokenAddress);
               if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
                 entry.pairAddress = onChainPair;
-                await upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
+                const patch = { pairAddress: onChainPair };
+                if (entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
+                  entry.tokenStatus = TOKEN_STATUS.LAUNCHED;
+                  patch.tokenStatus = TOKEN_STATUS.LAUNCHED;
+                }
+                await upsertTrackedToken(network, entry.tokenAddress, patch);
               }
             } catch (err) {
               // best-effort — next tick tries again
