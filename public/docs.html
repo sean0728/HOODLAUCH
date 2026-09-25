@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Hood Launch documentation — platform features and a step-by-step guide to deploying a token.">
+<!-- Same defense-in-depth CSP as index.html: single static file, no
+     per-request nonce available, so script-src keeps 'unsafe-inline' and
+     relies on this page never writing untrusted input into the DOM (it
+     doesn't — every string below is authored here, nothing is fetched or
+     interpolated). See index.html's own CSP comment for the full reasoning. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Docs — Hood Launch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ============================================================
+     Same instrument-panel design system as index.html — the tokens
+     below are copied verbatim so this page reads as part of the same
+     product rather than a bolted-on help page. Keep these two token
+     blocks in sync by hand if the app's palette ever changes.
+     ============================================================ */
+  :root{
+    color-scheme: dark;
+    --ink-950:#06080c; --ink-900:#11161f; --ink-850:#161c28; --ink-800:#1d2431; --ink-700:#2b3244;
+    --line: rgba(170,190,220,.09); --line-strong: rgba(180,200,230,.17);
+    --paper-100:#eef1f8; --paper-300:#c4cade; --paper-500:#8d94ab; --paper-700:#5f6680;
+    --signal-300:#ffcf9e; --signal-500:#ff9d3c; --signal-600:#e2791f; --signal-wash: rgba(255,157,60,.11);
+    --cyan-400:#8fe3f2; --cyan-500:#3dc7de; --cyan-wash: rgba(61,199,222,.11);
+    --good-500:#34dd9c; --good-wash: rgba(52,221,156,.12);
+    --critical-500:#f0405f; --critical-wash: rgba(240,64,95,.12);
+    --glow-signal: 0 0 1px rgba(255,157,60,.75), 0 0 11px rgba(255,157,60,.32), 0 0 26px rgba(255,157,60,.11);
+    --glow-cyan: 0 0 1px rgba(61,199,222,.75), 0 0 11px rgba(61,199,222,.28), 0 0 26px rgba(61,199,222,.10);
+    --radius-xs: 6px; --radius-sm: 10px; --radius-md: 16px; --radius-lg: 22px;
+    --font-display:'Chakra Petch', system-ui, sans-serif;
+    --font-body:'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    --font-mono:'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+    --shadow-panel: 0 24px 60px -20px rgba(0,0,0,.7);
+  }
+  *{box-sizing:border-box;}
+  html{background:var(--ink-950); scroll-behavior:smooth;}
+  body{
+    margin:0; background:var(--ink-950); color:var(--paper-100); font-family:var(--font-body);
+    font-size:16px; line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  @media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto;} *{animation-duration:.001ms !important; transition-duration:.001ms !important;} }
+  body::before{
+    content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+    background:
+      radial-gradient(1200px 680px at 82% -8%, rgba(255,157,60,.07), transparent 60%),
+      radial-gradient(1000px 560px at -10% 8%, rgba(61,199,222,.055), transparent 55%),
+      linear-gradient(var(--ink-950), var(--ink-950));
+  }
+  a{color:inherit;}
+  button{font-family:inherit;}
+  .mono{font-family:var(--font-mono);}
+  .eyebrow{font-family:var(--font-mono); font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; color:var(--paper-500); font-weight:500;}
+  h1,h2,h3,h4{font-family:var(--font-display); text-wrap:balance; margin:0 0 .5em; font-weight:700; letter-spacing:-.01em; color:var(--paper-100);}
+  p{margin:0 0 1em; color:var(--paper-300);}
+  :focus-visible{outline:2px solid var(--signal-500); outline-offset:2px; border-radius:2px;}
+
+  /* ---------------- header ---------------- */
+  .hud{
+    position:sticky; top:0; z-index:40; background:rgba(5,7,12,.86); backdrop-filter:blur(14px) saturate(140%);
+    border-bottom:1px solid var(--line-strong); box-shadow:0 1px 0 rgba(61,199,222,.14), 0 20px 40px -24px rgba(0,0,0,.75);
+  }
+  .hud-inner{max-width:1320px; margin:0 auto; padding:14px 28px; display:flex; align-items:center; gap:20px;}
+  .brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; font-size:1.05rem; letter-spacing:.01em; white-space:nowrap; text-decoration:none;}
+  .brand-mark{
+    width:30px; height:30px; flex:none; position:relative;
+    background:linear-gradient(155deg, var(--signal-300), var(--signal-600));
+    clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
+    filter:drop-shadow(0 0 6px rgba(255,157,60,.5)) drop-shadow(0 0 13px rgba(255,157,60,.22));
+  }
+  .brand-mark::after{content:""; position:absolute; left:50%; top:56%; width:6px; height:6px; border-radius:50%; background:var(--ink-950); transform:translate(-50%,-50%);}
+  .brand small{font-family:var(--font-mono); font-weight:500; font-size:.62rem; letter-spacing:.1em; color:var(--paper-500); display:block; margin-top:1px;}
+  .hud-spacer{flex:1;}
+  .hud-nav{display:flex; gap:2px;}
+  .hud-nav a{
+    font-family:var(--font-mono); font-size:.74rem; letter-spacing:.04em; text-transform:uppercase; color:var(--paper-500);
+    text-decoration:none; padding:9px 12px; border-radius:var(--radius-xs); transition:color .15s, background .15s;
+  }
+  .hud-nav a:hover{color:var(--paper-100); background:var(--ink-900);}
+  .btn{
+    appearance:none; cursor:pointer; border-radius:var(--radius-sm); font-family:var(--font-body); font-weight:600; font-size:.86rem;
+    padding:10px 18px; border:1px solid transparent; text-decoration:none; display:inline-flex; align-items:center; gap:6px;
+    transition:transform .1s, background .15s, border-color .15s, box-shadow .2s; white-space:nowrap;
+  }
+  .btn:active{transform:translateY(1px);}
+  .btn-primary{background:linear-gradient(155deg, var(--signal-500), var(--signal-600)); color:#1a0f04;}
+  .btn-primary:hover{background:linear-gradient(155deg, var(--signal-300), var(--signal-500)); box-shadow:var(--glow-signal);}
+  .btn-ghost{background:transparent; border-color:var(--line-strong); color:var(--paper-100);}
+  .btn-ghost:hover{border-color:var(--cyan-500); box-shadow:0 0 11px rgba(61,199,222,.16);}
+  .nav-toggle{display:none; background:transparent; border:1px solid var(--line-strong); color:var(--paper-100); border-radius:var(--radius-xs); padding:8px 10px; cursor:pointer;}
+
+  /* ---------------- layout ---------------- */
+  .docs-shell{position:relative; z-index:1; max-width:1320px; margin:0 auto; padding:0 28px; display:grid; grid-template-columns:240px 1fr; gap:48px;}
+  .docs-nav{position:sticky; top:78px; align-self:start; max-height:calc(100vh - 100px); overflow-y:auto; padding:36px 0 40px;}
+  .docs-nav-group{margin-bottom:20px;}
+  .docs-nav-group .eyebrow{display:block; margin-bottom:8px;}
+  .docs-nav a{
+    display:block; font-size:.86rem; color:var(--paper-500); text-decoration:none; padding:5px 10px; margin:0 -10px;
+    border-radius:var(--radius-xs); border-left:2px solid transparent; transition:color .15s, background .15s, border-color .15s;
+  }
+  .docs-nav a:hover{color:var(--paper-100);}
+  .docs-nav a.active{color:var(--signal-300); border-left-color:var(--signal-500); background:var(--signal-wash);}
+  .docs-content{padding:36px 0 90px; min-width:0;}
+  .docs-content section{padding-top:18px; margin-bottom:56px; scroll-margin-top:88px;}
+  .docs-content section:first-child{padding-top:0;}
+  .docs-content h2{font-size:1.7rem; margin-bottom:10px;}
+  .docs-content h2 .eyebrow{display:block; margin-bottom:10px;}
+  .docs-content h3{font-size:1.15rem; margin-bottom:8px;}
+  .section-intro{max-width:64ch; color:var(--paper-300); font-size:1rem;}
+  .panel{position:relative; background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:22px;}
+
+  /* ---------------- hero ---------------- */
+  .doc-hero{padding:56px 0 8px;}
+  .doc-hero h1{font-size:clamp(2rem, 4vw, 2.9rem); line-height:1.08; max-width:20ch;}
+  .doc-hero p{font-size:1.05rem; max-width:56ch;}
+  .doc-hero-cta{display:flex; gap:12px; flex-wrap:wrap; margin-top:22px;}
+
+  /* ---------------- feature grid ---------------- */
+  .feature-grid{display:grid; grid-template-columns:repeat(3, 1fr); gap:16px;}
+  @media (max-width: 980px){ .feature-grid{grid-template-columns:repeat(2,1fr);} }
+  @media (max-width: 640px){ .feature-grid{grid-template-columns:1fr;} }
+  .feature-card{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:20px;}
+  .feature-icon{
+    width:36px; height:36px; border-radius:var(--radius-sm); display:flex; align-items:center; justify-content:center;
+    font-size:1.05rem; margin-bottom:14px; background:var(--signal-wash); border:1px solid rgba(255,157,60,.3);
+  }
+  .feature-card h3{font-size:1rem; margin-bottom:6px;}
+  .feature-card p{font-size:.86rem; margin:0; color:var(--paper-500);}
+
+  /* ---------------- launch mode cards ---------------- */
+  .mode-grid{display:grid; grid-template-columns:repeat(2, 1fr); gap:16px;}
+  @media (max-width: 900px){ .mode-grid{grid-template-columns:1fr;} }
+  .mode-card{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:22px; position:relative; overflow:hidden;}
+  .mode-card::before{content:""; position:absolute; top:0; left:0; right:0; height:2px; background:linear-gradient(90deg, var(--signal-500), var(--cyan-500)); opacity:.7;}
+  .mode-card-head{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px;}
+  .mode-card h3{margin:0; font-size:1.05rem;}
+  .mode-badge{font-family:var(--font-mono); font-size:.64rem; letter-spacing:.05em; text-transform:uppercase; padding:3px 9px; border-radius:999px; white-space:nowrap;}
+  .mode-badge.free{background:var(--good-wash); color:var(--good-500);}
+  .mode-badge.eth{background:var(--cyan-wash); color:var(--cyan-400);}
+  .mode-badge.quick{background:var(--signal-wash); color:var(--signal-300); border:1px solid rgba(255,157,60,.35);}
+  .mode-card p{font-size:.88rem; margin:0 0 12px;}
+  .mode-specs{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px;}
+  .mode-specs li{font-size:.8rem; color:var(--paper-500); display:flex; gap:8px;}
+  .mode-specs li .k{font-family:var(--font-mono); color:var(--paper-700); flex:none; min-width:88px;}
+
+  /* ---------------- numbered steps ---------------- */
+  .steps-list{counter-reset:doc-step; display:flex; flex-direction:column; gap:0;}
+  .doc-step{display:grid; grid-template-columns:40px 1fr; gap:18px; padding:22px 0; border-bottom:1px solid var(--line);}
+  .doc-step:last-child{border-bottom:none; padding-bottom:0;}
+  .doc-step:first-child{padding-top:0;}
+  .doc-step-num{
+    counter-increment:doc-step; width:36px; height:36px; border-radius:50%; background:var(--ink-800); border:1px solid var(--line-strong);
+    display:flex; align-items:center; justify-content:center; font-family:var(--font-mono); font-weight:600; color:var(--signal-300);
+  }
+  .doc-step-num::before{content:counter(doc-step);}
+  .doc-step h3{margin-bottom:6px;}
+  .doc-step p{font-size:.92rem; margin:0 0 8px;}
+  .doc-step .step-note{
+    font-size:.8rem; color:var(--paper-500); background:var(--ink-850); border:1px solid var(--line); border-radius:var(--radius-sm);
+    padding:9px 12px; margin-top:6px;
+  }
+  .doc-step .step-note b{color:var(--paper-300);}
+
+  /* ---------------- misc content blocks ---------------- */
+  .callout{
+    display:flex; gap:12px; align-items:flex-start; background:var(--cyan-wash); border:1px solid rgba(61,199,222,.3);
+    border-radius:var(--radius-md); padding:16px 18px; font-size:.88rem; color:var(--paper-300); margin:18px 0;
+  }
+  .callout.warn{background:var(--signal-wash); border-color:rgba(255,157,60,.35);}
+  .callout-icon{flex:none; font-size:1.1rem; line-height:1;}
+  .callout p{margin:0; color:inherit;}
+  .callout b{color:var(--paper-100);}
+  .kv-table{width:100%; border-collapse:collapse; font-size:.86rem;}
+  .kv-table th, .kv-table td{text-align:left; padding:10px 14px; border-bottom:1px solid var(--line);}
+  .kv-table th{font-family:var(--font-mono); font-size:.68rem; letter-spacing:.06em; text-transform:uppercase; color:var(--paper-500); font-weight:500;}
+  .kv-table td{color:var(--paper-300);}
+  .table-wrap{overflow-x:auto; border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--ink-900);}
+  .table-wrap .kv-table{margin:0;}
+  .table-wrap .kv-table th:first-child, .table-wrap .kv-table td:first-child{padding-left:18px;}
+  .badge-pill{
+    font-family:var(--font-mono); font-size:.68rem; letter-spacing:.04em; text-transform:uppercase; padding:3px 9px;
+    border-radius:999px; white-space:nowrap; display:inline-block;
+  }
+  .badge-pill.good{background:var(--good-wash); color:var(--good-500);}
+  .badge-pill.signal{background:var(--signal-wash); color:var(--signal-300);}
+  .badge-pill.cyan{background:var(--cyan-wash); color:var(--cyan-400);}
+
+  .faq-item{border-bottom:1px solid var(--line); padding:18px 0;}
+  .faq-item:last-child{border-bottom:none;}
+  .faq-item summary{cursor:pointer; font-family:var(--font-display); font-weight:600; font-size:1rem; color:var(--paper-100); list-style:none; display:flex; justify-content:space-between; align-items:center; gap:12px;}
+  .faq-item summary::-webkit-details-marker{display:none;}
+  .faq-item summary::after{content:"+"; font-family:var(--font-mono); color:var(--signal-300); font-size:1.2rem; flex:none; transition:transform .2s;}
+  .faq-item[open] summary::after{transform:rotate(45deg);}
+  .faq-item p{margin-top:10px; font-size:.9rem;}
+
+  /* ---------------- footer (mirrors index.html) ---------------- */
+  footer{position:relative; z-index:1; border-top:1px solid var(--line); margin-top:20px;}
+  .footer-inner{max-width:1320px; margin:0 auto; padding:28px 28px 36px; display:flex; justify-content:space-between; gap:24px; flex-wrap:wrap;}
+  .footer-note{font-size:.76rem; color:var(--paper-700); max-width:56ch; line-height:1.6;}
+  .footer-links{display:flex; gap:18px; font-family:var(--font-mono); font-size:.74rem; color:var(--paper-500); white-space:nowrap;}
+  .footer-links a{text-decoration:none; color:inherit; transition:color .15s;}
+  .footer-links a:hover{color:var(--signal-300);}
+  .footer-links a[aria-current="page"]{color:var(--signal-300);}
+
+  @media (max-width: 980px){
+    .docs-shell{grid-template-columns:1fr; padding:0 20px;}
+    .docs-nav{
+      position:fixed; inset:64px 0 0 0; top:64px; z-index:39; background:var(--ink-950); padding:20px; max-height:none;
+      transform:translateX(-100%); transition:transform .2s ease; overflow-y:auto;
+    }
+    .docs-nav.open{transform:translateX(0);}
+    .hud-nav{display:none;}
+    .nav-toggle{display:inline-flex;}
+    .hud-inner{padding:14px 20px;}
+  }
+</style>
+</head>
+<body>
+
+<div class="hud">
+  <div class="hud-inner">
+    <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true"></span><span>HOOD LAUNCH<small>DOCUMENTATION</small></span></a>
+    <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="docsNav">☰ Menu</button>
+    <div class="hud-spacer"></div>
+    <nav class="hud-nav" aria-label="Docs sections">
+      <a href="#features">Features</a>
+      <a href="#launch-modes">Launch modes</a>
+      <a href="#how-to-deploy">Deploy a token</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <a class="btn btn-ghost" href="index.html">← Back to app</a>
+    <a class="btn btn-primary" href="index.html#create">Launch a token</a>
+  </div>
+</div>
+
+<div class="docs-shell">
+  <aside class="docs-nav" id="docsNav">
+    <div class="docs-nav-group">
+      <span class="eyebrow">Start here</span>
+      <a href="#overview">Overview</a>
+      <a href="#getting-started">Getting started</a>
+    </div>
+    <div class="docs-nav-group">
+      <span class="eyebrow">Platform</span>
+      <a href="#features">Features</a>
+      <a href="#launch-modes">Launch modes</a>
+    </div>
+    <div class="docs-nav-group">
+      <span class="eyebrow">Deploying</span>
+      <a href="#how-to-deploy">How to deploy a token</a>
+      <a href="#gasless">Gasless launches</a>
+      <a href="#after-launch">After you launch</a>
+    </div>
+    <div class="docs-nav-group">
+      <span class="eyebrow">Trading</span>
+      <a href="#trading">Buying &amp; selling</a>
+      <a href="#graduation">Tax &amp; graduation</a>
+    </div>
+    <div class="docs-nav-group">
+      <span class="eyebrow">Reference</span>
+      <a href="#security">Security &amp; disclosures</a>
+      <a href="#faq">FAQ</a>
+    </div>
+  </aside>
+
+  <div class="docs-content">
+
+    <section id="overview">
+      <div class="doc-hero">
+        <span class="eyebrow">Documentation</span>
+        <h1>Everything Hood Launch does, and how to launch a token on it.</h1>
+        <p>Hood Launch is a token-launchpad for Robinhood Chain. This page covers what's on the platform — the live launch feed, the six ways to deploy a token, trading, and the anti-rug protections built into every launch — and walks through deploying a token from start to finish.</p>
+        <div class="doc-hero-cta">
+          <a class="btn btn-primary" href="#how-to-deploy">Jump to: How to deploy a token</a>
+          <a class="btn btn-ghost" href="#features">See all features</a>
+        </div>
+      </div>
+      <div class="callout warn">
+        <span class="callout-icon">◆</span>
+        <p><b>Hood Launch is an independent, unofficial interface built for Robinhood Chain.</b> It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
+      </div>
+    </section>
+
+    <section id="getting-started">
+      <h2><span class="eyebrow">01</span>Getting started</h2>
+      <p class="section-intro">Three things to know before you do anything else on the platform.</p>
+      <div class="table-wrap" style="margin-top:16px;">
+        <table class="kv-table">
+          <tr><th>Connect a wallet</th><td>Click <b>Connect Wallet</b> in the top right. Hood Launch talks to whatever wallet your browser has injected (e.g. MetaMask) — no account or sign-up beyond that.</td></tr>
+          <tr><th>Pick a network</th><td>The network pill next to your wallet shows whether you're on <b>Testnet</b> or <b>Mainnet</b>. This is a platform-wide setting, not a personal preference — everyone browsing sees the same one at the same time.</td></tr>
+          <tr><th>Know which one is real</th><td>Testnet uses Robinhood Chain's test network — nothing has real value. Mainnet is the real chain: real ETH, real tokens, real trades. Always check the network pill before sending anything.</td></tr>
+        </table>
+      </div>
+    </section>
+
+    <section id="features">
+      <h2><span class="eyebrow">02</span>Features</h2>
+      <p class="section-intro">What's actually on the platform, beyond the launch wizard itself.</p>
+      <div class="feature-grid" style="margin-top:20px;">
+        <div class="feature-card">
+          <div class="feature-icon">◔</div>
+          <h3>Live launch grid</h3>
+          <p>Every token launched on the current network, with search, status filters (Recently Launched / Launched / Deployed / Graduated), live price sparklines, and a market-cap badge on each card.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">↯</div>
+          <h3>Real-time trade feed</h3>
+          <p>A live ticker of real buys and sells as they happen on-chain — including bonding-curve trades, tagged so you can tell a Quick Launch trade apart from an ordinary pool trade at a glance.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🚀</div>
+          <h3>Launch announcements</h3>
+          <p>The instant a new token goes live, it gets a large announcement banner in the same feed — you don't have to refresh the grid to catch a brand-new launch.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">◈</div>
+          <h3>Portfolio</h3>
+          <p>Connect your wallet to see every token you've launched, your real on-chain holdings, any creator rewards you can claim, and LP unlock status/countdowns.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⛓</div>
+          <h3>Six launch modes</h3>
+          <p>From a plain no-frills deploy to a fully configurable tax token to a pump.fun-style bonding curve — pick the mode that matches what you're actually building. See <a href="#launch-modes">Launch modes</a>.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">✎</div>
+          <h3>Editable token profile</h3>
+          <p>Add a logo, banner, description, and social links to your token after launch — off-chain, display-only metadata that syncs to every visitor, verified by a signature from your own wallet.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <h3>Gasless launches</h3>
+          <p>Two of the six modes let you sign a message instead of paying your own gas — a relayer submits the transaction for you. See <a href="#gasless">Gasless launches</a>.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔒</div>
+          <h3>Locked liquidity</h3>
+          <p>Every mode that adds a real pool locks the resulting LP tokens for a fixed period — never immediately withdrawable by the creator. A bonding curve's graduation liquidity is permanently burned instead of locked to anyone.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">◧</div>
+          <h3>Self-disabling tax</h3>
+          <p>Every taxed pool's transfer tax permanently switches itself off, forever, once the pool's live market cap crosses a fixed target — see <a href="#graduation">Tax &amp; graduation</a>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="launch-modes">
+      <h2><span class="eyebrow">03</span>Launch modes</h2>
+      <p class="section-intro">Every launch starts the same way — name, symbol, supply — then splits into one of six paths depending on how much upfront ETH you want to put in and how much control you want over the tax.</p>
+
+      <div class="mode-grid" style="margin-top:20px;">
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Deploy Token</h3><span class="mode-badge free">No ETH needed</span></div>
+          <p>100% of the supply mints straight to your wallet. No pool, no tax, nothing else happens on-chain. Creating a market for it — anywhere, any time — is entirely up to you afterward.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat, small deploy fee</li>
+            <li><span class="k">Tax</span>None</li>
+            <li><span class="k">Best for</span>Tokens you'll pair into liquidity yourself later, or that don't need a public market at all</li>
+          </ul>
+        </div>
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Deploy + Add Liquidity</h3><span class="mode-badge eth">Needs ETH</span></div>
+          <p>Creates the token and pairs your ETH into a real pool in the same transaction. A 1.00% transfer tax funds the climb to a fixed $50,000 market cap, then switches off for good. Your LP is locked to you, not withdrawable early.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat launch fee, plus the ETH you're pairing</li>
+            <li><span class="k">Tax</span>1.00%, until $50,000 market cap</li>
+            <li><span class="k">Optional</span>An initial buy-in, guaranteed to be the pool's first trade</li>
+          </ul>
+        </div>
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Deploy Custom Tax Token</h3><span class="mode-badge free">No ETH needed</span></div>
+          <p>Same idea as Deploy Token, but for the configurable token type — deploy and verify only, with whatever tax settings you chose staying completely inert until a pool actually exists.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat, small deploy fee</li>
+            <li><span class="k">Tax</span>Configured, but inactive</li>
+            <li><span class="k">Best for</span>Reserving your configurable token now, launching liquidity later</li>
+          </ul>
+        </div>
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Deploy + Add Liquidity (Custom Tax)</h3><span class="mode-badge eth">Needs ETH</span></div>
+          <p>The fully configurable path: pick a buy tax and sell tax (each independently capped), and mix in up to four mechanics — reflections paid to every holder, a marketing wallet, automatic liquidity, and automatic burn. Rates lock at launch and can never be raised afterward.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat launch fee, plus the ETH you're pairing</li>
+            <li><span class="k">Tax</span>Your own rate, plus a small platform tax on top (same self-disabling behavior)</li>
+            <li><span class="k">Best for</span>Reflections, auto-liquidity, or a fully custom tokenomics design</li>
+          </ul>
+        </div>
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Quick Launch</h3><span class="mode-badge quick">⚡ Zero tax, no ETH needed</span></div>
+          <p>No upfront ETH at all. Your token trades immediately against its own bonding curve — price rises automatically as people buy. Once the curve raises enough real ETH, it graduates: it automatically seeds a real pool and the platform's usual post-launch tax begins.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat, small launch fee</li>
+            <li><span class="k">Tax</span>None pre-graduation; the standard platform tax after</li>
+            <li><span class="k">Best for</span>A pump.fun-style launch with instant trading and no liquidity to raise yourself</li>
+          </ul>
+        </div>
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Quick Launch (Custom Tax)</h3><span class="mode-badge quick">⚡ Zero tax, no ETH needed</span></div>
+          <p>Identical bonding-curve mechanics to Quick Launch, but graduates into the configurable token type — so your reflections/marketing/auto-liquidity/burn settings apply from the moment real trading begins.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat, small launch fee</li>
+            <li><span class="k">Tax</span>None pre-graduation; your configured tax after</li>
+            <li><span class="k">Best for</span>A bonding-curve launch that still ends in your own custom tokenomics</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout" style="margin-top:20px;">
+        <span class="callout-icon">◆</span>
+        <p>In every mode that ends with a real pool, the liquidity that goes in is <b>locked</b> to the original creator for a fixed period — it's never something you (or anyone) can pull back out early. A Quick Launch's graduation liquidity comes from many different buyers rather than one creator, so it's <b>permanently burned</b> instead of locked to anyone.</p>
+      </div>
+    </section>
+
+    <section id="how-to-deploy">
+      <h2><span class="eyebrow">04</span>How to deploy a token</h2>
+      <p class="section-intro">The launch wizard is the same four steps regardless of which mode you pick — only what you fill in in step 2 and 3 changes.</p>
+
+      <div class="steps-list" style="margin-top:24px;">
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Connect your wallet and check the network</h3>
+            <p>Click <b>Connect Wallet</b> top-right, then confirm the network pill shows the network you actually intend to launch on. Click <b>Launch a token</b> (or the <b>Launch</b> tab) to open the wizard.</p>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Step 01 · Identity</h3>
+            <p>Name, ticker symbol, total supply, a short description, and optionally a logo, banner, and social links. This is the same information shown on your token's card and detail page later — you can still edit the description/branding/socials after launch.</p>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Step 02 · Deploy mode</h3>
+            <p>Choose one of the six modes from <a href="#launch-modes">Launch modes</a> above. The live preview panel on the right updates immediately to show what your token's card will look like.</p>
+            <div class="step-note"><b>Not sure which to pick?</b> No ETH to put in yet → Deploy Token or Deploy Custom Tax Token. Want instant trading with zero setup → Quick Launch. Want your own tax/reflections design → one of the Custom Tax modes.</div>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Step 03 · Terms</h3>
+            <p>For a liquidity mode, set how much ETH to pair in (and, optionally, an initial buy-in — guaranteed to be the pool's very first trade). For a custom-tax mode, set your buy/sell tax split across reflections, marketing, liquidity, and burn. Deploy-only and Quick Launch modes have little or nothing to configure here.</p>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Step 04 · Review</h3>
+            <p>Double-check everything — there's no editing tokenomics after this. Confirm, then approve the transaction in your wallet (or, for a gasless-eligible mode, sign the free message and send the deposit — see <a href="#gasless">Gasless launches</a>). A progress panel tracks each step of the launch live.</p>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>You're live</h3>
+            <p>Once the transaction confirms, your token appears on the grid, a launch announcement posts to the live feed, and it shows up under <b>Your launches</b> in your Portfolio tab. See <a href="#after-launch">After you launch</a> for what to do next.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="gasless">
+      <h2><span class="eyebrow">05</span>Gasless launches</h2>
+      <p class="section-intro">Deploy Token and Deploy + Add Liquidity both support launching without paying your own gas.</p>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>1. Sign</th><td>You sign a message describing your launch — free, no gas, no transaction sent yet.</td></tr>
+          <tr><th>2. Deposit</th><td>You send <b>one plain ETH transfer</b> covering the fee/liquidity/buy-in — an ordinary transfer, not a special gas payment.</td></tr>
+          <tr><th>3. Relay</th><td>A relayer wallet submits the actual launch transaction and pays that transaction's own gas for you.</td></tr>
+        </table>
+      </div>
+      <p style="margin-top:14px;">This only ever covers the launch transaction's gas — you're still the one funding the launch fee, liquidity, and any buy-in itself. Nobody but you can ever redirect or forge a launch: every relay re-checks your own signature and deposit before doing anything. Where gasless isn't available (or a relayer isn't configured for the current network), the wizard falls back to an ordinary wallet-paid transaction automatically.</p>
+    </section>
+
+    <section id="after-launch">
+      <h2><span class="eyebrow">06</span>After you launch</h2>
+      <div class="feature-grid" style="grid-template-columns:repeat(2,1fr); margin-top:16px;">
+        <div class="feature-card">
+          <h3>Edit your token</h3>
+          <p>From your token's detail page (or Portfolio → Your launches), update its description, logo, banner, and social links any time — a quick signature from your wallet syncs it for every visitor.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Claim creator rewards</h3>
+          <p>If creator rewards are enabled on the network you launched on, your Portfolio shows a claimable balance as trading activity accrues — trigger the swap and claim it straight to your wallet.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Unlock your LP</h3>
+          <p>Once your lock period ends, an <b>Unlock LP</b> button appears next to that launch in your Portfolio. Before that, the countdown shows exactly how long is left.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Watch it trade</h3>
+          <p>Every real buy/sell shows up in the live feed in real time, and your token's price/market-cap chart updates from the same on-chain activity.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="trading">
+      <h2><span class="eyebrow">07</span>Buying &amp; selling</h2>
+      <p class="section-intro">How a trade works depends on which side of graduation a token is on.</p>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Pool-based token</th><td>Deploy + Add Liquidity and Custom Tax modes trade against a real DEX pool from the moment they launch. Buy/sell straight from the token's detail page; price follows the pool like any ordinary AMM pair.</td></tr>
+          <tr><th>Quick Launch, pre-graduation</th><td>Trades go straight against the bonding curve itself — no pool yet. Price rises with every buy and falls with every sell, following the curve, not an order book.</td></tr>
+          <tr><th>Quick Launch, post-graduation</th><td>Once graduated, it behaves exactly like a pool-based token from then on — same detail-page trade panel, same live pricing.</td></tr>
+        </table>
+      </div>
+      <p style="margin-top:14px;">The live feed tags every bonding-curve trade with a small <span class="badge-pill signal">⚡</span> marker so you can tell it apart from an ordinary pool trade at a glance.</p>
+    </section>
+
+    <section id="graduation">
+      <h2><span class="eyebrow">08</span>Tax &amp; graduation</h2>
+      <p class="section-intro">Every taxed token on Hood Launch is built to tax itself out of existence, not to tax forever.</p>
+      <ul style="color:var(--paper-300); font-size:.92rem; padding-left:20px; margin:0 0 12px;">
+        <li style="margin-bottom:8px;">A <b>Deploy + Add Liquidity</b> or <b>Custom Tax</b> pool starts taxed the instant it launches, and that tax <b>permanently disables itself</b>, forever, the moment the pool's live market cap crosses its target — checked automatically on every taxed trade.</li>
+        <li style="margin-bottom:8px;">A <b>Quick Launch</b> token has <b>zero tax</b> while it's trading on the curve. The moment it graduates into a real pool, it opts into that same kind of post-launch tax — which then disables itself the same way, once the (now real) pool's market cap crosses its own target.</li>
+      </ul>
+      <div class="callout">
+        <span class="callout-icon">◆</span>
+        <p>Nobody can raise a tax rate after launch. For custom-tax tokens the rate is locked in at launch and has no setter at all afterward — the only thing a creator can still change post-launch is operational (marketing wallet, exemptions), never the rate itself.</p>
+      </div>
+    </section>
+
+    <section id="security">
+      <h2><span class="eyebrow">09</span>Security &amp; disclosures</h2>
+      <div class="feature-grid" style="grid-template-columns:repeat(2,1fr); margin-top:16px;">
+        <div class="feature-card">
+          <h3>LP locks &amp; burns</h3>
+          <p>Every liquidity-bearing launch locks its LP to the creator, or — for a Quick Launch's graduation liquidity — burns it outright. Neither is ever pulled back out early by anyone, including the platform.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Immutable custom-token rates</h3>
+          <p>A Custom Tax token's buy/sell rates are fixed forever at launch. There is no admin, creator, or platform action anywhere that can raise them afterward.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Independently-added pools</h3>
+          <p>If liquidity is ever detected for a token outside Hood Launch's own launch flow, its card says so plainly and its price isn't tracked here — the platform doesn't vouch for a market it didn't create.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Testnet vs. Mainnet</h3>
+          <p>The Demo/Live network switch is platform-wide. On Mainnet, every launch, trade, and price shown reflects genuine on-chain transactions and real funds — never a simulation.</p>
+        </div>
+      </div>
+      <div class="callout warn" style="margin-top:20px;">
+        <span class="callout-icon">◆</span>
+        <p>Hood Launch is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Launching or trading a token carries real financial risk. Nothing on this page or on the platform is financial advice; review a token's own contract and terms before committing real funds.</p>
+      </div>
+    </section>
+
+    <section id="faq">
+      <h2><span class="eyebrow">10</span>FAQ</h2>
+      <div style="margin-top:8px;">
+        <details class="faq-item">
+          <summary>Do I need ETH to launch a token?</summary>
+          <p>Only for the modes that add liquidity upfront (Deploy + Add Liquidity, and its Custom Tax equivalent) — you're pairing that ETH into the pool yourself. Deploy Token, Deploy Custom Tax Token, and both Quick Launch modes need no upfront ETH beyond a small flat fee.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What's the difference between Testnet and Mainnet?</summary>
+          <p>Testnet runs on Robinhood Chain's test network, where nothing has real value — it's the place to try the platform out. Mainnet is the real chain: real ETH, real tokens, real, irreversible trades. The network pill next to your wallet always shows which one is currently active for everyone.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can a creator raise the tax after launch?</summary>
+          <p>No. A Custom Tax token's rate is locked in permanently at launch, with no setter anywhere in the contract afterward. A plain Deploy + Add Liquidity token's tax only ever moves in one direction: from active to permanently disabled once its pool crosses the market-cap target — never back up.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What happens to my liquidity?</summary>
+          <p>It's locked to you (the creator) for a fixed period the moment it's added — you can't withdraw it early, and neither can anyone else. Once the lock period ends, an Unlock LP button appears for that launch in your Portfolio.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What does "graduated" mean?</summary>
+          <p>For a taxed pool, it means the tax has permanently switched off — the market cap target was hit and trading is now tax-free for good. For a Quick Launch token specifically, "graduated" also marks the moment it moved off the bonding curve and into a real DEX pool.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is Hood Launch affiliated with Robinhood?</summary>
+          <p>No. Hood Launch is an independent, unofficial interface built for Robinhood Chain. It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is any of this simulated?</summary>
+          <p>Once real contracts are configured for a network, launching, trading, and a taxed/graduated token's own price all reflect genuine on-chain activity — not a simulation. What stays illustrative regardless: holder-count breakdowns, 24h volume shown before any real trades exist, and the price of a pool Hood Launch merely detected rather than created itself.</p>
+        </details>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<footer>
+  <div class="footer-inner">
+    <p class="footer-note">Hood Launch is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Wallet connection is real (via your browser wallet), and the Demo/Live switch targets testnet or mainnet respectively. Once real factory addresses are configured for a network, launching a token, trading it, and its own price and chart (for a "taxed"/"graduated" token) all reflect genuine on-chain transactions and live pool state, not a simulation — real tokens and funds move. What stays illustrative regardless: the holder breakdown, 24h volume, and the price of any pool Hood Launch merely detected rather than created itself.</p>
+    <div class="footer-links"><a href="index.html">App</a><a href="docs.html" aria-current="page">Docs</a><span>Status</span><span>Terms</span></div>
+  </div>
+</footer>
+
+<script>
+  // Mobile nav toggle — the sidebar TOC becomes an off-canvas panel below
+  // 980px (see .docs-nav's own media query). No framework, no external
+  // script: just a class flip, matching this page's "single self-contained
+  // file" constraint.
+  (function(){
+    var toggle = document.getElementById("navToggle");
+    var nav = document.getElementById("docsNav");
+    if(!toggle || !nav) return;
+    toggle.addEventListener("click", function(){
+      var open = nav.classList.toggle("open");
+      toggle.setAttribute("aria-expanded", String(open));
+    });
+    nav.querySelectorAll("a").forEach(function(a){
+      a.addEventListener("click", function(){
+        nav.classList.remove("open");
+        toggle.setAttribute("aria-expanded", "false");
+      });
+    });
+  })();
+
+  // Scrollspy: highlights whichever section heading is currently nearest
+  // the top of the viewport in the sidebar TOC. Purely a wayfinding aid —
+  // every link already works with a plain click regardless of this.
+  (function(){
+    var sections = Array.prototype.slice.call(document.querySelectorAll(".docs-content section[id]"));
+    var links = Array.prototype.slice.call(document.querySelectorAll(".docs-nav a[href^='#']"));
+    if(!sections.length || !links.length || !("IntersectionObserver" in window)) return;
+    var byId = {};
+    links.forEach(function(a){ byId[a.getAttribute("href").slice(1)] = a; });
+    var observer = new IntersectionObserver(function(entries){
+      entries.forEach(function(entry){
+        var link = byId[entry.target.id];
+        if(!link) return;
+        if(entry.isIntersecting) links.forEach(function(a){ a.classList.remove("active"); });
+        if(entry.isIntersecting) link.classList.add("active");
+      });
+    }, { rootMargin: "-15% 0px -70% 0px", threshold: 0 });
+    sections.forEach(function(s){ observer.observe(s); });
+  })();
+</script>
+</body>
+</html>
