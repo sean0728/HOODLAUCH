@@ -6,5 +6,4 @@
   "rewardsDistributor": { "demo": "0xb8749F939C7C667FD9a51b69C32019d4a59da404", "live": null },
   "creatorRewardsDistributor": { "demo": "0xcad077587A5db2210e586AA31B24BaD1a12ECc0C", "live": null },
   "priceFeed": { "demo": "0x96B1Ebd9daB675F41C6B5688F1601c2b0619e32f", "live": "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9" },
-  "relayerApiUrl": { "demo": null, "live": null }
-}
+  }
