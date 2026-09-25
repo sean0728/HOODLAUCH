@@ -1,18 +1,38 @@
 {
   "tokenFactory": {
-    "demo": "0x4B4E27149ba7bAC493f97Cc62F4fF308b984eC3E",
+    "demo": "0xBC0E6376a90505A6eB9aD6C1675e6b32Be524d84",
     "live": null
   },
   "customTokenFactory": {
-    "demo": "0xB6d9AcfD3BF32578eb37773137D324ee12E2dEAb",
+    "demo": "0x8e37F930991369bE46Dd79f43E77dd2A095f31a2",
     "live": null
   },
   "rewardsDistributor": {
-    "demo": "0x751661E773da8D74bc956952F91695cFE9506DE7",
+    "demo": "0xb8749F939C7C667FD9a51b69C32019d4a59da404",
     "live": null
   },
   "priceFeed": {
     "demo": "0x96B1Ebd9daB675F41C6B5688F1601c2b0619e32f",
     "live": "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9"
   }
+  {
+  "bondingCurveFactory": {
+    "demo": "0x686Ab1FFB715eD4088DC57AE61f401Ee40776f9C",
+    "live": null
+  },
+  {
+  "customBondingCurveFactory": {
+    "demo": "0xf825B78DF6E98E35cBFA31886ff3EA5caB3BccD2",
+    "live": null
+  }
+{
+  "feeWalletDistributor": {
+    "demo": "0xA2DB4edA8EB27Ff5d2e754bCB25f997c1C89AE74",
+    "live": null
+  },
+ {
+  "creatorRewardsDistributor": {
+    "demo": "0xcad077587A5db2210e586AA31B24BaD1a12ECc0C",
+    "live": null
+  } 
 }
