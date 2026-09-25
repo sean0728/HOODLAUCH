@@ -1012,10 +1012,16 @@
   // is shown, without duplicating the initials-vs-image branch at each
   // call site.
   function tcMarkHTML(t, extraStyle=""){
-    const initials = (t.ticker||"??").slice(0,2);
+    // initials is capped at 2 chars from t.ticker (never truly untrusted —
+    // catColor is always the hardcoded "var(--signal-500)" at every call
+    // site, never user input) but escaping both here is free insurance and
+    // keeps this function safe even if a future call site starts passing
+    // real user-controlled data through catColor.
+    const initials = escapeHtml((t.ticker||"??").slice(0,2));
+    const catColor = escapeHtml(t.catColor||"var(--signal-500)");
     const safeLogo = safeImageSrc(t.logo);
-    if(safeLogo) return `<div class="tc-mark" style="background:${t.catColor}; padding:0; ${extraStyle}"><img src="${safeLogo}" alt=""></div>`;
-    return `<div class="tc-mark" style="background:${t.catColor}; ${extraStyle}">${initials}</div>`;
+    if(safeLogo) return `<div class="tc-mark" style="background:${catColor}; padding:0; ${extraStyle}"><img src="${safeLogo}" alt=""></div>`;
+    return `<div class="tc-mark" style="background:${catColor}; ${extraStyle}">${initials}</div>`;
   }
 
   function socialLinksHTML(t){
@@ -1312,7 +1318,12 @@
     // <meta> tag in <head>) only ever allows 'self' for this endpoint, not
     // a second hardcoded host — so anything other than the live origin gets
     // silently blocked by the browser the moment the two don't match.
-    relayerApiUrl: { demo: location.origin, live: null }, // fill in once a mainnet relayer instance is hosted somewhere reachable
+    // gatherPlatformConfigLayerFromForm() enforces this same-origin
+    // requirement at save time for whatever the admin panel later sets this
+    // (or the live URL below) to, so a mismatch gets caught with an
+    // actionable message instead of surfacing later as unexplained dropped
+    // requests.
+    relayerApiUrl: { demo: location.origin, live: null }, // fill in once a mainnet relayer instance is hosted somewhere reachable (must share this page's origin, or the CSP connect-src allowlist above needs widening first — see gatherPlatformConfigLayerFromForm)
   };
   const PLATFORM_CONFIG_STORAGE_KEY = "hoodlaunch_platform_config";
 
@@ -9658,6 +9669,31 @@
       const kindNoun = isUrlField ? "URL" : "address";
       if(demoV && !validator(demoV)){ toast(`${CONFIG_LABELS[k]} testnet ${kindNoun} doesn't look valid.`); return null; }
       if(liveV && !validator(liveV)){ toast(`${CONFIG_LABELS[k]} mainnet ${kindNoun} doesn't look valid.`); return null; }
+      // FIRM-UP: this page's CSP (see the <meta http-equiv="Content-Security-
+      // Policy"> tag in <head>) only allows connect-src 'self' — there's no
+      // second hardcoded host in that allowlist. relayerApiUrl is otherwise
+      // free-form (any https://... the admin types), so a value here whose
+      // origin doesn't match the page's own origin will validate fine, save
+      // fine, and then have every fetch() to it silently dropped by the
+      // browser at runtime — gasless launches, the live token feed, and
+      // pricing would all quietly stop working with only a CSP violation in
+      // the browser console to explain why. Block that combination at save
+      // time instead of letting it surface later as an unexplained outage:
+      // either point relayerApiUrl at this same origin (the common case,
+      // since relayer.js serves this page itself via express.static), or
+      // widen the CSP connect-src to include the new host and re-upload
+      // index.html before saving a cross-origin relayer URL here.
+      if(k==="relayerApiUrl"){
+        for(const [label, v] of [["testnet", demoV], ["mainnet", liveV]]){
+          if(!v) continue;
+          let originOk = true;
+          try{ originOk = new URL(v).origin === location.origin; }catch(e){ originOk = false; }
+          if(!originOk){
+            toast(`${label==="testnet"?"Testnet":"Mainnet"} relayer URL is on a different origin than this page. This page's CSP (connect-src 'self') will block every request to it — add that origin to connect-src in the <meta> CSP tag and re-upload index.html first, or point this at ${location.origin} instead.`);
+            return null;
+          }
+        }
+      }
       layer[k] = { demo: demoV || null, live: liveV || null };
     }
     return layer;
