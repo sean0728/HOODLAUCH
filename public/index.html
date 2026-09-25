@@ -281,6 +281,17 @@
   .feed-line .dot{width:6px; height:6px; border-radius:50%; flex:none; margin-top:5px;}
   .feed-line .tk{color:var(--signal-300); font-weight:600;}
   .feed-line .msg{color:var(--paper-300);}
+  .feed-curve-tag{margin-right:1px;}
+  /* Big launch-announcement row — same feed-line shape so it sits in the
+     same list/pruning/scroll behavior, just visually louder so a brand-new
+     token launch doesn't read like just another trade line. */
+  .feed-announce{background:linear-gradient(90deg, rgba(255,157,60,.14), rgba(61,199,222,.07)); padding:12px 14px;}
+  .feed-announce .msg{color:var(--paper-100); font-weight:600; font-size:.86rem;}
+  .feed-announce-badge{
+    font-family:var(--font-mono); font-size:.6rem; letter-spacing:.05em; text-transform:uppercase;
+    padding:2px 7px; border-radius:999px; background:var(--signal-wash); color:var(--signal-300);
+    border:1px solid rgba(255,157,60,.35); flex:none;
+  }
 
   /* ---------------- stat row ---------------- */
   .stat-row{display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:var(--radius-md); overflow:hidden; margin-bottom:56px;}
@@ -339,6 +350,10 @@
      this stays visible on a card so a Quick Launch token's pump.fun-style
      origin is never lost after graduation. */
   .tc-quicklaunch-badge{font-family:var(--font-mono); font-size:.62rem; letter-spacing:.05em; text-transform:uppercase; padding:2px 8px; border-radius:999px; white-space:nowrap; background:var(--signal-wash); color:var(--signal-300); border:1px solid rgba(255,157,60,.35);}
+  /* Market cap badge, top-right corner of each token's card — sits above the
+     Quick Launch/status badges in that same right-aligned column. */
+  .tc-mcap{font-family:var(--font-mono); font-size:.74rem; font-weight:600; color:var(--paper-100); white-space:nowrap;}
+  .tc-mcap .l{font-size:.58rem; font-weight:400; color:var(--paper-700); text-transform:uppercase; letter-spacing:.05em; margin-right:4px;}
 
   .tc-desc{font-size:.82rem; color:var(--paper-500); margin:0 0 14px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
   .tc-spark{width:100%; height:36px; display:block; margin-bottom:14px; overflow:hidden;}
@@ -1458,6 +1473,14 @@
   function setMode(mode){
     appMode = mode;
     refreshModeUI();
+    // Re-filter the grid/header stats to this network's own tokens right
+    // away — tokensForCurrentNetwork()/renderGrid()/renderStats() are plain
+    // function declarations defined further down (hoisted, so safe to call
+    // here) — otherwise a switch would only visibly update once
+    // refreshRemoteLaunches below happens to find something new for this
+    // network, leaving the OTHER network's tokens on screen until then.
+    if(typeof renderGrid==="function") renderGrid();
+    if(typeof renderStats==="function") renderStats();
     if(wallet) ensureNetwork(appMode);
     refreshOnChainDefaults();
     refreshEthUsdPrice();
@@ -5326,6 +5349,15 @@
     };
   }
 
+  // Tracks which networks have already had one full GET /launches sync this
+  // page load. The very first sync for a network just catches this browser
+  // up on every launch that already exists — announcing each of those as a
+  // "new launch" would flood the live feed with the platform's entire
+  // history the moment anyone opens the site. Only a launch that shows up on
+  // a LATER poll, after that initial catch-up, is actually new — see the
+  // `alreadySeeded` check below.
+  const remoteLaunchesSeededModes = new Set();
+
   // Fetches GET /launches for `mode` (defaulting to the current Demo/Live
   // mode) and merges in anything this browser hasn't seen yet. Silent no-op
   // when no relayer is configured for that mode, or it's unreachable —
@@ -5341,7 +5373,8 @@
       payload = await res.json();
     }catch(e){ return; }
     const launches = Array.isArray(payload && payload.launches) ? payload.launches : [];
-    if(!launches.length) return;
+    const alreadySeeded = remoteLaunchesSeededModes.has(mode);
+    if(!launches.length){ remoteLaunchesSeededModes.add(mode); return; }
 
     // Rank of each status in the one-way DEPLOYED -> LAUNCHED -> GRADUATED
     // progression, so an already-known token's status can be advanced below
@@ -5359,6 +5392,9 @@
         byKey.set(key, t);
         tokens.push(t);
         added = true;
+        // Only announce launches discovered AFTER the initial catch-up sync
+        // for this network — see remoteLaunchesSeededModes' own comment.
+        if(alreadySeeded && mode===appMode) announceLaunch(t);
         continue;
       }
       // Already known (from this same GET /launches call earlier, or from a
@@ -5402,6 +5438,7 @@
         updated = true;
       }
     }
+    remoteLaunchesSeededModes.add(mode);
     if(added || updated){
       renderGrid();
       renderStats();
@@ -5563,14 +5600,31 @@
   }
 
   /* ---------------- stat row + hero readouts ---------------- */
+  // A token created (or merged in from GET /launches) under one network
+  // carries that network on t.networkMode (see the launch flows and
+  // remoteLaunchToTokenObject, all of which stamp `networkMode: appMode`/
+  // `networkMode: mode` at creation time) — but `tokens` itself is one
+  // shared array for the whole page session, so a browser that's ever
+  // touched both Demo (testnet) and Live (mainnet) — an admin testing both,
+  // or simply having launched things on testnet before mainnet contracts
+  // existed — ends up with both networks' tokens sitting in it at once.
+  // Every network-scoped view (the grid, the header stats) reads through
+  // this instead of `tokens` directly, so switching Demo/Live actually shows
+  // only that network's own launches rather than a mix of both. A token
+  // saved before this field existed has no networkMode at all — treated as
+  // Demo, since Demo (testnet) was the only network before Live existed.
+  function tokensForCurrentNetwork(){
+    return tokens.filter(t => (t.networkMode || "demo") === appMode);
+  }
   function renderStats(){
-    const tvl = tokens.reduce((a,t)=>a+t.mcap*0.22,0);
-    const vol = tokens.reduce((a,t)=>a+t.vol,0);
-    const traders = tokens.reduce((a,t)=>a+t.holders,0);
-    const graduated = tokens.filter(t=>t.status==="graduated").length;
+    const visible = tokensForCurrentNetwork();
+    const tvl = visible.reduce((a,t)=>a+t.mcap*0.22,0);
+    const vol = visible.reduce((a,t)=>a+t.vol,0);
+    const traders = visible.reduce((a,t)=>a+t.holders,0);
+    const graduated = visible.filter(t=>t.status==="graduated").length;
 
     document.getElementById("rdTvl").textContent = fmtUSD(tvl);
-    document.getElementById("rdLaunches").textContent = fmtInt(tokens.length);
+    document.getElementById("rdLaunches").textContent = fmtInt(visible.length);
     document.getElementById("rdGrad").textContent = fmtInt(graduated);
 
     document.getElementById("statTvl").textContent = fmtUSD(tvl);
@@ -5747,6 +5801,7 @@
         ${tcMarkHTML(t)}
         <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)}</div></div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
+          ${(!noSimulatedMarket && t.mcap>0) ? `<div class="tc-mcap"><span class="l">Mcap</span>${fmtUSD(t.mcap)}</div>` : ""}
           ${(t.mode==="curve"||t.mode==="customCurve") ? `<span class="tc-quicklaunch-badge">⚡ Quick Launch</span>` : ""}
           <div style="display:flex; gap:6px;">${statusBadgeHTML(t.mode, t.status)}</div>
         </div>
@@ -5764,7 +5819,8 @@
   function renderGrid(){
     const grid = document.getElementById("tokenGrid");
     const q = searchTerm.trim().toLowerCase();
-    const filtered = tokens.filter(t=>{
+    const networkTokens = tokensForCurrentNetwork();
+    const filtered = networkTokens.filter(t=>{
       if(activeFilter==="recent"){
         if(!(typeof t.createdAtMs==="number" && (Date.now()-t.createdAtMs)<=RECENT_LAUNCH_WINDOW_MS)) return false;
       } else if(!matchesStatusFilter(t, activeFilter)){
@@ -5778,12 +5834,12 @@
       return true;
     });
     if(!filtered.length){
-      if(tokens.length){
+      if(networkTokens.length){
         grid.innerHTML = `<div class="empty" style="grid-column:1/-1">No launches match that filter yet.</div>`;
         return;
       }
       grid.innerHTML = `<div class="empty" style="grid-column:1/-1; display:flex; flex-direction:column; gap:14px; align-items:center;">
-        <span>No launches yet on Hood Launch.</span>
+        <span>No launches yet on ${escapeHtml(NETWORKS[appMode].label)}.</span>
         <button class="btn btn-primary" data-goto="create">Launch the first token</button>
       </div>`;
       grid.querySelectorAll("[data-goto]").forEach(b=> b.addEventListener("click", ()=>showView(b.dataset.goto)) );
@@ -10432,10 +10488,42 @@
     const dotColor = entry.side==="buy" ? "var(--good-500)" : "var(--cyan-500)";
     const shortWallet = entry.wallet ? `${entry.wallet.slice(0,6)}…` : "0x????…";
     const symbol = entry.symbol || "TOKEN";
+    // Quick Launch (bonding-curve) buys/sells land in this exact same
+    // /activity feed — pollTokenActivity in relayer.js reads them straight
+    // off the factory's own CurveBought/CurveSold events (its curve branch,
+    // separate from the ordinary pair-Swap loop) — but they're otherwise
+    // indistinguishable here from a normal DEX-pool trade. Tag them with the
+    // same ⚡ Quick Launch mark the token cards use, looked up from the
+    // already-known `tokens` array by address.
+    const knownToken = entry.tokenAddress
+      ? tokens.find(x=>x.tokenAddress && x.tokenAddress.toLowerCase()===String(entry.tokenAddress).toLowerCase())
+      : null;
+    const isCurveTrade = !!knownToken && (knownToken.mode==="curve" || knownToken.mode==="customCurve");
     const div = document.createElement("div");
     div.className = "feed-line";
-    div.innerHTML = `<span class="t mono">${time}</span><span class="dot" style="background:${dotColor}"></span><span class="msg">Wallet <span class="tk">${escapeHtml(shortWallet)}</span> ${verb} <span class="tk">$${escapeHtml(symbol)}</span></span>`;
+    div.innerHTML = `<span class="t mono">${time}</span><span class="dot" style="background:${dotColor}"></span><span class="msg">${isCurveTrade ? `<span class="feed-curve-tag">⚡</span> ` : ""}Wallet <span class="tk">${escapeHtml(shortWallet)}</span> ${verb} <span class="tk">$${escapeHtml(symbol)}</span></span>`;
     return div;
+  }
+
+  // ---- launch announcements in the live feed ----
+  // Reuses refreshRemoteLaunches' own "is this tokenAddress already in
+  // `tokens`" check (see its `!existing` branch below) to detect a brand-new
+  // launch, then drops one of these into the same #feedBody list as a big,
+  // visually distinct row instead of an ordinary trade line.
+  function launchAnnouncementHTML(t){
+    const time = new Date(t.createdAtMs || Date.now()).toLocaleTimeString("en-US", {hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
+    const badge = (t.mode==="curve"||t.mode==="customCurve") ? "⚡ Quick Launch" : "New launch";
+    const div = document.createElement("div");
+    div.className = "feed-line feed-announce";
+    div.innerHTML = `<span class="t mono">${time}</span><span class="feed-announce-badge">${badge}</span><span class="msg">🚀 <span class="tk">$${escapeHtml(t.ticker)}</span> just launched on Hood Launch — ${escapeHtml(t.name)}</span>`;
+    return div;
+  }
+  function announceLaunch(t){
+    const body = document.getElementById("feedBody");
+    if(!body) return;
+    if(body.querySelector(".empty")) body.innerHTML = "";
+    body.appendChild(launchAnnouncementHTML(t));
+    while(body.children.length>8) body.removeChild(body.firstChild);
   }
 
   // How far back a trade still counts toward "24h volume" — see the
