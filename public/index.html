@@ -1968,6 +1968,31 @@
   const SET_POOL_SEED_TARGET_WEI_SELECTOR = "196928ad";        // setPoolSeedTargetWei(uint256)
   const SET_CURVE_LAUNCH_FEE_SELECTOR = "a4056bc9";            // setCurveLaunchFee(uint256)
   const RESCUE_STRANDED_FEES_SELECTOR = "7d751b04";            // rescueStrandedFees(address,uint256) — owner-only sweep of fee transfers that failed to deliver (see strandedFees() / FeeTransferFailed event)
+  const LIQUIDITY_SLIPPAGE_BPS_SELECTOR = "07042173";          // liquiditySlippageBps() — the fixed 5.00%-8.00% band applied to _doGraduate's own addLiquidityETH call
+  const SET_LIQUIDITY_SLIPPAGE_BPS_SELECTOR = "f90f7fe4";      // setLiquiditySlippageBps(uint256)
+  // setRelayer/maxRelayerGasReimbursementWei/setMaxRelayerGasReimbursement
+  // are identical signatures on all four factories (TokenFactory/
+  // CustomTokenFactory/BondingCurveFactory/CustomBondingCurveFactory), same
+  // sharing convention as RELAYER_SELECTOR/DEPOSIT_FOR_RELAYED_LAUNCH_SELECTOR
+  // above — only the admin panel for the two curve factories actually wires
+  // these up right now, but the selectors themselves apply to any of the four.
+  const SET_RELAYER_SELECTOR = "6548e9bc";                       // setRelayer(address)
+  const MAX_RELAYER_GAS_REIMBURSEMENT_SELECTOR = "82f6860f";     // maxRelayerGasReimbursementWei()
+  const SET_MAX_RELAYER_GAS_REIMBURSEMENT_SELECTOR = "4270675b"; // setMaxRelayerGasReimbursement(uint256)
+  // BondingCurveFactory/CustomBondingCurveFactory's combined replacement for
+  // the individual platformFeeWallet()/feeBps()/priceFeed()/
+  // graduationTargetUsd()/maxOracleStaleness()/rewardsDistributor()/
+  // rewardBps()/creatorRewardsDistributor()/creatorRewardBps()/
+  // feeWalletDistributor() getters TokenFactory/CustomTokenFactory still
+  // expose individually — see those two contracts' own "Finding 8" comment
+  // (right above their private tax-default fields) on why the curve
+  // factories deliberately have NO individual getters for these: making
+  // them private closes an exploit where _maybeAutoActivateTax's
+  // ITokenFactoryTaxDefaults(factory) cross-call could hit a matching
+  // function on the WRONG factory. Every value is still fully readable
+  // off-chain, just through this one view instead — see
+  // decodeCurveTaxDefaults below for the tuple shape.
+  const CURVE_TAX_DEFAULTS_SELECTOR = "c6378688"; // taxDefaults()
 
   // ---- Gasless relayed-launch selectors — shared by TokenFactory and
   // CustomTokenFactory (identical function signatures, identical
@@ -2298,6 +2323,28 @@
       curveFeeBps: decodeUint256("0x"+words[8]),
       graduated: decodeUint256("0x"+words[9]) === 1n,
       createdAt: decodeUint256("0x"+words[10]),
+    };
+  }
+  // Decodes BondingCurveFactory/CustomBondingCurveFactory's combined
+  // taxDefaults() view (see CURVE_TAX_DEFAULTS_SELECTOR's own comment on why
+  // this replaces individual getters) — 11 static (address/uint256) return
+  // values, so this is just 11 concatenated 32-byte words in order, same
+  // decoding pattern as decodeCurveState above.
+  function decodeCurveTaxDefaults(hex){
+    const clean = hex.replace(/^0x/i,"");
+    const words = splitWords(clean);
+    return {
+      router: decodeAddress("0x"+words[0]),
+      platformFeeWallet: decodeAddress("0x"+words[1]),
+      feeBps: decodeUint256("0x"+words[2]),
+      priceFeed: decodeAddress("0x"+words[3]),
+      graduationTargetUsd: decodeUint256("0x"+words[4]),
+      maxOracleStaleness: decodeUint256("0x"+words[5]),
+      rewardsDistributor: decodeAddress("0x"+words[6]),
+      rewardBps: decodeUint256("0x"+words[7]),
+      creatorRewardsDistributor: decodeAddress("0x"+words[8]),
+      creatorRewardBps: decodeUint256("0x"+words[9]),
+      feeWalletDistributor: decodeAddress("0x"+words[10]),
     };
   }
   // quoteBuy(token,ethIn)/quoteSell(token,tokenAmountIn)/buy(token,minTokensOut)
@@ -8637,7 +8684,11 @@
   // authority beyond what the connected wallet's private key already has
   // on-chain.
   function adminFactoryAddress(key){
-    return key==="tf" ? tokenFactoryAddress() : customTokenFactoryAddress();
+    if(key==="tf") return tokenFactoryAddress();
+    if(key==="ctf") return customTokenFactoryAddress();
+    if(key==="bcf") return bondingCurveFactoryAddress();
+    if(key==="cbcf") return customBondingCurveFactoryAddress();
+    return customTokenFactoryAddress(); // legacy fallback for any stray caller not yet updated to pass one of the four keys above
   }
 
   async function loadFactoryAdminState(address){
@@ -8790,6 +8841,249 @@
 
         <div class="admin-section-label">Fee wallet distributor · the platform's own trading-tax remainder, converted to ETH</div>
         <p class="admin-empty" style="margin-bottom:10px;">Redirects whatever's left of the platform tax after the reward/creator-reward diversion above — the fee-wallet slice that would otherwise sit at "Platform fee wallet" as whatever token it was taxed in — to a FeeWalletDistributor contract instead, which converts it to ETH automatically and pays out to one address it controls (owner-changeable independently of this panel). Leaving this unset (the default) keeps the fee-wallet slice going straight to the plain wallet above, exactly as it's always worked — see scripts/deployFeeWalletDistributor.js for how one gets deployed.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Fee wallet distributor (address)</label><input type="text" id="admin_${key}_feeWalletDistributor" placeholder="${state.feeWalletDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.feeWalletDistributor}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="feeWalletDistributor" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
+        </div>
+
+        <div class="admin-section-label">Ownership · Ownable2Step</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Transferring ownership doesn't take effect until the new address itself calls acceptOwnership() — the current owner keeps full control until then, so a mistyped address can't lock this contract out.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Transfer ownership to</label><input type="text" id="admin_${key}_newOwner" placeholder="0x…"></div>
+          <button class="btn btn-ghost btn-sm" data-admin-action="transferOwnership" data-factory-key="${key}">Propose</button>
+        </div>
+        ${walletIsPendingOwner ? `
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">This connected wallet is the pending owner — accept to complete the transfer.</p>
+          <button class="btn btn-primary btn-sm" data-admin-action="acceptOwnership" data-factory-key="${key}">Accept ownership</button>
+        </div>` : ""}
+      </div>`;
+  }
+
+  // ---- BondingCurveFactory/CustomBondingCurveFactory admin panel — same
+  // "one function, keyed by which of the two contracts" convention as
+  // adminFactoryPanelHTML above for TokenFactory/CustomTokenFactory, but
+  // reading/writing a different set of on-chain fields: no deployFee/
+  // launchFee (curveLaunchFee is the closest equivalent, priced like
+  // deployFee since no pool exists yet at creation), plus curve-only knobs
+  // (curveFeeBps, curveSupplyBps, virtualEthReserveDefault,
+  // virtualTokenReserveBps, poolSeedTargetWei, liquiditySlippageBps) and a
+  // gasless-relay toggle (relayer/maxRelayerGasReimbursementWei) neither
+  // TokenFactory nor CustomTokenFactory currently expose a panel for. The
+  // shared platform-tax-defaults/rewards/creator-rewards/fee-wallet-
+  // distributor/ownership sections below are copied verbatim from
+  // adminFactoryPanelHTML (identical field-id and data-admin-action
+  // conventions), since those setters really are identical signatures on
+  // every factory (see runAdminAction — those branches need no changes to
+  // work for "bcf"/"cbcf" too) — only the "Current state" readout for the
+  // tax-default cluster differs, since it comes from one taxDefaults() call
+  // instead of ten individual getters (see CURVE_TAX_DEFAULTS_SELECTOR's own
+  // comment on why).
+  async function loadCurveFactoryAdminState(address){
+    const [
+      ownerHex, pendingOwnerHex, curveLaunchFeeHex, curveFeeBpsHex, curveSupplyBpsHex,
+      virtualEthReserveDefaultHex, virtualTokenReserveBpsHex, poolSeedTargetWeiHex,
+      maxCreatorBuyBpsHex, liquiditySlippageBpsHex, feeTreasuryHex, lpLockDurationHex,
+      relayerHex, maxRelayerGasReimbursementWeiHex, taxDefaultsHex,
+    ] = await Promise.all([
+      ethCall(address, "0x"+OWNER_SELECTOR),
+      ethCall(address, "0x"+PENDING_OWNER_SELECTOR),
+      ethCall(address, "0x"+CURVE_LAUNCH_FEE_SELECTOR),
+      ethCall(address, "0x"+CURVE_FEE_BPS_SELECTOR),
+      ethCall(address, "0x"+CURVE_SUPPLY_BPS_SELECTOR),
+      ethCall(address, "0x"+VIRTUAL_ETH_RESERVE_DEFAULT_SELECTOR),
+      ethCall(address, "0x"+VIRTUAL_TOKEN_RESERVE_BPS_SELECTOR),
+      ethCall(address, "0x"+POOL_SEED_TARGET_WEI_SELECTOR),
+      ethCall(address, "0x"+MAX_CREATOR_BUY_BPS_SELECTOR),
+      ethCall(address, "0x"+LIQUIDITY_SLIPPAGE_BPS_SELECTOR),
+      ethCall(address, "0x"+FEE_TREASURY_SELECTOR),
+      ethCall(address, "0x"+LP_LOCK_DURATION_SELECTOR),
+      ethCall(address, "0x"+RELAYER_SELECTOR),
+      ethCall(address, "0x"+MAX_RELAYER_GAS_REIMBURSEMENT_SELECTOR),
+      ethCall(address, "0x"+CURVE_TAX_DEFAULTS_SELECTOR),
+    ]);
+    const tax = decodeCurveTaxDefaults(taxDefaultsHex);
+    return {
+      owner: decodeAddress(ownerHex),
+      pendingOwner: decodeAddress(pendingOwnerHex),
+      curveLaunchFeeWei: decodeUint256(curveLaunchFeeHex),
+      curveFeeBps: decodeUint256(curveFeeBpsHex),
+      curveSupplyBps: decodeUint256(curveSupplyBpsHex),
+      virtualEthReserveDefaultWei: decodeUint256(virtualEthReserveDefaultHex),
+      virtualTokenReserveBps: decodeUint256(virtualTokenReserveBpsHex),
+      poolSeedTargetWeiVal: decodeUint256(poolSeedTargetWeiHex),
+      maxCreatorBuyBps: decodeUint256(maxCreatorBuyBpsHex),
+      liquiditySlippageBps: decodeUint256(liquiditySlippageBpsHex),
+      feeTreasury: decodeAddress(feeTreasuryHex),
+      lpLockDurationSeconds: decodeUint256(lpLockDurationHex),
+      relayer: decodeAddress(relayerHex),
+      maxRelayerGasReimbursementWei: decodeUint256(maxRelayerGasReimbursementWeiHex),
+      platformFeeWallet: tax.platformFeeWallet,
+      feeBps: tax.feeBps,
+      priceFeed: tax.priceFeed,
+      graduationTargetUsd: tax.graduationTargetUsd,
+      maxOracleStalenessSeconds: tax.maxOracleStaleness,
+      rewardsDistributor: tax.rewardsDistributor,
+      rewardBps: tax.rewardBps,
+      creatorRewardsDistributor: tax.creatorRewardsDistributor,
+      creatorRewardBps: tax.creatorRewardBps,
+      feeWalletDistributor: tax.feeWalletDistributor,
+    };
+  }
+
+  function curveFactoryAdminPanelHTML(key, label, address, state){
+    if(!address){
+      return `
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>${escapeHtml(label)}</h3></div>
+          <div class="admin-addr-line">Not deployed on ${escapeHtml(NETWORKS[appMode].label)}</div>
+          <p class="admin-empty">Set this contract's address in the "Platform Contracts" section below (${key==="bcf" ? "bondingCurveFactory" : "customBondingCurveFactory"}) once it's actually deployed on this network — there's nothing to administer here yet.</p>
+        </div>`;
+    }
+    if(!state){
+      return `
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>${escapeHtml(label)}</h3></div>
+          <div class="admin-addr-line">${escapeHtml(address)}</div>
+          <p class="admin-empty">Couldn't read this contract's on-chain state — check your wallet's network and try again.</p>
+        </div>`;
+    }
+    const pendingIsZero = state.pendingOwner.toLowerCase()===ZERO_ADDRESS;
+    const walletIsPendingOwner = wallet && !pendingIsZero && wallet.toLowerCase()===state.pendingOwner.toLowerCase();
+    return `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>${escapeHtml(label)}</h3></div>
+        <div class="admin-addr-line">${escapeHtml(address)}</div>
+
+        <div class="admin-section-label">Current state</div>
+        <div class="admin-readout-grid">
+          <div class="admin-readout"><div class="l">Owner</div><div class="v">${escapeHtml(state.owner)}</div></div>
+          <div class="admin-readout"><div class="l">Pending owner</div><div class="v">${pendingIsZero ? "None" : escapeHtml(state.pendingOwner)}</div></div>
+          <div class="admin-readout"><div class="l">Curve launch fee</div><div class="v">${weiToEtherString(state.curveLaunchFeeWei,6)} ETH</div></div>
+          <div class="admin-readout"><div class="l">Curve fee (buy/sell)</div><div class="v">${(Number(state.curveFeeBps)/100).toFixed(2)}%</div></div>
+          <div class="admin-readout"><div class="l">Curve supply</div><div class="v">${(Number(state.curveSupplyBps)/100).toFixed(2)}% of totalSupply tradable on the curve</div></div>
+          <div class="admin-readout"><div class="l">Virtual ETH reserve default</div><div class="v">${weiToEtherString(state.virtualEthReserveDefaultWei,4)} ETH</div></div>
+          <div class="admin-readout"><div class="l">Virtual token reserve</div><div class="v">${(Number(state.virtualTokenReserveBps)/100).toFixed(2)}% of totalSupply</div></div>
+          <div class="admin-readout"><div class="l">Pool seed target</div><div class="v">${weiToEtherString(state.poolSeedTargetWeiVal,4)} ETH</div></div>
+          <div class="admin-readout"><div class="l">Max creator buy-in</div><div class="v">${(Number(state.maxCreatorBuyBps)/100).toFixed(2)}%</div></div>
+          <div class="admin-readout"><div class="l">Liquidity slippage</div><div class="v">${(Number(state.liquiditySlippageBps)/100).toFixed(2)}%</div></div>
+          <div class="admin-readout"><div class="l">Fee treasury</div><div class="v">${escapeHtml(state.feeTreasury)}</div></div>
+          <div class="admin-readout"><div class="l">LP lock duration</div><div class="v">${fmtInt(Number(state.lpLockDurationSeconds)/86400)} days</div></div>
+          <div class="admin-readout"><div class="l">Gasless relayer</div><div class="v">${state.relayer.toLowerCase()===ZERO_ADDRESS ? "Unset — gasless relayed launches disabled" : escapeHtml(state.relayer)}</div></div>
+          <div class="admin-readout"><div class="l">Max relayer gas reimbursement</div><div class="v">${weiToEtherString(state.maxRelayerGasReimbursementWei,6)} ETH</div></div>
+          <div class="admin-readout"><div class="l">Platform fee wallet</div><div class="v">${state.platformFeeWallet.toLowerCase()===ZERO_ADDRESS ? "Unset" : escapeHtml(state.platformFeeWallet)}</div></div>
+          <div class="admin-readout"><div class="l">Post-graduation tax</div><div class="v">${(Number(state.feeBps)/100).toFixed(2)}%</div></div>
+          <div class="admin-readout"><div class="l">Price feed</div><div class="v">${state.priceFeed.toLowerCase()===ZERO_ADDRESS ? "Unset" : escapeHtml(state.priceFeed)}</div></div>
+          <div class="admin-readout"><div class="l">Graduation target</div><div class="v">${fmtUSD(Number(state.graduationTargetUsd))}</div></div>
+          <div class="admin-readout"><div class="l">Max oracle staleness</div><div class="v">${fmtInt(Number(state.maxOracleStalenessSeconds)/60)} min</div></div>
+          <div class="admin-readout"><div class="l">Rewards distributor</div><div class="v">${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "Unset — 100% of fees stay platform profit" : escapeHtml(state.rewardsDistributor)}</div></div>
+          <div class="admin-readout"><div class="l">Reward diversion</div><div class="v">${(Number(state.rewardBps)/100).toFixed(2)}% ${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "(inactive — no distributor set)" : `of the ${(Number(state.feeBps)/100).toFixed(2)}% post-graduation tax`}</div></div>
+          <div class="admin-readout"><div class="l">Creator rewards distributor</div><div class="v">${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "Unset — no creator-reward cut is taken" : escapeHtml(state.creatorRewardsDistributor)}</div></div>
+          <div class="admin-readout"><div class="l">Creator reward diversion</div><div class="v">${(Number(state.creatorRewardBps)/100).toFixed(2)}% ${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "(inactive — no distributor set)" : `of the ${(Number(state.feeBps)/100).toFixed(2)}% post-graduation tax`}</div></div>
+          <div class="admin-readout"><div class="l">Fee wallet distributor</div><div class="v">${state.feeWalletDistributor.toLowerCase()===ZERO_ADDRESS ? "Unset — fee-wallet remainder goes straight to the plain wallet above" : escapeHtml(state.feeWalletDistributor)}</div></div>
+        </div>
+
+        <div class="admin-section-label">Curve mechanics · applies to curves created from now on, live curves unaffected</div>
+        <div class="admin-action-row">
+          <div class="field"><label>Curve launch fee (ETH)</label><input type="number" step="any" min="0" id="admin_${key}_curveLaunchFee" placeholder="${weiToEtherString(state.curveLaunchFeeWei,6)}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="curveLaunchFee" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Curve fee, buy/sell (bps, 10000 = 100%)</label><input type="number" step="1" min="0" max="2000" id="admin_${key}_curveFeeBps" placeholder="${state.curveFeeBps}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="curveFeeBps" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Curve supply (bps of totalSupply, 10000 = 100%)</label><input type="number" step="1" min="1" max="10000" id="admin_${key}_curveSupplyBps" placeholder="${state.curveSupplyBps}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="curveSupplyBps" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Virtual ETH reserve default (ETH)</label><input type="number" step="any" min="0" id="admin_${key}_virtualEthReserveDefault" placeholder="${weiToEtherString(state.virtualEthReserveDefaultWei,4)}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="virtualEthReserveDefault" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Virtual token reserve (bps of totalSupply)</label><input type="number" step="1" min="1" id="admin_${key}_virtualTokenReserveBps" placeholder="${state.virtualTokenReserveBps}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="virtualTokenReserveBps" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Pool seed target (ETH) — the "live on DEX" threshold</label><input type="number" step="any" min="0.000001" id="admin_${key}_poolSeedTargetWei" placeholder="${weiToEtherString(state.poolSeedTargetWeiVal,4)}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="poolSeedTargetWei" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Liquidity slippage on graduation (bps, 500-800 only)</label><input type="number" step="1" min="500" max="800" id="admin_${key}_liquiditySlippageBps" placeholder="${state.liquiditySlippageBps}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="liquiditySlippageBps" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">None of these touch a curve that's already trading — every value here is snapshotted onto a curve at the moment it's created, so a live curve keeps whatever terms it launched with regardless of later changes here.</span>
+        </div>
+
+        <div class="admin-section-label">Update fees</div>
+        <div class="admin-action-row">
+          <div class="field"><label>Fee treasury (address)</label><input type="text" id="admin_${key}_feeTreasury" placeholder="0x…"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="feeTreasury" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>LP lock duration (days)</label><input type="number" step="1" min="0" id="admin_${key}_lpLockDays" placeholder="${fmtInt(Number(state.lpLockDurationSeconds)/86400)}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="lpLockDuration" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Max creator buy-in (bps, 10000 = 100%)</label><input type="number" step="1" min="0" max="10000" id="admin_${key}_maxBuyBps" placeholder="${state.maxCreatorBuyBps}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="maxCreatorBuyBps" data-factory-key="${key}">Update</button>
+        </div>
+
+        <div class="admin-section-label">Gasless relay · powers this launch's "Skip gas" Quick Launch flow</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Points relayedCreateCurveToken's onlyRelayer gate at the platform's relayer hot wallet (see scripts/relayer.js/scripts/setRelayer.js). The zero address (the default) disables gasless relayed curve launches entirely — depositForRelayedLaunch/reclaimDeposit still work either way, and a creator can always fall back to paying their own gas.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Relayer address</label><input type="text" id="admin_${key}_relayer" placeholder="${state.relayer.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.relayer}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="relayer" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable gasless relaying. Must be set to a non-zero max gas reimbursement below BEFORE a relayer can be enabled — the contract enforces this on-chain too.</span>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Max relayer gas reimbursement (ETH)</label><input type="number" step="any" min="0" id="admin_${key}_maxRelayerGasReimbursement" placeholder="${weiToEtherString(state.maxRelayerGasReimbursementWei,6)}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="maxRelayerGasReimbursement" data-factory-key="${key}">Update</button>
+        </div>
+
+        <div class="admin-section-label">Platform tax defaults · applies to curves graduating from now on, already-live curves unaffected</div>
+        <div class="field-grid">
+          <div class="field"><label>Platform fee wallet</label><input type="text" id="admin_${key}_taxWallet" placeholder="${state.platformFeeWallet.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.platformFeeWallet}"></div>
+          <div class="field"><label>Tax (bps, 10000 = 100%)</label><input type="number" step="1" min="0" max="10000" id="admin_${key}_taxBps" placeholder="${state.feeBps}"></div>
+          <div class="field"><label>Price feed (address)</label><input type="text" id="admin_${key}_taxFeed" placeholder="${state.priceFeed.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.priceFeed}"></div>
+          <div class="field"><label>Graduation target (whole USD)</label><input type="number" step="1" min="1" id="admin_${key}_taxGrad" placeholder="${state.graduationTargetUsd}"></div>
+          <div class="field"><label>Max oracle staleness (seconds)</label><input type="number" step="1" min="1" id="admin_${key}_taxStale" placeholder="${state.maxOracleStalenessSeconds}"></div>
+          <div class="field"><label>Reward diversion (bps, out of the tax bps above)</label><input type="number" step="1" min="0" max="10000" id="admin_${key}_taxRewardBps" placeholder="${state.rewardBps}"></div>
+          <div class="field"><label>Creator reward diversion (bps, out of the tax bps above)</label><input type="number" step="1" min="0" max="10000" id="admin_${key}_taxCreatorRewardBps" placeholder="${state.creatorRewardBps}"></div>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave the wallet/price-feed fields blank to leave them exactly as they are now (shown in the placeholder above) — only the fields you actually fill in get changed. To deliberately pause the post-graduation tax for future curves, type the zero address (0x0000000000000000000000000000000000000000) into both fields yourself. Reward diversion and creator reward diversion bps are both carved OUT OF the tax bps above (never on top of it, and never overlapping each other) — together they must not exceed it. Reward diversion only takes effect once a rewards distributor is set below; creator reward diversion only takes effect once a creator rewards distributor is set below that.</span>
+          <button class="btn btn-primary btn-sm" data-admin-action="taxDefaults" data-factory-key="${key}">Update tax defaults</button>
+        </div>
+
+        <div class="admin-section-label">Rewards distributor · buyback/burn/holder-airdrop</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Splits 50% of every curveLaunchFee/curveFeeBps revenue, plus the reward-diversion bps above out of the ongoing post-graduation tax, to a PlatformRewardsDistributor contract instead of feeTreasury/the platform fee wallet. Leaving this unset (the default) keeps 100% of every fee exactly where it's always gone.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Rewards distributor (address)</label><input type="text" id="admin_${key}_rewardsDistributor" placeholder="${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.rewardsDistributor}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="rewardsDistributor" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
+        </div>
+
+        <div class="admin-section-label">Creator rewards distributor · per-token ETH, claimable by each token's own creator</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Splits the creator-reward-diversion bps above out of the ongoing post-graduation tax to a CreatorRewardsDistributor contract, in the launched token's own units. Leaving this unset (the default) keeps creator reward diversion inactive.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Creator rewards distributor (address)</label><input type="text" id="admin_${key}_creatorRewardsDistributor" placeholder="${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.creatorRewardsDistributor}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="creatorRewardsDistributor" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
+        </div>
+
+        <div class="admin-section-label">Fee wallet distributor · the platform's own post-graduation tax remainder, converted to ETH</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Redirects whatever's left of the post-graduation tax after the reward/creator-reward diversion above to a FeeWalletDistributor contract instead, which converts it to ETH automatically. Leaving this unset (the default) keeps the fee-wallet slice going straight to the plain wallet above.</p>
         <div class="admin-action-row">
           <div class="field"><label>Fee wallet distributor (address)</label><input type="text" id="admin_${key}_feeWalletDistributor" placeholder="${state.feeWalletDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.feeWalletDistributor}"></div>
           <button class="btn btn-primary btn-sm" data-admin-action="feeWalletDistributor" data-factory-key="${key}">Update</button>
@@ -9648,6 +9942,8 @@
       <div class="admin-grid" id="adminGrid">
         <div class="panel admin-panel"><p class="admin-empty">Loading TokenFactory…</p></div>
         <div class="panel admin-panel"><p class="admin-empty">Loading CustomTokenFactory…</p></div>
+        <div class="panel admin-panel"><p class="admin-empty">Loading BondingCurveFactory…</p></div>
+        <div class="panel admin-panel"><p class="admin-empty">Loading CustomBondingCurveFactory…</p></div>
         <div class="panel admin-panel"><p class="admin-empty">Loading PlatformRewardsDistributor…</p></div>
         <div class="panel admin-panel"><p class="admin-empty">Loading FeeWalletDistributor…</p></div>
       </div>`;
@@ -9676,11 +9972,15 @@
 
     const tfAddress = adminFactoryAddress("tf");
     const ctfAddress = adminFactoryAddress("ctf");
+    const bcfAddress = adminFactoryAddress("bcf");
+    const cbcfAddress = adminFactoryAddress("cbcf");
     const prdAddress = rewardsDistributorAddress();
     const fwdAddress = await feeWalletDistributorContractAddress();
-    const [tfState, ctfState, prdState, fwdState] = await Promise.all([
+    const [tfState, ctfState, bcfState, cbcfState, prdState, fwdState] = await Promise.all([
       tfAddress ? loadFactoryAdminState(tfAddress).catch(()=>null) : Promise.resolve(null),
       ctfAddress ? loadFactoryAdminState(ctfAddress).catch(()=>null) : Promise.resolve(null),
+      bcfAddress ? loadCurveFactoryAdminState(bcfAddress).catch(()=>null) : Promise.resolve(null),
+      cbcfAddress ? loadCurveFactoryAdminState(cbcfAddress).catch(()=>null) : Promise.resolve(null),
       prdAddress ? loadRewardsDistributorState(prdAddress).catch(()=>null) : Promise.resolve(null),
       fwdAddress ? loadFeeWalletDistributorState(fwdAddress).catch(()=>null) : Promise.resolve(null),
     ]);
@@ -9702,6 +10002,8 @@
     grid.innerHTML =
       adminFactoryPanelHTML("tf", "TokenFactory", tfAddress, tfState) +
       adminFactoryPanelHTML("ctf", "CustomTokenFactory", ctfAddress, ctfState) +
+      curveFactoryAdminPanelHTML("bcf", "BondingCurveFactory", bcfAddress, bcfState) +
+      curveFactoryAdminPanelHTML("cbcf", "CustomBondingCurveFactory", cbcfAddress, cbcfState) +
       rewardsDistributorPanelHTML(prdAddress, prdState) +
       feeWalletDistributorPanelHTML(fwdAddress, fwdState);
 
@@ -9750,6 +10052,51 @@
         if(isNaN(n) || n<0 || n>10000) throw new Error("Enter a bps value between 0 and 10000.");
         data = encodeUint256Calldata(SET_MAX_CREATOR_BUY_BPS_SELECTOR, BigInt(n));
         successMsg = "Max creator buy-in cap updated.";
+      } else if(action==="curveLaunchFee"){
+        const v = field("curveLaunchFee").value;
+        if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid ETH amount.");
+        data = encodeUint256Calldata(SET_CURVE_LAUNCH_FEE_SELECTOR, parseEtherToWei(v));
+        successMsg = "Curve launch fee updated.";
+      } else if(action==="curveFeeBps"){
+        const n = parseInt(field("curveFeeBps").value, 10);
+        if(isNaN(n) || n<0 || n>2000) throw new Error("Enter a bps value between 0 and 2000 (the contract's 20% ceiling).");
+        data = encodeUint256Calldata(SET_CURVE_FEE_BPS_SELECTOR, BigInt(n));
+        successMsg = "Curve fee updated.";
+      } else if(action==="curveSupplyBps"){
+        const n = parseInt(field("curveSupplyBps").value, 10);
+        if(isNaN(n) || n<=0 || n>10000) throw new Error("Enter a bps value between 1 and 10000.");
+        data = encodeUint256Calldata(SET_CURVE_SUPPLY_BPS_SELECTOR, BigInt(n));
+        successMsg = "Curve supply updated.";
+      } else if(action==="virtualEthReserveDefault"){
+        const v = field("virtualEthReserveDefault").value;
+        if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid ETH amount.");
+        data = encodeUint256Calldata(SET_VIRTUAL_ETH_RESERVE_DEFAULT_SELECTOR, parseEtherToWei(v));
+        successMsg = "Virtual ETH reserve default updated.";
+      } else if(action==="virtualTokenReserveBps"){
+        const n = parseInt(field("virtualTokenReserveBps").value, 10);
+        if(isNaN(n) || n<=0) throw new Error("Enter a bps value greater than 0.");
+        data = encodeUint256Calldata(SET_VIRTUAL_TOKEN_RESERVE_BPS_SELECTOR, BigInt(n));
+        successMsg = "Virtual token reserve updated.";
+      } else if(action==="poolSeedTargetWei"){
+        const v = field("poolSeedTargetWei").value;
+        if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<=0) throw new Error("Enter a valid ETH amount greater than 0.");
+        data = encodeUint256Calldata(SET_POOL_SEED_TARGET_WEI_SELECTOR, parseEtherToWei(v));
+        successMsg = "Pool seed target updated.";
+      } else if(action==="liquiditySlippageBps"){
+        const n = parseInt(field("liquiditySlippageBps").value, 10);
+        if(isNaN(n) || n<500 || n>800) throw new Error("Enter a bps value between 500 and 800 (the contract's fixed 5%-8% band).");
+        data = encodeUint256Calldata(SET_LIQUIDITY_SLIPPAGE_BPS_SELECTOR, BigInt(n));
+        successMsg = "Liquidity slippage updated.";
+      } else if(action==="relayer"){
+        const v = field("relayer").value.trim();
+        if(v && !isAddressLike(v)) throw new Error("Relayer must be a valid address, or left blank to disable gasless relaying.");
+        data = encodeAddressCalldata(SET_RELAYER_SELECTOR, v || ZERO_ADDRESS);
+        successMsg = v ? "Relayer updated." : "Relayer cleared — gasless relayed curve launches are disabled.";
+      } else if(action==="maxRelayerGasReimbursement"){
+        const v = field("maxRelayerGasReimbursement").value;
+        if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid ETH amount.");
+        data = encodeUint256Calldata(SET_MAX_RELAYER_GAS_REIMBURSEMENT_SELECTOR, parseEtherToWei(v));
+        successMsg = "Max relayer gas reimbursement updated.";
       } else if(action==="taxDefaults"){
         const walletVal = field("taxWallet").value.trim();
         const feedVal = field("taxFeed").value.trim();
@@ -9781,15 +10128,26 @@
         // set either to address(0) now is to type it in explicitly, the
         // same deliberate action scripts/updateTaxDefaults.js already
         // requires.
+        // BondingCurveFactory/CustomBondingCurveFactory have no individual
+        // platformFeeWallet()/priceFeed() getters at all (see
+        // CURVE_TAX_DEFAULTS_SELECTOR's own comment on why) — read both off
+        // the combined taxDefaults() view instead for those two factories.
+        const isCurveFactoryKey = key==="bcf" || key==="cbcf";
         let walletFallback = ZERO_ADDRESS, feedFallback = ZERO_ADDRESS;
         if(!walletVal || !feedVal){
           try{
-            const [currentWalletHex, currentFeedHex] = await Promise.all([
-              ethCall(address, "0x"+PLATFORM_FEE_WALLET_SELECTOR),
-              ethCall(address, "0x"+PRICE_FEED_SELECTOR),
-            ]);
-            walletFallback = decodeAddress(currentWalletHex);
-            feedFallback = decodeAddress(currentFeedHex);
+            if(isCurveFactoryKey){
+              const tax = decodeCurveTaxDefaults(await ethCall(address, "0x"+CURVE_TAX_DEFAULTS_SELECTOR));
+              walletFallback = tax.platformFeeWallet;
+              feedFallback = tax.priceFeed;
+            } else {
+              const [currentWalletHex, currentFeedHex] = await Promise.all([
+                ethCall(address, "0x"+PLATFORM_FEE_WALLET_SELECTOR),
+                ethCall(address, "0x"+PRICE_FEED_SELECTOR),
+              ]);
+              walletFallback = decodeAddress(currentWalletHex);
+              feedFallback = decodeAddress(currentFeedHex);
+            }
           }catch(err){
             throw new Error("Couldn't read the current on-chain wallet/price-feed to preserve them — try again, or fill in both fields explicitly.");
           }
