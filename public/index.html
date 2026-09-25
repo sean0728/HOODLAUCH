@@ -1073,8 +1073,24 @@
     const saved = JSON.parse(localStorage.getItem("hoodlaunch_custom_tokens")||"[]");
     saved.forEach(t=>{
       // normalize tokens saved by an older version of this page, using the
-      // closest available analogue in the current two-mode model
-      if(t.mode!=="just" && t.mode!=="liquidity"){
+      // closest available analogue in the current two-mode model.
+      // BUG FIX: this guard used to be `t.mode!=="just" && t.mode!=="liquidity"`
+      // — true for a real "curve"/"customCurve" (Quick Launch) save too, since
+      // neither of those modes existed when this migration was written. That
+      // silently forced EVERY saved Quick Launch token through the legacy-
+      // migration branch on every single page load, rewriting its mode to
+      // "liquidity" and its status to "taxed"/"graduated" (losing
+      // "curve-trading" entirely) — which then failed every one of the ~30
+      // `t.mode==="curve"||t.mode==="customCurve"` checks elsewhere on this
+      // page (the Quick Launch badge, the bonding-curve trade panel wiring,
+      // tokenBottomHTML's two-bar progress display, factory-address
+      // resolution for trades). The token didn't vanish from localStorage —
+      // it just silently stopped being recognized as a curve token by
+      // everything downstream, which is what made it "disappear" the first
+      // time this page reloaded after launching it. Excluding both curve
+      // modes here means a real Quick Launch save is left completely alone,
+      // exactly like "just"/"liquidity" already were.
+      if(t.mode!=="just" && t.mode!=="liquidity" && t.mode!=="curve" && t.mode!=="customCurve"){
         if(t.status==="escrowed"){
           t.mode = "just"; t.status = "creator-held";
         } else {
@@ -5455,12 +5471,41 @@
       }
       if(typeof entry.tokenStatus !== "number") continue;
       const isLiquidityNow = !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS);
-      // A curve-mode token (existing.mode — set once, correctly, by
-      // remoteLaunchToTokenObject above and never changed by this update
-      // path) stays "curve-trading" until it actually has a pool, same as
-      // the initial mapping — statusFromTokenStatus's plain LAUNCHED->"taxed"
-      // guess only applies to the two pool-based kinds, and would otherwise
-      // wrongly promote a still-pre-pool curve token to "taxed".
+      // SELF-HEAL: the relayer's own ledger `mode` (entry.mode, e.g.
+      // "relayed-curve"/"relayed-custom-curve") is the authoritative record
+      // of what kind of launch this actually is — written once, at launch
+      // time, straight from the factory event, never guessed at. If it says
+      // "curve" but this browser's cached copy of the token disagrees, that
+      // cached copy is wrong — the only realistic way that happens is a
+      // client-side bug corrupting `existing.mode` after the fact (the
+      // legacy-save migration bug documented on the "load any locally-created
+      // demo tokens" bootstrap above is exactly this shape, but this guards
+      // against any future bug shaped like it too, not just that one).
+      // Re-sync from the server's own record here rather than trusting
+      // whatever this browser happened to have cached, so a corrupted local
+      // copy repairs itself the very next time this poll runs — the whole
+      // point of keeping the real record in MySQL instead of only ever
+      // trusting a per-browser cache.
+      const isCurveEntry = typeof entry.mode === "string" && entry.mode.indexOf("curve") !== -1;
+      const isCustomCurveEntry = isCurveEntry && entry.mode.indexOf("custom") !== -1;
+      if(isCurveEntry && existing.mode!=="curve" && existing.mode!=="customCurve"){
+        existing.mode = isCustomCurveEntry ? "customCurve" : "curve";
+        existing.isCustomCurve = isCustomCurveEntry;
+        if(!existing.factoryAddress){
+          existing.factoryAddress = isCustomCurveEntry ? customBondingCurveFactoryAddress(mode) : bondingCurveFactoryAddress(mode);
+        }
+        // Bypasses the STATUS_RANK never-downgrade gate below just this
+        // once: that gate exists to protect against a stale/slow poll
+        // response wrongly un-graduating a token, not to protect an
+        // already-known-wrong local value from being corrected.
+        existing.status = isLiquidityNow ? statusFromTokenStatus(entry, isLiquidityNow) : "curve-trading";
+        updated = true;
+      }
+      // A curve-mode token stays "curve-trading" until it actually has a
+      // pool, same as the initial mapping — statusFromTokenStatus's plain
+      // LAUNCHED->"taxed" guess only applies to the two pool-based kinds,
+      // and would otherwise wrongly promote a still-pre-pool curve token to
+      // "taxed".
       const isCurveNow = existing.mode==="curve" || existing.mode==="customCurve";
       const nextStatus = (isCurveNow && !isLiquidityNow) ? "curve-trading" : statusFromTokenStatus(entry, isLiquidityNow);
       if((STATUS_RANK[nextStatus]||0) > (STATUS_RANK[existing.status]||0)){
