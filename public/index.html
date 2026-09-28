@@ -10350,7 +10350,7 @@
     wrap.innerHTML = `
       <div class="panel admin-panel" style="grid-column:1 / -1;">
         <div class="admin-panel-head"><h3>Launch activity</h3></div>
-        <p class="admin-empty" style="margin-bottom:14px;">The 20 most recent completed launches on ${escapeHtml(NETWORKS[appMode].label)}, and every gasless-launch attempt that failed before a contract was ever deployed (with why).</p>
+        <p class="admin-empty" style="margin-bottom:14px;">The 20 most recent completed launches on ${escapeHtml(NETWORKS[appMode].label)}, and every gasless-launch attempt that failed before a contract was ever deployed (with why). "Delete" on a launch below removes its record from the relayer's database/files entirely — it stops being listed anywhere on the platform (this page's own feed included). It's admin-only, never reachable by an ordinary visitor, and meant for cleaning out stale entries — an old contract version, a launch that never actually works — not for anything still in use.</p>
         <div class="admin-action-row" style="margin-bottom:4px;">
           <button class="chip" data-launch-tab="recent" aria-pressed="true">Recent Launches</button>
           <button class="chip" data-launch-tab="failed" aria-pressed="false">Failed Launches (${failed.length})</button>
@@ -10414,11 +10414,99 @@
             <div class="mtr-meta">${entry.tokenAddress ? fmtAddrSafe(entry.tokenAddress) : "Unknown address"} · ${escapeHtml(when)}</div>
           </div>
           <div class="mtr-actions">
-            ${entry.tokenAddress ? `<button class="btn btn-ghost" style="padding:7px 12px; font-size:.8rem;" data-view-token="${escapeHtml(entry.tokenAddress)}">View</button>` : ""}
+            ${entry.tokenAddress ? `<button class="btn btn-ghost" style="padding:7px 12px; font-size:.8rem;" data-view-token="${escapeHtml(entry.tokenAddress)}">View</button>
+            <button class="btn btn-ghost" style="padding:7px 12px; font-size:.8rem; color:var(--critical-500); border-color:rgba(240,64,95,.4);" data-delete-launch="${escapeHtml(entry.tokenAddress)}">Delete</button>` : ""}
           </div>
         </div>`;
     }).join("");
     list.querySelectorAll("[data-view-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.viewToken)) );
+
+    // Admin-only, delete-from-the-platform's-own-records action — see
+    // requestDeleteLaunch/POST /launches/delete for what this actually
+    // does. Two clicks required (Delete -> Confirm delete?, auto-resetting
+    // after a few seconds) instead of a native confirm() dialog, so a
+    // single accidental click can't wipe a launch record — same
+    // hard-to-do-by-accident instinct as this app's Ownable2Step transfers
+    // and LP-lock timers elsewhere, just done inline on the button itself
+    // rather than a second on-chain step.
+    list.querySelectorAll("[data-delete-launch]").forEach(b=>{
+      b.addEventListener("click", ()=>{
+        const tokenAddress = b.dataset.deleteLaunch;
+        if(b.dataset.confirming==="1"){
+          runDeleteLaunchRow(tokenAddress, b);
+          return;
+        }
+        b.dataset.confirming = "1";
+        b.textContent = "Confirm delete?";
+        clearTimeout(b._deleteConfirmTimer);
+        b._deleteConfirmTimer = setTimeout(()=>{
+          if(b.dataset.confirming==="1"){ b.dataset.confirming=""; b.textContent = "Delete"; }
+        }, 4000);
+      });
+    });
+  }
+
+  // Executes the actual delete once the two-click confirm above fires —
+  // split out so the button's own disabled/label state is managed in one
+  // place regardless of success or failure.
+  async function runDeleteLaunchRow(tokenAddress, btnEl){
+    clearTimeout(btnEl._deleteConfirmTimer);
+    btnEl.disabled = true;
+    btnEl.textContent = "Deleting…";
+    const ok = await requestDeleteLaunch(tokenAddress);
+    if(ok){
+      launchActivityData.recent = launchActivityData.recent.filter(
+        e => !(e.tokenAddress && e.tokenAddress.toLowerCase()===tokenAddress.toLowerCase())
+      );
+      renderLaunchActivityList();
+    } else {
+      btnEl.disabled = false;
+      btnEl.dataset.confirming = "";
+      btnEl.textContent = "Delete";
+    }
+  }
+
+  // Same admin-signed pattern as requestActiveNetworkChange/
+  // requestTrackToken above — see POST /launches/delete's own comment in
+  // relayer.js for exactly what this removes and why it targets BOTH the
+  // launch ledger and trackedTokensStore. Targets relayerApiUrl(appMode)
+  // (the same relayer GET /launches was just fetched from to populate this
+  // very list) rather than location.origin, since the admin could in
+  // principle be viewing a different network's relayer than the one this
+  // page happens to be served from. Returns true only once the server has
+  // actually confirmed the delete.
+  async function requestDeleteLaunch(tokenAddress){
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return false; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return false; }
+    const url = relayerApiUrl(appMode);
+    if(!url){ toast("No relayer configured for this network."); return false; }
+    const timestamp = Date.now();
+    const message = `Hood Launch admin: delete launch ${tokenAddress} at ${timestamp}`;
+    let signature;
+    try{
+      signature = await window.ethereum.request({
+        method: "personal_sign",
+        params: ["0x"+utf8Hex(message), wallet],
+      });
+    }catch(err){
+      toast("Signature was rejected — nothing was deleted.");
+      return false;
+    }
+    try{
+      const res = await fetch(`${url}/launches/delete`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ tokenAddress, timestamp, signature }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't delete this launch record."); return false; }
+      if(!data.deleted){ toast("Nothing to delete — this token wasn't on record."); return false; }
+      toast("Deleted — it no longer shows anywhere on the platform.");
+      return true;
+    }catch(err){
+      toast("Couldn't reach the relayer to delete this launch record.");
+      return false;
+    }
   }
 
   async function renderAdmin(){
