@@ -103,7 +103,7 @@ const fs = require("fs"); // used only by the temporary /debug/data-dirs route b
 const express = require("express");
 const hre = require("hardhat");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
-const { recordLaunch, updateLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = require("../lib/launchStore");
+const { recordLaunch, updateLaunch, deleteLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = require("../lib/launchStore");
 const {
   getVoucher,
   upsertVoucher,
@@ -124,7 +124,7 @@ const { verifySignatureFrom } = require("../lib/signedMessage");
 const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
 const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/tokenMetadata");
 const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
-const { readTrackedTokens, upsertTrackedToken } = require("../lib/trackedTokensStore");
+const { readTrackedTokens, upsertTrackedToken, deleteTrackedToken } = require("../lib/trackedTokensStore");
 const { readActivity, appendActivity } = require("../lib/activityStore");
 const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore");
 const { ROBINHOOD_NETWORKS } = require("../lib/networks");
@@ -1228,6 +1228,55 @@ async function main() {
       return publicEntry;
     });
     sendJson(res, 200, { network, launches });
+  });
+
+  // ---- delete a launch record (admin-gated, see lib/adminAuth.js) ----
+  // Built for clearing out stale entries from the admin panel's "Launch
+  // activity" list — an old contract version, a launch that never actually
+  // works on-chain — never exposed anywhere a non-admin visitor reaches
+  // (index.html's launch feed calls GET /launches only; this route has no
+  // client short of the admin panel itself). Removes the record from BOTH
+  // stores GET /launches reads from:
+  //   - lib/launchStore's per-network ledger (deleteLaunch) — also the same
+  //     list scripts/relayer.js's own feeWalletPollLoop/
+  //     creatorRewardsPollLoop sweep, so deleting a dead token here also
+  //     stops the automated reward sweeps from wasting a poll tick on it.
+  //   - lib/trackedTokensStore (deleteTrackedToken) — REQUIRED, not
+  //     optional: GET /launches folds any tracked token with no matching
+  //     ledger row back in as a synthetic entry (see that route's own
+  //     comment), so deleting only the ledger row would leave the token
+  //     still listed a moment later via that fallback.
+  // Same personal_sign + timestamp pattern as POST /track-token above,
+  // including verifying against tokenAddress EXACTLY as received (see that
+  // route's own comment on why — index.html signs whatever case the
+  // address happens to already be in, never a re-checksummed copy).
+  // Idempotent: deleting an address that isn't in either store just returns
+  // { deleted: false } rather than erroring, since a slow admin double-click
+  // or a stale page reload retrying the same delete shouldn't surface as a
+  // failure.
+  app.post("/launches/delete", async (req, res) => {
+    const { tokenAddress, timestamp, signature } = req.body || {};
+    if (!tokenAddress || !hre.ethers.isAddress(tokenAddress)) {
+      return sendJson(res, 400, { error: "tokenAddress must be a valid address" });
+    }
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    }
+    const message = `Hood Launch admin: delete launch ${tokenAddress} at ${timestamp}`;
+    if (!verifyAdminSignature(message, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
+    const [removedLaunch, removedTracked] = await Promise.all([
+      deleteLaunch(network, tokenAddress),
+      deleteTrackedToken(network, tokenAddress),
+    ]);
+    const deleted = !!(removedLaunch || removedTracked);
+    console.log(
+      deleted
+        ? `[admin] deleted launch record for ${tokenAddress} on "${network}" (ledger: ${!!removedLaunch}, tracked: ${!!removedTracked}).`
+        : `[admin] delete requested for ${tokenAddress} on "${network}" but no matching record existed in either store.`
+    );
+    sendJson(res, 200, { deleted, tokenAddress });
   });
 
   async function handleVoucherSubmission(req, res, watcher) {
