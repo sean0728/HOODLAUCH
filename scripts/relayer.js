@@ -22,25 +22,45 @@
 //      (and best-effort the clone), generate a flattened source archive, and
 //      record the launch via lib/launchStore.
 //
-// Separately, and entirely optionally, this service can also auto-sweep the
-// platform's own fee-wallet slice: set FEE_WALLET_DISTRIBUTOR_ADDRESS and
-// this service periodically calls FeeWalletDistributor.triggerFeeWalletSwap
-// for every launched token carrying enough accumulated in-kind balance
-// there, so that slice sits as spendable ETH (claimable via
-// claimFeeWalletRewards) instead of a pile of whatever token it was taxed
-// in. See the FEE_WALLET_* constants and feeWalletPollLoop below.
+// Separately, and entirely optionally, this service can also auto-sweep AND
+// auto-claim the platform's own fee-wallet slice end to end: set
+// FEE_WALLET_DISTRIBUTOR_ADDRESS and this service periodically calls
+// FeeWalletDistributor.triggerFeeWalletSwap for every launched token
+// carrying enough accumulated in-kind balance there (converting it to ETH),
+// then calls claimFeeWalletRewards for every token with a nonzero claimable
+// balance (paying that ETH straight to the platform's feeWallet) — so
+// neither step needs a person to open the admin panel and trigger them one
+// token at a time. See the FEE_WALLET_* constants and feeWalletPollLoop
+// below.
 //
-// NOTE: there used to be an identical auto-sweep here for per-token creator
-// rewards (CREATOR_REWARDS_DISTRIBUTOR_ADDRESS / sweepCreatorRewardsOnce /
-// creatorRewardsPollLoop). It was removed once
-// CreatorRewardsDistributor.triggerCreatorSwap/claimCreatorRewards became
-// restricted to msg.sender == token.creator() — this service's own relayer
-// wallet is never a token's creator, so every sweep attempt would revert
-// forever. Triggering/claiming creator rewards is now something only the
-// creator's own wallet can do (from the site or directly against the
-// contract); FeeWalletDistributor has no such restriction (it always pays a
-// single fixed platform wallet, not a per-token creator), so its sweep is
-// untouched and still runs the same as before.
+// A second, identical auto-sweep-and-claim runs for the per-token creator
+// reward: set CREATOR_REWARDS_DISTRIBUTOR_ADDRESS and this service
+// periodically calls CreatorRewardsDistributor.triggerCreatorSwap for every
+// launched token carrying enough accumulated in-kind balance there, then
+// claimCreatorRewards for every token with a nonzero claimable balance —
+// paid straight to that token's own creator(), read live off the token at
+// claim time, exactly as the contract itself always resolves it regardless
+// of who calls it.
+//
+// NOTE (history): an earlier version of this file removed this sweep,
+// on the belief that CreatorRewardsDistributor.triggerCreatorSwap/
+// claimCreatorRewards had become restricted to msg.sender ==
+// token.creator() — under that belief, every automated call from this
+// service's own wallet (never a token's creator) would revert forever.
+// The CreatorRewardsDistributor.sol actually reviewed and shipped with this
+// codebase has NO such restriction: both functions are explicitly
+// permissionless by their own code and doc comments — same
+// "callable by anyone, fixed destination" shape as FeeWalletDistributor's
+// triggerFeeWalletSwap/claimFeeWalletRewards, just paying a per-token
+// creator() instead of one fixed feeWallet. This sweep is restored on that
+// basis. If the contract actually deployed on your network differs from
+// that source and truly does gate these calls to the creator's own wallet,
+// every attempt below simply reverts and is logged (per-token, per-tick) as
+// a skip rather than failing the whole sweep — watch the
+// "[creator-rewards] swap skip"/"claim skip" log lines after enabling this;
+// a revert reason mentioning "creator" repeating for every token, every
+// tick, is the signal that's the case, and CREATOR_REWARDS_DISTRIBUTOR_ADDRESS
+// should be unset again until that's resolved.
 //
 // A fourth, similarly-optional sweep automates PlatformRewardsDistributor's
 // own accumulate -> buyback -> burn/airdrop pipeline: set
@@ -214,6 +234,33 @@ const FEE_WALLET_POLL_INTERVAL_MS = Number(process.env.FEE_WALLET_POLL_INTERVAL_
 // a bounded, small amount of value to extract instead of none at all (what
 // minEthOut=0 handed it before this fix).
 const FEE_WALLET_SLIPPAGE_BPS = BigInt(process.env.FEE_WALLET_SLIPPAGE_BPS || 300); // 3%
+// Minimum FeeWalletDistributor.claimableEth[token] balance worth spending a
+// transaction's gas on claimFeeWalletRewards for — see
+// sweepFeeWalletRewardsOnce's tryClaim below. Defaults to 0 (claim anything
+// nonzero), the same "permissive by default, owner can tighten later"
+// convention as FeeWalletDistributor's own swapThreshold/maxSwapAmount
+// on-chain defaults. Raise this (in wei) if a low-traffic token's claimable
+// balance is small enough that the claim tx's own gas cost would exceed it.
+const FEE_WALLET_CLAIM_MIN_WEI = BigInt(process.env.FEE_WALLET_CLAIM_MIN_WEI || 0);
+
+// Same optionality as FEE_WALLET_* above — leaving
+// CREATOR_REWARDS_DISTRIBUTOR_ADDRESS unset means this service does nothing
+// extra for per-token creator rewards. When set, it automates
+// CreatorRewardsDistributor's own swap-then-claim flow (see the module
+// comment near the top of this file — including the history note on why
+// this was once removed and why it's back) on the same 5-minute-default
+// cadence as the fee-wallet sweep, for the identical reason: an unconverted
+// creator-reward balance costs nothing by sitting a while longer.
+const CREATOR_REWARDS_DISTRIBUTOR_ADDRESS = process.env.CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null;
+const CREATOR_REWARDS_POLL_INTERVAL_MS = Number(process.env.CREATOR_REWARDS_POLL_INTERVAL_MS || 5 * 60_000);
+// Same reasoning and default as FEE_WALLET_SLIPPAGE_BPS above, applied to
+// triggerCreatorSwap's own minEthOut floor instead of
+// triggerFeeWalletSwap's.
+const CREATOR_REWARDS_SLIPPAGE_BPS = BigInt(process.env.CREATOR_REWARDS_SLIPPAGE_BPS || 300); // 3%
+// Same reasoning and default as FEE_WALLET_CLAIM_MIN_WEI above, applied to
+// CreatorRewardsDistributor.claimableEth[token] instead of
+// FeeWalletDistributor's.
+const CREATOR_REWARDS_CLAIM_MIN_WEI = BigInt(process.env.CREATOR_REWARDS_CLAIM_MIN_WEI || 0);
 
 // Same optionality as FEE_WALLET_*/CREATOR_REWARDS_* above — leaving
 // PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS unset means this service does
@@ -339,13 +386,11 @@ const AGGREGATOR_V3_ABI = [
   "function decimals() view returns (uint8)",
   "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
 ];
-// Minimal read-only router ABI used only to PREDICT a triggerFeeWalletSwap
-// outcome before ever sending it — see quoteSwapEthOut() below for why.
-// FeeWalletDistributor already exposes its router as a public immutable
-// (router()), so this needs no separate env var to find it. (This helper
-// used to also predict triggerCreatorSwap outcomes for the now-removed
-// creator-rewards auto-sweep — see the module comment near the top of this
-// file.)
+// Minimal read-only router ABI used only to PREDICT a triggerFeeWalletSwap/
+// triggerCreatorSwap outcome before ever sending it — see quoteSwapEthOut()
+// below for why. Both FeeWalletDistributor and CreatorRewardsDistributor
+// already expose their router as a public immutable (router()), so this
+// needs no separate env var to find either one.
 const UNIV2_ROUTER_QUOTE_ABI = [
   "function WETH() view returns (address)",
   "function factory() view returns (address)",
@@ -910,15 +955,34 @@ async function main() {
     }
   }
 
-  // NOTE: there used to be an analogous creatorRewardsDistributor
-  // contract-loading block here, gated on CREATOR_REWARDS_DISTRIBUTOR_ADDRESS.
-  // It was removed once CreatorRewardsDistributor.triggerCreatorSwap/
-  // claimCreatorRewards became restricted to msg.sender == token.creator() —
-  // this service's relayerWallet is never a token's creator, so loading the
-  // contract just to call functions that would revert on every attempt was
-  // pointless. Manual "Convert to ETH"/"Claim" from the portfolio UI are
-  // unaffected — those are separate calls made directly from the creator's
-  // own connected wallet, never routed through this relayer process.
+  // See the module comment's history note on why this was once removed and
+  // restored — same optional-feature try/catch guard as FeeWalletDistributor
+  // below, for the identical reason. Manual "Convert to ETH"/"Claim" from
+  // the portfolio UI keep working exactly as before regardless of whether
+  // this is enabled — those are separate calls made directly from the
+  // creator's own connected wallet, never routed through this relayer
+  // process.
+  let creatorRewardsDistributor = null;
+  if (CREATOR_REWARDS_DISTRIBUTOR_ADDRESS) {
+    try {
+      creatorRewardsDistributor = await hre.ethers.getContractAt(
+        "CreatorRewardsDistributor",
+        CREATOR_REWARDS_DISTRIBUTOR_ADDRESS,
+        relayerWallet
+      );
+      console.log(`Creator-rewards auto-sweep enabled against distributor ${CREATOR_REWARDS_DISTRIBUTOR_ADDRESS}.`);
+    } catch (err) {
+      console.error(
+        `Could not load CreatorRewardsDistributor at ${CREATOR_REWARDS_DISTRIBUTOR_ADDRESS} (${err.message}). ` +
+          "Creator-rewards auto-sweep is DISABLED for this run — everything else (vouchers, deposits, the API, " +
+          "the site, activity/price polling, fee-wallet auto-sweep) starts normally regardless. This specific " +
+          "error usually means the contract's build artifact wasn't included in this deploy (a stale/cached " +
+          "build) — a clean rebuild that actually recompiles contracts/CreatorRewardsDistributor.sol should fix " +
+          "it; set CREATOR_REWARDS_DISTRIBUTOR_ADDRESS again afterward to re-enable auto-sweep."
+      );
+      creatorRewardsDistributor = null;
+    }
+  }
 
   let feeWalletDistributor = null;
   if (FEE_WALLET_DISTRIBUTOR_ADDRESS) {
@@ -1040,10 +1104,7 @@ async function main() {
   // still behaved as if unset, until a real restart picked it up) — hitting
   // this endpoint answers "did my last restart actually take?" in one
   // request instead of guessing from a dashboard screen or a startup log
-  // scrollback. (creatorRewardsDistributorAddress/
-  // creatorRewardsAutoSweepEnabled used to be reported here too, for the
-  // now-removed creator-rewards auto-sweep — see the module comment near the
-  // top of this file.)
+  // scrollback.
   app.get("/health", (_req, res) =>
     sendJson(res, 200, {
       ok: true,
@@ -1052,6 +1113,8 @@ async function main() {
       customTokenFactoryAddress: customTokenFactoryAddress || null,
       bondingCurveFactoryAddress: bondingCurveFactoryAddress || null,
       customBondingCurveFactoryAddress: customBondingCurveFactoryAddress || null,
+      creatorRewardsDistributorAddress: CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null,
+      creatorRewardsAutoSweepEnabled: !!creatorRewardsDistributor,
       feeWalletDistributorAddress: FEE_WALLET_DISTRIBUTOR_ADDRESS || null,
       feeWalletAutoSweepEnabled: !!feeWalletDistributor,
       platformRewardsDistributorAddress: PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS || null,
@@ -2655,25 +2718,104 @@ async function main() {
     }
   }
 
-  // NOTE: there used to be an analogous "---- creator-reward auto-sweep
-  // (optional) ----" section here (sweepCreatorRewardsOnce/
-  // creatorRewardsPollLoop), walking every launched token and calling
-  // triggerCreatorSwap on the relayer's own dime whenever a token's
-  // accumulated balance cleared its threshold. It was removed once
-  // CreatorRewardsDistributor.triggerCreatorSwap became restricted to
-  // msg.sender == token.creator() — this relayer's own wallet is never a
-  // token's creator, so every one of those calls would now revert, every
-  // tick, forever (reintroducing exactly the kind of permanent noisy-failure
-  // log spam that quoteSwapEthOut's dust-prediction check was built to
-  // avoid, except with no fix possible here — the revert reason would always
-  // be "caller is not this token's creator", not something a balance/threshold
-  // check could route around). Triggering a creator's swap (and claiming the
-  // proceeds) is now something only that creator's own wallet can do —
-  // directly against the contract, or via the "Convert to ETH"/"Claim"
-  // buttons on the site, which already call it as the connected wallet, not
-  // through this relayer process.
+  // ---- creator-rewards auto-sweep + auto-claim (optional) ----
+  // Walks every token this relayer has ever recorded a launch for and, for
+  // each one carrying more than its own swapThreshold in accumulated in-kind
+  // balance on CreatorRewardsDistributor, calls triggerCreatorSwap on the
+  // relayer's own dime, then claimCreatorRewards for whatever's currently
+  // claimable — paid straight to that token's own creator(), read live off
+  // the token at claim time, exactly as the contract itself always resolves
+  // it regardless of who calls it. See the module comment's history note for
+  // why this was once removed and why it's back, and what to watch for if
+  // the deployed contract turns out to actually restrict these calls.
+  // Structurally identical to sweepFeeWalletRewardsOnce below (same
+  // trySwap/tryClaim shape, same dust-prediction and slippage-floor
+  // treatment) — kept as its own separate pair of functions, mirroring how
+  // this file already keeps fee-wallet and platform-rewards sweeps
+  // independent, so one distributor's contract-loading failure or one
+  // sweep's own bug can never take the other down with it.
+  async function sweepCreatorRewardsOnce() {
+    const network = hre.network.name;
+    const ledger = await readLedger(network);
+    const distributorAddress = await creatorRewardsDistributor.getAddress();
+    const routerAddress = await creatorRewardsDistributor.router();
+    const wethAddress = await (
+      await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
+    ).WETH();
+    const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
 
-  // ---- fee-wallet auto-sweep (optional) ----
+    // ---- step 1: convert each token's accumulated in-kind balance to ETH.
+    // See sweepFeeWalletRewardsOnce's trySwap for why "nothing to do this
+    // tick" returns quietly rather than throwing/logging.
+    async function trySwap(tokenAddress) {
+      try {
+        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
+        const balance = await token.balanceOf(distributorAddress);
+        if (balance === 0n) return;
+
+        const threshold = await creatorRewardsDistributor.swapThreshold(tokenAddress);
+        if (balance < threshold) return;
+
+        const cap = await creatorRewardsDistributor.maxSwapAmount(tokenAddress);
+        const amountIn = cap > 0n && balance > cap ? cap : balance;
+
+        const predictedEthOut = await quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn);
+        if (predictedEthOut === 0n) return; // dust, or no pool/liquidity yet — nothing worth logging
+
+        const minEthOut = (predictedEthOut * (10000n - CREATOR_REWARDS_SLIPPAGE_BPS)) / 10000n;
+
+        const tx = await creatorRewardsDistributor.triggerCreatorSwap(tokenAddress, minEthOut);
+        const receipt = await tx.wait();
+        console.log(
+          `[creator-rewards] swept ${tokenAddress} (balance ${balance}, predicted ${predictedEthOut} wei, ` +
+            `minEthOut ${minEthOut} wei) in tx ${receipt.hash}.`
+        );
+      } catch (err) {
+        // Expected/benign cases include: a threshold that hasn't been
+        // reached, another caller having already swept it between our
+        // balance read and our tx landing, or the token having no creator
+        // (renounced — see rescueOrphanedEth/rescueOrphanedTokens in
+        // CreatorRewardsDistributor.sol for that case). If this instead logs
+        // a "creator" access-control revert for EVERY token, EVERY tick, see
+        // the module comment's history note — that's the signal this
+        // relayer's deployed contract restricts these calls after all, and
+        // CREATOR_REWARDS_DISTRIBUTOR_ADDRESS should be unset again.
+        console.warn(`[creator-rewards] swap skip ${tokenAddress}: ${err.message}`);
+      }
+    }
+
+    // ---- step 2: claim whatever ETH is currently sitting in
+    // claimableEth[token], straight to that token's own creator(). See
+    // sweepFeeWalletRewardsOnce's tryClaim for why this always runs
+    // independently of trySwap above.
+    async function tryClaim(tokenAddress) {
+      try {
+        const claimable = await creatorRewardsDistributor.claimableEth(tokenAddress);
+        if (claimable === 0n || claimable < CREATOR_REWARDS_CLAIM_MIN_WEI) return;
+
+        const tx = await creatorRewardsDistributor.claimCreatorRewards(tokenAddress);
+        const receipt = await tx.wait();
+        console.log(`[creator-rewards] claimed ${claimable} wei for ${tokenAddress} in tx ${receipt.hash}.`);
+      } catch (err) {
+        // Expected/benign cases include: the token having no creator
+        // (renounced), or another caller already having claimed this
+        // token's balance between our read and our tx landing.
+        console.warn(`[creator-rewards] claim skip ${tokenAddress}: ${err.message}`);
+      }
+    }
+
+    for (const tokenAddress of tokenAddresses) {
+      await trySwap(tokenAddress);
+      await tryClaim(tokenAddress);
+    }
+  }
+
+  async function creatorRewardsPollLoop() {
+    await sweepCreatorRewardsOnce().catch((err) => console.error(`[creator-rewards] sweep error: ${err.message}`));
+    setTimeout(creatorRewardsPollLoop, CREATOR_REWARDS_POLL_INTERVAL_MS);
+  }
+
+  // ---- fee-wallet auto-sweep + auto-claim (optional) ----
   // Walks every token this relayer has ever recorded a launch for and, for
   // each one carrying more than its own swapThreshold in accumulated in-kind
   // balance on FeeWalletDistributor, calls triggerFeeWalletSwap on the
@@ -2683,6 +2825,23 @@ async function main() {
   // failure on one (no pool yet, a threshold that hasn't been reached) is
   // logged and skipped rather than aborting the sweep, mirroring
   // handleDeposit's per-event error isolation above.
+  //
+  // FIX: the swap step above only ever converts a token's in-kind balance
+  // into ETH sitting in FeeWalletDistributor.claimableEth[token] — it never
+  // moved that ETH the rest of the way to the actual feeWallet address.
+  // Before this fix, claimFeeWalletRewards(token) still had to be called by
+  // hand, per token, from the admin panel — exactly the "put each contract
+  // in and swap reward" tedium this was reported as. claimFeeWalletRewards
+  // is permissionless and, like triggerFeeWalletSwap, always pays out to
+  // this contract's own fixed feeWallet regardless of who calls it (see
+  // FeeWalletDistributor.sol's own doc comment), so it's exactly as safe to
+  // run from this service's own wallet as the swap step already was. Each
+  // token's claimable balance is now checked and claimed in the same tick,
+  // right after that token's own swap attempt, but as an independent
+  // try/catch step — so a balance left over from an earlier tick (or from
+  // before this auto-claim step existed) still gets claimed even on a tick
+  // where that token's own swap was skipped (below threshold, no pool yet)
+  // or failed.
   async function sweepFeeWalletRewardsOnce() {
     const network = hre.network.name;
     const ledger = await readLedger(network);
@@ -2693,14 +2852,20 @@ async function main() {
     ).WETH();
     const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
 
-    for (const tokenAddress of tokenAddresses) {
+    // ---- step 1: convert each token's accumulated in-kind balance to ETH.
+    // Broken out as its own inner function (rather than inline in the loop
+    // below) purely so a "nothing to do this tick" outcome (dust balance,
+    // threshold not yet reached, no pool/liquidity yet) can `return` early
+    // without needing a second exception type just to distinguish "quietly
+    // skipped" from "actually failed" once control reaches the outer catch.
+    async function trySwap(tokenAddress) {
       try {
         const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
         const balance = await token.balanceOf(distributorAddress);
-        if (balance === 0n) continue;
+        if (balance === 0n) return;
 
         const threshold = await feeWalletDistributor.swapThreshold(tokenAddress);
-        if (balance < threshold) continue;
+        if (balance < threshold) return;
 
         // See quoteSwapEthOut()'s own comment above — predicts the swap's
         // output first so a dust balance or thin/abandoned pool skips
@@ -2710,7 +2875,7 @@ async function main() {
         const amountIn = cap > 0n && balance > cap ? cap : balance;
 
         const predictedEthOut = await quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn);
-        if (predictedEthOut === 0n) continue; // dust, or no pool/liquidity yet — nothing worth logging
+        if (predictedEthOut === 0n) return; // dust, or no pool/liquidity yet — nothing worth logging
 
         // Real slippage floor instead of minEthOut=0 — see the FIX comment
         // above (Issue 2) and FEE_WALLET_SLIPPAGE_BPS's own comment for why
@@ -2728,8 +2893,40 @@ async function main() {
         // reached, or another caller having already swept it between our
         // balance read and our tx landing — the permanent dust/no-liquidity
         // case is now filtered out above before it ever gets here.
-        console.warn(`[fee-wallet] skip ${tokenAddress}: ${err.message}`);
+        console.warn(`[fee-wallet] swap skip ${tokenAddress}: ${err.message}`);
       }
+    }
+
+    // ---- step 2: claim whatever ETH is currently sitting in
+    // claimableEth[token], straight to feeWallet. Independent of trySwap
+    // above (and always attempted, even on a tick where that same token's
+    // own swap was skipped or failed) so a balance left over from an
+    // earlier tick — or from before this auto-claim step existed — still
+    // gets claimed rather than sitting there until someone opens the admin
+    // panel. FEE_WALLET_CLAIM_MIN_WEI exists purely to skip a dust-sized
+    // claimable balance not worth spending a transaction's gas on; it
+    // defaults to 0 (claim anything nonzero), same "permissive until an
+    // owner tightens it" default swapThreshold/maxSwapAmount already use.
+    async function tryClaim(tokenAddress) {
+      try {
+        const claimable = await feeWalletDistributor.claimableEth(tokenAddress);
+        if (claimable === 0n || claimable < FEE_WALLET_CLAIM_MIN_WEI) return;
+
+        const tx = await feeWalletDistributor.claimFeeWalletRewards(tokenAddress);
+        const receipt = await tx.wait();
+        console.log(`[fee-wallet] claimed ${claimable} wei for ${tokenAddress} in tx ${receipt.hash}.`);
+      } catch (err) {
+        // Expected/benign cases include: feeWallet not yet set by the owner
+        // (claimFeeWalletRewards reverts until it is — see
+        // FeeWalletDistributor.sol), or another caller already having
+        // claimed this token's balance between our read and our tx landing.
+        console.warn(`[fee-wallet] claim skip ${tokenAddress}: ${err.message}`);
+      }
+    }
+
+    for (const tokenAddress of tokenAddresses) {
+      await trySwap(tokenAddress);
+      await tryClaim(tokenAddress);
     }
   }
 
@@ -2901,8 +3098,19 @@ async function main() {
   tokenActivityPollLoop();
   tokenPricePollLoop();
 
+  if (creatorRewardsDistributor) {
+    console.log(
+      `Sweeping and auto-claiming creator rewards every ${CREATOR_REWARDS_POLL_INTERVAL_MS}ms ` +
+        `(claim floor ${CREATOR_REWARDS_CLAIM_MIN_WEI} wei).`
+    );
+    creatorRewardsPollLoop();
+  }
+
   if (feeWalletDistributor) {
-    console.log(`Sweeping fee-wallet rewards every ${FEE_WALLET_POLL_INTERVAL_MS}ms.`);
+    console.log(
+      `Sweeping and auto-claiming fee-wallet rewards every ${FEE_WALLET_POLL_INTERVAL_MS}ms ` +
+        `(claim floor ${FEE_WALLET_CLAIM_MIN_WEI} wei).`
+    );
     feeWalletPollLoop();
   }
 
