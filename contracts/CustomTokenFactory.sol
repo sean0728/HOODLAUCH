@@ -883,8 +883,19 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     }
 
     /// @notice See TokenFactory.setMaxRelayerGasReimbursement — identical
-    /// behavior here.
+    /// behavior here, including Finding CTF-1 (mirrors TokenFactory Finding
+    /// F-2): setRelayer() above refuses to enable a relayer until this cap is
+    /// nonzero, specifically so a relayer can never be left with an
+    /// unreimbursable, unbounded gas exposure. Before this fix, this setter
+    /// could silently zero the cap right back out afterward while a relayer
+    /// stayed configured, reopening the exact gap setRelayer()'s own check
+    /// exists to close. Now the cap can only go to zero once no relayer is
+    /// enabled.
     function setMaxRelayerGasReimbursement(uint256 newCapWei) external onlyOwner {
+        require(
+            newCapWei > 0 || relayer == address(0),
+            "CustomTokenFactory: cannot zero the cap while a relayer is enabled"
+        );
         maxRelayerGasReimbursementWei = newCapWei;
         emit MaxRelayerGasReimbursementUpdated(newCapWei);
     }

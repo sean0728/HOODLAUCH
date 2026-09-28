@@ -1025,7 +1025,22 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// wei. 0 means no cap. Protects against a compromised or
     /// malfunctioning relayer key inflating tx.gasprice to drain more than
     /// a real deploy could plausibly cost.
+    /// @dev FIX: setRelayer() only checked maxRelayerGasReimbursementWei > 0
+    /// at the MOMENT a relayer is enabled — nothing stopped this function
+    /// from being called afterward to reset the cap back to 0 while a
+    /// relayer remained fully active, silently reopening exactly the
+    /// unbounded-gas-reimbursement exposure that guard exists to prevent
+    /// (see setRelayer's own doc comment: "a circuit breaker against a
+    /// compromised or malfunctioning relayer key inflating tx.gasprice to
+    /// drain more than a real deploy could ever cost"). This now maintains
+    /// that invariant continuously in both directions — "a relayer is
+    /// enabled" implies "the cap is nonzero" — rather than only checking it
+    /// once, whichever setter happens to run first.
     function setMaxRelayerGasReimbursement(uint256 newCapWei) external onlyOwner {
+        require(
+            newCapWei > 0 || relayer == address(0),
+            "TokenFactory: cannot zero the cap while a relayer is enabled"
+        );
         maxRelayerGasReimbursementWei = newCapWei;
         emit MaxRelayerGasReimbursementUpdated(newCapWei);
     }

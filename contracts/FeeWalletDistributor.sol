@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import "./interfaces/IUniswapV2Router02.sol";
+import "./interfaces/IUniswapV2Pair.sol";
 
 /// @title FeeWalletDistributor
 /// @notice Where the platform-fee-wallet slice of every taxed buy/sell ends
@@ -84,9 +85,24 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
     /// of one, each individual swap staying small and proportional.
     mapping(address => uint256) public maxSwapAmount;
 
+    /// @notice Protective slippage floor applied to triggerFeeWalletSwap's
+    /// own router trade — see the accompanying audit report's Finding FW-1.
+    /// Before this existed, triggerFeeWalletSwap accepted a purely
+    /// caller-supplied minEthOut with no protocol-side floor computed from
+    /// the pool's own reserves; since the function is deliberately
+    /// permissionless (see its own comment), anyone could call it with
+    /// minEthOut == 0 and sandwich their own call for MEV profit, reducing
+    /// what the platform's own fee wallet ultimately collects. Identical
+    /// fix, same fixed 5.00%-8.00% band, as the one already applied to
+    /// CreatorRewardsDistributor.triggerCreatorSwap for the same reason.
+    uint256 public swapSlippageBps = 600; // 6.00% default
+    uint256 public constant MIN_SWAP_SLIPPAGE_BPS = 500; // 5.00%
+    uint256 public constant MAX_SWAP_SLIPPAGE_BPS = 800; // 8.00%
+
     event FeeWalletUpdated(address indexed oldWallet, address indexed newWallet);
     event SwapThresholdUpdated(address indexed token, uint256 newThreshold);
     event MaxSwapAmountUpdated(address indexed token, uint256 newMax);
+    event SwapSlippageBpsUpdated(uint256 newBps);
     event FeeWalletSwapTriggered(address indexed token, uint256 amountIn, uint256 ethOut);
     event FeeWalletRewardsClaimed(address indexed token, address indexed feeWallet, address indexed caller, uint256 amount);
 
@@ -122,6 +138,50 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
         emit MaxSwapAmountUpdated(token, newMax);
     }
 
+    /// @notice Adjusts the protective slippage floor applied to every
+    /// triggerFeeWalletSwap trade — see swapSlippageBps above and Finding
+    /// FW-1. Bounded to the same 5.00%-8.00% band used everywhere else in
+    /// this codebase for the identical purpose.
+    function setSwapSlippageBps(uint256 newBps) external onlyOwner {
+        require(newBps >= MIN_SWAP_SLIPPAGE_BPS, "FeeWalletDistributor: slippage below 5% floor");
+        require(newBps <= MAX_SWAP_SLIPPAGE_BPS, "FeeWalletDistributor: slippage above 8% ceiling");
+        swapSlippageBps = newBps;
+        emit SwapSlippageBpsUpdated(newBps);
+    }
+
+    /// @dev Standard Uniswap V2 constant-product quote (0.30% swap fee baked
+    /// into the 997/1000 constants) — used only to derive a protective
+    /// slippage floor below, never to execute anything. Same helper as
+    /// CreatorRewardsDistributor/CustomToken/CustomTokenFactory's identical
+    /// utility.
+    function _getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) private pure returns (uint256) {
+        uint256 amountInWithFee = amountIn * 997;
+        uint256 numerator = amountInWithFee * reserveOut;
+        uint256 denominator = reserveIn * 1000 + amountInWithFee;
+        return numerator / denominator;
+    }
+
+    /// @dev Quotes amountIn's expected ETH output off the token/WETH pool's
+    /// own live reserves and applies swapSlippageBps — see Finding FW-1.
+    /// Returns 0 if no pool is found or either reserve is empty, which
+    /// triggerFeeWalletSwap treats as "can't compute a protocol floor this
+    /// time," falling back to the caller's own minEthOut rather than
+    /// blocking the swap outright.
+    function _protectiveMinOut(address token, uint256 amountIn) private view returns (uint256) {
+        address weth = router.WETH();
+        address pairAddr = IUniswapV2FactoryMinimal(router.factory()).getPair(token, weth);
+        if (pairAddr == address(0)) return 0;
+
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2PairMinimal(pairAddr).getReserves();
+        address token0 = IUniswapV2PairMinimal(pairAddr).token0();
+        uint256 reserveIn = token0 == token ? uint256(reserve0) : uint256(reserve1);
+        uint256 reserveOut = token0 == token ? uint256(reserve1) : uint256(reserve0);
+        if (reserveIn == 0 || reserveOut == 0) return 0;
+
+        uint256 quoted = _getAmountOut(amountIn, reserveIn, reserveOut);
+        return quoted - (quoted * swapSlippageBps) / 10_000;
+    }
+
     /// @notice Swaps up to maxSwapAmount[token] of this contract's balance
     /// of `token` for ETH (the entire balance, if no cap is set — see
     /// maxSwapAmount above), routed straight through WETH
@@ -141,11 +201,20 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
         path[0] = token;
         path[1] = router.WETH();
 
+        // Finding FW-1: minEthOut alone was a purely caller-supplied value
+        // with no protocol-side floor — since this function is deliberately
+        // permissionless, that let anyone call it with minEthOut == 0 and
+        // sandwich their own call for MEV profit. effectiveMinOut is
+        // whichever is stricter of the caller's own minEthOut and a floor
+        // computed from the pool's own live reserves.
+        uint256 protectiveFloor = _protectiveMinOut(token, amountIn);
+        uint256 effectiveMinOut = minEthOut > protectiveFloor ? minEthOut : protectiveFloor;
+
         uint256 before = address(this).balance;
         IERC20(token).approve(address(router), amountIn);
         router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             amountIn,
-            minEthOut,
+            effectiveMinOut,
             path,
             address(this),
             block.timestamp + 15 minutes

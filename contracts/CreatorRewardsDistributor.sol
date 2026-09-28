@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import "./interfaces/IUniswapV2Router02.sol";
+import "./interfaces/IUniswapV2Pair.sol";
 import "./interfaces/ICreatorAware.sol";
 
 /// @title CreatorRewardsDistributor
@@ -80,10 +81,27 @@ contract CreatorRewardsDistributor is Ownable2Step, ReentrancyGuard {
     /// there.
     mapping(address => uint256) public maxSwapAmount;
 
+    /// @notice Protective slippage floor applied to triggerCreatorSwap's own
+    /// router trade — see Finding CR-2 in the accompanying audit report.
+    /// Before this existed, triggerCreatorSwap accepted a purely
+    /// caller-supplied minEthOut with no protocol-side floor computed from
+    /// the pool's own reserves; since the function is deliberately
+    /// permissionless (see its own comment), anyone could call it with
+    /// minEthOut == 0 and sandwich their own call for MEV profit at the
+    /// creator's expense. Same fixed 5.00%-8.00% band, and the same
+    /// "whichever is stricter" combination with the caller's own minEthOut,
+    /// already used for CustomToken/CustomTokenFactory's internal swaps.
+    uint256 public swapSlippageBps = 600; // 6.00% default
+    uint256 public constant MIN_SWAP_SLIPPAGE_BPS = 500; // 5.00%
+    uint256 public constant MAX_SWAP_SLIPPAGE_BPS = 800; // 8.00%
+
     event SwapThresholdUpdated(address indexed token, uint256 newThreshold);
     event MaxSwapAmountUpdated(address indexed token, uint256 newMax);
+    event SwapSlippageBpsUpdated(uint256 newBps);
     event CreatorSwapTriggered(address indexed token, address indexed creator, uint256 amountIn, uint256 ethOut);
     event CreatorRewardsClaimed(address indexed token, address indexed creator, address indexed caller, uint256 amount);
+    event OrphanedEthRescued(address indexed token, address indexed to, uint256 amount);
+    event OrphanedTokensRescued(address indexed token, address indexed to, uint256 amount);
 
     constructor(address router_, address initialOwner_) Ownable(initialOwner_) {
         require(router_ != address(0), "CreatorRewardsDistributor: invalid router");
@@ -104,6 +122,50 @@ contract CreatorRewardsDistributor is Ownable2Step, ReentrancyGuard {
     function setMaxSwapAmount(address token, uint256 newMax) external onlyOwner {
         maxSwapAmount[token] = newMax;
         emit MaxSwapAmountUpdated(token, newMax);
+    }
+
+    /// @notice Adjusts the protective slippage floor applied to every
+    /// triggerCreatorSwap trade — see swapSlippageBps above and Finding CR-2.
+    /// Bounded to the same 5.00%-8.00% band used everywhere else in this
+    /// codebase for the identical purpose.
+    function setSwapSlippageBps(uint256 newBps) external onlyOwner {
+        require(newBps >= MIN_SWAP_SLIPPAGE_BPS, "CreatorRewardsDistributor: slippage below 5% floor");
+        require(newBps <= MAX_SWAP_SLIPPAGE_BPS, "CreatorRewardsDistributor: slippage above 8% ceiling");
+        swapSlippageBps = newBps;
+        emit SwapSlippageBpsUpdated(newBps);
+    }
+
+    /// @dev Standard Uniswap V2 constant-product quote (0.30% swap fee baked
+    /// into the 997/1000 constants) — used only to derive a protective
+    /// slippage floor below, never to execute anything. Same helper as
+    /// TokenFactory/CustomToken/CustomTokenFactory's identical utility.
+    function _getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) private pure returns (uint256) {
+        uint256 amountInWithFee = amountIn * 997;
+        uint256 numerator = amountInWithFee * reserveOut;
+        uint256 denominator = reserveIn * 1000 + amountInWithFee;
+        return numerator / denominator;
+    }
+
+    /// @dev Quotes amountIn's expected ETH output off the token/WETH pool's
+    /// own live reserves and applies swapSlippageBps — see Finding CR-2.
+    /// Returns 0 if no pool is found or either reserve is empty, which
+    /// triggerCreatorSwap treats as "can't compute a protocol floor this
+    /// time," falling back to the caller's own minEthOut rather than
+    /// blocking the swap outright — consistent with how every other
+    /// quote-derived floor in this codebase degrades on a missing pool.
+    function _protectiveMinOut(address token, uint256 amountIn) private view returns (uint256) {
+        address weth = router.WETH();
+        address pairAddr = IUniswapV2FactoryMinimal(router.factory()).getPair(token, weth);
+        if (pairAddr == address(0)) return 0;
+
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2PairMinimal(pairAddr).getReserves();
+        address token0 = IUniswapV2PairMinimal(pairAddr).token0();
+        uint256 reserveIn = token0 == token ? uint256(reserve0) : uint256(reserve1);
+        uint256 reserveOut = token0 == token ? uint256(reserve1) : uint256(reserve0);
+        if (reserveIn == 0 || reserveOut == 0) return 0;
+
+        uint256 quoted = _getAmountOut(amountIn, reserveIn, reserveOut);
+        return quoted - (quoted * swapSlippageBps) / 10_000;
     }
 
     /// @notice Swaps up to maxSwapAmount[token] of this contract's balance
@@ -132,11 +194,22 @@ contract CreatorRewardsDistributor is Ownable2Step, ReentrancyGuard {
         path[0] = token;
         path[1] = router.WETH();
 
+        // Finding CR-2: minEthOut alone was a purely caller-supplied value
+        // with no protocol-side floor — since this function is deliberately
+        // permissionless, that let anyone call it with minEthOut == 0 and
+        // sandwich their own call for MEV profit at the creator's expense.
+        // effectiveMinOut is whichever is stricter of the caller's own
+        // minEthOut and a floor computed from the pool's own live reserves,
+        // same "whichever is stricter" combination CustomTokenFactory uses
+        // for its own creator buy-in.
+        uint256 protectiveFloor = _protectiveMinOut(token, amountIn);
+        uint256 effectiveMinOut = minEthOut > protectiveFloor ? minEthOut : protectiveFloor;
+
         uint256 before = address(this).balance;
         IERC20(token).approve(address(router), amountIn);
         router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             amountIn,
-            minEthOut,
+            effectiveMinOut,
             path,
             address(this),
             block.timestamp + 15 minutes
@@ -162,5 +235,56 @@ contract CreatorRewardsDistributor is Ownable2Step, ReentrancyGuard {
         (bool sent, ) = payable(creator).call{value: amount}("");
         require(sent, "CreatorRewardsDistributor: ETH transfer failed");
         emit CreatorRewardsClaimed(token, creator, msg.sender, amount);
+    }
+
+    /// @notice Escape hatch for Finding CR-1: once a token's creator has
+    /// permanently renounced (LaunchedToken.renounceCreator() /
+    /// CustomToken.renounceCreator() — a normal, explicitly supported action
+    /// elsewhere in this platform), creator() returns address(0) forever,
+    /// which means claimCreatorRewards(token) can never succeed again for
+    /// that token. Without this function, any ETH already sitting in
+    /// claimableEth[token] at that point — and, before the CR-1 fix,
+    /// anything triggerCreatorSwap would have credited afterward — would be
+    /// stuck in this contract permanently, with no recovery path anywhere.
+    ///
+    /// Deliberately narrow, mirroring the rest of this codebase's escape
+    /// hatches (e.g. LaunchedToken/CustomToken.updatePriceFeed, which only
+    /// works once the current feed has gone stale): only callable once the
+    /// token's OWN creator() call reports address(0). The owner can never
+    /// redirect a live creator's still-claimable balance this way — doing so
+    /// would require the creator to have already, irreversibly, given up the
+    /// role that balance was owed to.
+    function rescueOrphanedEth(address token, address to) external onlyOwner nonReentrant returns (uint256 amount) {
+        require(to != address(0), "CreatorRewardsDistributor: invalid recipient");
+        require(ICreatorAware(token).creator() == address(0), "CreatorRewardsDistributor: creator has not renounced");
+        amount = claimableEth[token];
+        require(amount > 0, "CreatorRewardsDistributor: nothing to rescue");
+        claimableEth[token] = 0;
+        (bool sent, ) = payable(to).call{value: amount}("");
+        require(sent, "CreatorRewardsDistributor: ETH transfer failed");
+        emit OrphanedEthRescued(token, to, amount);
+    }
+
+    /// @notice Companion to rescueOrphanedEth above, for the in-kind token
+    /// side of the same problem: once a token's creator has renounced,
+    /// triggerCreatorSwap(token) can never run again either (it requires the
+    /// same nonzero creator()), so whatever `token` balance this contract is
+    /// still holding — including anything the token's own tax keeps sending
+    /// here on every subsequent trade, since LaunchedToken/CustomToken's own
+    /// creatorRewardBps carve-out never checks the token's creator status —
+    /// would otherwise sit here forever, permanently unswappable and
+    /// unclaimable. Same narrow, renounced-only gate as rescueOrphanedEth;
+    /// moves the raw token balance rather than swapping it here, so the
+    /// owner decides what happens to it next (e.g. route it to the fee
+    /// treasury, or to a replacement distributor) rather than this function
+    /// making that call unilaterally.
+    function rescueOrphanedTokens(address token, address to) external onlyOwner returns (uint256 amount) {
+        require(to != address(0), "CreatorRewardsDistributor: invalid recipient");
+        require(ICreatorAware(token).creator() == address(0), "CreatorRewardsDistributor: creator has not renounced");
+        amount = IERC20(token).balanceOf(address(this));
+        require(amount > 0, "CreatorRewardsDistributor: nothing to rescue");
+        bool sent = IERC20(token).transfer(to, amount);
+        require(sent, "CreatorRewardsDistributor: token transfer failed");
+        emit OrphanedTokensRescued(token, to, amount);
     }
 }

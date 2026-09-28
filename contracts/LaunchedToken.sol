@@ -33,6 +33,13 @@ contract LaunchedToken is ERC20 {
     bool private _initialized;
 
     address public creator;
+    /// @notice Set by transferCreator(); becomes `creator` once the
+    /// proposed address calls acceptCreator() itself. Mirrors the
+    /// Ownable2Step-style handoff CustomToken.sol already uses for its own
+    /// creator role, and the same pattern TokenFactory/CustomTokenFactory/
+    /// LiquidityLocker use for their owner — a single mistyped address can
+    /// never permanently strand the creator role.
+    address public pendingCreator;
     address public factory;
     uint256 public launchedAt;
     string private _tokenName;
@@ -130,9 +137,16 @@ contract LaunchedToken is ERC20 {
     event GraduationCandidateObserved(uint256 marketCapInFeedDecimals, uint256 confirmEligibleAt);
     event GraduationCandidateReset();
     event PriceFeedUpdated(address indexed newPriceFeed, uint256 newMaxOracleStaleness);
+    event CreatorTransferStarted(address indexed previousCreator, address indexed newCreator);
+    event CreatorTransferred(address indexed previousCreator, address indexed newCreator);
+    event CreatorRenounced(address indexed previousCreator);
 
     modifier onlyFactory() {
         require(msg.sender == factory, "LaunchedToken: caller is not the factory");
+        _;
+    }
+    modifier onlyCreator() {
+        require(msg.sender == creator, "LaunchedToken: caller is not the creator");
         _;
     }
 
@@ -189,6 +203,17 @@ contract LaunchedToken is ERC20 {
     ) external onlyFactory {
         require(!taxConfigured, "LaunchedToken: tax already configured");
         require(pair_ != address(0), "LaunchedToken: invalid pair");
+        // Defense in depth: TokenFactory.setTaxDefaults already bounds
+        // feeBps_ to MAX_FEE_BPS (2,000 / 20.00%) before it's ever read into
+        // a configureTax() call, so this can't be tripped via the real
+        // TokenFactory today — but this contract shouldn't implicitly trust
+        // an unbounded input just because its one current caller happens to
+        // validate it. Without this, a feeBps_ above 10,000 (100%) would
+        // make `value - fee` underflow on every single taxed transfer once
+        // configured, permanently bricking trading (Solidity 0.8's checked
+        // arithmetic reverts rather than wrapping) — this closes that off at
+        // configuration time instead of relying on the caller forever.
+        require(feeBps_ <= 10_000, "LaunchedToken: feeBps exceeds 100%");
         require(rewardBps_ + creatorRewardBps_ <= feeBps_, "LaunchedToken: rewardBps+creatorRewardBps exceeds feeBps");
         require(rewardsDistributor_ != address(0) || rewardBps_ == 0, "LaunchedToken: rewardBps requires a distributor");
         require(
@@ -247,6 +272,58 @@ contract LaunchedToken is ERC20 {
         priceFeed = IAggregatorV3(newPriceFeed_);
         maxOracleStaleness = newMaxOracleStaleness_;
         emit PriceFeedUpdated(newPriceFeed_, newMaxOracleStaleness_);
+    }
+
+    // ---------------------------------------------------------------
+    // Creator handoff — mirrors CustomToken.sol's transferCreator/
+    // acceptCreator/renounceCreator exactly, so every launch mode that
+    // clones this contract ("Just Launch", "Launch + Add Liquidity", and
+    // Quick Launch once it graduates via BondingCurveFactory) gets the same
+    // creator-controlled renounce/transfer assurance CustomToken already
+    // has. `creator` is the address CreatorRewardsDistributor pays out to
+    // for this token and what the front end shows as "your launch" — a
+    // two-step transfer (rather than a single-call transfer) means a
+    // mistyped newCreator address can never permanently strand these
+    // functions, since the proposed address must actively accept before
+    // control moves.
+    // ---------------------------------------------------------------
+
+    /// @notice Step 1 of a two-step creator handoff. Does nothing to the
+    /// live `creator` until the proposed address calls acceptCreator()
+    /// itself.
+    function transferCreator(address newCreator) external onlyCreator {
+        require(newCreator != address(0), "LaunchedToken: invalid creator");
+        pendingCreator = newCreator;
+        emit CreatorTransferStarted(creator, newCreator);
+    }
+
+    /// @notice Step 2: only the proposed address can complete the handoff,
+    /// proving it controls that address before transferCreator/
+    /// renounceCreator start listening to it instead of the old creator.
+    function acceptCreator() external {
+        require(msg.sender == pendingCreator, "LaunchedToken: caller is not the pending creator");
+        address previousCreator = creator;
+        creator = pendingCreator;
+        pendingCreator = address(0);
+        emit CreatorTransferred(previousCreator, creator);
+    }
+
+    /// @notice Permanently renounces the creator role — the same
+    /// "renounce ownership" assurance CustomToken.sol's renounceCreator()
+    /// gives that token's buyers. Sets `creator` (and any in-flight
+    /// `pendingCreator`) to address(0) forever, with no recovery path by
+    /// design. This contract has no other creator-gated operational
+    /// levers to lock out (unlike CustomToken, LaunchedToken never exposed
+    /// any), so the concrete effect is: no address can ever again call
+    /// transferCreator() on this token, and — if CreatorRewardsDistributor
+    /// is configured — this token's ongoing creator-reward stream becomes
+    /// permanently unclaimable rather than redirectable, exactly like
+    /// abandoning that claim outright.
+    function renounceCreator() external onlyCreator {
+        address previousCreator = creator;
+        creator = address(0);
+        pendingCreator = address(0);
+        emit CreatorRenounced(previousCreator);
     }
 
     function name() public view override returns (string memory) { return _tokenName; }
@@ -520,7 +597,28 @@ contract LaunchedToken is ERC20 {
         (uint256 marketCap, bool feedIsFresh) = currentMarketCapInFeedDecimals();
         if (!feedIsFresh) return; // oracle hiccup: leave any in-progress candidacy exactly as it was
 
-        uint256 targetInFeedDecimals = graduationTargetUsd * (10 ** priceFeed.decimals());
+        // FIX: priceFeed.decimals() is a real external call, previously made
+        // completely unguarded right here — inconsistent with every other
+        // price-feed call in this contract (latestRoundData() above, and
+        // _computeMarketCapFromPair()), both of which are already wrapped in
+        // try/catch for exactly this reason. A misbehaving, non-standard, or
+        // simply broken feed that reverts on decimals() — even though
+        // latestRoundData() just succeeded moments ago — would otherwise
+        // propagate straight out of _maybeDisableTax() and revert the ENTIRE
+        // taxed transfer that triggered it, permanently bricking ordinary
+        // buy/sell trading against this token's pool rather than merely
+        // leaving graduation stuck. Treating a reverting decimals() call the
+        // same as a stale feed (skip this check, retry on a later transfer)
+        // keeps the contract's own documented contract: "a stale/broken feed
+        // never blocks trading."
+        uint8 feedDecimals;
+        try priceFeed.decimals() returns (uint8 d) {
+            feedDecimals = d;
+        } catch {
+            return;
+        }
+
+        uint256 targetInFeedDecimals = graduationTargetUsd * (10 ** feedDecimals);
         if (marketCap < targetInFeedDecimals) {
             if (graduationCandidateAt != 0) {
                 graduationCandidateAt = 0;

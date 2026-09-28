@@ -390,6 +390,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
 
     // operational setters
     error InvalidWallet();
+    error MarketingFeeNotActive(); // marketing fee is 0 on both buy and sell — no wallet to redirect
     error ThresholdOutOfBounds();
     error SlippageBelowFloor(); // slippage below 5% floor
     error SlippageAboveCeiling(); // slippage above 8% ceiling
@@ -739,8 +740,17 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// change after launch, exactly as requested — everyone can see a
     /// wallet change happen (event below), but nobody, including this
     /// contract's own code, can touch the tax rates themselves again.
+    /// Only callable while the marketing fee is actually active (nonzero on
+    /// buyFees or sellFees, locked in permanently at initialize()) — a
+    /// token launched with marketingBps == 0 on both sides never routes
+    /// anything to marketingWallet, so there's nothing meaningful to
+    /// redirect. onlyCreator already means this becomes permanently
+    /// uncallable the moment renounceCreator() is called (msg.sender can
+    /// never equal address(0)), same as every other creator-gated setter
+    /// here.
     function setMarketingWallet(address newWallet) external onlyCreator {
         if (newWallet == address(0)) revert InvalidWallet();
+        if (buyFees.marketingBps == 0 && sellFees.marketingBps == 0) revert MarketingFeeNotActive();
         marketingWallet = newWallet;
         emit MarketingWalletUpdated(newWallet);
     }
@@ -1390,7 +1400,27 @@ contract CustomToken is ERC20, ReentrancyGuard {
         (uint256 marketCap, bool feedIsFresh) = currentMarketCapInFeedDecimals();
         if (!feedIsFresh) return; // oracle hiccup: leave any in-progress candidacy exactly as it was
 
-        uint256 targetInFeedDecimals = graduationTargetUsd * (10 ** priceFeed.decimals());
+        // Finding CT-1 (mirrors LaunchedToken Finding F-1): priceFeed.decimals()
+        // is an external call just like latestRoundData() above, and every
+        // other price-feed call in this function's own call chain
+        // (latestRoundData() itself, and the _computeMarketCapFromPair self-call)
+        // is already wrapped in try/catch specifically so a misbehaving feed
+        // can never brick a taxed transfer. This one line was the sole
+        // exception: if decimals() ever reverted on a feed that still answers
+        // latestRoundData() successfully, that revert would propagate out of
+        // _maybeDisablePlatformTax() and out of _update(), permanently
+        // reverting every single taxed buy/sell of this token — not just
+        // blocking graduation, but bricking ordinary trading entirely, with no
+        // admin override anywhere in this contract. Guarding it closes that
+        // gap and keeps this function consistent with its own stated
+        // defensive philosophy.
+        uint8 feedDecimals;
+        try priceFeed.decimals() returns (uint8 d) {
+            feedDecimals = d;
+        } catch {
+            return;
+        }
+        uint256 targetInFeedDecimals = graduationTargetUsd * (10 ** feedDecimals);
         if (marketCap < targetInFeedDecimals) {
             if (graduationCandidateAt != 0) {
                 graduationCandidateAt = 0;
