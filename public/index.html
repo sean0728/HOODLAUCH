@@ -1205,6 +1205,34 @@
     }
   };
 
+  // ---------------- platform trade tax (standalone, NOT part of this
+  // platform's own contracts or admin config) ----------------
+  // A flat 0.30% fee this page itself adds to every buy/sell/curve-buy/
+  // curve-sell it executes, on top of ordinary gas — sent to a standalone
+  // PlatformTaxDistributor contract that is deployed and owned entirely
+  // independently of this platform (its own owner, its own deployment,
+  // never touched by TokenFactory/relayer.js/this admin panel). Nothing
+  // about that contract's own settings is read or controlled from here —
+  // this is only the address every trade on this page sends its 0.30% to,
+  // and it is a plain code constant rather than part of CONFIG_KEYS below
+  // on purpose: this fee is not "platform config," it isn't saved to the
+  // relayer, and it never goes through the ADMIN_WALLET-signed config
+  // flow those keys do. Fill in the real deployed address per network
+  // after deploying PlatformTaxDistributor.sol; leaving a network's entry
+  // as the zero address simply means trades on that network skip the fee
+  // entirely (fails open — never blocks or breaks a trade over a missing
+  // address).
+  const PLATFORM_TAX_DISTRIBUTOR = {
+    demo: "0x0000000000000000000000000000000000000000",
+    live: "0x0000000000000000000000000000000000000000",
+  };
+  const PLATFORM_TRADE_TAX_BPS = 30n; // 0.30% — this page's own constant, independent of any contract
+
+  function platformTaxDistributorAddress(networkMode){
+    const addr = PLATFORM_TAX_DISTRIBUTOR[networkMode] || PLATFORM_TAX_DISTRIBUTOR[appMode];
+    return (addr && addr.toLowerCase() !== ZERO_ADDRESS) ? addr : ZERO_ADDRESS;
+  }
+
   // ---------------- platform config (contract addresses) ----------------
   // Every address needed to run the live version, centralized here instead
   // of scattered hardcoded constants, so the admin panel can show and edit
@@ -6510,16 +6538,28 @@
       const amtStr = amtInput.value;
       const amt = parseFloat(amtStr);
       if(!reserves || !amtStr || isNaN(amt) || amt<=0) return null;
+      const taxDistributor = platformTaxDistributorAddress(t.networkMode);
       if(tradeSide==="buy"){
         const ethIn = parseEtherToWei(amtStr);
-        const gross = getAmountOut(ethIn, reserves.wethReserve, reserves.tokenReserve);
+        // The 0.30% platform trade tax (see PLATFORM_TAX_DISTRIBUTOR above)
+        // comes off the ETH BEFORE it reaches the pool — only the
+        // remainder actually buys tokens — so the quote below has to use
+        // that reduced amount to match what submitTrade() will actually
+        // swap.
+        const taxWei = taxDistributor!==ZERO_ADDRESS ? (ethIn*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
+        const gross = getAmountOut(ethIn-taxWei, reserves.wethReserve, reserves.tokenReserve);
         const net = liveTaxActive ? (gross*(10000n-liveFeeBps))/10000n : gross;
         return { grossOut: gross, netOut: net };
       } else {
         const tokensIn = parseEtherToWei(amtStr); // both LaunchedToken and CustomToken use 18 decimals, same as ETH
         const netIn = liveTaxActive ? (tokensIn*(10000n-liveFeeBps))/10000n : tokensIn;
         const ethOut = getAmountOut(netIn, reserves.tokenReserve, reserves.wethReserve);
-        return { grossOut: ethOut, netOut: ethOut };
+        // The same 0.30% platform trade tax is forwarded out of the ETH
+        // proceeds right after the swap completes (see submitTrade below)
+        // — netted out of the displayed estimate here so it matches what
+        // the seller actually ends up with.
+        const taxWei = taxDistributor!==ZERO_ADDRESS ? (ethOut*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
+        return { grossOut: ethOut, netOut: ethOut-taxWei };
       }
     }
     function renderQuote(){
@@ -6569,19 +6609,41 @@
         reserves = await getPairReserves(t.pairAddress, t.tokenAddress);
         const deadline = BigInt(Math.floor(Date.now()/1000) + 15*60);
 
+        const taxDistributor = platformTaxDistributorAddress(t.networkMode);
+
         if(tradeSide==="buy"){
           const ethIn = parseEtherToWei(amtStr);
           if(ethIn<=0n) throw new Error("Enter an amount greater than 0.");
-          const gross = getAmountOut(ethIn, reserves.wethReserve, reserves.tokenReserve);
+          // Platform trade tax (see PLATFORM_TAX_DISTRIBUTOR above): 0.30%
+          // of the ETH the user entered is taken off BEFORE the swap, so
+          // only the remainder actually buys tokens — one extra wallet
+          // transaction, sent first, on top of the swap itself. Skipped
+          // entirely (swaps the full ethIn, exactly as before this
+          // feature existed) if no distributor address is configured for
+          // this network.
+          const taxWei = taxDistributor!==ZERO_ADDRESS ? (ethIn*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
+          const swapEthIn = ethIn - taxWei;
+          const gross = getAmountOut(swapEthIn, reserves.wethReserve, reserves.tokenReserve);
           if(gross<=0n) throw new Error("This pool can't quote that amount right now — try a smaller amount.");
           const amountOutMin = (gross*(10000n-slippageBps))/10000n;
+
+          if(taxWei>0n){
+            submitBtn.textContent = "Sending platform fee…";
+            toast("Sending the 0.30% platform fee — confirm in your wallet…");
+            const taxTxHash = await window.ethereum.request({
+              method:"eth_sendTransaction",
+              params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
+            });
+            const taxReceipt = await waitForReceipt(taxTxHash);
+            if(taxReceipt.status !== "0x1") throw new Error("The platform fee transfer reverted on-chain — nothing was bought.");
+          }
 
           submitBtn.textContent = "Confirm in your wallet…";
           toast("Confirm the buy in your wallet…");
           const data = encodeSwapExactETHForTokensCalldata({ amountOutMin, path:[dexInfo.weth, t.tokenAddress], to: wallet, deadline });
           const txHash = await window.ethereum.request({
             method:"eth_sendTransaction",
-            params:[{ from: wallet, to: dexInfo.router, value: "0x"+ethIn.toString(16), data }],
+            params:[{ from: wallet, to: dexInfo.router, value: "0x"+swapEthIn.toString(16), data }],
           });
           submitBtn.textContent = "Waiting for confirmation…";
           toast("Transaction sent — waiting for confirmation…");
@@ -6620,6 +6682,30 @@
           toast("Transaction sent — waiting for confirmation…");
           const receipt = await waitForReceipt(txHash);
           if(receipt.status !== "0x1") throw new Error("The sell reverted on-chain — try a smaller amount or a higher slippage tolerance.");
+
+          // Platform trade tax on the sell side: forwarded out of the
+          // quoted ETH proceeds (the same `gross` used for amountOutMin
+          // above) right after the sell itself confirms — a second,
+          // separate wallet transaction. If this fails or is rejected,
+          // the sale itself has already gone through and is NOT undone;
+          // only the fee transfer is skipped.
+          if(taxDistributor!==ZERO_ADDRESS){
+            const taxWei = (gross*PLATFORM_TRADE_TAX_BPS)/10000n;
+            if(taxWei>0n){
+              try{
+                submitBtn.textContent = "Sending platform fee…";
+                toast("Sale complete — sending the 0.30% platform fee…");
+                const taxTxHash = await window.ethereum.request({
+                  method:"eth_sendTransaction",
+                  params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
+                });
+                await waitForReceipt(taxTxHash);
+              }catch(taxErr){
+                console.error(taxErr);
+                toast("Sold, but the platform fee transfer failed — the sale itself still went through.");
+              }
+            }
+          }
           toast(`✅ Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
         }
         amtInput.value = "";
@@ -6660,13 +6746,20 @@
     const submitBtn = document.getElementById("tradeSubmit");
     if(!amtInput || !outEl || !slippageInput || !submitBtn) return;
 
-    async function fetchQuote(){
+    // ethInOverride lets a caller quote off a DIFFERENT ETH amount than
+    // what's actually in the input box — needed for the platform trade tax
+    // (see PLATFORM_TAX_DISTRIBUTOR above): only ethIn-minus-tax actually
+    // reaches the curve on a buy, so both renderQuote (display) and
+    // submitTrade (the real transaction) need to quote off that reduced
+    // amount rather than the raw amtInput.value this function otherwise
+    // always reads.
+    async function fetchQuote(ethInOverride){
       const amtStr = amtInput.value;
       const amt = parseFloat(amtStr);
       if(!amtStr || isNaN(amt) || amt<=0) return null;
       try{
         if(tradeSide==="buy"){
-          const ethIn = parseEtherToWei(amtStr);
+          const ethIn = ethInOverride!==undefined ? ethInOverride : parseEtherToWei(amtStr);
           if(ethIn<=0n) return null;
           const raw = await ethCall(t.factoryAddress, encodeAddressUint256Calldata(QUOTE_BUY_SELECTOR, t.tokenAddress, ethIn));
           const words = splitWords(raw);
@@ -6691,13 +6784,28 @@
       const amt = parseFloat(amtStr);
       if(!amtStr || isNaN(amt) || amt<=0){ outEl.textContent = "0"; return; }
       const seq = ++quoteSeq;
-      const q = await fetchQuote();
+      const taxDistributor = platformTaxDistributorAddress(t.networkMode);
+      let q;
+      if(tradeSide==="buy"){
+        const ethIn = parseEtherToWei(amtStr);
+        const taxWei = taxDistributor!==ZERO_ADDRESS ? (ethIn*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
+        q = await fetchQuote(ethIn - taxWei);
+      } else {
+        q = await fetchQuote();
+      }
       if(seq !== quoteSeq) return; // superseded by a newer keystroke
       if(!document.body.contains(outEl)) return; // detail view moved on while this was in flight
       if(!q){ outEl.textContent = "0"; return; }
-      outEl.textContent = tradeSide==="buy"
-        ? fmtInt(Number(weiToEtherString(q.out,6))) + " " + t.ticker
-        : weiToEtherString(q.out,6) + " ETH";
+      if(tradeSide==="buy"){
+        outEl.textContent = fmtInt(Number(weiToEtherString(q.out,6))) + " " + t.ticker;
+      } else {
+        // Platform trade tax forwarded out of the ETH proceeds right after
+        // the sell confirms (see submitTrade below) — netted out of the
+        // displayed estimate here so it matches what the seller actually
+        // ends up with.
+        const taxWei = taxDistributor!==ZERO_ADDRESS ? (q.out*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
+        outEl.textContent = weiToEtherString(q.out - taxWei, 6) + " ETH";
+      }
     }
 
     realTradeQuoteRefresh = renderQuote;
@@ -6733,19 +6841,40 @@
         // Always re-quote right before building the transaction — same
         // "don't trust a possibly-stale on-screen estimate" pattern
         // wireRealTradePanel uses when it re-reads pool reserves here.
+        const taxDistributor = platformTaxDistributorAddress(t.networkMode);
+
         if(tradeSide==="buy"){
           const ethIn = parseEtherToWei(amtStr);
           if(ethIn<=0n) throw new Error("Enter an amount greater than 0.");
-          const q = await fetchQuote();
+          // Platform trade tax (see PLATFORM_TAX_DISTRIBUTOR above): 0.30%
+          // of the ETH the user entered is taken off BEFORE it reaches the
+          // curve, as its own separate wallet transaction sent first — the
+          // quote below has to be re-derived off that reduced amount
+          // (fetchQuote's override param exists for exactly this), since
+          // that's the actual amount the curve will see.
+          const taxWei = taxDistributor!==ZERO_ADDRESS ? (ethIn*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
+          const curveEthIn = ethIn - taxWei;
+          const q = await fetchQuote(curveEthIn);
           if(!q || q.out<=0n) throw new Error("This curve can't quote that amount right now — try a smaller amount.");
           const minTokensOut = (q.out*(10000n-slippageBps))/10000n;
+
+          if(taxWei>0n){
+            submitBtn.textContent = "Sending platform fee…";
+            toast("Sending the 0.30% platform fee — confirm in your wallet…");
+            const taxTxHash = await window.ethereum.request({
+              method:"eth_sendTransaction",
+              params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
+            });
+            const taxReceipt = await waitForReceipt(taxTxHash);
+            if(taxReceipt.status !== "0x1") throw new Error("The platform fee transfer reverted on-chain — nothing was bought.");
+          }
 
           submitBtn.textContent = "Confirm in your wallet…";
           toast("Confirm the buy in your wallet…");
           const data = encodeAddressUint256Calldata(CURVE_BUY_SELECTOR, t.tokenAddress, minTokensOut);
           const txHash = await window.ethereum.request({
             method:"eth_sendTransaction",
-            params:[{ from: wallet, to: t.factoryAddress, value: "0x"+ethIn.toString(16), data }],
+            params:[{ from: wallet, to: t.factoryAddress, value: "0x"+curveEthIn.toString(16), data }],
           });
           submitBtn.textContent = "Waiting for confirmation…";
           toast("Transaction sent — waiting for confirmation…");
@@ -6784,6 +6913,30 @@
           toast("Transaction sent — waiting for confirmation…");
           const receipt = await waitForReceipt(txHash);
           if(receipt.status !== "0x1") throw new Error("The sell reverted on-chain — try a smaller amount or a higher slippage tolerance.");
+
+          // Platform trade tax on the sell side: forwarded out of the
+          // quoted ETH proceeds (the same `q.out` used for minEthOut
+          // above) right after the sell itself confirms — a second,
+          // separate wallet transaction. If this fails or is rejected,
+          // the sale itself has already gone through and is NOT undone;
+          // only the fee transfer is skipped.
+          if(taxDistributor!==ZERO_ADDRESS){
+            const taxWei = (q.out*PLATFORM_TRADE_TAX_BPS)/10000n;
+            if(taxWei>0n){
+              try{
+                submitBtn.textContent = "Sending platform fee…";
+                toast("Sale complete — sending the 0.30% platform fee…");
+                const taxTxHash = await window.ethereum.request({
+                  method:"eth_sendTransaction",
+                  params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
+                });
+                await waitForReceipt(taxTxHash);
+              }catch(taxErr){
+                console.error(taxErr);
+                toast("Sold, but the platform fee transfer failed — the sale itself still went through.");
+              }
+            }
+          }
           toast(`✅ Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
         }
         amtInput.value = "";
