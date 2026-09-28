@@ -2195,9 +2195,27 @@
   const CRD_CLAIMABLE_ETH_SELECTOR = "4793dc40";        // claimableEth(address) — keyed by token address
   const CRD_SWAP_THRESHOLD_SELECTOR = "0ae9b4f0";       // swapThreshold(address)
   const CRD_SET_SWAP_THRESHOLD_SELECTOR = "db3e514c";   // setSwapThreshold(address,uint256)
-  const CRD_MAX_SWAP_AMOUNT_SELECTOR = "e7881011";      // maxSwapAmount(address) — not currently read anywhere in this file (quoteCreatorSwapMinEthOut simulates triggerCreatorSwap directly instead of reimplementing its amountIn-capping logic); kept for any future admin-panel readout of this value, same as the other CRD_* getters above
-  const CRD_TRIGGER_CREATOR_SWAP_SELECTOR = "360f1b2c"; // triggerCreatorSwap(address,uint256) — creator-only (msg.sender == token.creator())
-  const CRD_CLAIM_CREATOR_REWARDS_SELECTOR = "bec3bbcc"; // claimCreatorRewards(address) — creator-only, pays token.creator()
+  const CRD_MAX_SWAP_AMOUNT_SELECTOR = "e7881011";      // maxSwapAmount(address)
+  // setSwapThreshold/setMaxSwapAmount are the exact two knobs the relayer's
+  // own creatorRewardsPollLoop reads before it auto-sweeps a token (see
+  // scripts/relayer.js) — the admin panel below exists so an owner can tune
+  // those without touching the relayer's env vars. Same function signatures
+  // as FeeWalletDistributor's setSwapThreshold/setMaxSwapAmount, so the
+  // selectors (which hash only the signature, not the contract) are
+  // identical to FWD_SET_SWAP_THRESHOLD_SELECTOR/FWD_SET_MAX_SWAP_AMOUNT_SELECTOR below.
+  const CRD_SET_MAX_SWAP_AMOUNT_SELECTOR = "a589d319";  // setMaxSwapAmount(address,uint256)
+  // NOTE: comments used to assert these two are restricted to
+  // msg.sender==token.creator() — see the much longer discussion at
+  // convertCreatorRewards/claimCreatorRewards below (search "creator-only")
+  // for why that's now disputed: the actual .sol source audited on
+  // 2026-09-28 has no such restriction, matching FeeWalletDistributor's
+  // fully-permissionless shape. The admin panel's manual-override buttons
+  // below call these same two selectors as the connected ADMIN wallet, not
+  // necessarily the token's creator — if the live deployed bytecode really
+  // does gate on creator(), those buttons will simply revert for a non-
+  // creator admin, surfaced as an ordinary failed-transaction toast.
+  const CRD_TRIGGER_CREATOR_SWAP_SELECTOR = "360f1b2c"; // triggerCreatorSwap(address,uint256)
+  const CRD_CLAIM_CREATOR_REWARDS_SELECTOR = "bec3bbcc"; // claimCreatorRewards(address) — pays token.creator()
   // Slippage tolerance applied to convertCreatorRewards' own live pool quote
   // (see quoteCreatorSwapMinEthOut below) before it's sent as
   // triggerCreatorSwap's minEthOut. This used to be hardcoded to 0 — an
@@ -9245,6 +9263,233 @@
       </div>`;
   }
 
+  // ---- CreatorRewardsDistributor admin panel — same platform-wide,
+  // read-off-whichever-factory-has-it shape as FeeWalletDistributor just
+  // below (no dedicated CONFIG_KEYS/platformConfig slot of its own; the only
+  // place its address is actually wired up is each factory's own
+  // creatorRewardsDistributor() getter — see the "Creator rewards
+  // distributor (address)" field under TokenFactory/CustomTokenFactory
+  // above). Added so the two anti-dust knobs the relayer's own
+  // creatorRewardsPollLoop reads before it auto-sweeps a token
+  // (swapThreshold/maxSwapAmount — see scripts/relayer.js) are actually
+  // reachable from this page; before this, CRD_SET_SWAP_THRESHOLD_SELECTOR
+  // was defined above but never wired to any UI at all.
+  async function creatorRewardsDistributorContractAddress(mode){
+    const factoryAddress = tokenFactoryAddress(mode) || customTokenFactoryAddress(mode);
+    if(!factoryAddress) return null;
+    try{
+      const addr = decodeAddress(await ethCall(factoryAddress, "0x"+CREATOR_REWARDS_DISTRIBUTOR_SELECTOR));
+      return addr.toLowerCase()===ZERO_ADDRESS ? null : addr;
+    }catch(err){ return null; }
+  }
+
+  // Same per-token lookup pattern as FeeWalletDistributor's fwdLookupToken
+  // below — claimableEth/swapThreshold/maxSwapAmount are all keyed per
+  // token, with no way to enumerate every token that's ever accrued a
+  // balance without an event scan.
+  let crdLookupToken = null;
+  async function loadCreatorRewardsDistributorState(address){
+    const [ownerHex, pendingOwnerHex] = await Promise.all([
+      ethCall(address, "0x"+OWNER_SELECTOR),
+      ethCall(address, "0x"+PENDING_OWNER_SELECTOR),
+    ]);
+    const state = {
+      owner: decodeAddress(ownerHex),
+      pendingOwner: decodeAddress(pendingOwnerHex),
+      lookupToken: crdLookupToken,
+      claimableEth: 0n,
+      swapThreshold: 0n,
+      maxSwapAmount: 0n,
+      creator: null,
+    };
+    if(crdLookupToken){
+      try{
+        const [claimableHex, thresholdHex, maxHex, creatorHex] = await Promise.all([
+          ethCall(address, "0x"+CRD_CLAIMABLE_ETH_SELECTOR+encodeAddressParam(crdLookupToken)),
+          ethCall(address, "0x"+CRD_SWAP_THRESHOLD_SELECTOR+encodeAddressParam(crdLookupToken)),
+          ethCall(address, "0x"+CRD_MAX_SWAP_AMOUNT_SELECTOR+encodeAddressParam(crdLookupToken)),
+          // creator() is the identical selector on every token type this
+          // platform launches (LaunchedToken and CustomToken alike — the
+          // selector hashes only the function signature "creator()", not
+          // which contract implements it), so CUSTOM_CREATOR_SELECTOR is
+          // reused here despite its name.
+          ethCall(crdLookupToken, "0x"+CUSTOM_CREATOR_SELECTOR).catch(()=>null),
+        ]);
+        state.claimableEth = decodeUint256(claimableHex);
+        state.swapThreshold = decodeUint256(thresholdHex);
+        state.maxSwapAmount = decodeUint256(maxHex);
+        state.creator = creatorHex ? decodeAddress(creatorHex) : null;
+      }catch(err){ /* best-effort — looked-up token's fields just show as 0 */ }
+    }
+    return state;
+  }
+
+  function creatorRewardsDistributorPanelHTML(address, state){
+    if(!address){
+      return `
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>CreatorRewardsDistributor</h3></div>
+          <p class="admin-empty">Not wired up on ${escapeHtml(NETWORKS[appMode].label)} yet — set a "Creator rewards distributor" address under TokenFactory or CustomTokenFactory above, and this panel picks it up automatically.</p>
+        </div>`;
+    }
+    if(!state){
+      return `
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>CreatorRewardsDistributor</h3></div>
+          <div class="admin-addr-line">${escapeHtml(address)}</div>
+          <p class="admin-empty">Couldn't read this contract's on-chain state — check your wallet's network and try again.</p>
+        </div>`;
+    }
+    const pendingIsZero = state.pendingOwner.toLowerCase()===ZERO_ADDRESS;
+    const walletIsPendingOwner = wallet && !pendingIsZero && wallet.toLowerCase()===state.pendingOwner.toLowerCase();
+    return `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>CreatorRewardsDistributor</h3></div>
+        <div class="admin-addr-line">${escapeHtml(address)}</div>
+
+        <div class="admin-section-label">Current state</div>
+        <div class="admin-readout-grid">
+          <div class="admin-readout"><div class="l">Owner</div><div class="v">${escapeHtml(state.owner)}</div></div>
+          <div class="admin-readout"><div class="l">Pending owner</div><div class="v">${pendingIsZero ? "None" : escapeHtml(state.pendingOwner)}</div></div>
+        </div>
+        <p class="admin-empty" style="margin:0 0 10px;">Unlike FeeWalletDistributor below, there's no single settable payout address here — each token's reward pays out to that token's own live <code>creator()</code>, read at claim time (see the token's own "Transfer creator"/"Renounce creator" controls elsewhere in this app). Nothing to configure platform-wide.</p>
+
+        <div class="admin-section-label">Per-token balance — swept and claimed automatically by the relayer keeper once it clears the threshold below</div>
+        <p class="admin-empty" style="margin-bottom:10px;">scripts/relayer.js's creatorRewardsPollLoop polls every launched token and automatically triggers the swap-to-ETH, then claims it to that token's creator — see the Automation status panel above to confirm that keeper is actually running for the network you're on. Look up a token below to see its current balance, or act on it manually (useful if the keeper is paused, misconfigured, or you want to force it sooner than the keeper's own schedule).</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Token address</label><input type="text" id="admin_crd_lookupToken" placeholder="0x…" value="${state.lookupToken ? escapeHtml(state.lookupToken) : ""}"></div>
+          <button class="btn btn-ghost btn-sm" data-crd-action="lookupToken">Load</button>
+        </div>
+        ${state.lookupToken ? `
+        <div class="admin-readout-grid">
+          <div class="admin-readout"><div class="l">Resolves to creator</div><div class="v">${state.creator ? escapeHtml(state.creator) : "Couldn't read — is this a launched token address?"}</div></div>
+          <div class="admin-readout"><div class="l">Claimable ETH (already swapped)</div><div class="v">${weiToEtherString(state.claimableEth,6)} ETH</div></div>
+          <div class="admin-readout"><div class="l">Swap threshold</div><div class="v">${fmtInt(Number(weiToEtherString(state.swapThreshold,0)))} tokens</div></div>
+          <div class="admin-readout"><div class="l">Max swap per call</div><div class="v">${state.maxSwapAmount>0n ? fmtInt(Number(weiToEtherString(state.maxSwapAmount,0)))+" tokens" : "Uncapped"}</div></div>
+        </div>
+
+        <div class="admin-section-label">Manual override — the keeper normally does this for you</div>
+        <p class="admin-empty" style="margin:0 0 10px;">Older comments in this file describe these two calls as restricted to the token's own creator; the actual contract audited most recently has no such restriction. If the version actually deployed on this network disagrees, these will simply revert for an admin wallet that isn't also this token's creator.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Min ETH out (slippage floor)</label><input type="number" step="any" min="0" id="admin_crd_minEthOut" placeholder="0"></div>
+          <button class="btn btn-ghost btn-sm" data-crd-action="triggerSwap">Swap accumulated balance → ETH</button>
+        </div>
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">Pays out ${weiToEtherString(state.claimableEth,6)} claimable ETH to ${state.creator ? escapeHtml(fmtAddrSafe(state.creator)) : "this token's creator"} right now.</p>
+          <button class="btn btn-ghost btn-sm" data-crd-action="claimRewards" ${state.claimableEth>0n ? "" : "disabled"}>Claim ETH</button>
+        </div>
+
+        <div class="admin-section-label">Automation tuning</div>
+        <p class="admin-empty" style="margin:0 0 10px;">Read live by the relayer keeper before every sweep attempt — it skips a token below its threshold, and never sends more than the max per call. Changing these takes effect on the keeper's very next poll, no restart needed.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Swap threshold (whole tokens)</label><input type="number" step="any" min="0" id="admin_crd_newThreshold" placeholder="0"></div>
+          <button class="btn btn-ghost btn-sm" data-crd-action="setSwapThreshold">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Max swap per call (whole tokens, 0 = uncapped)</label><input type="number" step="any" min="0" id="admin_crd_newMax" placeholder="0"></div>
+          <button class="btn btn-ghost btn-sm" data-crd-action="setMaxSwapAmount">Update</button>
+        </div>` : `<p class="admin-empty" style="margin:0 0 10px;">Enter a launched token's address above and click Load to see its accumulated balance and act on it.</p>`}
+
+        <div class="admin-section-label">Ownership · Ownable2Step</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Transferring ownership doesn't take effect until the new address itself calls acceptOwnership() — the current owner keeps full control until then, so a mistyped address can't lock this contract out.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Transfer ownership to</label><input type="text" id="admin_crd_newOwner" placeholder="0x…"></div>
+          <button class="btn btn-ghost btn-sm" data-crd-action="transferOwnership">Propose</button>
+        </div>
+        ${walletIsPendingOwner ? `
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">This connected wallet is the pending owner — accept to complete the transfer.</p>
+          <button class="btn btn-primary btn-sm" data-crd-action="acceptOwnership">Accept ownership</button>
+        </div>` : ""}
+      </div>`;
+  }
+
+  // Same shape as runFeeWalletDistributorAction above — see that for the
+  // pattern and for why no on-chain permission check is done client-side
+  // beyond the admin-gated tab this panel only ever renders inside.
+  async function runCreatorRewardsDistributorAction(action, btnEl){
+    const address = await creatorRewardsDistributorContractAddress();
+    if(!address){ toast("CreatorRewardsDistributor isn't wired up on the current network."); return; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+
+    const field = (suffix) => document.getElementById(`admin_crd_${suffix}`);
+
+    if(action==="lookupToken"){
+      const v = field("lookupToken").value.trim();
+      if(!isAddressLike(v)){ toast("Enter a valid token address."); return; }
+      crdLookupToken = v;
+      if(views.admin.classList.contains("active")) renderAdmin();
+      return;
+    }
+
+    let data, successMsg;
+    try{
+      if(action==="triggerSwap"){
+        if(!crdLookupToken) throw new Error("Load a token first.");
+        const v = field("minEthOut").value;
+        const minOut = v==="" ? 0n : parseEtherToWei(v);
+        if(v!=="" && (isNaN(parseFloat(v)) || parseFloat(v)<0)) throw new Error("Enter a valid minimum amount, or leave blank for 0.");
+        data = encodeAddressUint256Calldata(CRD_TRIGGER_CREATOR_SWAP_SELECTOR, crdLookupToken, minOut);
+        successMsg = "Creator-rewards swap triggered.";
+      } else if(action==="claimRewards"){
+        if(!crdLookupToken) throw new Error("Load a token first.");
+        data = "0x"+CRD_CLAIM_CREATOR_REWARDS_SELECTOR+encodeAddressParam(crdLookupToken);
+        successMsg = "ETH claimed to this token's creator.";
+      } else if(action==="setSwapThreshold"){
+        if(!crdLookupToken) throw new Error("Load a token first.");
+        const v = field("newThreshold").value;
+        if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid token amount.");
+        data = encodeAddressUint256Calldata(CRD_SET_SWAP_THRESHOLD_SELECTOR, crdLookupToken, parseEtherToWei(v));
+        successMsg = "Swap threshold updated.";
+      } else if(action==="setMaxSwapAmount"){
+        if(!crdLookupToken) throw new Error("Load a token first.");
+        const v = field("newMax").value;
+        if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid token amount, or 0 for uncapped.");
+        data = encodeAddressUint256Calldata(CRD_SET_MAX_SWAP_AMOUNT_SELECTOR, crdLookupToken, parseEtherToWei(v));
+        successMsg = "Max swap amount updated.";
+      } else if(action==="transferOwnership"){
+        const v = field("newOwner").value.trim();
+        if(!isAddressLike(v)) throw new Error("Enter a valid address to propose as the new owner.");
+        data = encodeAddressCalldata(TRANSFER_OWNERSHIP_SELECTOR, v);
+        successMsg = "Ownership transfer proposed — the new address must call acceptOwnership() itself to complete it.";
+      } else if(action==="acceptOwnership"){
+        data = "0x"+ACCEPT_OWNERSHIP_SELECTOR;
+        successMsg = "Ownership accepted.";
+      } else {
+        return;
+      }
+    }catch(validationErr){
+      toast(validationErr.message);
+      return;
+    }
+
+    const originalLabel = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = "Confirm in wallet…";
+    try{
+      toast("Confirm the transaction in your wallet…");
+      const txHash = await window.ethereum.request({
+        method:"eth_sendTransaction",
+        params:[{ from: wallet, to: address, data }],
+      });
+      btnEl.textContent = "Waiting for confirmation…";
+      const receipt = await waitForReceipt(txHash);
+      if(receipt.status !== "0x1"){
+        toast("The transaction reverted on-chain — nothing was changed.");
+      } else {
+        toast(`✅ ${successMsg}`);
+      }
+    }catch(err){
+      if(err && err.code===4001) toast("Transaction was rejected.");
+      else toast(err && err.message ? err.message : "Transaction failed.");
+    }finally{
+      btnEl.disabled = false;
+      btnEl.textContent = originalLabel;
+      if(views.admin.classList.contains("active")) renderAdmin();
+    }
+  }
+
   // ---- FeeWalletDistributor admin panel — another single, platform-wide
   // contract, same shape as PlatformRewardsDistributor below. Unlike that
   // one, though, FeeWalletDistributor has no dedicated platformConfig slot
@@ -9341,8 +9586,8 @@
         </div>
         <p class="admin-empty" style="margin:0 0 10px;">Repoints where every token's NEXT claim pays out, all at once — never retroactive to ETH already claimed.</p>
 
-        <div class="admin-section-label">Per-token balance — accumulates automatically from every taxed trade, but nothing sweeps it out on its own</div>
-        <p class="admin-empty" style="margin-bottom:10px;">Each launched token's fee-wallet slice sits here as an ordinary balance of THAT token until someone (anyone — this is permissionless) triggers a swap to ETH, then a claim. Look up a token below to see and act on its balance.</p>
+        <div class="admin-section-label">Per-token balance — swept and claimed automatically by the relayer keeper once it clears the threshold below</div>
+        <p class="admin-empty" style="margin-bottom:10px;">scripts/relayer.js's feeWalletPollLoop polls every launched token and automatically triggers the swap-to-ETH, then claims it to the fee wallet above — see the Automation status panel further up this page to confirm that keeper is actually running for the network you're on. Look up a token below to see its current balance, or act on it manually (useful if the keeper is paused, misconfigured, or you want to force it sooner than the keeper's own schedule).</p>
         <div class="admin-action-row">
           <div class="field"><label>Token address</label><input type="text" id="admin_fwd_lookupToken" placeholder="0x…" value="${state.lookupToken ? escapeHtml(state.lookupToken) : ""}"></div>
           <button class="btn btn-ghost btn-sm" data-fwd-action="lookupToken">Load</button>
@@ -9353,6 +9598,8 @@
           <div class="admin-readout"><div class="l">Swap threshold</div><div class="v">${fmtInt(Number(weiToEtherString(state.swapThreshold,0)))} tokens</div></div>
           <div class="admin-readout"><div class="l">Max swap per call</div><div class="v">${state.maxSwapAmount>0n ? fmtInt(Number(weiToEtherString(state.maxSwapAmount,0)))+" tokens" : "Uncapped"}</div></div>
         </div>
+
+        <div class="admin-section-label">Manual override — the keeper normally does this for you</div>
         <div class="admin-action-row">
           <div class="field"><label>Min ETH out (slippage floor)</label><input type="number" step="any" min="0" id="admin_fwd_minEthOut" placeholder="0"></div>
           <button class="btn btn-ghost btn-sm" data-fwd-action="triggerSwap">Swap accumulated balance → ETH</button>
@@ -9361,6 +9608,9 @@
           <p class="admin-empty" style="margin:0; flex:1;">Pays out ${weiToEtherString(state.claimableEth,6)} claimable ETH to ${feeWalletIsZero ? "(fee wallet not set)" : escapeHtml(fmtAddrSafe(state.feeWallet))} right now.</p>
           <button class="btn btn-ghost btn-sm" data-fwd-action="claimRewards" ${state.claimableEth>0n ? "" : "disabled"}>Claim ETH</button>
         </div>
+
+        <div class="admin-section-label">Automation tuning</div>
+        <p class="admin-empty" style="margin:0 0 10px;">Read live by the relayer keeper before every sweep attempt — it skips a token below its threshold, and never sends more than the max per call. Changing these takes effect on the keeper's very next poll, no restart needed.</p>
         <div class="admin-action-row">
           <div class="field"><label>Swap threshold (whole tokens)</label><input type="number" step="any" min="0" id="admin_fwd_newThreshold" placeholder="0"></div>
           <button class="btn btn-ghost btn-sm" data-fwd-action="setSwapThreshold">Update</button>
@@ -9940,6 +10190,102 @@
   // currently showing — kept here (rather than re-fetched on every tab
   // click) so switching between "Recent Launches" and "Failed Launches"
   // just re-renders the list from what's already in memory.
+  // ---- Automation status — answers "is the relayer keeper actually doing
+  // the sweeps it's supposed to?" directly from this tab, instead of an
+  // admin having to shell into the relayer host and hit GET /health by hand
+  // (see that route's own comment in scripts/relayer.js — it exists
+  // specifically because a dashboard/config value and the relayer's actual
+  // in-memory state have drifted apart before, surviving only until a real
+  // restart). Pure fetch()-over-HTTP like "Launch activity" below, so the
+  // first pass renders before any wallet is connected; a second pass (see
+  // renderAdmin's call to renderAutomationStatusHTML after its on-chain
+  // reads finish) adds a per-row mismatch check against the distributor
+  // addresses each factory is actually configured with right now.
+  let automationHealthData = null;
+
+  async function renderAutomationStatusPanel(){
+    const wrap = document.getElementById("automationStatusWrap");
+    if(!wrap) return;
+    const url = relayerApiUrl(appMode);
+    if(!url){
+      automationHealthData = null;
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No relayer configured for ${escapeHtml(NETWORKS[appMode].label)} yet — there's no keeper to check on until scripts/relayer.js is running and pointed at from "Platform contracts" above.</p></div>`;
+      return;
+    }
+    try{
+      const r = await fetch(`${url}/health`);
+      automationHealthData = r.ok ? await r.json() : null;
+    }catch(e){
+      automationHealthData = null;
+    }
+    renderAutomationStatusHTML();
+  }
+
+  // Split out of renderAutomationStatusPanel so renderAdmin can re-render
+  // this panel a second time, once it knows each factory's on-chain
+  // creatorRewardsDistributor()/feeWalletDistributor() addresses, without
+  // re-fetching /health. `onChain` is optional — the first, wallet-free pass
+  // renders without it and just skips the mismatch check.
+  function renderAutomationStatusHTML(onChain){
+    const wrap = document.getElementById("automationStatusWrap");
+    if(!wrap) return;
+    const h = automationHealthData;
+    if(!h){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Couldn't reach the relayer's <code>/health</code> endpoint just now — the automated sweeps below may or may not actually be running; this panel simply can't tell from here. Check that the relayer process is up and that the "Gasless relayer API" URL in "Platform contracts" above still points at it.</p></div>`;
+      return;
+    }
+    const rows = [
+      {
+        label: "Creator rewards",
+        detail: "swap → ETH, then claim to each token's creator",
+        enabled: !!h.creatorRewardsAutoSweepEnabled,
+        resolved: h.creatorRewardsDistributorAddress,
+        onChainAddr: onChain ? onChain.crdAddress : undefined,
+      },
+      {
+        label: "Fee wallet",
+        detail: "swap → ETH, then claim to the configured fee wallet",
+        enabled: !!h.feeWalletAutoSweepEnabled,
+        resolved: h.feeWalletDistributorAddress,
+        onChainAddr: onChain ? onChain.fwdAddress : undefined,
+      },
+      {
+        label: "Platform rewards",
+        detail: "ETH/token buyback → burn + airdrop rounds",
+        enabled: !!h.platformRewardsAutoSweepEnabled,
+        resolved: h.platformRewardsDistributorAddress,
+        onChainAddr: onChain ? onChain.prdAddress : undefined,
+      },
+    ];
+    const rowsHTML = rows.map(row=>{
+      const mismatchChecked = row.onChainAddr !== undefined; // undefined = first pass, not checked yet
+      const mismatch = mismatchChecked && row.enabled && row.resolved && row.onChainAddr
+        && row.resolved.toLowerCase() !== row.onChainAddr.toLowerCase();
+      const badge = !row.enabled ? `<span class="admin-status-badge">OFF</span>`
+        : mismatch ? `<span class="admin-status-badge partial">ADDRESS MISMATCH</span>`
+        : `<span class="admin-status-badge on">ON</span>`;
+      const addrLine = row.enabled
+        ? `Relayer is sweeping <span class="admin-addr-line" style="display:inline; padding:0; border:0; background:none;">${escapeHtml(row.resolved || "—")}</span>`
+        : `Not configured on the relayer — set ${row.label==="Creator rewards" ? "CREATOR_REWARDS_DISTRIBUTOR_ADDRESS" : row.label==="Fee wallet" ? "FEE_WALLET_DISTRIBUTOR_ADDRESS" : "PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS"} in the relayer's environment and restart it.`;
+      const mismatchLine = mismatch
+        ? `<p class="admin-empty" style="margin:4px 0 0; color:var(--signal-300);">⚠ This differs from the ${escapeHtml(row.label==="Platform rewards"?"platform token":row.label.toLowerCase()+" distributor")} address the factory panel below is currently configured with (${escapeHtml(row.onChainAddr)}). The keeper is watching a stale or different contract than this page shows — restart the relayer after updating its env var, or repoint the factory back to match.</p>`
+        : "";
+      return `
+        <div class="admin-readout" style="grid-column:span 1;">
+          <div class="l">${escapeHtml(row.label)} ${badge}</div>
+          <div class="v" style="font-weight:400;">${escapeHtml(row.detail)}</div>
+          <p class="admin-empty" style="margin:4px 0 0;">${addrLine}</p>
+          ${mismatchLine}
+        </div>`;
+    }).join("");
+    wrap.innerHTML = `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3>Relayer keeper (scripts/relayer.js)</h3></div>
+        <p class="admin-empty" style="margin-bottom:14px;">Live, in-memory state reported by the relayer process itself just now — not what this page's own config shows, but what the running keeper actually resolved at its last startup. Relayer wallet: ${h.relayer ? escapeHtml(h.relayer) : "unknown"}.</p>
+        <div class="admin-readout-grid">${rowsHTML}</div>
+      </div>`;
+  }
+
   let launchActivityData = { recent: [], failed: [] };
   let launchActivityTab = "recent";
 
@@ -10094,6 +10440,10 @@
       </div>
       <div class="section-head"><h2>Platform admin</h2></div>
       <div id="platformContractsWrap"></div>
+      <div class="section-head" style="margin-top:28px;"><h2>Automation status</h2></div>
+      <div id="automationStatusWrap">
+        <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+      </div>
       <div class="section-head" style="margin-top:28px;"><h2>Launch activity</h2></div>
       <div id="launchActivityWrap">
         <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
@@ -10109,6 +10459,7 @@
         <div class="panel admin-panel"><p class="admin-empty">Loading BondingCurveFactory…</p></div>
         <div class="panel admin-panel"><p class="admin-empty">Loading CustomBondingCurveFactory…</p></div>
         <div class="panel admin-panel"><p class="admin-empty">Loading PlatformRewardsDistributor…</p></div>
+        <div class="panel admin-panel"><p class="admin-empty">Loading CreatorRewardsDistributor…</p></div>
         <div class="panel admin-panel"><p class="admin-empty">Loading FeeWalletDistributor…</p></div>
       </div>`;
 
@@ -10126,6 +10477,7 @@
     // Same reasoning as the "Platform contracts" panel above: pure server
     // data over fetch(), no window.ethereum needed, so it belongs before the
     // wallet guard below and renders regardless of wallet state.
+    await renderAutomationStatusPanel();
     await renderLaunchActivityPanel();
 
     if(!window.ethereum){
@@ -10139,13 +10491,17 @@
     const bcfAddress = adminFactoryAddress("bcf");
     const cbcfAddress = adminFactoryAddress("cbcf");
     const prdAddress = rewardsDistributorAddress();
-    const fwdAddress = await feeWalletDistributorContractAddress();
-    const [tfState, ctfState, bcfState, cbcfState, prdState, fwdState] = await Promise.all([
+    const [crdAddress, fwdAddress] = await Promise.all([
+      creatorRewardsDistributorContractAddress(),
+      feeWalletDistributorContractAddress(),
+    ]);
+    const [tfState, ctfState, bcfState, cbcfState, prdState, crdState, fwdState] = await Promise.all([
       tfAddress ? loadFactoryAdminState(tfAddress).catch(()=>null) : Promise.resolve(null),
       ctfAddress ? loadFactoryAdminState(ctfAddress).catch(()=>null) : Promise.resolve(null),
       bcfAddress ? loadCurveFactoryAdminState(bcfAddress, true).catch(()=>null) : Promise.resolve(null),
       cbcfAddress ? loadCurveFactoryAdminState(cbcfAddress, false).catch(()=>null) : Promise.resolve(null),
       prdAddress ? loadRewardsDistributorState(prdAddress).catch(()=>null) : Promise.resolve(null),
+      crdAddress ? loadCreatorRewardsDistributorState(crdAddress).catch(()=>null) : Promise.resolve(null),
       fwdAddress ? loadFeeWalletDistributorState(fwdAddress).catch(()=>null) : Promise.resolve(null),
     ]);
 
@@ -10153,6 +10509,15 @@
     // while those eth_calls were in flight — don't clobber whatever's on
     // screen now with stale results for a wallet that's no longer admin.
     if(!isAdminWallet(wallet) || !views.admin.classList.contains("active")) return;
+
+    // Now that the on-chain distributor addresses each factory actually
+    // points at are known, re-render the automation panel with a mismatch
+    // check against whatever the relayer itself resolved at startup (see
+    // renderAutomationStatusHTML) — a drift between the two means the
+    // keeper is watching a stale contract even though this page's own
+    // "Creator rewards distributor"/"Fee wallet distributor" fields look
+    // current.
+    renderAutomationStatusHTML({ crdAddress, fwdAddress, prdAddress });
 
     const rewardsWrap = document.getElementById("platformRewardsWrap");
     if(rewardsWrap){
@@ -10169,6 +10534,7 @@
       curveFactoryAdminPanelHTML("bcf", "BondingCurveFactory", bcfAddress, bcfState) +
       curveFactoryAdminPanelHTML("cbcf", "CustomBondingCurveFactory", cbcfAddress, cbcfState) +
       rewardsDistributorPanelHTML(prdAddress, prdState) +
+      creatorRewardsDistributorPanelHTML(crdAddress, crdState) +
       feeWalletDistributorPanelHTML(fwdAddress, fwdState);
 
     grid.querySelectorAll("[data-admin-action]").forEach(btn=>{
@@ -10176,6 +10542,9 @@
     });
     grid.querySelectorAll("[data-prd-action]").forEach(btn=>{
       btn.addEventListener("click", ()=> runDistributorAction(btn.dataset.prdAction, btn));
+    });
+    grid.querySelectorAll("[data-crd-action]").forEach(btn=>{
+      btn.addEventListener("click", ()=> runCreatorRewardsDistributorAction(btn.dataset.crdAction, btn));
     });
     grid.querySelectorAll("[data-fwd-action]").forEach(btn=>{
       btn.addEventListener("click", ()=> runFeeWalletDistributorAction(btn.dataset.fwdAction, btn));
