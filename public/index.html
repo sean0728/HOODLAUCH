@@ -10637,6 +10637,7 @@
   const ADMIN_TABS = [
     { key: "overview", label: "Overview" },
     { key: "contracts", label: "Contracts" },
+    { key: "rewards", label: "Rewards" },
     { key: "relayer", label: "Relayer settings" },
     { key: "deploy", label: "Deploy" },
   ];
@@ -11279,16 +11280,22 @@
       </div>
 
       <div class="admin-tab-panel" data-admin-panel="contracts" ${adminTab==="contracts"?"":"hidden"}>
-        <div class="section-head"><h2>Platform rewards</h2></div>
-        <div id="platformRewardsWrap">
-          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
-        </div>
-        <div class="section-head" style="margin-top:28px;"><h2>Contract admin</h2></div>
+        <div class="section-head"><h2>Contract admin</h2></div>
         <div class="admin-grid" id="adminGrid">
           <div class="panel admin-panel"><p class="admin-empty">Loading TokenFactory…</p></div>
           <div class="panel admin-panel"><p class="admin-empty">Loading CustomTokenFactory…</p></div>
           <div class="panel admin-panel"><p class="admin-empty">Loading BondingCurveFactory…</p></div>
           <div class="panel admin-panel"><p class="admin-empty">Loading CustomBondingCurveFactory…</p></div>
+        </div>
+      </div>
+
+      <div class="admin-tab-panel" data-admin-panel="rewards" ${adminTab==="rewards"?"":"hidden"}>
+        <div class="section-head"><h2>Platform rewards</h2></div>
+        <div id="platformRewardsWrap">
+          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+        </div>
+        <div class="section-head" style="margin-top:28px;"><h2>Reward distributors</h2></div>
+        <div class="admin-grid" id="rewardsGrid">
           <div class="panel admin-panel"><p class="admin-empty">Loading PlatformRewardsDistributor…</p></div>
           <div class="panel admin-panel"><p class="admin-empty">Loading CreatorRewardsDistributor…</p></div>
           <div class="panel admin-panel"><p class="admin-empty">Loading FeeWalletDistributor…</p></div>
@@ -11340,6 +11347,7 @@
     if(!window.ethereum){
       document.getElementById("platformRewardsWrap").innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No browser wallet detected — connect one to manage platform rewards.</p></div>`;
       document.getElementById("adminGrid").innerHTML = `<div class="panel admin-panel"><p class="admin-empty">No browser wallet detected — connect one to read or update on-chain settings.</p></div>`;
+      document.getElementById("rewardsGrid").innerHTML = `<div class="panel admin-panel"><p class="admin-empty">No browser wallet detected — connect one to read or update on-chain settings.</p></div>`;
       return;
     }
 
@@ -11384,26 +11392,37 @@
     }
 
     const grid = document.getElementById("adminGrid");
-    if(!grid) return;
-    grid.innerHTML =
-      adminFactoryPanelHTML("tf", "TokenFactory", tfAddress, tfState) +
-      adminFactoryPanelHTML("ctf", "CustomTokenFactory", ctfAddress, ctfState) +
-      curveFactoryAdminPanelHTML("bcf", "BondingCurveFactory", bcfAddress, bcfState) +
-      curveFactoryAdminPanelHTML("cbcf", "CustomBondingCurveFactory", cbcfAddress, cbcfState) +
+    if(grid){
+      grid.innerHTML =
+        adminFactoryPanelHTML("tf", "TokenFactory", tfAddress, tfState) +
+        adminFactoryPanelHTML("ctf", "CustomTokenFactory", ctfAddress, ctfState) +
+        curveFactoryAdminPanelHTML("bcf", "BondingCurveFactory", bcfAddress, bcfState) +
+        curveFactoryAdminPanelHTML("cbcf", "CustomBondingCurveFactory", cbcfAddress, cbcfState);
+
+      grid.querySelectorAll("[data-admin-action]").forEach(btn=>{
+        btn.addEventListener("click", ()=> runAdminAction(btn.dataset.adminAction, btn.dataset.factoryKey, btn));
+      });
+    }
+
+    // Split out of #adminGrid above into its own Rewards tab — see that
+    // tab's own section-head. Same three panels (PlatformRewardsDistributor/
+    // CreatorRewardsDistributor/FeeWalletDistributor), same admin-signed
+    // action wiring, just rendered into a separate grid element so the
+    // Contracts tab only ever shows the four launch factories.
+    const rewardsGrid = document.getElementById("rewardsGrid");
+    if(!rewardsGrid) return;
+    rewardsGrid.innerHTML =
       rewardsDistributorPanelHTML(prdAddress, prdState) +
       creatorRewardsDistributorPanelHTML(crdAddress, crdState) +
       feeWalletDistributorPanelHTML(fwdAddress, fwdState);
 
-    grid.querySelectorAll("[data-admin-action]").forEach(btn=>{
-      btn.addEventListener("click", ()=> runAdminAction(btn.dataset.adminAction, btn.dataset.factoryKey, btn));
-    });
-    grid.querySelectorAll("[data-prd-action]").forEach(btn=>{
+    rewardsGrid.querySelectorAll("[data-prd-action]").forEach(btn=>{
       btn.addEventListener("click", ()=> runDistributorAction(btn.dataset.prdAction, btn));
     });
-    grid.querySelectorAll("[data-crd-action]").forEach(btn=>{
+    rewardsGrid.querySelectorAll("[data-crd-action]").forEach(btn=>{
       btn.addEventListener("click", ()=> runCreatorRewardsDistributorAction(btn.dataset.crdAction, btn));
     });
-    grid.querySelectorAll("[data-fwd-action]").forEach(btn=>{
+    rewardsGrid.querySelectorAll("[data-fwd-action]").forEach(btn=>{
       btn.addEventListener("click", ()=> runFeeWalletDistributorAction(btn.dataset.fwdAction, btn));
     });
   }
