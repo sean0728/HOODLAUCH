@@ -1112,6 +1112,34 @@ function sendJson(res, status, body) {
   );
 }
 
+// AUDIT FIX (relayer.js security review): Express 4 does not catch a
+// rejected promise returned from an async route handler on its own — a few
+// call sites in this file already learned that the hard way (see the FIX
+// comments on POST /token-metadata/:tokenAddress's final upsertTrackedToken
+// call and POST /relayer-settings' setRelayerSettings call) and wrapped
+// just that one risky call in its own try/catch. But most routes below
+// never got the same treatment for their OTHER store reads/writes —
+// including GET /launches, this service's single most-requested endpoint
+// (every visitor's homepage feed goes through it). A transient store
+// hiccup (a JSON-file read racing a concurrent write, a momentary MySQL
+// blip — see lib/db.js) in any of those left the request hanging open
+// until the client's own timeout, with no error ever sent and nothing
+// visible server-side beyond a log line from the process-level
+// unhandledRejection handler at the top of this file. Wrapping every route
+// registration below in this helper makes that protection uniform instead
+// of ad hoc: any rejection anywhere in a handler is caught here and
+// answered with a real 500 instead of silently hanging.
+function asyncRoute(handler) {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch((err) => {
+      console.error(`[http] unhandled error in ${req.method} ${req.path}: ${err && err.stack ? err.stack : err}`);
+      if (!res.headersSent) {
+        sendJson(res, 500, { error: "Internal error — check server logs." });
+      }
+    });
+  };
+}
+
 // FIX: liquidityEvent/boughtEvent were previously never captured for a
 // relayed launch at all — this function used to only record the bare
 // essentials (address, creator, supply, tx hash), leaving
@@ -1700,7 +1728,7 @@ async function main() {
   // this reads. Only PUBLIC_FIELDS are sent back per launch — notably never
   // `flattenedSource`, which would make every response needlessly huge.
   const network = hre.network.name;
-  app.get("/launches", async (_req, res) => {
+  app.get("/launches", asyncRoute(async (_req, res) => {
     const ledger = await readLedger(network);
     // tokenStatus (0 = deployed/no pool, 1 = launched/pool live, 2 =
     // graduated/tax disabled) lives in lib/trackedTokensStore, not the
@@ -1799,7 +1827,7 @@ async function main() {
       return publicEntry;
     });
     sendJson(res, 200, { network, launches });
-  });
+  }));
 
   // ---- delete a launch record (admin-gated, see lib/adminAuth.js) ----
   // Built for clearing out stale entries from the admin panel's "Launch
@@ -1825,7 +1853,7 @@ async function main() {
   // { deleted: false } rather than erroring, since a slow admin double-click
   // or a stale page reload retrying the same delete shouldn't surface as a
   // failure.
-  app.post("/launches/delete", async (req, res) => {
+  app.post("/launches/delete", asyncRoute(async (req, res) => {
     const { tokenAddress, timestamp, signature } = req.body || {};
     if (!tokenAddress || !hre.ethers.isAddress(tokenAddress)) {
       return sendJson(res, 400, { error: "tokenAddress must be a valid address" });
@@ -1848,7 +1876,7 @@ async function main() {
         : `[admin] delete requested for ${tokenAddress} on "${network}" but no matching record existed in either store.`
     );
     sendJson(res, 200, { deleted, tokenAddress });
-  });
+  }));
 
   async function handleVoucherSubmission(req, res, watcher) {
     try {
@@ -1882,9 +1910,9 @@ async function main() {
   // syncActiveNetworkFromServer, polled every 60s) so which network the
   // whole platform shows is one server-held value, not a per-browser
   // localStorage setting anyone could flip.
-  app.get("/active-network", async (_req, res) => {
+  app.get("/active-network", asyncRoute(async (_req, res) => {
     sendJson(res, 200, { network: await getActiveNetwork() });
-  });
+  }));
 
   // Body: { network: "demo"|"live", timestamp, signature }. `signature` must
   // be a personal_sign signature (from ADMIN_WALLET) of the exact string
@@ -1893,7 +1921,7 @@ async function main() {
   // requestActiveNetworkChange() builds, or a real admin's signature will
   // simply fail to verify here (see lib/adminAuth.js's own comment on why
   // that's the safe failure direction).
-  app.post("/active-network", async (req, res) => {
+  app.post("/active-network", asyncRoute(async (req, res) => {
     const { network: targetNetwork, timestamp, signature } = req.body || {};
     if (targetNetwork !== "demo" && targetNetwork !== "live") {
       return sendJson(res, 400, { error: 'network must be "demo" or "live"' });
@@ -1908,7 +1936,7 @@ async function main() {
     await setActiveNetwork(targetNetwork);
     console.log(`[admin] active network set to "${targetNetwork}".`);
     sendJson(res, 200, { network: targetNetwork });
-  });
+  }));
 
   // ---- platform contracts config (admin-gated) ----
   // Mirrors index.html's own config.json/localStorage layering — this is
@@ -1916,9 +1944,9 @@ async function main() {
   // with no manual redeploy step. `config` returned here is always the
   // canonicalized shape (every CONFIG_KEYS entry, {demo,live}, missing
   // values as null) — never raw, unvalidated input.
-  app.get("/platform-config", async (_req, res) => {
+  app.get("/platform-config", asyncRoute(async (_req, res) => {
     sendJson(res, 200, { config: await getPlatformConfig() });
-  });
+  }));
 
   // Body: { config, timestamp, signature }. `signature` must be a
   // personal_sign signature (from ADMIN_WALLET) of
@@ -1928,7 +1956,7 @@ async function main() {
   // and signed. lib/platformConfig.js's canonicalizePlatformConfig MUST stay
   // byte-identical to index.html's own copy or this will never verify a
   // real admin's signature (see that module's own comment).
-  app.post("/platform-config", async (req, res) => {
+  app.post("/platform-config", asyncRoute(async (req, res) => {
     const { config, timestamp, signature } = req.body || {};
     if (!config || typeof config !== "object") {
       return sendJson(res, 400, { error: "config is required" });
@@ -1944,7 +1972,7 @@ async function main() {
     await setPlatformConfig(canonical);
     console.log("[admin] platform config saved.");
     sendJson(res, 200, { config: canonical });
-  });
+  }));
 
   // ---- relayer runtime settings (admin-gated) ----
   // Public read (same "read is open, write is admin-signed" shape as
@@ -2198,7 +2226,7 @@ async function main() {
   // syncTokenMetadataToServer() builds (see lib/tokenMetadata.js's own
   // "kept in sync by hand" comment), or a real creator's signature will
   // simply fail to verify here (the safe failure direction).
-  app.post("/token-metadata/:tokenAddress", async (req, res) => {
+  app.post("/token-metadata/:tokenAddress", asyncRoute(async (req, res) => {
     const { tokenAddress } = req.params;
     if (!tokenAddress || !hre.ethers.isAddress(tokenAddress)) {
       return sendJson(res, 400, { error: "tokenAddress must be a valid address" });
@@ -2223,11 +2251,28 @@ async function main() {
     if (socials != null && (typeof socials !== "object" || Array.isArray(socials))) {
       return sendJson(res, 400, { error: "socials must be an object" });
     }
+    // AUDIT FIX (relayer.js security review): this previously only checked
+    // an http(s):// prefix and a length cap, so a value like
+    // `https://x.com"><script>...` or one embedding a stray `'`/`"` passed
+    // straight through and was persisted verbatim — every visitor of this
+    // token's page then has that string rendered wherever the front end
+    // builds a link/attribute from it. Whether that's actually exploitable
+    // depends on how carefully index.html happens to escape it when
+    // rendering, which this file has no control over and shouldn't have to
+    // trust — rejecting the characters that matter for breaking out of an
+    // HTML attribute or tag context here is a cheap, zero-functionality-cost
+    // hardening independent of the front end's own escaping.
     const URL_SHAPE = /^https?:\/\//i;
+    const HTML_BREAKOUT_CHARS = /["'<>]/;
     for (const field of ["website", "twitter", "telegram", "discord"]) {
       const value = socials ? socials[field] : null;
       if (!value) continue;
-      if (typeof value !== "string" || value.length > 200 || !URL_SHAPE.test(value)) {
+      if (
+        typeof value !== "string" ||
+        value.length > 200 ||
+        !URL_SHAPE.test(value) ||
+        HTML_BREAKOUT_CHARS.test(value)
+      ) {
         return sendJson(res, 400, { error: `socials.${field} must be a valid http(s) URL` });
       }
     }
@@ -2341,15 +2386,15 @@ async function main() {
       return sendJson(res, 500, { error: "Couldn't save — try again in a moment." });
     }
     sendJson(res, 200, { tokenAddress, ...canonical });
-  });
+  }));
 
   // ---- real trade activity / price history (see pollTokenActivity /
   // pollTokenPrices below for what populates these) ----
-  app.get("/activity", async (_req, res) => {
+  app.get("/activity", asyncRoute(async (_req, res) => {
     sendJson(res, 200, { network, activity: await readActivity(network) });
-  });
+  }));
 
-  app.get("/price-history/:tokenAddress", async (req, res) => {
+  app.get("/price-history/:tokenAddress", asyncRoute(async (req, res) => {
     // Piggybacks the tracked-tokens record for this address onto the same
     // response (rather than a separate round trip) — the platform-token
     // spotlight on index.html needs both the price history AND a couple of
@@ -2365,7 +2410,7 @@ async function main() {
       pairAddress: tracked ? tracked.pairAddress || null : null,
       initialSupply: tracked ? tracked.initialSupply || null : null,
     });
-  });
+  }));
 
   app.get("/holder-distribution/:tokenAddress", async (req, res) => {
     const rows = await computeHolderDistribution(req.params.tokenAddress);
@@ -2386,7 +2431,7 @@ async function main() {
   // token has been discovered at all, whether it has a pairAddress on file,
   // how far each factory's discovery scan has actually gotten vs. the
   // current chain tip, and how many price points have been sampled so far.
-  app.get("/debug/token/:tokenAddress", async (req, res) => {
+  app.get("/debug/token/:tokenAddress", asyncRoute(async (req, res) => {
     const addr = req.params.tokenAddress.toLowerCase();
     const tracked = (await readTrackedTokens(network))[addr] || null;
     const latestBlock = await hre.ethers.provider.getBlockNumber();
@@ -2416,7 +2461,7 @@ async function main() {
       priceHistoryPointCount: (await readPriceHistory(network, req.params.tokenAddress)).length,
       discovery,
     });
-  });
+  }));
 
   // Admin-gated fixup for exactly what /debug/token/:tokenAddress above is
   // for diagnosing: discoverLaunchedTokens' cursor is keyed by
@@ -2441,7 +2486,7 @@ async function main() {
   // own safety property) — a cursor already at or past targetBlock-1 is left
   // alone, so this can't cause discovery to reprocess or duplicate anything,
   // and is safe to call more than once (e.g. once per redeployed factory).
-  app.post("/debug/reset-discovery-cursor", async (req, res) => {
+  app.post("/debug/reset-discovery-cursor", asyncRoute(async (req, res) => {
     const { targetBlock, timestamp, signature } = req.body || {};
     const targetBlockNum = Number(targetBlock);
     if (!Number.isFinite(targetBlockNum) || targetBlockNum < 0 || !Number.isInteger(targetBlockNum)) {
@@ -2469,7 +2514,7 @@ async function main() {
       results[watcher.kind] = { factoryAddress, before, after: targetBlockNum - 1, changed: true };
     }
     sendJson(res, 200, { network, targetBlock: targetBlockNum, results });
-  });
+  }));
 
   // TEMPORARY DIAGNOSTIC ROUTE — added specifically to resolve a mismatch
   // between "the GoDaddy Files panel shows public/assets/ as completely
@@ -2478,11 +2523,29 @@ async function main() {
   // fs.writeFileSync has already succeeded). Rather than trust either side
   // of that from the outside, this asks the live running process directly:
   // what does ITS OWN fs module see right now, and can it genuinely write
-  // and read back a file at this exact moment. Safe to leave in short-term
-  // (no secrets exposed — only directory structure, resolved absolute
-  // paths, and a throwaway probe file that's deleted immediately after);
-  // remove once the persistence question is settled.
-  app.get("/debug/data-dirs", (_req, res) => {
+  // and read back a file at this exact moment.
+  //
+  // AUDIT FIX (relayer.js security review): this had no auth at all, unlike
+  // every other admin/diagnostic route in this file (including its own
+  // sibling, POST /debug/reset-discovery-cursor). "No secrets exposed" was
+  // true for the file CONTENTS, but the full recursive directory tree of
+  // both data roots — exact file names under RELAYER_DATA_ROOT/
+  // DEPLOYED_CONTRACTS_ROOT, absolute paths, process.cwd() — is still real
+  // reconnaissance value for free to anyone who finds the URL, and every
+  // request also forces a live write+delete against disk. Gated behind the
+  // same personal_sign admin check as everywhere else now — as a GET route
+  // (no JSON body to sign over from a plain browser visit), the signature
+  // travels as query params instead of a POST body, same message-shape
+  // convention as every other admin action in this file.
+  app.get("/debug/data-dirs", asyncRoute(async (req, res) => {
+    const { timestamp, signature } = req.query || {};
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    }
+    const message = `Hood Launch admin: view data-dirs diagnostic at ${timestamp}`;
+    if (!verifyAdminSignature(message, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
     function listTree(root, depth = 3) {
       if (!fs.existsSync(root)) return { exists: false, root };
       function walk(dir, level) {
@@ -2523,22 +2586,39 @@ async function main() {
       deployedContractsTree: listTree(DEPLOYED_CONTRACTS_ROOT),
       writeProbeRightNow: writeProbe,
     });
-  });
+  }));
 
   // TEMPORARY DIAGNOSTIC ROUTE — the GoDaddy Files panel isn't showing a
   // live view of this app's disk (confirmed by /debug/data-dirs above), so
   // rather than keep fighting that dashboard, ask the running process to
-  // just hand back vouchers.json directly. Nothing here is a secret in a
-  // way that matters for this app's threat model: a voucher's EIP-712
-  // signature only lets you call relayedCreateToken/relayedCreateCustomToken
-  // with the exact same parameters the creator already signed (no way to
-  // alter amounts/recipient), and doing so still requires being the
-  // factory's own relayer() wallet — see the module comment on
-  // RELAYER_PRIVATE_KEY above. Remove once the /launches recordkeeping gap
-  // is resolved.
-  app.get("/debug/vouchers", async (_req, res) => {
+  // just hand back vouchers.json directly. A voucher's EIP-712 signature
+  // only lets you call relayedCreateToken/relayedCreateCustomToken with the
+  // exact same parameters the creator already signed (no way to alter
+  // amounts/recipient), and doing so still requires being the factory's own
+  // relayer() wallet — see the module comment on RELAYER_PRIVATE_KEY above
+  // — so leaking a signature itself isn't the concern.
+  //
+  // AUDIT FIX (relayer.js security review): what this DOES hand out
+  // unauthenticated is every creator wallet address and every unlaunched
+  // token's name/symbol/supply for every voucher ever submitted — including
+  // ones still sitting in "received"/"deposited" state, i.e. launches a
+  // creator hasn't actually gone live with yet. That's exactly the kind of
+  // pre-launch detail a name-squatter or front-runner would want, and
+  // there's no reason a random visitor needs it. Gated the same way as
+  // /debug/data-dirs above now, for consistency and because "temporary"
+  // diagnostic routes are exactly the ones that tend to quietly outlive the
+  // incident they were built for.
+  app.get("/debug/vouchers", asyncRoute(async (req, res) => {
+    const { timestamp, signature } = req.query || {};
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    }
+    const message = `Hood Launch admin: view vouchers diagnostic at ${timestamp}`;
+    if (!verifyAdminSignature(message, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
     sendJson(res, 200, { vouchers: await readVouchers() });
-  });
+  }));
 
   // Curated read of every voucher that ended in relayMatchedDeposit()'s
   // "failed" state (see the two upsertVoucher(voucherHash, { status: "failed",
@@ -2546,15 +2626,18 @@ async function main() {
   // gasless launch attempt that never became a real deployment. There's no
   // separate "failed launches" table: a voucher's failure and its reason are
   // already durable, per-network state living in the same relayer_vouchers
-  // JSON `data` column (or vouchers.json fallback) that /debug/vouchers dumps
-  // raw, so no schema change was needed here — this route just filters that
-  // same store down to the "failed" ones and reshapes them into a stable,
-  // non-raw-signature-leaking shape for the admin UI. Unauthenticated GET,
-  // same precedent as /launches, /activity, and /debug/vouchers above: none
-  // of this is more sensitive than what /debug/vouchers already exposes, and
-  // it's only ever rendered inside the admin panel, though nothing stops any
-  // visitor from calling it directly.
-  app.get("/failed-launches", async (_req, res) => {
+  // JSON `data` column (or vouchers.json fallback) — this route just filters
+  // that same store down to the "failed" ones and reshapes them into a
+  // stable, non-raw-signature-leaking shape for the admin UI. Left as an
+  // unauthenticated GET, same precedent as /launches and /activity above:
+  // unlike /debug/vouchers (now admin-gated — see its own comment above,
+  // updated during the relayer.js security review), this never exposes a
+  // creator's still-pending/unlaunched voucher — only ones that already
+  // definitively failed and were never going to become a real token — so
+  // there's nothing here worth front-running, and it's only ever rendered
+  // inside the admin panel, though nothing stops any visitor from calling
+  // it directly.
+  app.get("/failed-launches", asyncRoute(async (_req, res) => {
     const vouchers = await readVouchers();
     const failedLaunches = Object.values(vouchers)
       .filter((v) => v.status === "failed")
@@ -2579,14 +2662,14 @@ async function main() {
       })
       .slice(0, 200); // generous cap — this endpoint has no pagination
     sendJson(res, 200, { network, failedLaunches });
-  });
+  }));
 
   if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
   if (customTokenFactoryAddress) app.post("/vouchers/custom", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom")));
   if (bondingCurveFactoryAddress) app.post("/vouchers/curve", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "curve")));
   if (customBondingCurveFactoryAddress) app.post("/vouchers/custom-curve", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom-curve")));
 
-  app.get("/status/:voucherHash", async (req, res) => {
+  app.get("/status/:voucherHash", asyncRoute(async (req, res) => {
     const record = await getVoucher(req.params.voucherHash);
     if (!record) return sendJson(res, 404, { error: "unknown voucherHash" });
 
@@ -2601,7 +2684,7 @@ async function main() {
       }
     }
     sendJson(res, 200, { ...record, onChainDeposit });
-  });
+  }));
 
   app.listen(PORT, () => console.log(`Relayer API listening on :${PORT}`));
 
