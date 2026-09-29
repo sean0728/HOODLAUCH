@@ -610,6 +610,30 @@
   .admin-banner .icon{font-size:1.1rem; line-height:1; flex:none;}
   .admin-banner p{font-size:.82rem; color:var(--paper-300); margin:0;}
   .admin-banner strong{color:var(--paper-100);}
+  /* Sub-tabs within the Admin view itself — separate from the top-level
+     Explore/Launch/Portfolio/Admin .tab bar in the HUD. Splits what used to
+     be one long stacked page (platform contracts, automation, activity,
+     rewards, the 7-panel contract grid, plus the newer relayer-settings and
+     deploy sections) into switchable groups, per an explicit ask to keep
+     each part separate rather than one ever-longer scroll. */
+  .admin-tabbar{display:flex; gap:6px; flex-wrap:wrap; margin-bottom:24px; border-bottom:1px solid var(--line); padding-bottom:0;}
+  .admin-tab-btn{font-family:var(--font-mono); font-size:.76rem; letter-spacing:.03em; color:var(--paper-500); background:none; border:none; border-bottom:2px solid transparent; padding:10px 4px; margin-right:18px; cursor:pointer; transition:color .15s, border-color .15s;}
+  .admin-tab-btn:hover{color:var(--paper-100);}
+  .admin-tab-btn.active{color:var(--signal-300); border-bottom-color:var(--signal-500);}
+  .admin-tab-panel[hidden]{display:none;}
+  .admin-deploy-section{margin-bottom:28px; padding-bottom:24px; border-bottom:1px solid var(--line);}
+  .admin-deploy-section:last-of-type{border-bottom:none;}
+  .admin-deploy-section h3{font-size:.98rem; margin:0 0 6px;}
+  .admin-deploy-section .help-text{font-size:.8rem; color:var(--paper-500); margin:0 0 14px; line-height:1.5;}
+  .admin-deploy-toggle-row{display:flex; align-items:flex-start; gap:10px; margin-bottom:14px;}
+  .admin-deploy-toggle-row input[type="checkbox"]{margin-top:3px; flex:none;}
+  .admin-deploy-toggle-row label{font-size:.86rem; color:var(--paper-100); cursor:pointer;}
+  .admin-deploy-or{font-family:var(--font-mono); font-size:.64rem; text-transform:uppercase; letter-spacing:.06em; color:var(--paper-700); margin:10px 0;}
+  .admin-deploy-result{margin-top:18px; padding:14px 16px; border:1px solid var(--line-strong); border-radius:var(--radius-sm); background:var(--ink-950);}
+  .admin-deploy-result .addr-row{display:flex; justify-content:space-between; gap:10px; font-family:var(--font-mono); font-size:.76rem; padding:5px 0; border-bottom:1px solid var(--line);}
+  .admin-deploy-result .addr-row:last-child{border-bottom:none;}
+  .admin-deploy-result .addr-row .l{color:var(--paper-500);}
+  .admin-deploy-result .addr-row .v{color:var(--paper-100); word-break:break-all; text-align:right;}
   .admin-grid{display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:start;}
   @media (max-width: 980px){ .admin-grid{grid-template-columns:1fr;} }
   .admin-panel .admin-panel-head{display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:4px;}
@@ -10604,6 +10628,30 @@
   let launchActivityData = { recent: [], failed: [] };
   let launchActivityTab = "recent";
 
+  // Which of the Admin view's own sub-tabs is showing — see renderAdmin()'s
+  // own comment for why the view was split this way. Persists across
+  // re-renders (reconnecting the wallet, switching testnet/mainnet, etc.)
+  // the same way launchActivityTab above does, purely by living outside any
+  // render function.
+  let adminTab = "overview";
+  const ADMIN_TABS = [
+    { key: "overview", label: "Overview" },
+    { key: "contracts", label: "Contracts" },
+    { key: "relayer", label: "Relayer settings" },
+    { key: "deploy", label: "Deploy" },
+  ];
+  function switchAdminTab(key){
+    adminTab = key;
+    document.querySelectorAll('#adminTabbar [data-admin-tab]').forEach(btn=>{
+      const active = btn.dataset.adminTab === key;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    document.querySelectorAll('[data-admin-panel]').forEach(panel=>{
+      panel.hidden = panel.dataset.adminPanel !== key;
+    });
+  }
+
   // Requirement 2's read side: GET /failed-launches (scripts/relayer.js)
   // surfaces every voucher that ended in relayMatchedDeposit()'s "failed"
   // state, curated and reshaped — see that route's own comment for where the
@@ -10824,6 +10872,378 @@
     }
   }
 
+  // ---------------- Relayer settings (Admin > Relayer settings tab) ----------------
+  // Lets an admin retune the relayer's own unattended reward-sweep loops
+  // (poll interval / slippage / claim-min-wei for each of the three sweeps,
+  // plus the platform-rewards airdrop batch knobs) without touching .env or
+  // restarting the service — see GET/POST /relayer-settings in
+  // scripts/relayer.js. RELAYER_SETTINGS_FIELDS' key order and
+  // canonicalizeRelayerSettingsForMessage/relayerSettingsMessage below MUST
+  // stay byte-identical to relayer.js's own copies (same "kept in sync by
+  // hand" convention as platformConfigMessage) or a signed save will never
+  // verify server-side.
+  const RELAYER_SETTINGS_FIELDS = [
+    { key: "feeWalletPollIntervalMs", label: "Fee-wallet sweep interval (ms)", help: "How often the relayer sweeps every launched token's accumulated fee-wallet cut into ETH and auto-claims it. Lower = more responsive, more gas on dust; higher = cheaper, funds sit longer." },
+    { key: "feeWalletSlippageBps", label: "Fee-wallet sweep slippage (bps)", help: "Slippage tolerance (basis points, 100 = 1%) applied to the swap's minEthOut floor. Too low risks spurious reverts on ordinary price drift; too high gives a sandwiching bot more room." },
+    { key: "feeWalletClaimMinWei", label: "Fee-wallet claim floor (wei)", help: "Skip claiming a token's fee-wallet reward when its claimable ETH balance is below this many wei — avoids spending gas on dust-sized claims." },
+    { key: "creatorRewardsPollIntervalMs", label: "Creator-rewards sweep interval (ms)", help: "Same idea as the fee-wallet interval above, for the per-token creator-reward sweep-and-claim loop." },
+    { key: "creatorRewardsSlippageBps", label: "Creator-rewards sweep slippage (bps)", help: "Same idea as the fee-wallet slippage above, applied to the creator-reward swap's minEthOut floor." },
+    { key: "creatorRewardsClaimMinWei", label: "Creator-rewards claim floor (wei)", help: "Same idea as the fee-wallet claim floor above, for each token creator's claimable ETH balance." },
+    { key: "platformRewardsPollIntervalMs", label: "Platform-rewards sweep interval (ms)", help: "How often the relayer runs PlatformRewardsDistributor's buyback → burn/airdrop pipeline (ETH buyback, per-token buyback, and airdrop-round batches)." },
+    { key: "platformBuybackSlippageBps", label: "Platform buyback slippage (bps)", help: "Slippage tolerance applied to both the ETH buyback and the per-token buyback's minTokensOut floor." },
+    { key: "platformAirdropBatchSize", label: "Airdrop holders per batch", help: "How many platformToken holders one processAirdropBatch call sweeps." },
+    { key: "platformAirdropMaxBatchesPerTick", label: "Airdrop batches per tick", help: "How many processAirdropBatch calls one sweep tick makes before yielding to the next tick — bounds one tick's gas spend on a large holder set." },
+  ];
+  const RELAYER_SETTINGS_KEYS = RELAYER_SETTINGS_FIELDS.map(f => f.key);
+
+  function canonicalizeRelayerSettingsForMessage(settings){
+    const out = {};
+    for(const key of RELAYER_SETTINGS_KEYS){
+      out[key] = (settings && settings[key] !== undefined && settings[key] !== null) ? String(settings[key]) : null;
+    }
+    return out;
+  }
+  function relayerSettingsMessage(settings, timestamp){
+    return `Hood Launch admin: update relayer settings to ${JSON.stringify(canonicalizeRelayerSettingsForMessage(settings))} at ${timestamp}`;
+  }
+
+  function relayerSettingsPanelHTML(settings, bounds){
+    const rows = RELAYER_SETTINGS_FIELDS.map(f=>{
+      const b = bounds[f.key] || {};
+      const value = (settings[f.key] !== undefined && settings[f.key] !== null) ? settings[f.key] : "";
+      const rangeHint = (b.min !== undefined && b.max !== undefined) ? ` (range ${b.min}–${b.max})` : (b.min !== undefined ? ` (min ${b.min})` : "");
+      return `
+        <div class="admin-cfg-row">
+          <div class="admin-cfg-label">${escapeHtml(f.label)} <span class="info-dot" title="${escapeHtml(f.help + rangeHint)}">?</span></div>
+          <div class="field" style="grid-column:2 / -1;">
+            <input type="text" id="rs_${f.key}" value="${escapeHtml(String(value))}" inputmode="numeric" aria-label="${escapeHtml(f.label)}" title="${escapeHtml(f.help)}">
+          </div>
+        </div>`;
+    }).join("");
+    return `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3>Reward-sweep automation</h3></div>
+        <p class="help-text" style="margin:2px 0 14px;">Tunes the relayer's own unattended fee-wallet / creator-rewards / platform-rewards sweep loops (see Automation status in Overview) without editing .env or restarting the service — saving here takes effect on each loop's very next tick.</p>
+        <div class="admin-cfg-table">
+          <div class="admin-cfg-row admin-cfg-head">
+            <div class="admin-cfg-col-head">Setting</div>
+            <div class="admin-cfg-col-head" style="grid-column:2 / -1;">Value</div>
+          </div>
+          ${rows}
+        </div>
+        <button class="btn btn-primary" id="relayerSettingsSaveBtn">Save relayer settings</button>
+      </div>`;
+  }
+
+  async function renderRelayerSettingsPanel(){
+    const wrap = document.getElementById("relayerSettingsWrap");
+    if(!wrap) return;
+    const url = relayerApiUrl(appMode);
+    if(!url){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No relayer configured for this network — set a Relayer API URL in Overview → Platform contracts first.</p></div>`;
+      return;
+    }
+    let data;
+    try{
+      const res = await fetch(`${url}/relayer-settings`);
+      if(!res.ok) throw new Error("bad response");
+      data = await res.json();
+    }catch(err){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Couldn't reach the relayer to load its runtime settings.</p></div>`;
+      return;
+    }
+    if(!isAdminWallet(wallet) || !views.admin.classList.contains("active")) return;
+    wrap.innerHTML = relayerSettingsPanelHTML(data.settings || {}, data.bounds || {});
+    const btn = document.getElementById("relayerSettingsSaveBtn");
+    if(btn) btn.addEventListener("click", ()=> runRelayerSettingsSave(btn));
+  }
+
+  async function runRelayerSettingsSave(btnEl){
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    const url = relayerApiUrl(appMode);
+    if(!url){ toast("No relayer configured for this network."); return; }
+    const settings = {};
+    for(const key of RELAYER_SETTINGS_KEYS){
+      const el = document.getElementById(`rs_${key}`);
+      settings[key] = el ? el.value.trim() : "";
+    }
+    const timestamp = Date.now();
+    const message = relayerSettingsMessage(settings, timestamp);
+    let signature;
+    try{
+      signature = await window.ethereum.request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
+    }catch(err){
+      toast("Signature was rejected — nothing was saved.");
+      return;
+    }
+    const originalLabel = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = "Saving…";
+    try{
+      const res = await fetch(`${url}/relayer-settings`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ settings, timestamp, signature }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't save relayer settings."); return; }
+      toast(data.warning || "Relayer settings saved — takes effect on the next sweep tick, no restart needed.");
+      renderRelayerSettingsPanel();
+    }catch(err){
+      toast("Couldn't reach the relayer to save settings.");
+    }finally{
+      btnEl.disabled = false;
+      btnEl.textContent = originalLabel;
+    }
+  }
+
+  // ---------------- Deploy contracts (Admin > Deploy tab) ----------------
+  // Runs scripts/deploy.js's own logic server-side (see POST /deploy in
+  // scripts/relayer.js) from the relayer's own wallet, instead of requiring
+  // `npx hardhat run scripts/deploy.js` from a terminal — the second half of
+  // the "avoid command line" goal this whole feature set was built for.
+  // sortObjectKeysDeep/deployMessage below MUST stay byte-identical to
+  // relayer.js's own copies (same convention as every other admin-signed
+  // action on this page).
+  function sortObjectKeysDeep(value){
+    if(Array.isArray(value)) return value.map(sortObjectKeysDeep);
+    if(value && typeof value === "object"){
+      const out = {};
+      for(const key of Object.keys(value).sort()) out[key] = sortObjectKeysDeep(value[key]);
+      return out;
+    }
+    return value;
+  }
+  function deployMessage(config, timestamp){
+    return `Hood Launch admin: deploy contracts with config ${JSON.stringify(sortObjectKeysDeep(config || {}))} at ${timestamp}`;
+  }
+
+  const DEPLOY_ADDRESS_ROW_LABELS = [
+    ["tokenFactory", "TokenFactory"],
+    ["customTokenFactory", "CustomTokenFactory"],
+    ["bondingCurveFactory", "BondingCurveFactory"],
+    ["customBondingCurveFactory", "CustomBondingCurveFactory"],
+    ["rewardsDistributor", "PlatformRewardsDistributor"],
+    ["creatorRewardsDistributor", "CreatorRewardsDistributor"],
+    ["feeWalletDistributor", "FeeWalletDistributor"],
+    ["platformToken", "Platform token"],
+  ];
+
+  function deployCurrentSummaryHTML(current){
+    if(!current) return `<p class="admin-empty">No deployment recorded yet for this network.</p>`;
+    const rows = DEPLOY_ADDRESS_ROW_LABELS.filter(([key])=>current[key]);
+    if(!rows.length) return `<p class="admin-empty">No deployment recorded yet for this network.</p>`;
+    return `
+      <div class="admin-deploy-result">
+        ${rows.map(([key,label])=>`<div class="addr-row"><span class="l">${escapeHtml(label)}</span><span class="v">${escapeHtml(current[key])}</span></div>`).join("")}
+        ${current.deployedAt ? `<div class="addr-row"><span class="l">Deployed</span><span class="v">${escapeHtml(new Date(current.deployedAt).toLocaleString())}</span></div>` : ""}
+      </div>`;
+  }
+
+  function deploySuccessHTML(summary){
+    if(!summary) return "";
+    const rows = DEPLOY_ADDRESS_ROW_LABELS.filter(([key])=>summary[key]);
+    const proposals = (summary.ownershipProposals || []).map(p =>
+      `<div class="addr-row"><span class="l">${escapeHtml(p.label)}</span><span class="v">${p.ok ? "ownership proposed to you" : `handoff failed: ${escapeHtml(p.error || "")}`}</span></div>`
+    ).join("");
+    return `
+      <div class="admin-deploy-result">
+        <div class="admin-cfg-col-head" style="margin-bottom:8px;">Deployed addresses</div>
+        ${rows.map(([key,label])=>`<div class="addr-row"><span class="l">${escapeHtml(label)}</span><span class="v">${escapeHtml(summary[key])}</span></div>`).join("")}
+        ${proposals ? `<div class="admin-cfg-col-head" style="margin:14px 0 8px;">Ownership handoff</div>${proposals}` : ""}
+        <p class="help-text" style="margin-top:12px;">TokenFactory / CustomTokenFactory / BondingCurveFactory / CustomBondingCurveFactory and PlatformRewardsDistributor still need saving into Overview → Platform contracts before this page uses them — CreatorRewardsDistributor / FeeWalletDistributor are auto-detected straight off the factories, nothing to save.</p>
+      </div>`;
+  }
+
+  function deployPanelHTML(hints, current){
+    const router = hints.knownRouter || "";
+    const priceFeed = hints.knownPriceFeed || "";
+    return `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3>Current deployment — ${escapeHtml(hints.network || "unknown network")}</h3></div>
+        ${deployCurrentSummaryHTML(current)}
+      </div>
+
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-banner" style="margin-bottom:22px;">
+          <span class="icon">⚠️</span>
+          <p>This runs the full deploy pipeline from THIS relayer's own wallet (<code>${escapeHtml(hints.deployerAddress || "")}</code>) — real gas, real contracts, potentially several minutes end to end. Every contract it deploys fresh proposes ownership to your wallet (<code>${escapeHtml(hints.adminWallet || ADMIN_WALLET)}</code>) when it finishes; accept it from the Contract admin tab afterward. PlatformTaxDistributor is standalone and NOT included here — it still needs its own <code>npx hardhat run scripts/deploy.js</code> run, since wiring its address in requires editing this file's own PLATFORM_TAX_DISTRIBUTOR constant.</p>
+        </div>
+
+        <div class="admin-deploy-section">
+          <h3>Core infrastructure</h3>
+          <p class="help-text">Deploys the LaunchedToken/CustomToken implementations, their LiquidityLockers, and all four factories — the stack every launch mode needs. Leave a fee blank to price it from a live ETH/USD quote at deploy time, same as scripts/deploy.js's own default.</p>
+          <div class="admin-cfg-table">
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Fee treasury address</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_feeTreasuryAddress" placeholder="defaults to the relayer's own address" aria-label="Fee treasury address"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Platform fee wallet address</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_platformFeeWalletAddress" placeholder="defaults to the relayer's own address" aria-label="Platform fee wallet address"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">DEX router address</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_dexRouterAddress" value="${escapeHtml(router)}" placeholder="required — no confirmed default for this network" aria-label="DEX router address"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Price feed address</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_priceFeedAddress" value="${escapeHtml(priceFeed)}" placeholder="required — no confirmed default for this network" aria-label="Price feed address"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Deploy fee (wei)</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_deployFeeWei" placeholder="blank = auto ($50 at live ETH price)" aria-label="Deploy fee wei"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Launch fee (wei)</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_launchFeeWei" placeholder="blank = auto ($100 at live ETH price)" aria-label="Launch fee wei"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Curve launch fee (wei)</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_curveLaunchFeeWei" placeholder="blank = auto ($25 at live ETH price)" aria-label="Curve launch fee wei"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">LP lock duration (seconds)</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_lpLockDurationSeconds" placeholder="blank = 15 days" aria-label="LP lock duration seconds"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Pool seed target (wei)</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_poolSeedTargetWei" placeholder="blank = contract default (1.5 ETH)" aria-label="Pool seed target wei"></div></div>
+          </div>
+        </div>
+
+        <div class="admin-deploy-section">
+          <h3>Platform rewards (optional)</h3>
+          <p class="help-text">Buyback / burn / holder-airdrop pipeline funded by launch fees and trading tax. Deploying here also wires it into all four factories automatically.</p>
+          <div class="admin-deploy-toggle-row">
+            <input type="checkbox" id="dep_deployPlatformToken">
+            <label for="dep_deployPlatformToken">Deploy a new PlatformToken + PlatformRewardsDistributor</label>
+          </div>
+          <div class="admin-cfg-table">
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Token name</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_platformTokenName" placeholder="Hood Launch" aria-label="Platform token name"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Token symbol</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_platformTokenSymbol" placeholder="HOOD" aria-label="Platform token symbol"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Total supply</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_platformTokenSupply" placeholder="1000000000" aria-label="Platform token supply"></div></div>
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Initial holder address</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_platformTokenInitialHolder" placeholder="defaults to the relayer's own address" aria-label="Platform token initial holder"></div></div>
+          </div>
+          <div class="admin-deploy-or">— or —</div>
+          <div class="admin-cfg-table">
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Use an existing PlatformRewardsDistributor</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_rewardsDistributorAddress" placeholder="0x… (leave blank unless reusing one)" aria-label="Existing rewards distributor address"></div></div>
+          </div>
+        </div>
+
+        <div class="admin-deploy-section">
+          <h3>Creator rewards (optional)</h3>
+          <p class="help-text">Per-token ETH reward claimable by each token's own creator. Deploying here also wires it into all four factories automatically.</p>
+          <div class="admin-deploy-toggle-row">
+            <input type="checkbox" id="dep_deployCreatorRewards">
+            <label for="dep_deployCreatorRewards">Deploy a new CreatorRewardsDistributor</label>
+          </div>
+          <div class="admin-deploy-or">— or —</div>
+          <div class="admin-cfg-table">
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Use an existing CreatorRewardsDistributor</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_creatorRewardsDistributorAddress" placeholder="0x… (leave blank unless reusing one)" aria-label="Existing creator rewards distributor address"></div></div>
+          </div>
+        </div>
+
+        <div class="admin-deploy-section">
+          <h3>Fee-wallet distributor (optional)</h3>
+          <p class="help-text">Converts the platform's ongoing trading-tax remainder to ETH automatically instead of it sitting in whatever token it was taxed in. Deploying here also wires it into all four factories automatically.</p>
+          <div class="admin-deploy-toggle-row">
+            <input type="checkbox" id="dep_deployFeeWalletDistributor">
+            <label for="dep_deployFeeWalletDistributor">Deploy a new FeeWalletDistributor</label>
+          </div>
+          <div class="admin-cfg-table">
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Fee wallet recipient address</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_feeWalletAddress" placeholder="defaults to the platform fee wallet above" aria-label="Fee wallet recipient address"></div></div>
+          </div>
+          <div class="admin-deploy-or">— or —</div>
+          <div class="admin-cfg-table">
+            <div class="admin-cfg-row"><div class="admin-cfg-label">Use an existing FeeWalletDistributor</div><div class="field" style="grid-column:2/-1;"><input type="text" id="dep_feeWalletDistributorAddress" placeholder="0x… (leave blank unless reusing one)" aria-label="Existing fee wallet distributor address"></div></div>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" id="deployRunBtn">Deploy</button>
+        <div id="deployResultWrap"></div>
+      </div>`;
+  }
+
+  async function renderDeployPanel(){
+    const wrap = document.getElementById("deployWrap");
+    if(!wrap) return;
+    const url = relayerApiUrl(appMode);
+    if(!url){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No relayer configured for this network — set a Relayer API URL in Overview → Platform contracts first.</p></div>`;
+      return;
+    }
+    let hints = {}, current = null;
+    try{
+      const [hintsRes, currentRes] = await Promise.all([
+        fetch(`${url}/deploy/network-hints`),
+        fetch(`${url}/deploy/current`),
+      ]);
+      hints = await hintsRes.json().catch(()=>({}));
+      const currentData = await currentRes.json().catch(()=>({}));
+      current = currentData.deployment || null;
+    }catch(err){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Couldn't reach the relayer to load deploy info.</p></div>`;
+      return;
+    }
+    if(!isAdminWallet(wallet) || !views.admin.classList.contains("active")) return;
+    wrap.innerHTML = deployPanelHTML(hints, current);
+    const btn = document.getElementById("deployRunBtn");
+    if(btn) btn.addEventListener("click", ()=> runDeploy(btn));
+  }
+
+  function gatherDeployConfigFromForm(){
+    const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
+    const config = {};
+    const setIfPresent = (key, id) => { const v = val(id); if(v !== "") config[key] = v; };
+    setIfPresent("feeTreasuryAddress", "dep_feeTreasuryAddress");
+    setIfPresent("platformFeeWalletAddress", "dep_platformFeeWalletAddress");
+    setIfPresent("dexRouterAddress", "dep_dexRouterAddress");
+    setIfPresent("priceFeedAddress", "dep_priceFeedAddress");
+    setIfPresent("deployFeeWei", "dep_deployFeeWei");
+    setIfPresent("launchFeeWei", "dep_launchFeeWei");
+    setIfPresent("curveLaunchFeeWei", "dep_curveLaunchFeeWei");
+    setIfPresent("lpLockDurationSeconds", "dep_lpLockDurationSeconds");
+    setIfPresent("poolSeedTargetWei", "dep_poolSeedTargetWei");
+
+    const deployPlatformTokenEl = document.getElementById("dep_deployPlatformToken");
+    config.deployPlatformToken = !!(deployPlatformTokenEl && deployPlatformTokenEl.checked);
+    setIfPresent("platformTokenName", "dep_platformTokenName");
+    setIfPresent("platformTokenSymbol", "dep_platformTokenSymbol");
+    setIfPresent("platformTokenSupply", "dep_platformTokenSupply");
+    setIfPresent("platformTokenInitialHolder", "dep_platformTokenInitialHolder");
+    setIfPresent("rewardsDistributorAddress", "dep_rewardsDistributorAddress");
+
+    const deployCreatorRewardsEl = document.getElementById("dep_deployCreatorRewards");
+    config.deployCreatorRewards = !!(deployCreatorRewardsEl && deployCreatorRewardsEl.checked);
+    setIfPresent("creatorRewardsDistributorAddress", "dep_creatorRewardsDistributorAddress");
+
+    const deployFeeWalletDistributorEl = document.getElementById("dep_deployFeeWalletDistributor");
+    config.deployFeeWalletDistributor = !!(deployFeeWalletDistributorEl && deployFeeWalletDistributorEl.checked);
+    setIfPresent("feeWalletAddress", "dep_feeWalletAddress");
+    setIfPresent("feeWalletDistributorAddress", "dep_feeWalletDistributorAddress");
+
+    return config;
+  }
+
+  async function runDeploy(btnEl){
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    const url = relayerApiUrl(appMode);
+    if(!url){ toast("No relayer configured for this network."); return; }
+    const config = gatherDeployConfigFromForm();
+    const timestamp = Date.now();
+    const message = deployMessage(config, timestamp);
+    let signature;
+    try{
+      signature = await window.ethereum.request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
+    }catch(err){
+      toast("Signature was rejected — nothing was deployed.");
+      return;
+    }
+    const originalLabel = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = "Deploying… this can take several minutes";
+    const resultWrap = document.getElementById("deployResultWrap");
+    if(resultWrap) resultWrap.innerHTML = `<p class="admin-empty" style="margin-top:14px;">Deploying — please keep this tab open. Each contract is a real on-chain transaction; this can take several minutes.</p>`;
+    try{
+      const res = await fetch(`${url}/deploy`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ config, timestamp, signature }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){
+        if(resultWrap) resultWrap.innerHTML = `<p class="admin-empty" style="color:var(--critical-500); margin-top:14px;">${escapeHtml(data.error || "Deployment failed.")}</p>`;
+        toast(data.error || "Deployment failed.");
+        return;
+      }
+      toast("Deployed — review the addresses below, then accept ownership from the Contract admin tab.");
+      if(resultWrap) resultWrap.innerHTML = deploySuccessHTML(data.deploymentSummary);
+    }catch(err){
+      if(resultWrap) resultWrap.innerHTML = `<p class="admin-empty" style="color:var(--critical-500); margin-top:14px;">Couldn't reach the relayer to run the deploy.</p>`;
+      toast("Couldn't reach the relayer to run the deploy.");
+    }finally{
+      btnEl.disabled = false;
+      btnEl.textContent = originalLabel;
+    }
+  }
+
   async function renderAdmin(){
     const wrap = document.getElementById("adminWrap");
     if(!isAdminWallet(wallet)){
@@ -10841,30 +11261,57 @@
         <span class="icon">⚠️</span>
         <p><strong>This tab is a UI convenience, not the security boundary.</strong> Every action below is an ordinary transaction — TokenFactory and CustomTokenFactory each enforce <code>onlyOwner</code> on-chain (Ownable2Step, hardened this session), so any call here still reverts unless the connected wallet is the real contract owner, regardless of what this page shows or hides. Anyone who reads this file's source can see the ${escapeHtml(ADMIN_WALLET)} check and knows it's only gating this tab's visibility, not gating anything on-chain.</p>
       </div>
-      <div class="section-head"><h2>Platform admin</h2></div>
-      <div id="platformContractsWrap"></div>
-      <div class="section-head" style="margin-top:28px;"><h2>Automation status</h2></div>
-      <div id="automationStatusWrap">
-        <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+      <div class="admin-tabbar" id="adminTabbar" role="tablist" aria-label="Admin sections">
+        ${ADMIN_TABS.map(t => `<button type="button" class="admin-tab-btn${t.key===adminTab?" active":""}" role="tab" aria-selected="${t.key===adminTab}" data-admin-tab="${t.key}">${escapeHtml(t.label)}</button>`).join("")}
       </div>
-      <div class="section-head" style="margin-top:28px;"><h2>Launch activity</h2></div>
-      <div id="launchActivityWrap">
-        <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+
+      <div class="admin-tab-panel" data-admin-panel="overview" ${adminTab==="overview"?"":"hidden"}>
+        <div class="section-head"><h2>Platform admin</h2></div>
+        <div id="platformContractsWrap"></div>
+        <div class="section-head" style="margin-top:28px;"><h2>Automation status</h2></div>
+        <div id="automationStatusWrap">
+          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+        </div>
+        <div class="section-head" style="margin-top:28px;"><h2>Launch activity</h2></div>
+        <div id="launchActivityWrap">
+          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+        </div>
       </div>
-      <div class="section-head" style="margin-top:28px;"><h2>Platform rewards</h2></div>
-      <div id="platformRewardsWrap">
-        <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+
+      <div class="admin-tab-panel" data-admin-panel="contracts" ${adminTab==="contracts"?"":"hidden"}>
+        <div class="section-head"><h2>Platform rewards</h2></div>
+        <div id="platformRewardsWrap">
+          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+        </div>
+        <div class="section-head" style="margin-top:28px;"><h2>Contract admin</h2></div>
+        <div class="admin-grid" id="adminGrid">
+          <div class="panel admin-panel"><p class="admin-empty">Loading TokenFactory…</p></div>
+          <div class="panel admin-panel"><p class="admin-empty">Loading CustomTokenFactory…</p></div>
+          <div class="panel admin-panel"><p class="admin-empty">Loading BondingCurveFactory…</p></div>
+          <div class="panel admin-panel"><p class="admin-empty">Loading CustomBondingCurveFactory…</p></div>
+          <div class="panel admin-panel"><p class="admin-empty">Loading PlatformRewardsDistributor…</p></div>
+          <div class="panel admin-panel"><p class="admin-empty">Loading CreatorRewardsDistributor…</p></div>
+          <div class="panel admin-panel"><p class="admin-empty">Loading FeeWalletDistributor…</p></div>
+        </div>
       </div>
-      <div class="section-head" style="margin-top:28px;"><h2>Contract admin</h2></div>
-      <div class="admin-grid" id="adminGrid">
-        <div class="panel admin-panel"><p class="admin-empty">Loading TokenFactory…</p></div>
-        <div class="panel admin-panel"><p class="admin-empty">Loading CustomTokenFactory…</p></div>
-        <div class="panel admin-panel"><p class="admin-empty">Loading BondingCurveFactory…</p></div>
-        <div class="panel admin-panel"><p class="admin-empty">Loading CustomBondingCurveFactory…</p></div>
-        <div class="panel admin-panel"><p class="admin-empty">Loading PlatformRewardsDistributor…</p></div>
-        <div class="panel admin-panel"><p class="admin-empty">Loading CreatorRewardsDistributor…</p></div>
-        <div class="panel admin-panel"><p class="admin-empty">Loading FeeWalletDistributor…</p></div>
+
+      <div class="admin-tab-panel" data-admin-panel="relayer" ${adminTab==="relayer"?"":"hidden"}>
+        <div class="section-head"><h2>Relayer settings</h2></div>
+        <div id="relayerSettingsWrap">
+          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+        </div>
+      </div>
+
+      <div class="admin-tab-panel" data-admin-panel="deploy" ${adminTab==="deploy"?"":"hidden"}>
+        <div class="section-head"><h2>Deploy contracts</h2></div>
+        <div id="deployWrap">
+          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+        </div>
       </div>`;
+
+    wrap.querySelectorAll("[data-admin-tab]").forEach(btn=>{
+      btn.addEventListener("click", ()=> switchAdminTab(btn.dataset.adminTab));
+    });
 
     // The "Platform contracts" panel is pure client-side config (no
     // eth_call, no transaction) so it renders and works regardless of
@@ -10882,6 +11329,13 @@
     // wallet guard below and renders regardless of wallet state.
     await renderAutomationStatusPanel();
     await renderLaunchActivityPanel();
+    // Independent of everything else in this function (their own tabs, own
+    // fetches, own admin-signed save actions) — rendered here rather than
+    // gated behind the window.ethereum/on-chain-read guard below, since both
+    // panels' initial GETs are plain server reads that work with no wallet
+    // connected at all (same reasoning as "Platform contracts" above).
+    renderRelayerSettingsPanel();
+    renderDeployPanel();
 
     if(!window.ethereum){
       document.getElementById("platformRewardsWrap").innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No browser wallet detected — connect one to manage platform rewards.</p></div>`;
