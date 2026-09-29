@@ -72,9 +72,11 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
     /// CustomToken — entirely separate from the creator's own buyFees/
     /// sellFees), how much (absolute bps) gets diverted to
     /// rewardsDistributor instead of platformFeeWallet. See
-    /// TokenFactory.rewardBps for the full explanation; behaves
-    /// identically here.
-    uint256 public rewardBps = 45; // 0.45%
+    /// TokenFactory.rewardBps for the full explanation, including why this
+    /// now defaults to 0 (PlatformRewardsDistributor is one-time,
+    /// launch-fee-only by design — see that comment for the full
+    /// reasoning); behaves identically here.
+    uint256 public rewardBps = 0;
 
     /// @notice CreatorRewardsDistributor's address — see
     /// TokenFactory.creatorRewardsDistributor for the full explanation;

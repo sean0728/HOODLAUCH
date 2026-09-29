@@ -254,7 +254,18 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// buyer bought into (see the contract-level note on Finding 4). Private
     /// for the same Finding 8 reason as the tax-default fields above.
     address private rewardsDistributor;
-    uint256 private rewardBps = 45; // 0.45% -- POST-graduation tax carve-out only, see LaunchedToken.configureTax -- snapshotted into Curve.taxRewardBps at creation (see Finding 4)
+    // Defaults to 0 by design -- PlatformRewardsDistributor (rewardsDistributor
+    // above) is meant to be funded ONLY by the one-time 50% curveLaunchFee
+    // share it already receives directly (see _distributeEthFee), never by
+    // the ongoing POST-graduation per-trade tax. With this at 0, that ongoing
+    // slice is never diverted here; it flows entirely to feeWalletDistributor/
+    // feeWallet instead via the same `fee - rewardCut - creatorCut` remainder
+    // computation LaunchedToken._update already does, so no other code change
+    // is needed for feeWalletDistributor to receive it. See
+    // TokenFactory.rewardBps for the full reasoning; behaves identically
+    // here. POST-graduation tax carve-out only, see LaunchedToken.configureTax
+    // -- snapshotted into Curve.taxRewardBps at creation (see Finding 4).
+    uint256 private rewardBps = 0;
 
     /// @notice CreatorRewardsDistributor's address -- POST-graduation
     /// LaunchedToken transfer-tax carve-out only (see the contract-level
@@ -1277,7 +1288,19 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice See TokenFactory.setMaxRelayerGasReimbursement -- identical
     /// circuit breaker, applied to relayedCreateCurveToken's own
     /// _settleRelayedFee.
+    ///
+    /// FIX (this review, same class as TokenFactory's own F-2): setRelayer()
+    /// above only checks maxRelayerGasReimbursementWei > 0 at the moment a
+    /// relayer is *enabled* -- this setter had no corresponding check, so it
+    /// could be called with newCapWei == 0 at any later time, including
+    /// while a relayer was already active, silently reopening the circuit
+    /// breaker setRelayer() exists to enforce. Now rejects zeroing the cap
+    /// while a relayer is configured.
     function setMaxRelayerGasReimbursement(uint256 newCapWei) external onlyOwner {
+        require(
+            relayer == address(0) || newCapWei > 0,
+            "BondingCurveFactory: cannot zero the gas reimbursement cap while a relayer is active"
+        );
         maxRelayerGasReimbursementWei = newCapWei;
         emit MaxRelayerGasReimbursementUpdated(newCapWei);
     }

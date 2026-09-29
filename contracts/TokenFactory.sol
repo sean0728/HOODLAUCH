@@ -72,8 +72,18 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     uint256 public constant MAX_FEE_BPS = 2_000; // 20.00%
 
     address public platformFeeWallet;
+    // Aligned to 100 (1.00%) to match every other launch mode's default
+    // (CustomTokenFactory, BondingCurveFactory, CustomBondingCurveFactory all
+    // default feeBps to 1.00%) — previously 25 (0.25%) here only, which left
+    // this one launch mode's ongoing trading tax at a different rate than
+    // the other three for no documented reason.
     uint256 public feeBps = 100; // 1.00%
     address public priceFeed;
+    // Aligned to 50_000 to match every other launch mode's default
+    // (CustomTokenFactory, BondingCurveFactory, CustomBondingCurveFactory all
+    // graduate their transfer tax at the same $50,000 live-market-cap target)
+    // — previously 80_000 here only, which left this one launch mode's tax
+    // running longer than the other three for no documented reason.
     uint256 public graduationTargetUsd = 50_000; // whole dollars; tax permanently disables once a pool's live market cap crosses this
     uint256 public maxOracleStaleness = 1 hours;
 
@@ -89,13 +99,26 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     address public rewardsDistributor;
 
     /// @notice Out of feeBps (the platform's ongoing 1.00% trading tax),
-    /// how much (in absolute bps, e.g. 45 = 0.45%) gets diverted to
+    /// how much (in absolute bps, e.g. 10 = 0.10%) gets diverted to
     /// rewardsDistributor instead of platformFeeWallet — carved OUT OF
     /// feeBps, never added on top of it. Must stay <= feeBps (enforced in
     /// setTaxDefaults); has no effect at all while rewardsDistributor is
     /// unset. Snapshotted per-token at launch, same as every other tax
     /// default here.
-    uint256 public rewardBps = 45; // 0.45%
+    ///
+    /// Defaults to 0 by design: PlatformRewardsDistributor (rewardsDistributor
+    /// above) is meant to be funded ONLY by the one-time 50% launch/deploy-fee
+    /// share it already receives directly in _finalizeLaunch — never by the
+    /// ongoing per-trade tax. With rewardBps at 0, no per-trade tax is ever
+    /// diverted to rewardsDistributor; the full remainder (feeBps minus
+    /// creatorRewardBps) flows entirely to feeWalletDistributor/feeWallet
+    /// instead (see toFeeWallet in LaunchedToken._update — it's computed as
+    /// `fee - rewardCut - creatorCut`, so a zero rewardCut requires no other
+    /// code change for feeWalletDistributor to receive that share). Owner can
+    /// still turn ongoing rewardsDistributor funding back on via
+    /// setTaxDefaults for future launches, but that is a deliberate
+    /// exception, not the shipped default.
+    uint256 public rewardBps = 0;
 
     /// @notice CreatorRewardsDistributor's address — pays a slice of the
     /// ongoing trading tax back to each token's own creator, in native ETH,
@@ -114,6 +137,11 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// enforced in setTaxDefaults). Has no effect at all while
     /// creatorRewardsDistributor is unset. Snapshotted per-token at launch,
     /// same as every other tax default here.
+    ///
+    /// Aligned to 10 (0.10%) to match every other launch mode's default
+    /// (CustomTokenFactory, BondingCurveFactory, CustomBondingCurveFactory
+    /// all default creatorRewardBps to 0.10%) — previously 5 (0.05%) here
+    /// only.
     uint256 public creatorRewardBps = 10; // 0.10%
 
     /// @notice FeeWalletDistributor's address — automatically converts the
@@ -1025,21 +1053,19 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
     /// wei. 0 means no cap. Protects against a compromised or
     /// malfunctioning relayer key inflating tx.gasprice to drain more than
     /// a real deploy could plausibly cost.
-    /// @dev FIX: setRelayer() only checked maxRelayerGasReimbursementWei > 0
-    /// at the MOMENT a relayer is enabled — nothing stopped this function
-    /// from being called afterward to reset the cap back to 0 while a
-    /// relayer remained fully active, silently reopening exactly the
-    /// unbounded-gas-reimbursement exposure that guard exists to prevent
-    /// (see setRelayer's own doc comment: "a circuit breaker against a
-    /// compromised or malfunctioning relayer key inflating tx.gasprice to
-    /// drain more than a real deploy could ever cost"). This now maintains
-    /// that invariant continuously in both directions — "a relayer is
-    /// enabled" implies "the cap is nonzero" — rather than only checking it
-    /// once, whichever setter happens to run first.
+    /// @notice FIX (post-audit, HoodLaunch_TokenFactory_LaunchedToken_Audit —
+    /// Finding F-2): setRelayer() only ever checked
+    /// maxRelayerGasReimbursementWei > 0 at the moment a relayer was
+    /// *enabled* — this setter had no corresponding check, so it could be
+    /// called with newCapWei == 0 at any later time, including while a
+    /// relayer was already active, silently reopening the circuit breaker
+    /// setRelayer() exists to enforce. Now rejects zeroing the cap while a
+    /// relayer is configured, so the invariant holds continuously instead of
+    /// only at the one moment setRelayer() itself checks it.
     function setMaxRelayerGasReimbursement(uint256 newCapWei) external onlyOwner {
         require(
-            newCapWei > 0 || relayer == address(0),
-            "TokenFactory: cannot zero the cap while a relayer is enabled"
+            relayer == address(0) || newCapWei > 0,
+            "TokenFactory: cannot zero the gas reimbursement cap while a relayer is active"
         );
         maxRelayerGasReimbursementWei = newCapWei;
         emit MaxRelayerGasReimbursementUpdated(newCapWei);

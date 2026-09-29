@@ -57,14 +57,20 @@ interface IPlatformTokenMinimal {
 /// automatically triggers the split: half straight to feeWallet in plain
 /// ETH, half swapped for platformToken (using a live on-chain quote — see
 /// triggerDistributionAuto()) and queued for pro-rata disbursement to every
-/// platform token holder. No keeper, relayer, or manual call is needed for
-/// this step — it happens as a side effect of whatever transfer happened to
-/// cross the threshold. The one piece that genuinely cannot be automatic is
-/// paying out a potentially large holder list: that's still done in
-/// explicit batches via processDisburseRound() (anyone can call it, as many
-/// times as it takes), since looping over an unbounded number of holders in
-/// a single transaction risks running out of gas — see that function's own
-/// comment.
+/// platform token holder, which then starts paying itself out too — see
+/// autoProcessBatchSize below. No keeper, relayer, or manual call is needed
+/// for any of this — it all happens as a side effect of ordinary trade-tax
+/// transfers arriving. A smart contract can never run code on its own
+/// timer, only when some transaction calls it, so this contract uses the
+/// one thing that reliably calls it on an ongoing basis — HoodLaunch's own
+/// traders paying their 0.30% tax — as its "heartbeat": each such transfer
+/// also nudges an in-progress holder-payout round forward by a small,
+/// bounded batch. The tradeoff is real and disclosed: whoever's transfer
+/// happens to trigger a batch pays that batch's extra gas alongside their
+/// own transaction. autoProcessBatchSize is kept small by default and can
+/// be set to 0 to disable this piggybacking, falling back to
+/// processDisburseRound() only ever being called manually or by an
+/// external script the owner runs entirely outside this contract.
 contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     IRouterMinimal public immutable router;
 
@@ -105,6 +111,20 @@ contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     uint256 public totalDistributedToFeeWallet;
     uint256 public totalDistributedToBuyback;
 
+    /// @notice How many holders receive() automatically pays out (see
+    /// below) on top of whatever else it does, whenever a disburse round is
+    /// already active — the only way to make holder payout fully
+    /// self-driving with no external keeper: a smart contract can't run on
+    /// its own timer, so ongoing trade-tax payments are used as the
+    /// "heartbeat" that nudges an in-progress round forward. Kept
+    /// deliberately small and owner-adjustable, since whoever's incoming
+    /// transfer happens to trigger a batch pays that batch's extra gas on
+    /// top of their own transaction — a real cost shifted onto an
+    /// unrelated trader, not free automation. Set to 0 to disable this
+    /// piggybacking entirely and rely only on manual/external
+    /// processDisburseRound() calls instead.
+    uint256 public autoProcessBatchSize = 5;
+
     // ---- disburse-round bookkeeping: an accumulate-then-batch pattern so
     // paying out every platform token holder never risks looping over an
     // unbounded list in one transaction. Tokens bought back by a
@@ -136,6 +156,8 @@ contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     event DisburseRoundStarted(uint256 amount, uint256 supplyAtStart);
     event DisburseRoundProgress(uint256 nextCursor, uint256 paidThisBatch);
     event DisburseRoundFinished(uint256 totalAmount);
+    event AutoProcessBatchSizeUpdated(uint256 newBatchSize);
+    event DisbursePayoutSkipped(address indexed holder, uint256 amount);
 
     constructor(address router_, address platformToken_, address feeWallet_) Ownable(msg.sender) {
         require(router_ != address(0), "PlatformTaxDistributor: invalid router");
@@ -147,23 +169,33 @@ contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     /// @notice Every trade's 0.30% tax lands here as a plain ETH transfer —
     /// see HoodLaunch's own public/index.html, the only piece of that
     /// platform that knows this address exists. Logs the transfer, adds it
-    /// to the all-time totalEthCollected counter, and — this is the
-    /// automation this contract runs on — if that pushes the balance to
-    /// disburseThreshold or beyond, immediately attempts a full
-    /// distribution (see triggerDistributionAuto()) with NO extra call
-    /// from anyone required.
+    /// to the all-time totalEthCollected counter, and drives BOTH pieces of
+    /// this contract's automation as side effects:
     ///
-    /// That attempt is wrapped in try/catch specifically so it can NEVER
-    /// cause this function to revert: if feeWallet/platformToken aren't
-    /// configured yet, if the router can't quote or swap right now, or if
-    /// anything else about the automatic attempt fails, the ETH is simply
-    /// accepted and sits in this contract's balance for the next transfer
-    /// (or a manual triggerDistribution/triggerDistributionAuto call) to
-    /// try again — a misconfigured setting on THIS contract must never be
-    /// able to cause a trade on HoodLaunch's own platform to fail.
+    ///  1. If a disburse round is already active, piggybacks a small,
+    ///     bounded batch of holder payouts onto THIS transfer (see
+    ///     autoProcessBatchSize above) — the only way to make holder payout
+    ///     fully self-driving without an external keeper, since ongoing
+    ///     trade-tax payments are the only thing that calls this contract
+    ///     on any regular cadence.
+    ///  2. If the balance is now at or above disburseThreshold, immediately
+    ///     attempts a full distribution (see triggerDistributionAuto()).
+    ///
+    /// Both attempts are wrapped in try/catch specifically so NEITHER can
+    /// ever cause this function to revert: if feeWallet/platformToken
+    /// aren't configured yet, if the router can't quote or swap right now,
+    /// if a holder's token transfer reverts, or if anything else about
+    /// either automatic attempt fails, this transfer still succeeds — a
+    /// misconfigured setting or misbehaving dependency on THIS contract
+    /// must never be able to cause a trade on HoodLaunch's own platform to
+    /// fail.
     receive() external payable {
         totalEthCollected += msg.value;
         emit TaxReceived(msg.sender, msg.value, totalEthCollected);
+
+        if (roundActive && autoProcessBatchSize > 0) {
+            try this.processDisburseRound(autoProcessBatchSize) {} catch {}
+        }
         if (address(this).balance >= disburseThreshold) {
             try this.triggerDistributionAuto() {} catch {}
         }
@@ -193,6 +225,18 @@ contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
         emit BuybackSlippageBpsUpdated(newBps);
     }
 
+    /// @notice Tunes how many holders each incoming tax payment automatically
+    /// pays out of an in-progress round (see receive() and
+    /// autoProcessBatchSize above). Capped at 50 — this runs inside an
+    /// ordinary trader's own transaction, so it must stay small enough that
+    /// it can never plausibly push that transaction over a block's gas
+    /// limit on its own. 0 disables the piggyback entirely.
+    function setAutoProcessBatchSize(uint256 newBatchSize) external onlyOwner {
+        require(newBatchSize <= 50, "PlatformTaxDistributor: batch size above 50 ceiling");
+        autoProcessBatchSize = newBatchSize;
+        emit AutoProcessBatchSizeUpdated(newBatchSize);
+    }
+
     /// @notice Manual, permissionless fallback for whenever the balance is
     /// already at or above disburseThreshold but, for whatever reason, no
     /// distribution has happened yet (e.g. the automatic attempt inside
@@ -219,17 +263,39 @@ contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     }
 
     /// @notice Same as triggerDistributionAuto(), but with a caller-supplied
-    /// slippage floor instead of an automatic on-chain quote — for anyone
-    /// who wants tighter control over the buyback leg (e.g. someone who
-    /// suspects the pool is being manipulated right now and doesn't trust
-    /// an automatic quote taken at this exact moment).
+    /// slippage floor — for anyone who wants TIGHTER control over the
+    /// buyback leg than the automatic quote (e.g. someone who suspects the
+    /// pool is being manipulated right now and wants a stricter floor than
+    /// buybackSlippageBps would compute).
+    ///
+    /// FIX (this review): this function used to take minPlatformTokenOut
+    /// straight from the caller with no protocol-side floor at all — unlike
+    /// triggerDistributionAuto(), which always computes one from a live
+    /// quote. Since this function is just as permissionless as that one,
+    /// anyone could call this instead with minPlatformTokenOut = 0 to get
+    /// the exact unprotected swap the automatic path exists specifically to
+    /// prevent — sandwich the buyback, extract the difference, at the direct
+    /// expense of the burn/holder-disbursement split. Now computes the same
+    /// live-quote floor triggerDistributionAuto() does and takes whichever
+    /// of that floor or the caller's own value is stricter (higher), so the
+    /// caller-supplied value can only ever tighten the protection, never
+    /// remove it.
     function triggerDistribution(uint256 minPlatformTokenOut) external nonReentrant {
         uint256 balance = address(this).balance;
         require(balance >= disburseThreshold, "PlatformTaxDistributor: balance below disburseThreshold");
         require(feeWallet != address(0), "PlatformTaxDistributor: feeWallet not set");
         require(address(platformToken) != address(0), "PlatformTaxDistributor: platformToken not set");
 
-        _distribute(minPlatformTokenOut);
+        uint256 toBuyback = balance - balance / 2;
+        address[] memory path = new address[](2);
+        path[0] = router.WETH();
+        path[1] = address(platformToken);
+        uint256[] memory amountsOut = router.getAmountsOut(toBuyback, path);
+        uint256 quoted = amountsOut[amountsOut.length - 1];
+        uint256 protocolFloor = (quoted * (10_000 - buybackSlippageBps)) / 10_000;
+        uint256 effectiveMinOut = minPlatformTokenOut > protocolFloor ? minPlatformTokenOut : protocolFloor;
+
+        _distribute(effectiveMinOut);
     }
 
     /// @dev Shared core of both trigger paths above: splits the CURRENT ETH
@@ -296,21 +362,34 @@ contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     /// @notice Pays out up to `batchSize` more holders from the active
     /// round, resuming from roundCursor — callable repeatedly by anyone
     /// until it reports the round finished (roundActive flips back to
-    /// false). This is the one part of the whole pipeline that genuinely
-    /// cannot be fully automatic: HoodLaunch's platform token can have an
-    /// unbounded number of holders, and looping over all of them in a
-    /// single transaction risks running out of gas, so this must be called
-    /// (by anyone — the owner, a holder waiting on their share, or a
-    /// script/cron the owner sets up entirely outside this contract) as
-    /// many times as it takes to reach the end of the holder list.
+    /// false). Looping over ALL holders in one transaction risks running
+    /// out of gas, which is why this is batched at all — receive() already
+    /// calls this automatically, in small pieces, every time a new tax
+    /// payment arrives (see autoProcessBatchSize), so in ordinary operation
+    /// with regular trading activity nobody needs to call this directly.
+    /// It remains callable by anyone at any time regardless — the owner, a
+    /// holder impatient for their share, or a script/cron the owner sets up
+    /// entirely outside this contract — as a faster or more reliable way to
+    /// finish a round than waiting on trading activity alone.
     ///
     /// A holder with a zero balance, a zero computed share, or a transfer
     /// that reverts (e.g. a blocklist-style token) is simply skipped rather
-    /// than reverting the whole batch — see _sendPlatformToken. Any tokens
-    /// skipped this way are never swept or retried automatically; they
-    /// stay in this contract's own platformToken balance, available to
-    /// whatever the NEXT distribution adds to pendingDisburseTokens for the
-    /// round after this one.
+    /// than reverting the whole batch — see _sendPlatformToken.
+    ///
+    /// FIX (this review, same class as the already-fixed PlatformRewards-
+    /// Distributor Finding PR-1): a skipped holder's share used to be
+    /// silently dropped — never added back to pendingDisburseTokens, never
+    /// reflected in roundAmount, and no code path ever revisited it, despite
+    /// this function's own comment previously (incorrectly) claiming it
+    /// would become "available to whatever the NEXT distribution adds to
+    /// pendingDisburseTokens." In reality, since pendingDisburseTokens is
+    /// only ever incremented by a fresh buyback's own `bought` amount (see
+    /// _distribute), a skipped share just sat in this contract's raw
+    /// platformToken balance forever, uncounted by any tracking variable.
+    /// Skipped shares are now re-added to pendingDisburseTokens so they
+    /// actually get folded into the NEXT round once one starts, and a
+    /// DisbursePayoutSkipped event makes every skip independently
+    /// auditable.
     function processDisburseRound(uint256 batchSize) external nonReentrant {
         require(roundActive, "PlatformTaxDistributor: no disburse round is active");
         require(batchSize > 0, "PlatformTaxDistributor: batchSize must be > 0");
@@ -329,6 +408,9 @@ contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
             if (share == 0) continue;
             if (_sendPlatformToken(holder, share)) {
                 paidThisBatch += share;
+            } else {
+                pendingDisburseTokens += share;
+                emit DisbursePayoutSkipped(holder, share);
             }
         }
 

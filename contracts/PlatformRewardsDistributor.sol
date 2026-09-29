@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import "./interfaces/IUniswapV2Router02.sol";
+import "./interfaces/IUniswapV2Pair.sol";
 import "./interfaces/IPlatformToken.sol";
 
 /// @title PlatformRewardsDistributor
@@ -44,6 +45,24 @@ import "./interfaces/IPlatformToken.sol";
 /// startAirdropRound()/processAirdropBatch() walk it in gas-bounded
 /// batches so it stays permissionless and affordable no matter how many
 /// holders PlatformToken eventually has.
+///
+/// --- Security review (this file) ---
+/// Two findings from the accompanying audit report are fixed directly in
+/// this version — see the inline comments at each site for the mechanics:
+///  - Finding PR-1 (Critical): processAirdropBatch could be permanently
+///    bricked by a single reverting holder payout.
+///  - Finding PR-2 (High): triggerEthBuyback/triggerTokenBuyback had no
+///    protocol-side slippage floor, making every permissionless call
+///    sandwich-able for MEV profit at the community's expense.
+///  - Finding PR-3 (Medium): triggerTokenBuyback's approve() call could
+///    permanently revert against non-standard ERC20s (USDT-style) that
+///    reject changing a nonzero allowance directly to another nonzero
+///    value.
+/// A fourth, lower-severity finding (PR-4 — no rescue path for a token
+/// balance that never clears) is discussed in the report but deliberately
+/// NOT fixed here — see that finding for why an unrestricted rescue
+/// function would trade a minor availability gap for a worse
+/// centralization risk.
 contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     IUniswapV2Router02 public immutable router;
 
@@ -82,6 +101,21 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     /// 0 (uncapped) per token until the owner sets one.
     mapping(address => uint256) public maxTokenBuybackAmount;
 
+    /// @notice Protective slippage floor applied to every buyback swap in
+    /// this contract — see Finding PR-2 in the accompanying audit report.
+    /// Before this existed, triggerEthBuyback/triggerTokenBuyback accepted
+    /// a purely caller-supplied minTokensOut with no protocol-side floor
+    /// computed from the pool(s)' own reserves; since both functions are
+    /// deliberately permissionless, that let anyone call them with
+    /// minTokensOut == 0 and sandwich their own call for MEV profit at the
+    /// expense of the burn/airdrop pool. Same fixed 5.00%-8.00% band, and
+    /// the same "whichever is stricter" combination with the caller's own
+    /// minTokensOut, already used for CreatorRewardsDistributor's and
+    /// FeeWalletDistributor's own swap triggers.
+    uint256 public swapSlippageBps = 600; // 6.00% default
+    uint256 public constant MIN_SWAP_SLIPPAGE_BPS = 500; // 5.00%
+    uint256 public constant MAX_SWAP_SLIPPAGE_BPS = 800; // 8.00%
+
     /// @notice PlatformToken sitting here, already bought back and already
     /// split, awaiting its turn in the next airdrop round. Frozen into
     /// roundAmount the moment startAirdropRound() runs.
@@ -97,11 +131,13 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     event TokenBuybackThresholdUpdated(address indexed token, uint256 newThreshold);
     event MaxEthBuybackAmountUpdated(uint256 newMax);
     event MaxTokenBuybackAmountUpdated(address indexed token, uint256 newMax);
+    event SwapSlippageBpsUpdated(uint256 newBps);
     event EthBuybackTriggered(uint256 ethIn, uint256 tokensOut, uint256 burned, uint256 toAirdrop);
     event TokenBuybackTriggered(address indexed token, uint256 amountIn, uint256 tokensOut, uint256 burned, uint256 toAirdrop);
     event DirectPlatformTokensProcessed(uint256 amountIn, uint256 burned, uint256 toAirdrop);
     event AirdropRoundStarted(uint256 amount, uint256 supplySnapshot, uint256 holderCountAtStart);
     event AirdropBatchProcessed(uint256 fromIndex, uint256 toIndex, uint256 amountDistributed);
+    event AirdropPayoutSkipped(address indexed holder, uint256 amount);
     event AirdropRoundCompleted(uint256 totalDistributed);
 
     constructor(address router_, address initialOwner_) Ownable(initialOwner_) {
@@ -154,9 +190,63 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         emit MaxTokenBuybackAmountUpdated(token, newMax);
     }
 
+    /// @notice Adjusts the protective slippage floor applied to every
+    /// buyback trade — see swapSlippageBps above and Finding PR-2. Bounded
+    /// to the same 5.00%-8.00% band used everywhere else in this codebase
+    /// for the identical purpose.
+    function setSwapSlippageBps(uint256 newBps) external onlyOwner {
+        require(newBps >= MIN_SWAP_SLIPPAGE_BPS, "PlatformRewardsDistributor: slippage below 5% floor");
+        require(newBps <= MAX_SWAP_SLIPPAGE_BPS, "PlatformRewardsDistributor: slippage above 8% ceiling");
+        swapSlippageBps = newBps;
+        emit SwapSlippageBpsUpdated(newBps);
+    }
+
     // ---------------------------------------------------------------
     // Buyback triggers — permissionless once the relevant threshold is met
     // ---------------------------------------------------------------
+
+    /// @dev Standard Uniswap V2 constant-product quote (0.30% swap fee baked
+    /// into the 997/1000 constants) — used only to derive a protective
+    /// slippage floor below, never to execute anything. Same helper as
+    /// CreatorRewardsDistributor/FeeWalletDistributor/CustomToken/
+    /// CustomTokenFactory's identical utility.
+    function _getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) private pure returns (uint256) {
+        uint256 amountInWithFee = amountIn * 997;
+        uint256 numerator = amountInWithFee * reserveOut;
+        uint256 denominator = reserveIn * 1000 + amountInWithFee;
+        return numerator / denominator;
+    }
+
+    /// @dev Quotes amountIn's expected output at the END of a (possibly
+    /// multi-hop) path off each hop's own live pool reserves, chaining the
+    /// output of one hop into the input of the next, then applies
+    /// swapSlippageBps to the final figure — see Finding PR-2. Generalizes
+    /// CreatorRewardsDistributor's/FeeWalletDistributor's single-hop
+    /// _protectiveMinOut to the two-hop [token, WETH, platformToken] path
+    /// triggerTokenBuyback needs (triggerEthBuyback's own
+    /// [WETH, platformToken] path is just the one-hop case of the same
+    /// loop). Returns 0 if any hop's pool doesn't exist or has an empty
+    /// reserve, which callers treat as "can't compute a protocol floor this
+    /// time," falling back to the caller's own minTokensOut rather than
+    /// blocking the swap outright — consistent with how every other
+    /// quote-derived floor in this codebase degrades on a missing pool.
+    function _protectiveMinOut(address[] memory path, uint256 amountIn) private view returns (uint256) {
+        address factory = router.factory();
+        uint256 amount = amountIn;
+        for (uint256 i = 0; i + 1 < path.length; i++) {
+            address pairAddr = IUniswapV2FactoryMinimal(factory).getPair(path[i], path[i + 1]);
+            if (pairAddr == address(0)) return 0;
+
+            (uint112 reserve0, uint112 reserve1, ) = IUniswapV2PairMinimal(pairAddr).getReserves();
+            address token0 = IUniswapV2PairMinimal(pairAddr).token0();
+            uint256 reserveIn = token0 == path[i] ? uint256(reserve0) : uint256(reserve1);
+            uint256 reserveOut = token0 == path[i] ? uint256(reserve1) : uint256(reserve0);
+            if (reserveIn == 0 || reserveOut == 0) return 0;
+
+            amount = _getAmountOut(amount, reserveIn, reserveOut);
+        }
+        return amount - (amount * swapSlippageBps) / 10_000;
+    }
 
     /// @notice Swaps up to maxEthBuybackAmount of this contract's ETH
     /// balance for platformToken (the entire balance, if no cap is set) and
@@ -174,9 +264,19 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         path[0] = router.WETH();
         path[1] = address(platformToken);
 
+        // Finding PR-2: minTokensOut alone was a purely caller-supplied
+        // value with no protocol-side floor — since this function is
+        // deliberately permissionless, that let anyone call it with
+        // minTokensOut == 0 and sandwich their own call for MEV profit at
+        // the burn/airdrop pool's expense. effectiveMinOut is whichever is
+        // stricter of the caller's own minTokensOut and a floor computed
+        // from the pool's own live reserves.
+        uint256 protectiveFloor = _protectiveMinOut(path, ethIn);
+        uint256 effectiveMinOut = minTokensOut > protectiveFloor ? minTokensOut : protectiveFloor;
+
         uint256 before = platformToken.balanceOf(address(this));
         router.swapExactETHForTokensSupportingFeeOnTransferTokens{value: ethIn}(
-            minTokensOut,
+            effectiveMinOut,
             path,
             address(this),
             block.timestamp + 15 minutes
@@ -218,11 +318,26 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         path[1] = router.WETH();
         path[2] = address(platformToken);
 
+        // Finding PR-2 (see triggerEthBuyback above for the full
+        // rationale) — applied here via the same _protectiveMinOut helper,
+        // generalized to walk both hops of this path.
+        uint256 protectiveFloor = _protectiveMinOut(path, amountIn);
+        uint256 effectiveMinOut = minTokensOut > protectiveFloor ? minTokensOut : protectiveFloor;
+
+        // Finding PR-3: approving `amountIn` directly on top of any
+        // existing allowance breaks against ERC20s (e.g. USDT and tokens
+        // that copy its guard) that revert on changing a nonzero allowance
+        // straight to another nonzero value. Resetting to zero first makes
+        // this safe regardless of whatever allowance, if any, is already
+        // outstanding — including the case where a prior call here left a
+        // residual allowance because `token` took a transfer fee and the
+        // router pulled less than the full approved amount.
+        IERC20(token).approve(address(router), 0);
         IERC20(token).approve(address(router), amountIn);
         uint256 before = platformToken.balanceOf(address(this));
         router.swapExactTokensForTokensSupportingFeeOnTransferTokens(
             amountIn,
-            minTokensOut,
+            effectiveMinOut,
             path,
             address(this),
             block.timestamp + 15 minutes
@@ -276,15 +391,46 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         emit AirdropRoundStarted(roundAmount, roundSupplySnapshot, platformToken.holderCount());
     }
 
+    /// @dev Finding PR-1 fix: wraps the actual token transfer in try/catch
+    /// so a single reverting recipient (a blocklist, a max-wallet cap on
+    /// PlatformToken, or any other transfer-blocking condition) can never
+    /// take down the whole batch. `platformToken.transfer(...)` is already
+    /// an external call (platformToken is a separately-deployed contract),
+    /// so it can be try/catched directly with no extra self-call needed.
+    function _sendPlatformToken(address to, uint256 amount) private returns (bool) {
+        try platformToken.transfer(to, amount) returns (bool ok) {
+            return ok;
+        } catch {
+            return false;
+        }
+    }
+
     /// @notice Pushes up to `maxHolders` holders' proportional share of the
     /// active round, resuming from wherever the last call left off, and
     /// closes the round out once every holder's been reached. Anyone can
     /// call this (e.g. a keeper looping until the round completes) — it's
     /// the only way round funds ever actually move.
     ///
-    /// Two disclosed, deliberate approximations keep this affordable and
-    /// gas-bounded rather than paying for a fully-frozen per-holder
-    /// snapshot:
+    /// Finding PR-1 (fixed here): before this fix, a single holder whose
+    /// transfer reverted — for example because PlatformToken itself
+    /// enforces a blocklist, a max-wallet cap that this payout would cross,
+    /// or any other transfer-blocking condition — would revert this whole
+    /// call. Since `from` always starts at `roundCursor`, which only
+    /// advances on a SUCCESSFUL call, every subsequent call would begin at
+    /// that exact same holder and revert identically, permanently freezing
+    /// the round (and, with it, roundAmount of PlatformToken, and every
+    /// future round behind it, since startAirdropRound() refuses to run
+    /// while roundActive is true). _sendPlatformToken now catches a failed
+    /// transfer instead of letting it propagate: the batch keeps moving,
+    /// the failed share is added back to pendingAirdropTokens so it isn't
+    /// silently lost (it simply becomes eligible for the NEXT round,
+    /// recomputed against balances at that time), and an
+    /// AirdropPayoutSkipped event records exactly which holder and how
+    /// much, for anyone auditing a round afterward.
+    ///
+    /// Two other, disclosed and deliberate approximations keep this
+    /// affordable and gas-bounded rather than paying for a fully-frozen
+    /// per-holder snapshot:
     ///  - Each holder's share is computed from their LIVE balance at the
     ///    moment they're processed, not a balance frozen at round start —
     ///    someone who buys or sells between startAirdropRound() and their
@@ -310,8 +456,15 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
             if (holder == address(this)) continue;
             uint256 share = (roundAmount * platformToken.balanceOf(holder)) / roundSupplySnapshot;
             if (share == 0) continue;
-            platformToken.transfer(holder, share);
-            distributed += share;
+            if (_sendPlatformToken(holder, share)) {
+                distributed += share;
+            } else {
+                // Finding PR-1: don't lose the share — requeue it for the
+                // next round instead of leaving it stranded, unaccounted,
+                // in this contract's own balance forever.
+                pendingAirdropTokens += share;
+                emit AirdropPayoutSkipped(holder, share);
+            }
         }
 
         roundCursor = to;
