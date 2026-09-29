@@ -630,6 +630,21 @@
   .admin-status-badge{display:inline-block; font-family:var(--font-mono); font-size:.66rem; letter-spacing:.05em; padding:2px 9px; border-radius:999px; margin-left:10px; vertical-align:middle; border:1px solid var(--line-strong); background:var(--ink-800); color:var(--paper-500);}
   .admin-status-badge.on{color:var(--good-500); background:var(--good-wash); border-color:rgba(52,221,156,.4); box-shadow:0 0 7px rgba(52,221,156,.2);}
   .admin-status-badge.partial{color:var(--signal-300); background:var(--signal-wash); border-color:rgba(255,157,60,.4); box-shadow:0 0 7px rgba(255,157,60,.18);}
+  /* Compact one-row-per-key layout for the "Platform contracts" panel — see
+     platformContractsPanelHTML(). Replaces a full section-label + paragraph
+     + field-grid per key (very tall) with a single grid row per key; the
+     full help text moves into a hover tooltip (title attr) on the small "?"
+     dot instead of always-rendered body text. */
+  .admin-cfg-table{margin:12px 0 18px;}
+  .admin-cfg-row{display:grid; grid-template-columns:190px 1fr 1fr; gap:10px; align-items:center; padding:8px 0; border-bottom:1px solid var(--line);}
+  .admin-cfg-row:last-child{border-bottom:none;}
+  .admin-cfg-row .field{margin-bottom:0;}
+  .admin-cfg-head{padding-top:0; padding-bottom:6px; border-bottom:1px solid var(--line-strong);}
+  .admin-cfg-col-head{font-family:var(--font-mono); font-size:.62rem; text-transform:uppercase; letter-spacing:.05em; color:var(--paper-700);}
+  .admin-cfg-label{font-family:var(--font-mono); font-size:.74rem; color:var(--paper-300); display:flex; align-items:center; gap:6px; line-height:1.3;}
+  .admin-cfg-label .info-dot{cursor:help; color:var(--paper-700); font-size:.6rem; font-family:var(--font-mono); border:1px solid var(--line-strong); border-radius:999px; width:14px; height:14px; flex:none; display:inline-flex; align-items:center; justify-content:center;}
+  .admin-cfg-label .info-dot:hover{color:var(--signal-300); border-color:var(--signal-500);}
+  @media (max-width: 760px){ .admin-cfg-row{grid-template-columns:1fr;} .admin-cfg-head{display:none;} }
   .switch-row{display:flex; align-items:center; gap:14px; margin-top:4px;}
   .switch{position:relative; display:inline-block; width:42px; height:24px; flex:none;}
   .switch input{position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer;}
@@ -2171,6 +2186,21 @@
   const FWD_SET_MAX_SWAP_AMOUNT_SELECTOR = "a589d319";     // setMaxSwapAmount(address,uint256)
   const FWD_TRIGGER_SWAP_SELECTOR = "4d048085";            // triggerFeeWalletSwap(address,uint256)
   const FWD_CLAIM_REWARDS_SELECTOR = "5a7af73c";           // claimFeeWalletRewards(address)
+  // Added when FeeWalletDistributor grew a buyback/burn/holder-airdrop leg
+  // (splitting its pulled amount 50/50 between the ETH leg above and a
+  // platformToken buyback, mirroring PlatformRewardsDistributor) — see that
+  // contract's own header comment and Finding FWD-1. The 3-argument
+  // overload lets a caller also supply a slippage floor for the buyback
+  // leg; the original 2-argument selector above is unchanged and still
+  // works against it (it just forwards 0 for that leg). The getter/setter/
+  // round selectors this leg needs (platformToken, setPlatformToken,
+  // pendingAirdropTokens, roundActive/roundAmount/roundSupplySnapshot/
+  // roundCursor, startAirdropRound, processAirdropBatch) are IDENTICAL
+  // signatures to PlatformRewardsDistributor's own — selectors hash only
+  // the signature, not the contract — so this panel reuses the PRD_*
+  // constants directly below rather than duplicating them under an FWD_
+  // name.
+  const FWD_TRIGGER_SWAP_WITH_MIN_TOKENS_OUT_SELECTOR = "7b93553b"; // triggerFeeWalletSwap(address,uint256,uint256)
 
   // One-arg encoders for the admin setters above — every parameter in this
   // whole group is static (uint256 or address), so calldata is always
@@ -9677,10 +9707,70 @@
       ethCall(address, "0x"+PENDING_OWNER_SELECTOR),
       ethCall(address, "0x"+FWD_FEE_WALLET_SELECTOR),
     ]);
+
+    // The buyback leg (platformToken()/pendingAirdropTokens()/round*) only
+    // exists on the version of FeeWalletDistributor.sol that added it (see
+    // FWD_TRIGGER_SWAP_WITH_MIN_TOKENS_OUT_SELECTOR's own comment) —
+    // reusing the identical PlatformRewardsDistributor selectors, since
+    // selectors hash only the signature. Isolated in its own try/catch so
+    // an older deployed FeeWalletDistributor without these getters (every
+    // eth_call in one Promise.all would otherwise reject together) still
+    // renders its base owner/feeWallet/per-token state correctly —
+    // supportsBuyback tells the panel below whether to show that half of
+    // the UI at all.
+    let supportsBuyback = true;
+    let platformToken = ZERO_ADDRESS, hasPlatformToken = false;
+    let platformTokenSupply = 0n, platformTokenHolderCount = 0n;
+    let pendingAirdropTokens = 0n, roundActive = false, roundAmount = 0n, roundSupplySnapshot = 0n, roundCursor = 0n;
+    try{
+      const [platformTokenHex, pendingAirdropHex, roundActiveHex, roundAmountHex, roundSupplySnapshotHex, roundCursorHex] = await Promise.all([
+        ethCall(address, "0x"+PRD_PLATFORM_TOKEN_SELECTOR),
+        ethCall(address, "0x"+PRD_PENDING_AIRDROP_SELECTOR),
+        ethCall(address, "0x"+PRD_ROUND_ACTIVE_SELECTOR),
+        ethCall(address, "0x"+PRD_ROUND_AMOUNT_SELECTOR),
+        ethCall(address, "0x"+PRD_ROUND_SUPPLY_SNAPSHOT_SELECTOR),
+        ethCall(address, "0x"+PRD_ROUND_CURSOR_SELECTOR),
+      ]);
+      platformToken = decodeAddress(platformTokenHex);
+      hasPlatformToken = platformToken.toLowerCase() !== ZERO_ADDRESS;
+      pendingAirdropTokens = decodeUint256(pendingAirdropHex);
+      roundActive = decodeUint256(roundActiveHex) === 1n;
+      roundAmount = decodeUint256(roundAmountHex);
+      roundSupplySnapshot = decodeUint256(roundSupplySnapshotHex);
+      roundCursor = decodeUint256(roundCursorHex);
+      if(hasPlatformToken){
+        // Best-effort only, same as loadRewardsDistributorState — if this
+        // address doesn't actually implement holderCount(), the rest of
+        // this panel should still render.
+        try{
+          const [supplyHex, holderCountHex] = await Promise.all([
+            ethCall(platformToken, "0x"+PT_TOTAL_SUPPLY_SELECTOR),
+            ethCall(platformToken, "0x"+PT_HOLDER_COUNT_SELECTOR),
+          ]);
+          platformTokenSupply = decodeUint256(supplyHex);
+          platformTokenHolderCount = decodeUint256(holderCountHex);
+        }catch{}
+      }
+    }catch(err){
+      // Older deployed contract, predating the buyback leg — not an error,
+      // just means this half of the panel stays hidden below.
+      supportsBuyback = false;
+    }
+
     const state = {
       owner: decodeAddress(ownerHex),
       pendingOwner: decodeAddress(pendingOwnerHex),
       feeWallet: decodeAddress(feeWalletHex),
+      supportsBuyback,
+      platformToken,
+      hasPlatformToken,
+      platformTokenSupply,
+      platformTokenHolderCount,
+      pendingAirdropTokens,
+      roundActive,
+      roundAmount,
+      roundSupplySnapshot,
+      roundCursor,
       lookupToken: fwdLookupToken,
       claimableEth: 0n,
       swapThreshold: 0n,
@@ -9720,6 +9810,7 @@
     const pendingIsZero = state.pendingOwner.toLowerCase()===ZERO_ADDRESS;
     const feeWalletIsZero = state.feeWallet.toLowerCase()===ZERO_ADDRESS;
     const walletIsPendingOwner = wallet && !pendingIsZero && wallet.toLowerCase()===state.pendingOwner.toLowerCase();
+    const buyback = state.supportsBuyback;
     return `
       <div class="panel admin-panel">
         <div class="admin-panel-head"><h3>FeeWalletDistributor</h3></div>
@@ -9730,6 +9821,15 @@
           <div class="admin-readout"><div class="l">Owner</div><div class="v">${escapeHtml(state.owner)}</div></div>
           <div class="admin-readout"><div class="l">Pending owner</div><div class="v">${pendingIsZero ? "None" : escapeHtml(state.pendingOwner)}</div></div>
           <div class="admin-readout"><div class="l">Fee wallet (payout recipient)</div><div class="v">${feeWalletIsZero ? "Unset — claims will revert until this is set" : escapeHtml(state.feeWallet)}</div></div>
+          ${buyback ? `
+          <div class="admin-readout"><div class="l">Platform token</div><div class="v">${state.hasPlatformToken ? escapeHtml(state.platformToken) : "Unset — 100% of every pull still goes to ETH, buyback leg is inert"}</div></div>
+          ${state.hasPlatformToken ? `
+          <div class="admin-readout"><div class="l">Platform token supply</div><div class="v">${fmtInt(Number(weiToEtherString(state.platformTokenSupply,0)))}</div></div>
+          <div class="admin-readout"><div class="l">Platform token holders</div><div class="v">${fmtInt(Number(state.platformTokenHolderCount))}</div></div>` : ""}
+          <div class="admin-readout"><div class="l">Pending airdrop</div><div class="v">${fmtInt(Number(weiToEtherString(state.pendingAirdropTokens,0)))} tokens</div></div>
+          <div class="admin-readout"><div class="l">Airdrop round</div><div class="v">${state.roundActive ? `Active — ${state.roundCursor} / ${state.platformTokenHolderCount} processed` : "None active"}</div></div>
+          ${state.roundActive ? `<div class="admin-readout"><div class="l">Round amount</div><div class="v">${fmtInt(Number(weiToEtherString(state.roundAmount,0)))} tokens</div></div>` : ""}` : `
+          <div class="admin-readout"><div class="l">Buyback leg</div><div class="v">Not supported by this deployed contract — redeploy from the current FeeWalletDistributor.sol to enable the platform-token buyback/burn/airdrop half</div></div>`}
         </div>
 
         <div class="admin-section-label">Payout recipient</div>
@@ -9738,6 +9838,14 @@
           <button class="btn btn-primary btn-sm" data-fwd-action="setFeeWallet">Update</button>
         </div>
         <p class="admin-empty" style="margin:0 0 10px;">Repoints where every token's NEXT claim pays out, all at once — never retroactive to ETH already claimed.</p>
+
+        ${buyback ? `
+        <div class="admin-section-label">Platform token · needed to run the buyback half (50% ETH / 25% burn / 25% airdrop) — leave unset to keep 100% going to ETH</div>
+        <div class="admin-action-row">
+          <div class="field"><label>Platform token (address)</label><input type="text" id="admin_fwd_platformToken" placeholder="${state.hasPlatformToken ? state.platformToken : "0x… (currently unset)"}"></div>
+          <button class="btn btn-primary btn-sm" data-fwd-action="setPlatformToken">Update</button>
+        </div>
+        <p class="admin-empty" style="margin:0 0 10px;">Blocked while an airdrop round is active or airdrop tokens are pending — let the current round finish first.</p>` : ""}
 
         <div class="admin-section-label">Per-token balance — swept and claimed automatically by the relayer keeper once it clears the threshold below</div>
         <p class="admin-empty" style="margin-bottom:10px;">scripts/relayer.js's feeWalletPollLoop polls every launched token and automatically triggers the swap-to-ETH, then claims it to the fee wallet above — see the Automation status panel further up this page to confirm that keeper is actually running for the network you're on. Look up a token below to see its current balance, or act on it manually (useful if the keeper is paused, misconfigured, or you want to force it sooner than the keeper's own schedule).</p>
@@ -9755,8 +9863,10 @@
         <div class="admin-section-label">Manual override — the keeper normally does this for you</div>
         <div class="admin-action-row">
           <div class="field"><label>Min ETH out (slippage floor)</label><input type="number" step="any" min="0" id="admin_fwd_minEthOut" placeholder="0"></div>
-          <button class="btn btn-ghost btn-sm" data-fwd-action="triggerSwap">Swap accumulated balance → ETH</button>
+          ${buyback && state.hasPlatformToken ? `<div class="field"><label>Min platformToken out (buyback leg, whole tokens)</label><input type="number" step="any" min="0" id="admin_fwd_minPlatformTokensOut" placeholder="0"></div>` : ""}
+          <button class="btn btn-ghost btn-sm" data-fwd-action="triggerSwap">Swap accumulated balance ${buyback && state.hasPlatformToken ? "→ ETH + platformToken" : "→ ETH"}</button>
         </div>
+        ${buyback && state.hasPlatformToken ? `<p class="admin-empty" style="margin:0 0 10px;">Splits the pulled amount 50/50: half to ETH (using the floor above), half bought back into platformToken and split again into burn/airdrop (using the floor to its right, if entered — otherwise the protocol's own default floor applies).</p>` : ""}
         <div class="admin-action-row">
           <p class="admin-empty" style="margin:0; flex:1;">Pays out ${weiToEtherString(state.claimableEth,6)} claimable ETH to ${feeWalletIsZero ? "(fee wallet not set)" : escapeHtml(fmtAddrSafe(state.feeWallet))} right now.</p>
           <button class="btn btn-ghost btn-sm" data-fwd-action="claimRewards" ${state.claimableEth>0n ? "" : "disabled"}>Claim ETH</button>
@@ -9772,6 +9882,17 @@
           <div class="field"><label>Max swap per call (whole tokens, 0 = uncapped)</label><input type="number" step="any" min="0" id="admin_fwd_newMax" placeholder="0"></div>
           <button class="btn btn-ghost btn-sm" data-fwd-action="setMaxSwapAmount">Update</button>
         </div>` : `<p class="admin-empty" style="margin:0 0 10px;">Enter a launched token's address above and click Load to see its accumulated balance and act on it.</p>`}
+
+        ${buyback ? `
+        <div class="admin-section-label">Airdrop rounds · accumulate-and-batch-trigger, permissionless</div>
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">${state.roundActive ? "A round is already active — process it below." : "Starts a new round from whatever's currently pending."}</p>
+          <button class="btn btn-ghost btn-sm" data-fwd-action="startAirdropRound" ${state.roundActive ? "disabled" : ""}>Start round</button>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Holders to process this batch</label><input type="number" step="1" min="1" id="admin_fwd_batchSize" placeholder="50"></div>
+          <button class="btn btn-ghost btn-sm" data-fwd-action="processAirdropBatch" ${state.roundActive ? "" : "disabled"}>Process batch</button>
+        </div>` : ""}
 
         <div class="admin-section-label">Ownership · Ownable2Step</div>
         <p class="admin-empty" style="margin-bottom:10px;">Transferring ownership doesn't take effect until the new address itself calls acceptOwnership() — the current owner keeps full control until then, so a mistyped address can't lock this contract out.</p>
@@ -9824,8 +9945,36 @@
         const v = field("minEthOut").value;
         const minOut = v==="" ? 0n : parseEtherToWei(v);
         if(v!=="" && (isNaN(parseFloat(v)) || parseFloat(v)<0)) throw new Error("Enter a valid minimum amount, or leave blank for 0.");
-        data = encodeAddressUint256Calldata(FWD_TRIGGER_SWAP_SELECTOR, fwdLookupToken, minOut);
-        successMsg = "Fee-wallet swap triggered.";
+        // The min-platformToken-out field only renders once the buyback leg
+        // is supported AND a platform token is configured (see
+        // feeWalletDistributorPanelHTML) — if it's present and the admin
+        // filled it in, use the 3-argument overload so that floor actually
+        // applies to the buyback leg; otherwise keep using the original
+        // 2-argument selector so this keeps working unmodified against an
+        // older deployed contract that predates the buyback leg entirely.
+        const minTokensField = field("minPlatformTokensOut");
+        const tv = minTokensField ? minTokensField.value : "";
+        if(tv!=="" && (isNaN(parseFloat(tv)) || parseFloat(tv)<0)) throw new Error("Enter a valid minimum platformToken amount, or leave blank.");
+        if(minTokensField && tv!==""){
+          data = "0x"+FWD_TRIGGER_SWAP_WITH_MIN_TOKENS_OUT_SELECTOR+encodeAddressParam(fwdLookupToken)+toHex32(minOut)+toHex32(parseEtherToWei(tv));
+          successMsg = "Fee-wallet swap triggered (ETH leg + platformToken buyback leg).";
+        } else {
+          data = encodeAddressUint256Calldata(FWD_TRIGGER_SWAP_SELECTOR, fwdLookupToken, minOut);
+          successMsg = "Fee-wallet swap triggered.";
+        }
+      } else if(action==="setPlatformToken"){
+        const v = field("platformToken").value.trim();
+        if(v && !isAddressLike(v)) throw new Error("Platform token must be a valid address, or left blank to unset it.");
+        data = encodeAddressCalldata(PRD_SET_PLATFORM_TOKEN_SELECTOR, v || ZERO_ADDRESS);
+        successMsg = v ? "Platform token updated — the buyback leg is now active for future swaps." : "Platform token cleared — 100% of every future pull goes to ETH until a new one is set.";
+      } else if(action==="startAirdropRound"){
+        data = "0x"+PRD_START_AIRDROP_ROUND_SELECTOR;
+        successMsg = "Airdrop round started.";
+      } else if(action==="processAirdropBatch"){
+        const n = parseInt(field("batchSize").value, 10);
+        if(isNaN(n) || n<1) throw new Error("Enter how many holders to process this batch (at least 1).");
+        data = encodeUint256Calldata(PRD_PROCESS_AIRDROP_BATCH_SELECTOR, BigInt(n));
+        successMsg = "Airdrop batch processed.";
       } else if(action==="claimRewards"){
         if(!fwdLookupToken) throw new Error("Load a token first.");
         data = "0x"+FWD_CLAIM_REWARDS_SELECTOR+encodeAddressParam(fwdLookupToken);
@@ -10071,25 +10220,38 @@
       : "";
     const hasLocalOverrides = !!loadLocalConfigOverrides();
 
+    // One compact row per key: label (+ a hover "?" carrying the full
+    // explanation that used to be a permanent paragraph) and the two
+    // network fields side by side. Cuts this panel from ~8 stacked
+    // label+paragraph+field-grid blocks down to a single small table —
+    // same fields, same validation, same help text (now on hover),
+    // dramatically less vertical space.
     const rows = CONFIG_KEYS.map(k=>{
       const isUrlField = k==="relayerApiUrl";
-      const placeholder = isUrlField ? "https://… (unset — falls back to creator-pays-gas)" : "0x… (unset)";
-      const demoLabel = isUrlField ? "Testnet relayer URL" : "Testnet address";
-      const liveLabel = isUrlField ? "Mainnet relayer URL" : "Mainnet address";
+      const placeholder = isUrlField ? "https://… (unset)" : "0x… (unset)";
+      const demoLabel = isUrlField ? "Testnet URL" : "Testnet address";
+      const liveLabel = isUrlField ? "Mainnet URL" : "Mainnet address";
+      const help = escapeHtml(CONFIG_HELP[k]);
       return `
-        <div class="admin-section-label">${escapeHtml(CONFIG_LABELS[k])}</div>
-        <p class="admin-empty" style="margin-bottom:10px;">${escapeHtml(CONFIG_HELP[k])}</p>
-        <div class="field-grid" style="margin-bottom:20px;">
-          <div class="field"><label>${escapeHtml(demoLabel)}</label><input type="text" id="${configFieldId(k,'demo')}" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(platformConfig[k].demo || "")}"></div>
-          <div class="field"><label>${escapeHtml(liveLabel)}</label><input type="text" id="${configFieldId(k,'live')}" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(platformConfig[k].live || "")}"></div>
+        <div class="admin-cfg-row">
+          <div class="admin-cfg-label">${escapeHtml(CONFIG_LABELS[k])}<span class="info-dot" title="${help}" tabindex="0">?</span></div>
+          <div class="field"><input type="text" id="${configFieldId(k,'demo')}" aria-label="${escapeHtml(CONFIG_LABELS[k])} — ${escapeHtml(demoLabel)}" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(platformConfig[k].demo || "")}" title="${help}"></div>
+          <div class="field"><input type="text" id="${configFieldId(k,'live')}" aria-label="${escapeHtml(CONFIG_LABELS[k])} — ${escapeHtml(liveLabel)}" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(platformConfig[k].live || "")}" title="${help}"></div>
         </div>`;
     }).join("");
 
     return `
       <div class="panel admin-panel" style="grid-column:1 / -1;">
         <div class="admin-panel-head"><h3>Platform contracts</h3></div>
-        <p class="admin-empty">${escapeHtml(statusLine)}${serverStatusLine}${hasLocalOverrides ? " This browser also has saved local overrides layered on top of all of that — they win over everything else, and are what every field below, and every panel on this page, is currently showing." : ""}</p>
-        ${rows}
+        <p class="admin-empty">${escapeHtml(statusLine)}${serverStatusLine}${hasLocalOverrides ? " This browser also has saved local overrides layered on top of all of that — they win over everything else, and are what every field below, and every panel on this page, is currently showing." : ""} Hover the <span class="info-dot" style="display:inline-flex; vertical-align:middle;">?</span> next to any row for what it does.</p>
+        <div class="admin-cfg-table">
+          <div class="admin-cfg-row admin-cfg-head">
+            <div></div>
+            <div class="admin-cfg-col-head">Testnet</div>
+            <div class="admin-cfg-col-head">Mainnet</div>
+          </div>
+          ${rows}
+        </div>
         <div class="admin-action-row">
           <button class="btn btn-primary btn-sm" data-cfg-action="savePlatformWide">Save (all visitors)</button>
           <button class="btn btn-ghost btn-sm" data-cfg-action="save">Save (this browser)</button>
