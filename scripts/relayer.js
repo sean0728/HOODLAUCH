@@ -103,6 +103,7 @@ const fs = require("fs"); // used only by the temporary /debug/data-dirs route b
 const express = require("express");
 const hre = require("hardhat");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
+const { recordDeployment, readCurrentDeployment } = require("../lib/deploymentStore");
 const { recordLaunch, updateLaunch, deleteLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = require("../lib/launchStore");
 const {
   getVoucher,
@@ -114,12 +115,14 @@ const {
   setActiveNetwork,
   getPlatformConfig,
   setPlatformConfig,
+  getRelayerSettings,
+  setRelayerSettings,
   readPendingDeposits,
   upsertPendingDeposit,
   removePendingDeposit,
   RELAYER_DATA_ROOT,
 } = require("../lib/relayerStore");
-const { verifyAdminSignature, isFreshTimestamp } = require("../lib/adminAuth");
+const { ADMIN_WALLET, verifyAdminSignature, isFreshTimestamp } = require("../lib/adminAuth");
 const { verifySignatureFrom } = require("../lib/signedMessage");
 const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
 const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/tokenMetadata");
@@ -221,27 +224,11 @@ const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5
 // own wallet). A much longer default interval than the deposit poll above is
 // intentional — unlike a pending gasless launch, an unconverted reward
 // balance costs nothing by sitting a while longer, and sweeping every
-// launched token on every tick would waste gas for no benefit.
+// launched token on every tick would waste gas for no benefit. Its own
+// poll interval/slippage/claim-min-wei knobs now live in relayerSettings
+// below (formerly frozen consts here) so an admin can retune them without a
+// restart — see the big comment on RELAYER_SETTINGS_DEFAULTS.
 const FEE_WALLET_DISTRIBUTOR_ADDRESS = process.env.FEE_WALLET_DISTRIBUTOR_ADDRESS || null;
-const FEE_WALLET_POLL_INTERVAL_MS = Number(process.env.FEE_WALLET_POLL_INTERVAL_MS || 5 * 60_000);
-// Slippage tolerance applied to quoteSwapEthOut's prediction before it's
-// used as triggerFeeWalletSwap's real minEthOut floor (see
-// sweepFeeWalletRewardsOnce below) — same 3% default and same reasoning as
-// PLATFORM_BUYBACK_SLIPPAGE_BPS: this is an unattended scheduled sweep, not
-// a one-off UI click a person is watching, so it needs more room than a
-// UI's tighter 2% to avoid spurious reverts from ordinary price drift
-// between the quote and the mined tx, while still giving a sandwiching bot
-// a bounded, small amount of value to extract instead of none at all (what
-// minEthOut=0 handed it before this fix).
-const FEE_WALLET_SLIPPAGE_BPS = BigInt(process.env.FEE_WALLET_SLIPPAGE_BPS || 300); // 3%
-// Minimum FeeWalletDistributor.claimableEth[token] balance worth spending a
-// transaction's gas on claimFeeWalletRewards for — see
-// sweepFeeWalletRewardsOnce's tryClaim below. Defaults to 0 (claim anything
-// nonzero), the same "permissive by default, owner can tighten later"
-// convention as FeeWalletDistributor's own swapThreshold/maxSwapAmount
-// on-chain defaults. Raise this (in wei) if a low-traffic token's claimable
-// balance is small enough that the claim tx's own gas cost would exceed it.
-const FEE_WALLET_CLAIM_MIN_WEI = BigInt(process.env.FEE_WALLET_CLAIM_MIN_WEI || 0);
 
 // Same optionality as FEE_WALLET_* above — leaving
 // CREATOR_REWARDS_DISTRIBUTOR_ADDRESS unset means this service does nothing
@@ -252,15 +239,6 @@ const FEE_WALLET_CLAIM_MIN_WEI = BigInt(process.env.FEE_WALLET_CLAIM_MIN_WEI || 
 // cadence as the fee-wallet sweep, for the identical reason: an unconverted
 // creator-reward balance costs nothing by sitting a while longer.
 const CREATOR_REWARDS_DISTRIBUTOR_ADDRESS = process.env.CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null;
-const CREATOR_REWARDS_POLL_INTERVAL_MS = Number(process.env.CREATOR_REWARDS_POLL_INTERVAL_MS || 5 * 60_000);
-// Same reasoning and default as FEE_WALLET_SLIPPAGE_BPS above, applied to
-// triggerCreatorSwap's own minEthOut floor instead of
-// triggerFeeWalletSwap's.
-const CREATOR_REWARDS_SLIPPAGE_BPS = BigInt(process.env.CREATOR_REWARDS_SLIPPAGE_BPS || 300); // 3%
-// Same reasoning and default as FEE_WALLET_CLAIM_MIN_WEI above, applied to
-// CreatorRewardsDistributor.claimableEth[token] instead of
-// FeeWalletDistributor's.
-const CREATOR_REWARDS_CLAIM_MIN_WEI = BigInt(process.env.CREATOR_REWARDS_CLAIM_MIN_WEI || 0);
 
 // Same optionality as FEE_WALLET_*/CREATOR_REWARDS_* above — leaving
 // PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS unset means this service does
@@ -271,27 +249,593 @@ const CREATOR_REWARDS_CLAIM_MIN_WEI = BigInt(process.env.CREATOR_REWARDS_CLAIM_M
 // un-started airdrop round costs nothing by sitting a while longer, same
 // reasoning as the other two sweeps.
 const PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS = process.env.PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS || null;
-const PLATFORM_REWARDS_POLL_INTERVAL_MS = Number(process.env.PLATFORM_REWARDS_POLL_INTERVAL_MS || 5 * 60_000);
-// Slippage tolerance applied to both triggerEthBuyback's and
-// triggerTokenBuyback's own live pool quote before it's sent as minTokensOut
-// — see quoteAmountsOut/sweepPlatformEthBuybackOnce below. Left as its own,
-// slightly looser default than index.html's CREATOR_SWAP_DEFAULT_SLIPPAGE_BPS
-// (2%) since a buyback sweep runs unattended on a fixed schedule rather than
-// firing from a single click a person is watching — tolerating a bit more
-// drift here means fewer spurious reverts from ordinary price movement
-// between the quote and the transaction landing, at the cost of a slightly
-// looser worst-case floor.
-const PLATFORM_BUYBACK_SLIPPAGE_BPS = BigInt(process.env.PLATFORM_BUYBACK_SLIPPAGE_BPS || 300); // 3%
-// How many platformToken holders processAirdropBatch sweeps per call, and
-// how many such calls platformRewardsPollLoop will make in a single tick
-// before yielding to the next scheduled tick — a safety bound so a
-// platformToken with a very large holder set can't turn one tick into an
-// unbounded loop of transactions. A round that isn't finished within one
-// tick's batch budget simply continues on the next tick (roundActive stays
-// true and roundCursor stays wherever it left off), never restarting from
-// scratch.
-const PLATFORM_AIRDROP_BATCH_SIZE = Number(process.env.PLATFORM_AIRDROP_BATCH_SIZE || 200);
-const PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK = Number(process.env.PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK || 10);
+
+// ---------------------------------------------------------------------
+// Relayer runtime settings — poll interval / slippage / claim-min-wei /
+// airdrop-batch knobs for the three reward auto-sweep loops above. These
+// used to be frozen `const`s read from process.env exactly once at process
+// start (the only way to change one was to edit .env and restart the whole
+// service). They're now a single mutable object, seeded from those same env
+// vars as defaults (RELAYER_SETTINGS_DEFAULTS, unchanged env var names/
+// defaults from before this feature), then overlaid in main() — once the
+// storage backend is ready, before any poll loop is started — with whatever
+// an admin has saved via POST /relayer-settings (see that route and
+// lib/relayerStore.js's getRelayerSettings/setRelayerSettings). Every poll
+// loop below reads its knobs off THIS object by property access on every
+// tick (never a value captured once into a local), so a change saved
+// through the admin panel takes effect on the very next tick — no restart
+// needed, which is the entire point of this feature.
+//
+// Slippage/claim-min-wei reasoning (unchanged from before this refactor):
+// the ~3% slippage default is deliberately looser than a UI click a person
+// is watching (e.g. index.html's own 2% CREATOR_SWAP_DEFAULT_SLIPPAGE_BPS)
+// since this is an unattended scheduled sweep — tolerating a bit more drift
+// means fewer spurious reverts from ordinary price movement between the
+// quote and the transaction landing, at the cost of a slightly looser
+// worst-case floor against sandwiching. Claim-min-wei defaults to 0 (claim
+// anything nonzero) — the same permissive-by-default convention the
+// on-chain contracts themselves use — and exists purely so a low-traffic
+// token's claimable balance too small to be worth its own gas can be
+// skipped by raising this. Airdrop batch size/max-batches-per-tick bound
+// how many platformToken holders one tick's processAirdropBatch calls can
+// touch, so a very large holder set can't turn one tick into an unbounded
+// run of transactions — an unfinished round simply continues on the next
+// tick (roundActive/roundCursor persist on-chain).
+const RELAYER_SETTINGS_DEFAULTS = {
+  feeWalletPollIntervalMs: Number(process.env.FEE_WALLET_POLL_INTERVAL_MS || 5 * 60_000),
+  feeWalletSlippageBps: Number(process.env.FEE_WALLET_SLIPPAGE_BPS || 300), // 3%
+  feeWalletClaimMinWei: String(process.env.FEE_WALLET_CLAIM_MIN_WEI || 0),
+  creatorRewardsPollIntervalMs: Number(process.env.CREATOR_REWARDS_POLL_INTERVAL_MS || 5 * 60_000),
+  creatorRewardsSlippageBps: Number(process.env.CREATOR_REWARDS_SLIPPAGE_BPS || 300), // 3%
+  creatorRewardsClaimMinWei: String(process.env.CREATOR_REWARDS_CLAIM_MIN_WEI || 0),
+  platformRewardsPollIntervalMs: Number(process.env.PLATFORM_REWARDS_POLL_INTERVAL_MS || 5 * 60_000),
+  platformBuybackSlippageBps: Number(process.env.PLATFORM_BUYBACK_SLIPPAGE_BPS || 300), // 3%
+  platformAirdropBatchSize: Number(process.env.PLATFORM_AIRDROP_BATCH_SIZE || 200),
+  platformAirdropMaxBatchesPerTick: Number(process.env.PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK || 10),
+};
+// Hard bounds enforced on every one of the fields above, both when loading a
+// persisted override at startup and on every POST /relayer-settings save —
+// so a stray admin typo (or a corrupted settings file) can't turn a
+// 5-minute sweep into a runaway sub-second loop, or a claim-min so high
+// nothing is ever swept. See clampRelayerSetting/validateRelayerSettingsPatch.
+const RELAYER_SETTINGS_BOUNDS = {
+  feeWalletPollIntervalMs: { min: 15_000, max: 24 * 60 * 60_000 }, // 15s .. 24h
+  feeWalletSlippageBps: { min: 0, max: 2000 }, // 0%..20%
+  feeWalletClaimMinWei: { min: 0n },
+  creatorRewardsPollIntervalMs: { min: 15_000, max: 24 * 60 * 60_000 },
+  creatorRewardsSlippageBps: { min: 0, max: 2000 },
+  creatorRewardsClaimMinWei: { min: 0n },
+  platformRewardsPollIntervalMs: { min: 15_000, max: 24 * 60 * 60_000 },
+  platformBuybackSlippageBps: { min: 0, max: 2000 },
+  platformAirdropBatchSize: { min: 1, max: 2000 },
+  platformAirdropMaxBatchesPerTick: { min: 1, max: 200 },
+};
+// The live, mutable object every poll loop actually reads — seeded from
+// defaults here; main() overlays any persisted override once the storage
+// backend is confirmed ready, before any poll loop's first tick. The two
+// *ClaimMinWei fields are kept as decimal-string wei amounts (not BigInt)
+// so this object round-trips cleanly through JSON — into the settings
+// file/DB row and into a sendJson response body — with BigInt math done
+// only at the point of use via the *Big() helpers below.
+const relayerSettings = { ...RELAYER_SETTINGS_DEFAULTS };
+
+function feeWalletClaimMinWeiBig() { return BigInt(relayerSettings.feeWalletClaimMinWei); }
+function creatorRewardsClaimMinWeiBig() { return BigInt(relayerSettings.creatorRewardsClaimMinWei); }
+function feeWalletSlippageBpsBig() { return BigInt(relayerSettings.feeWalletSlippageBps); }
+function creatorRewardsSlippageBpsBig() { return BigInt(relayerSettings.creatorRewardsSlippageBps); }
+function platformBuybackSlippageBpsBig() { return BigInt(relayerSettings.platformBuybackSlippageBps); }
+
+// Clamps one incoming raw value into RELAYER_SETTINGS_BOUNDS[key], returning
+// null (never a silently-substituted default) when the raw value can't even
+// be parsed as a number (or a non-negative integer for a wei field) —
+// callers treat null as "reject this field" so a typo can't quietly become
+// some unrelated clamped value.
+function clampRelayerSetting(key, rawValue) {
+  const bounds = RELAYER_SETTINGS_BOUNDS[key];
+  if (!bounds) return null;
+  if (key === "feeWalletClaimMinWei" || key === "creatorRewardsClaimMinWei") {
+    let big;
+    try {
+      big = BigInt(rawValue);
+    } catch (err) {
+      return null;
+    }
+    if (big < 0n) return null;
+    return big.toString();
+  }
+  const n = Number(rawValue);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(bounds.max, Math.max(bounds.min, Math.round(n)));
+}
+
+// Validates + clamps a partial patch object (whatever POST /relayer-settings'
+// own `settings` body field contains, or a persisted settings file/row read
+// back at startup) against RELAYER_SETTINGS_BOUNDS. Unknown keys are
+// silently ignored (forward-compatible with a settings file saved by a
+// newer/older version of this file); a present-but-unparseable key is
+// dropped and reported back in `rejected` rather than crashing the request
+// or silently keeping a stale value. Returns { patch, rejected }.
+function validateRelayerSettingsPatch(input) {
+  const patch = {};
+  const rejected = [];
+  if (!input || typeof input !== "object") return { patch, rejected };
+  for (const key of Object.keys(RELAYER_SETTINGS_BOUNDS)) {
+    if (!(key in input)) continue;
+    const clamped = clampRelayerSetting(key, input[key]);
+    if (clamped === null) {
+      rejected.push(key);
+      continue;
+    }
+    patch[key] = clamped;
+  }
+  return { patch, rejected };
+}
+
+// The exact string an admin's wallet signs (via personal_sign) to authorize
+// a relayer-settings update — same anti-replay shape as
+// lib/platformConfig.js's platformConfigMessage (the message embeds the
+// full settings object itself, not just a timestamp, so a signature can't
+// be replayed to save different values than the ones actually reviewed and
+// signed). MUST stay byte-identical to index.html's own copy of this
+// function, same "kept in sync by hand" convention documented on
+// lib/adminAuth.js/lib/platformConfig.js — fixed key order
+// (RELAYER_SETTINGS_BOUNDS' own insertion order) and every value coerced
+// through String() so neither side's JSON.stringify can disagree over a
+// number vs. numeric-string representation.
+function canonicalizeRelayerSettingsForMessage(settings) {
+  const out = {};
+  for (const key of Object.keys(RELAYER_SETTINGS_BOUNDS)) {
+    out[key] = settings && settings[key] !== undefined && settings[key] !== null ? String(settings[key]) : null;
+  }
+  return out;
+}
+function relayerSettingsMessage(settings, timestamp) {
+  return `Hood Launch admin: update relayer settings to ${JSON.stringify(canonicalizeRelayerSettingsForMessage(settings))} at ${timestamp}`;
+}
+
+// ---------------------------------------------------------------------
+// Contract deployment (POST /deploy below) — lets an admin run the
+// equivalent of `npx hardhat run scripts/deploy.js` from the browser
+// instead of a terminal, per the "avoid command line" goal this feature was
+// built for. This mirrors scripts/deploy.js's own main() as closely as
+// possible: same contracts, same deployment order, same constructor-arg
+// shapes, same optional-bundle env-var-driven-defaults philosophy (a field
+// left out of the request body behaves exactly like the matching env var
+// being unset) — just driven by an admin-signed HTTP request instead of
+// process.env, and using THIS service's own relayerWallet as the deploying
+// account instead of whatever DEPLOYER_PRIVATE_KEY/getSigners()[0]
+// scripts/deploy.js would use when run directly. See runFullStackDeploy()
+// and the POST /deploy route (registered in main(), since it needs
+// relayerWallet) for the actual logic.
+//
+// PlatformTaxDistributor (see scripts/deploy.js's own big comment on it) is
+// deliberately NOT included here: it's a standalone contract that is never
+// wired into any HoodLaunch factory, and — per that same comment — wiring
+// its address into the front end requires hand-editing index.html's own
+// PLATFORM_TAX_DISTRIBUTOR constant, something no admin-panel action can do
+// safely from a running server. It stays a command-line-only, deliberately
+// manual step; deploy it with `npx hardhat run scripts/deploy.js` and
+// DEPLOY_PLATFORM_TAX_DISTRIBUTOR=true exactly as before.
+//
+// Ownership handoff: every Ownable2Step contract this deploys ends the run
+// owned by relayerWallet (the deploying account) — required so the relayer
+// itself can still make the handful of owner-only setup calls deploy.js
+// itself makes right after deploying (wiring rewardsDistributor/
+// creatorRewardsDistributor/feeWalletDistributor onto each factory,
+// PlatformRewardsDistributor.setPlatformToken, etc.) — and only THEN calls
+// transferOwnership(ADMIN_WALLET) on each one it just deployed (never on a
+// reused/already-existing address it didn't itself deploy). That sets each
+// contract's pendingOwner to the admin wallet while leaving owner as
+// relayerWallet until the admin's own browser wallet calls acceptOwnership()
+// — exactly the existing "Accept ownership" button already in the Contract
+// admin grid (see lib/adminAuth.js/index.html's own transferOwnership/
+// acceptOwnership selectors), which needs no new code to handle a
+// freshly-deployed contract once its address is saved into the admin panel.
+const DEPLOY_KNOWN_ROUTER_ADDRESSES = {
+  robinhoodMainnet: "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba", // UniswapV2Router02 — see scripts/deploy.js's own comment for how this was confirmed
+};
+const DEPLOY_KNOWN_FACTORY_ADDRESSES = {
+  robinhoodMainnet: "0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f", // UniswapV2Factory — informational sanity-check only
+};
+const DEPLOY_KNOWN_PRICE_FEED_ADDRESSES = {
+  robinhoodMainnet: "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9", // Chainlink ETH/USD, Standard Proxy
+};
+const DEPLOY_FEE_USD = 50;
+const DEPLOY_LAUNCH_FEE_USD = 100;
+const DEPLOY_CURVE_LAUNCH_FEE_USD = 25;
+
+async function fetchEthUsdPriceForDeploy() {
+  try {
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd");
+    if (!res.ok) return null;
+    const data = await res.json();
+    const price = data && data.ethereum && data.ethereum.usd;
+    return typeof price === "number" && price > 0 ? price : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// Generic (schema-independent) canonicalization for the admin-signed
+// message below — deploy config has many optional/nested fields, too many
+// to hand-maintain a fixed CONFIG_KEYS-style list the way platformConfig.js
+// does without it drifting the moment either side adds a field. Sorting
+// keys recursively is instead the ENTIRE contract between client and
+// server: both sides just need this exact function, not a shared schema.
+function sortObjectKeysDeep(value) {
+  if (Array.isArray(value)) return value.map(sortObjectKeysDeep);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value).sort()) out[key] = sortObjectKeysDeep(value[key]);
+    return out;
+  }
+  return value;
+}
+// MUST stay byte-identical to index.html's own copy (same convention as
+// platformConfigMessage/relayerSettingsMessage above).
+function deployMessage(deployConfig, timestamp) {
+  return `Hood Launch admin: deploy contracts with config ${JSON.stringify(sortObjectKeysDeep(deployConfig || {}))} at ${timestamp}`;
+}
+
+// Validates an address field from the deploy request body — returns the
+// checksummed-or-as-given address string, or null if unset, or throws a
+// descriptive Error if it's present but not a valid address (the route
+// handler turns that into a 400, never a 500).
+function parseOptionalAddress(value, fieldName) {
+  if (value === undefined || value === null || value === "") return null;
+  if (!hre.ethers.isAddress(value)) throw new Error(`${fieldName} must be a valid address`);
+  return value;
+}
+
+function parseOptionalWei(value, fieldName) {
+  if (value === undefined || value === null || value === "") return null;
+  try {
+    const big = BigInt(value);
+    if (big < 0n) throw new Error("negative");
+    return big;
+  } catch (err) {
+    throw new Error(`${fieldName} must be a non-negative integer (wei)`);
+  }
+}
+
+// Runs the actual deploy — a near-line-for-line port of scripts/deploy.js's
+// own main() body, with `deployerWallet` (this service's relayerWallet)
+// standing in for that script's `deployer` signer, and every env var
+// replaced by the matching field on `body` (same fallback semantics: a
+// field left unset behaves exactly like the env var being unset). See the
+// big comment above this section for why PlatformTaxDistributor is excluded
+// and how ownership handoff works. Throws on any failure — the route
+// handler is responsible for turning that into a clear error response;
+// nothing here ever silently swallows a failed deployment.
+async function runFullStackDeploy(body, deployerWallet) {
+  const network = hre.network.name;
+  const isLocal = network === "hardhat" || network === "localhost";
+  const deployedFreshOwnable = []; // { label, contract } — transferOwnership(ADMIN_WALLET) target list, filled in as we go
+
+  const feeTreasury = parseOptionalAddress(body.feeTreasuryAddress, "feeTreasuryAddress") || deployerWallet.address;
+  const platformFeeWallet = parseOptionalAddress(body.platformFeeWalletAddress, "platformFeeWalletAddress") || deployerWallet.address;
+
+  let deployFeeWei = parseOptionalWei(body.deployFeeWei, "deployFeeWei");
+  let launchFeeWei = parseOptionalWei(body.launchFeeWei, "launchFeeWei");
+  let curveLaunchFeeWei = parseOptionalWei(body.curveLaunchFeeWei, "curveLaunchFeeWei");
+  if (deployFeeWei == null || launchFeeWei == null || curveLaunchFeeWei == null) {
+    const ethUsdPrice = await fetchEthUsdPriceForDeploy();
+    const priceForConversion = ethUsdPrice != null ? ethUsdPrice : FALLBACK_ETH_USD;
+    if (deployFeeWei == null) deployFeeWei = hre.ethers.parseEther((DEPLOY_FEE_USD / priceForConversion).toFixed(18));
+    if (launchFeeWei == null) launchFeeWei = hre.ethers.parseEther((DEPLOY_LAUNCH_FEE_USD / priceForConversion).toFixed(18));
+    if (curveLaunchFeeWei == null)
+      curveLaunchFeeWei = hre.ethers.parseEther((DEPLOY_CURVE_LAUNCH_FEE_USD / priceForConversion).toFixed(18));
+  }
+  const lpLockDurationSeconds = body.lpLockDurationSeconds ? Number(body.lpLockDurationSeconds) : 15 * 24 * 60 * 60;
+  if (!Number.isFinite(lpLockDurationSeconds) || lpLockDurationSeconds < 0) {
+    throw new Error("lpLockDurationSeconds must be a non-negative number of seconds");
+  }
+
+  let routerAddress = parseOptionalAddress(body.dexRouterAddress, "dexRouterAddress") || DEPLOY_KNOWN_ROUTER_ADDRESSES[network];
+  let priceFeedAddress = parseOptionalAddress(body.priceFeedAddress, "priceFeedAddress") || DEPLOY_KNOWN_PRICE_FEED_ADDRESSES[network];
+  if (!routerAddress) {
+    if (!isLocal) {
+      throw new Error(
+        `dexRouterAddress is required — no confirmed default DEX router exists for network "${network}". ` +
+          "See scripts/deploy.js's KNOWN_ROUTER_ADDRESSES comment for what is and isn't confirmed."
+      );
+    }
+    const MockERC20 = await hre.ethers.getContractFactory("MockERC20", deployerWallet);
+    const mockWeth = await MockERC20.deploy("Mock Wrapped ETH", "mWETH", hre.ethers.parseEther("1000000"));
+    await mockWeth.waitForDeployment();
+    const MockRouter = await hre.ethers.getContractFactory("MockRouter", deployerWallet);
+    const mockRouter = await MockRouter.deploy(await mockWeth.getAddress());
+    await mockRouter.waitForDeployment();
+    routerAddress = await mockRouter.getAddress();
+  }
+  if (!priceFeedAddress) {
+    if (!isLocal) {
+      throw new Error(
+        `priceFeedAddress is required — no confirmed default ETH/USD feed exists for network "${network}". ` +
+          "See scripts/deploy.js's KNOWN_PRICE_FEED_ADDRESSES comment for what is and isn't confirmed."
+      );
+    }
+    const MockAggregatorV3 = await hre.ethers.getContractFactory("MockAggregatorV3", deployerWallet);
+    const mockFeed = await MockAggregatorV3.deploy(8, 3000n * 10n ** 8n);
+    await mockFeed.waitForDeployment();
+    priceFeedAddress = await mockFeed.getAddress();
+  }
+
+  // Same live on-chain sanity checks scripts/deploy.js runs before spending
+  // any real gas — see that script's own comments for exactly what these
+  // catch and why.
+  if (!isLocal) {
+    let onChainFactory;
+    try {
+      const router = new hre.ethers.Contract(routerAddress, ["function factory() view returns (address)"], deployerWallet);
+      onChainFactory = await router.factory();
+    } catch (err) {
+      throw new Error(`dexRouterAddress (${routerAddress}) does not behave like a Uniswap V2 router (${err.message}).`);
+    }
+    const knownFactory = DEPLOY_KNOWN_FACTORY_ADDRESSES[network];
+    if (knownFactory && onChainFactory.toLowerCase() !== knownFactory.toLowerCase()) {
+      throw new Error(
+        `Router at ${routerAddress} reports factory ${onChainFactory}, which does not match the confirmed ` +
+          `Uniswap V2 Factory for ${network} (${knownFactory}). Double-check dexRouterAddress.`
+      );
+    }
+    try {
+      const feed = new hre.ethers.Contract(
+        priceFeedAddress,
+        [
+          "function decimals() view returns (uint8)",
+          "function latestRoundData() view returns (uint80, int256, uint256, uint256, uint80)",
+        ],
+        deployerWallet
+      );
+      await feed.decimals();
+      const [, answer] = await feed.latestRoundData();
+      if (answer <= 0n) throw new Error(`latestRoundData() returned a non-positive answer (${answer})`);
+    } catch (err) {
+      throw new Error(`priceFeedAddress (${priceFeedAddress}) does not behave like a Chainlink price feed (${err.message}).`);
+    }
+  }
+
+  // ---- LaunchedToken / TokenFactory ----
+  const LaunchedToken = await hre.ethers.getContractFactory("LaunchedToken", deployerWallet);
+  const tokenImplementation = await LaunchedToken.deploy();
+  await tokenImplementation.waitForDeployment();
+  const tokenImplementationVerification = await verifyContract(await tokenImplementation.getAddress(), []);
+
+  const LiquidityLocker = await hre.ethers.getContractFactory("LiquidityLocker", deployerWallet);
+  const locker = await LiquidityLocker.deploy();
+  await locker.waitForDeployment();
+  const lockerVerification = await verifyContract(await locker.getAddress(), []);
+
+  const tokenFactoryConstructorArgs = [
+    await tokenImplementation.getAddress(),
+    routerAddress,
+    await locker.getAddress(),
+    deployFeeWei,
+    launchFeeWei,
+    feeTreasury,
+    lpLockDurationSeconds,
+    platformFeeWallet,
+    priceFeedAddress,
+  ];
+  const TokenFactory = await hre.ethers.getContractFactory("TokenFactory", deployerWallet);
+  const factory = await TokenFactory.deploy(...tokenFactoryConstructorArgs);
+  await factory.waitForDeployment();
+  const factoryAddress = await factory.getAddress();
+  await (await locker.setFactory(factoryAddress)).wait();
+  const tokenFactoryVerification = await verifyContract(factoryAddress, tokenFactoryConstructorArgs);
+  deployedFreshOwnable.push({ label: "tokenFactory", contract: factory });
+
+  // ---- CustomToken / CustomTokenFactory ----
+  const CustomToken = await hre.ethers.getContractFactory("CustomToken", deployerWallet);
+  const customTokenImplementation = await CustomToken.deploy();
+  await customTokenImplementation.waitForDeployment();
+  const customTokenImplementationVerification = await verifyContract(await customTokenImplementation.getAddress(), []);
+
+  const customLocker = await LiquidityLocker.deploy();
+  await customLocker.waitForDeployment();
+  const customLockerVerification = await verifyContract(await customLocker.getAddress(), []);
+
+  const customTokenFactoryConstructorArgs = [
+    await customTokenImplementation.getAddress(),
+    routerAddress,
+    await customLocker.getAddress(),
+    deployFeeWei,
+    launchFeeWei,
+    feeTreasury,
+    lpLockDurationSeconds,
+    platformFeeWallet,
+    priceFeedAddress,
+  ];
+  const CustomTokenFactory = await hre.ethers.getContractFactory("CustomTokenFactory", deployerWallet);
+  const customFactory = await CustomTokenFactory.deploy(...customTokenFactoryConstructorArgs);
+  await customFactory.waitForDeployment();
+  const customFactoryAddress = await customFactory.getAddress();
+  await (await customLocker.setFactory(customFactoryAddress)).wait();
+  const customTokenFactoryVerification = await verifyContract(customFactoryAddress, customTokenFactoryConstructorArgs);
+  deployedFreshOwnable.push({ label: "customTokenFactory", contract: customFactory });
+
+  // ---- BondingCurveFactory (Quick Launch, zero-tax) ----
+  const bondingCurveLocker = await LiquidityLocker.deploy();
+  await bondingCurveLocker.waitForDeployment();
+  const bondingCurveLockerVerification = await verifyContract(await bondingCurveLocker.getAddress(), []);
+
+  const bondingCurveFactoryConstructorArgs = [
+    await tokenImplementation.getAddress(),
+    routerAddress,
+    await bondingCurveLocker.getAddress(),
+    curveLaunchFeeWei,
+    feeTreasury,
+    lpLockDurationSeconds,
+    platformFeeWallet,
+    priceFeedAddress,
+  ];
+  const BondingCurveFactory = await hre.ethers.getContractFactory("BondingCurveFactory", deployerWallet);
+  const bondingCurveFactory = await BondingCurveFactory.deploy(...bondingCurveFactoryConstructorArgs);
+  await bondingCurveFactory.waitForDeployment();
+  const bondingCurveFactoryAddress = await bondingCurveFactory.getAddress();
+  await (await bondingCurveLocker.setFactory(bondingCurveFactoryAddress)).wait();
+  const poolSeedTargetWei = parseOptionalWei(body.poolSeedTargetWei, "poolSeedTargetWei");
+  if (poolSeedTargetWei != null) await (await bondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei)).wait();
+  const bondingCurveFactoryVerification = await verifyContract(bondingCurveFactoryAddress, bondingCurveFactoryConstructorArgs);
+  deployedFreshOwnable.push({ label: "bondingCurveFactory", contract: bondingCurveFactory });
+
+  // ---- CustomBondingCurveFactory (Quick Launch, custom tax) ----
+  const customBondingCurveLocker = await LiquidityLocker.deploy();
+  await customBondingCurveLocker.waitForDeployment();
+  const customBondingCurveLockerVerification = await verifyContract(await customBondingCurveLocker.getAddress(), []);
+
+  const customBondingCurveFactoryConstructorArgs = [
+    await customTokenImplementation.getAddress(),
+    routerAddress,
+    await customBondingCurveLocker.getAddress(),
+    curveLaunchFeeWei,
+    feeTreasury,
+    lpLockDurationSeconds,
+    platformFeeWallet,
+    priceFeedAddress,
+  ];
+  const CustomBondingCurveFactory = await hre.ethers.getContractFactory("CustomBondingCurveFactory", deployerWallet);
+  const customBondingCurveFactory = await CustomBondingCurveFactory.deploy(...customBondingCurveFactoryConstructorArgs);
+  await customBondingCurveFactory.waitForDeployment();
+  const customBondingCurveFactoryAddress = await customBondingCurveFactory.getAddress();
+  await (await customBondingCurveLocker.setFactory(customBondingCurveFactoryAddress)).wait();
+  if (poolSeedTargetWei != null) await (await customBondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei)).wait();
+  const customBondingCurveFactoryVerification = await verifyContract(
+    customBondingCurveFactoryAddress,
+    customBondingCurveFactoryConstructorArgs
+  );
+  deployedFreshOwnable.push({ label: "customBondingCurveFactory", contract: customBondingCurveFactory });
+
+  // ---- Platform rewards (optional) ----
+  let rewardsDistributorAddress = parseOptionalAddress(body.rewardsDistributorAddress, "rewardsDistributorAddress");
+  let platformTokenAddress = parseOptionalAddress(body.platformTokenAddress, "platformTokenAddress");
+  let platformTokenDeployed = false;
+  if (!rewardsDistributorAddress && body.deployPlatformToken) {
+    if (!platformTokenAddress) {
+      const platformTokenName = body.platformTokenName || "Hood Launch";
+      const platformTokenSymbol = body.platformTokenSymbol || "HOOD";
+      const platformTokenSupply = hre.ethers.parseEther(String(body.platformTokenSupply || "1000000000"));
+      const platformTokenInitialHolder = parseOptionalAddress(body.platformTokenInitialHolder, "platformTokenInitialHolder") || deployerWallet.address;
+      const PlatformToken = await hre.ethers.getContractFactory("PlatformToken", deployerWallet);
+      const platformToken = await PlatformToken.deploy(platformTokenName, platformTokenSymbol, platformTokenSupply, platformTokenInitialHolder);
+      await platformToken.waitForDeployment();
+      platformTokenAddress = await platformToken.getAddress();
+      platformTokenDeployed = true;
+    }
+    // Owner is THIS service's own wallet, not ADMIN_WALLET directly — so the
+    // very next line (setPlatformToken, an onlyOwner call) can still
+    // succeed. Ownership is proposed to ADMIN_WALLET only once, at the very
+    // end of this function, after every owner-only setup call is done. See
+    // the big comment above this function for why.
+    const PlatformRewardsDistributor = await hre.ethers.getContractFactory("PlatformRewardsDistributor", deployerWallet);
+    const distributor = await PlatformRewardsDistributor.deploy(routerAddress, deployerWallet.address);
+    await distributor.waitForDeployment();
+    rewardsDistributorAddress = await distributor.getAddress();
+    await (await distributor.setPlatformToken(platformTokenAddress)).wait();
+    deployedFreshOwnable.push({ label: "platformRewardsDistributor", contract: distributor });
+  }
+  if (rewardsDistributorAddress) {
+    await (await factory.setRewardsDistributor(rewardsDistributorAddress)).wait();
+    await (await customFactory.setRewardsDistributor(rewardsDistributorAddress)).wait();
+    await (await bondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress)).wait();
+    await (await customBondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress)).wait();
+  }
+
+  // ---- Creator rewards (optional) ----
+  let creatorRewardsDistributorAddress = parseOptionalAddress(body.creatorRewardsDistributorAddress, "creatorRewardsDistributorAddress");
+  if (!creatorRewardsDistributorAddress && body.deployCreatorRewards) {
+    const CreatorRewardsDistributor = await hre.ethers.getContractFactory("CreatorRewardsDistributor", deployerWallet);
+    const creatorDistributor = await CreatorRewardsDistributor.deploy(routerAddress, deployerWallet.address);
+    await creatorDistributor.waitForDeployment();
+    creatorRewardsDistributorAddress = await creatorDistributor.getAddress();
+    deployedFreshOwnable.push({ label: "creatorRewardsDistributor", contract: creatorDistributor });
+  }
+  if (creatorRewardsDistributorAddress) {
+    await (await factory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress)).wait();
+    await (await customFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress)).wait();
+    await (await bondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress)).wait();
+    await (await customBondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress)).wait();
+  }
+
+  // ---- Fee-wallet distributor (optional) ----
+  let feeWalletDistributorAddress = parseOptionalAddress(body.feeWalletDistributorAddress, "feeWalletDistributorAddress");
+  if (!feeWalletDistributorAddress && body.deployFeeWalletDistributor) {
+    const feeWalletRecipient = parseOptionalAddress(body.feeWalletAddress, "feeWalletAddress") || platformFeeWallet;
+    const FeeWalletDistributor = await hre.ethers.getContractFactory("FeeWalletDistributor", deployerWallet);
+    const feeWalletDistributorContract = await FeeWalletDistributor.deploy(routerAddress, deployerWallet.address, feeWalletRecipient);
+    await feeWalletDistributorContract.waitForDeployment();
+    feeWalletDistributorAddress = await feeWalletDistributorContract.getAddress();
+    deployedFreshOwnable.push({ label: "feeWalletDistributor", contract: feeWalletDistributorContract });
+  }
+  if (feeWalletDistributorAddress) {
+    await (await factory.setFeeWalletDistributor(feeWalletDistributorAddress)).wait();
+    await (await customFactory.setFeeWalletDistributor(feeWalletDistributorAddress)).wait();
+    await (await bondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress)).wait();
+    await (await customBondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress)).wait();
+  }
+
+  // ---- Ownership handoff — the very last step, after every owner-only
+  // setup call above has already gone through as relayerWallet. Only
+  // contracts THIS run actually deployed are touched; a reused/
+  // already-existing address someone passed in via *Address is left alone
+  // (this service was never necessarily its owner in the first place).
+  const ownershipProposals = [];
+  for (const { label, contract } of deployedFreshOwnable) {
+    const address = await contract.getAddress();
+    try {
+      await (await contract.transferOwnership(ADMIN_WALLET)).wait();
+      ownershipProposals.push({ label, address, proposedTo: ADMIN_WALLET, ok: true });
+    } catch (err) {
+      // Never let a failed handoff undo or hide the deployment itself — the
+      // contract is real and already recorded; the admin can always call
+      // transferOwnership manually later from the Contract admin grid.
+      ownershipProposals.push({ label, address, proposedTo: ADMIN_WALLET, ok: false, error: err.message });
+    }
+  }
+
+  const deploymentSummary = {
+    deployedBy: deployerWallet.address,
+    tokenImplementation: await tokenImplementation.getAddress(),
+    tokenImplementationVerified: tokenImplementationVerification.verified,
+    liquidityLocker: await locker.getAddress(),
+    liquidityLockerVerified: lockerVerification.verified,
+    tokenFactory: factoryAddress,
+    tokenFactoryVerified: tokenFactoryVerification.verified,
+    customTokenImplementation: await customTokenImplementation.getAddress(),
+    customTokenImplementationVerified: customTokenImplementationVerification.verified,
+    customLiquidityLocker: await customLocker.getAddress(),
+    customLiquidityLockerVerified: customLockerVerification.verified,
+    customTokenFactory: customFactoryAddress,
+    customTokenFactoryVerified: customTokenFactoryVerification.verified,
+    bondingCurveLiquidityLocker: await bondingCurveLocker.getAddress(),
+    bondingCurveLiquidityLockerVerified: bondingCurveLockerVerification.verified,
+    bondingCurveFactory: bondingCurveFactoryAddress,
+    bondingCurveFactoryVerified: bondingCurveFactoryVerification.verified,
+    customBondingCurveLiquidityLocker: await customBondingCurveLocker.getAddress(),
+    customBondingCurveLiquidityLockerVerified: customBondingCurveLockerVerification.verified,
+    customBondingCurveFactory: customBondingCurveFactoryAddress,
+    customBondingCurveFactoryVerified: customBondingCurveFactoryVerification.verified,
+    curveLaunchFeeWei: curveLaunchFeeWei.toString(),
+    router: routerAddress,
+    priceFeed: priceFeedAddress,
+    deployFeeWei: deployFeeWei.toString(),
+    launchFeeWei: launchFeeWei.toString(),
+    lpLockDurationSeconds: String(lpLockDurationSeconds),
+    feeTreasury,
+    platformFeeWallet,
+    platformToken: platformTokenAddress || null,
+    platformTokenFreshlyDeployed: platformTokenDeployed,
+    rewardsDistributor: rewardsDistributorAddress || null,
+    creatorRewardsDistributor: creatorRewardsDistributorAddress || null,
+    feeWalletDistributor: feeWalletDistributorAddress || null,
+    ownershipProposals,
+    deployedViaRelayerAdminPanel: true,
+  };
+
+  const { currentPath, historyPath } = await recordDeployment(network, deploymentSummary);
+  return { network, deploymentSummary, currentPath, historyPath };
+}
 
 const ERC20_BALANCE_OF_ABI = ["function balanceOf(address) view returns (uint256)"];
 
@@ -748,8 +1292,35 @@ async function initStorageBackend() {
   }
 }
 
+// Overlays a persisted relayer-settings override (see lib/relayerStore.js's
+// getRelayerSettings) onto the live relayerSettings object — called once at
+// startup, after the storage backend is confirmed ready and before any poll
+// loop's first tick, and again at the end of every successful
+// POST /relayer-settings so the in-memory object served to callers and read
+// by the poll loops always matches what was actually persisted. Every
+// persisted value is re-clamped through validateRelayerSettingsPatch rather
+// than trusted as-is, so a settings file hand-edited (or corrupted) outside
+// this process can't push a poll loop outside RELAYER_SETTINGS_BOUNDS.
+async function loadRelayerSettingsFromStore() {
+  let stored = null;
+  try {
+    stored = await getRelayerSettings();
+  } catch (err) {
+    console.error(`[relayer-settings] could not read persisted settings — keeping env-var defaults (${err.message})`);
+    return;
+  }
+  if (!stored) return;
+  const { patch, rejected } = validateRelayerSettingsPatch(stored);
+  Object.assign(relayerSettings, patch);
+  if (rejected.length) {
+    console.warn(`[relayer-settings] ignored unparseable persisted key(s): ${rejected.join(", ")}`);
+  }
+  console.log(`[relayer-settings] loaded persisted overrides: ${JSON.stringify(patch)}`);
+}
+
 async function main() {
   await initStorageBackend();
+  await loadRelayerSettingsFromStore();
   logEnvVarPresence();
   const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
   if (!relayerPrivateKey) {
@@ -1373,6 +1944,120 @@ async function main() {
     await setPlatformConfig(canonical);
     console.log("[admin] platform config saved.");
     sendJson(res, 200, { config: canonical });
+  });
+
+  // ---- relayer runtime settings (admin-gated) ----
+  // Public read (same "read is open, write is admin-signed" shape as
+  // GET/POST /platform-config above) — the admin panel needs the CURRENT
+  // effective values (env-var default overlaid with whatever's persisted)
+  // to render its form, and there's nothing sensitive in a poll interval or
+  // a slippage percentage. `defaults`/`bounds` are included so the UI can
+  // show "reset to default" and validate client-side before ever signing,
+  // without hardcoding a second copy of either.
+  app.get("/relayer-settings", (_req, res) => {
+    sendJson(res, 200, { settings: relayerSettings, defaults: RELAYER_SETTINGS_DEFAULTS, bounds: RELAYER_SETTINGS_BOUNDS });
+  });
+
+  // Body: { settings, timestamp, signature }. Same admin-signed shape as
+  // POST /platform-config: `settings` is expected to carry ALL known keys
+  // (the admin panel always sends its full current form, not just whatever
+  // changed) so the signed message is unambiguous — a signature only ever
+  // authorizes the exact object that was actually reviewed and signed, the
+  // same anti-replay property platformConfigMessage already has. Every value
+  // is still re-validated/clamped server-side via validateRelayerSettingsPatch
+  // regardless of what the client already clamped, so a stale or tampered
+  // client can't push a poll loop outside RELAYER_SETTINGS_BOUNDS.
+  app.post("/relayer-settings", async (req, res) => {
+    const { settings, timestamp, signature } = req.body || {};
+    if (!settings || typeof settings !== "object") {
+      return sendJson(res, 400, { error: "settings is required" });
+    }
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    }
+    const message = relayerSettingsMessage(settings, timestamp);
+    if (!verifyAdminSignature(message, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
+    const { patch, rejected } = validateRelayerSettingsPatch(settings);
+    if (rejected.length) {
+      return sendJson(res, 400, { error: `Could not parse: ${rejected.join(", ")}` });
+    }
+    Object.assign(relayerSettings, patch);
+    try {
+      await setRelayerSettings(relayerSettings);
+    } catch (err) {
+      // The in-memory object (and therefore every poll loop's very next
+      // tick) already reflects the new values even if persistence itself
+      // failed — surface the failure so the admin knows a restart would
+      // lose this change, rather than silently pretending it's durable.
+      console.error(`[relayer-settings] saved in-memory but failed to persist: ${err.message}`);
+      return sendJson(res, 200, {
+        settings: relayerSettings,
+        warning: "Applied immediately, but could not be saved to disk/DB — it will revert to the previous value on restart. Check server logs.",
+      });
+    }
+    console.log(`[admin] relayer settings saved: ${JSON.stringify(patch)}`);
+    sendJson(res, 200, { settings: relayerSettings });
+  });
+
+  // ---- contract deployment (admin-gated) ----
+  // Public: lets the admin panel prefill sensible defaults (this network's
+  // name/mode, any independently-confirmed router/price-feed address) before
+  // the admin fills in the rest of the deploy form — nothing here is
+  // sensitive, same reasoning as GET /platform-config being public while its
+  // POST twin is admin-signed.
+  app.get("/deploy/network-hints", (_req, res) => {
+    sendJson(res, 200, {
+      network,
+      knownRouter: DEPLOY_KNOWN_ROUTER_ADDRESSES[network] || null,
+      knownPriceFeed: DEPLOY_KNOWN_PRICE_FEED_ADDRESSES[network] || null,
+      deployerAddress: relayerWallet.address,
+      adminWallet: ADMIN_WALLET,
+    });
+  });
+
+  // Public: whatever this network's most recent deployment recorded (see
+  // lib/deploymentStore.js) — the same record `npx hardhat run
+  // scripts/deploy.js` itself has always produced, now also written here
+  // whenever POST /deploy below runs. Lets the admin panel show "what's
+  // already deployed" before offering to deploy anything new.
+  app.get("/deploy/current", async (_req, res) => {
+    const current = await readCurrentDeployment(network).catch(() => null);
+    sendJson(res, 200, { network, deployment: current });
+  });
+
+  // Body: { config, timestamp, signature }. Runs the entire deploy pipeline
+  // (see runFullStackDeploy above) using this service's own relayerWallet as
+  // the deploying account — this is a real, potentially multi-minute series
+  // of on-chain transactions (every contract in the stack, back to back),
+  // not a quick admin toggle, so this route's own socket timeout is
+  // extended well past Express's/Node's defaults rather than making the
+  // admin's browser see a connection-reset partway through a real deploy
+  // that's still running server-side.
+  app.post("/deploy", async (req, res) => {
+    req.setTimeout(20 * 60 * 1000);
+    res.setTimeout(20 * 60 * 1000);
+    const { config, timestamp, signature } = req.body || {};
+    if (!config || typeof config !== "object") {
+      return sendJson(res, 400, { error: "config is required" });
+    }
+    if (!isFreshTimestamp(timestamp)) {
+      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    }
+    const message = deployMessage(config, timestamp);
+    if (!verifyAdminSignature(message, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
+    console.log(`[admin] deploy requested with config: ${JSON.stringify(config)}`);
+    try {
+      const result = await runFullStackDeploy(config, relayerWallet);
+      console.log(`[admin] deploy finished for network "${result.network}": ${JSON.stringify(result.deploymentSummary)}`);
+      sendJson(res, 200, result);
+    } catch (err) {
+      console.error(`[admin] deploy failed: ${err.stack || err.message}`);
+      sendJson(res, 500, { error: err.message || "Deployment failed — check server logs for the full error." });
+    }
   });
 
   // ---- manual token tracking (admin-gated) ----
@@ -2811,7 +3496,7 @@ async function main() {
         const predictedEthOut = await quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn);
         if (predictedEthOut === 0n) return; // dust, or no pool/liquidity yet — nothing worth logging
 
-        const minEthOut = (predictedEthOut * (10000n - CREATOR_REWARDS_SLIPPAGE_BPS)) / 10000n;
+        const minEthOut = (predictedEthOut * (10000n - creatorRewardsSlippageBpsBig())) / 10000n;
 
         const tx = await creatorRewardsDistributor.triggerCreatorSwap(tokenAddress, minEthOut);
         const receipt = await tx.wait();
@@ -2840,7 +3525,7 @@ async function main() {
     async function tryClaim(tokenAddress) {
       try {
         const claimable = await creatorRewardsDistributor.claimableEth(tokenAddress);
-        if (claimable === 0n || claimable < CREATOR_REWARDS_CLAIM_MIN_WEI) return;
+        if (claimable === 0n || claimable < creatorRewardsClaimMinWeiBig()) return;
 
         const tx = await creatorRewardsDistributor.claimCreatorRewards(tokenAddress);
         const receipt = await tx.wait();
@@ -2861,7 +3546,7 @@ async function main() {
 
   async function creatorRewardsPollLoop() {
     await sweepCreatorRewardsOnce().catch((err) => console.error(`[creator-rewards] sweep error: ${err.message}`));
-    setTimeout(creatorRewardsPollLoop, CREATOR_REWARDS_POLL_INTERVAL_MS);
+    setTimeout(creatorRewardsPollLoop, relayerSettings.creatorRewardsPollIntervalMs);
   }
 
   // ---- fee-wallet auto-sweep + auto-claim (optional) ----
@@ -2929,7 +3614,7 @@ async function main() {
         // Real slippage floor instead of minEthOut=0 — see the FIX comment
         // above (Issue 2) and FEE_WALLET_SLIPPAGE_BPS's own comment for why
         // 3% rather than a UI's tighter 2%.
-        const minEthOut = (predictedEthOut * (10000n - FEE_WALLET_SLIPPAGE_BPS)) / 10000n;
+        const minEthOut = (predictedEthOut * (10000n - feeWalletSlippageBpsBig())) / 10000n;
 
         const tx = await feeWalletDistributor.triggerFeeWalletSwap(tokenAddress, minEthOut);
         const receipt = await tx.wait();
@@ -2959,7 +3644,7 @@ async function main() {
     async function tryClaim(tokenAddress) {
       try {
         const claimable = await feeWalletDistributor.claimableEth(tokenAddress);
-        if (claimable === 0n || claimable < FEE_WALLET_CLAIM_MIN_WEI) return;
+        if (claimable === 0n || claimable < feeWalletClaimMinWeiBig()) return;
 
         const tx = await feeWalletDistributor.claimFeeWalletRewards(tokenAddress);
         const receipt = await tx.wait();
@@ -2981,7 +3666,7 @@ async function main() {
 
   async function feeWalletPollLoop() {
     await sweepFeeWalletRewardsOnce().catch((err) => console.error(`[fee-wallet] sweep error: ${err.message}`));
-    setTimeout(feeWalletPollLoop, FEE_WALLET_POLL_INTERVAL_MS);
+    setTimeout(feeWalletPollLoop, relayerSettings.feeWalletPollIntervalMs);
   }
 
   // ---- platform rewards auto-sweep (optional) ----
@@ -3023,7 +3708,7 @@ async function main() {
     const quotedTokensOut = await quoteAmountsOut(routerAddress, [wethAddress, platformTokenAddress], ethIn);
     if (quotedTokensOut === 0n) return; // dust, or no platformToken pool/liquidity yet — nothing worth logging
 
-    const minTokensOut = (quotedTokensOut * (10000n - PLATFORM_BUYBACK_SLIPPAGE_BPS)) / 10000n;
+    const minTokensOut = (quotedTokensOut * (10000n - platformBuybackSlippageBpsBig())) / 10000n;
     const tx = await platformRewardsDistributor.triggerEthBuyback(minTokensOut);
     const receipt = await tx.wait();
     console.log(`[platform-rewards] ETH buyback: ${ethIn} wei -> ~${quotedTokensOut} platformToken in tx ${receipt.hash}.`);
@@ -3074,7 +3759,7 @@ async function main() {
             amountIn
           );
           if (quotedTokensOut === 0n) continue; // dust, or no pool/liquidity yet — nothing worth logging
-          minTokensOut = (quotedTokensOut * (10000n - PLATFORM_BUYBACK_SLIPPAGE_BPS)) / 10000n;
+          minTokensOut = (quotedTokensOut * (10000n - platformBuybackSlippageBpsBig())) / 10000n;
         }
 
         const tx = await platformRewardsDistributor.triggerTokenBuyback(tokenAddress, minTokensOut);
@@ -3116,8 +3801,8 @@ async function main() {
       roundActive = true;
     }
 
-    for (let i = 0; i < PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK && roundActive; i++) {
-      const tx = await platformRewardsDistributor.processAirdropBatch(PLATFORM_AIRDROP_BATCH_SIZE);
+    for (let i = 0; i < relayerSettings.platformAirdropMaxBatchesPerTick && roundActive; i++) {
+      const tx = await platformRewardsDistributor.processAirdropBatch(relayerSettings.platformAirdropBatchSize);
       const receipt = await tx.wait();
       roundActive = await platformRewardsDistributor.roundActive();
       console.log(
@@ -3131,7 +3816,7 @@ async function main() {
     await sweepPlatformEthBuybackOnce().catch((err) => console.error(`[platform-rewards] ETH buyback sweep error: ${err.message}`));
     await sweepPlatformTokenBuybacksOnce().catch((err) => console.error(`[platform-rewards] token buyback sweep error: ${err.message}`));
     await sweepPlatformAirdropRoundOnce().catch((err) => console.error(`[platform-rewards] airdrop round sweep error: ${err.message}`));
-    setTimeout(platformRewardsPollLoop, PLATFORM_REWARDS_POLL_INTERVAL_MS);
+    setTimeout(platformRewardsPollLoop, relayerSettings.platformRewardsPollIntervalMs);
   }
 
   console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits (only deposits made from now on — see cursors.json).`);
@@ -3149,22 +3834,22 @@ async function main() {
 
   if (creatorRewardsDistributor) {
     console.log(
-      `Sweeping and auto-claiming creator rewards every ${CREATOR_REWARDS_POLL_INTERVAL_MS}ms ` +
-        `(claim floor ${CREATOR_REWARDS_CLAIM_MIN_WEI} wei).`
+      `Sweeping and auto-claiming creator rewards every ${relayerSettings.creatorRewardsPollIntervalMs}ms ` +
+        `(claim floor ${relayerSettings.creatorRewardsClaimMinWei} wei).`
     );
     creatorRewardsPollLoop();
   }
 
   if (feeWalletDistributor) {
     console.log(
-      `Sweeping and auto-claiming fee-wallet rewards every ${FEE_WALLET_POLL_INTERVAL_MS}ms ` +
-        `(claim floor ${FEE_WALLET_CLAIM_MIN_WEI} wei).`
+      `Sweeping and auto-claiming fee-wallet rewards every ${relayerSettings.feeWalletPollIntervalMs}ms ` +
+        `(claim floor ${relayerSettings.feeWalletClaimMinWei} wei).`
     );
     feeWalletPollLoop();
   }
 
   if (platformRewardsDistributor) {
-    console.log(`Sweeping platform rewards (buyback/burn/airdrop) every ${PLATFORM_REWARDS_POLL_INTERVAL_MS}ms.`);
+    console.log(`Sweeping platform rewards (buyback/burn/airdrop) every ${relayerSettings.platformRewardsPollIntervalMs}ms.`);
     platformRewardsPollLoop();
   }
 }
