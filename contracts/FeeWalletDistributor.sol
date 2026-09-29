@@ -44,6 +44,19 @@ import "./interfaces/IPlatformToken.sol";
 /// worth of platformToken is burned, and 25% worth of platformToken is
 /// pushed out to platformToken's own holders.
 ///
+/// --- Security review (this file) ---
+/// One finding from the accompanying audit report is fixed directly in this
+/// version:
+///  - Finding FWD-1 (Medium): the buyback leg originally had no
+///    caller-supplied slippage floor of its own — only the ETH leg did — so
+///    a caller wanting extra protection beyond the protocol default had no
+///    way to provide it for that leg. Fixed by adding a second
+///    triggerFeeWalletSwap(token, minEthOut, minPlatformTokensOut) overload;
+///    the original 2-argument overload is unchanged and simply forwards
+///    minPlatformTokensOut = 0.
+/// Four additional informational notes (FWD-2..FWD-5) are documented in the
+/// accompanying report and require no code change.
+///
 /// Before platformToken is configured, this contract behaves exactly as it
 /// always did: the entire pulled amount converts to ETH for feeWallet, and
 /// nothing is held back — same "inert until configured" pattern documented
@@ -316,14 +329,51 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
     /// claim time) never depends on who calls it, and neither does the
     /// buyback leg's fixed 50/50 burn/airdrop split.
     /// @param minEthOut Caller-supplied minimum-out floor for the ETH leg
-    /// only (unchanged meaning from the original contract) — combined with
-    /// the protocol's own protective floor computed against the ETH leg's
-    /// actual (possibly halved) size. The buyback leg has no caller-supplied
-    /// override; it relies solely on the protocol's own protective floor,
-    /// since this function's external signature is kept unchanged for
+    /// (unchanged meaning from the original contract) — combined with the
+    /// protocol's own protective floor computed against the ETH leg's
+    /// actual (possibly halved) size. The buyback leg gets no caller-
+    /// supplied floor from this overload (it relies solely on the
+    /// protocol's own protective floor) — this overload's signature is
+    /// kept byte-for-byte unchanged from the original contract for
     /// backward compatibility with existing callers (see
-    /// scripts/relayer.js's feeWalletPollLoop).
+    /// scripts/relayer.js's feeWalletPollLoop). Callers that also want to
+    /// supply a floor for the buyback leg should use the 3-argument
+    /// overload below instead — see Finding FWD-1.
     function triggerFeeWalletSwap(address token, uint256 minEthOut) external nonReentrant returns (uint256 ethOut) {
+        return _triggerFeeWalletSwap(token, minEthOut, 0);
+    }
+
+    /// @notice Same as triggerFeeWalletSwap(token, minEthOut) above, but
+    /// additionally lets the caller supply `minPlatformTokensOut` — a
+    /// caller-side minimum-out floor for the buyback leg specifically,
+    /// combined with the protocol's own protective floor the same
+    /// "whichever is stricter" way minEthOut already is for the ETH leg,
+    /// and the same way PlatformRewardsDistributor.triggerTokenBuyback's
+    /// own minTokensOut already works. Added to fix Finding FWD-1: before
+    /// this overload existed, the buyback leg had no way for a caller
+    /// (e.g. an off-chain keeper quoting this leg's expected output in
+    /// real time, the same way scripts/relayer.js already does for the
+    /// ETH leg) to add protection beyond the protocol default — a real,
+    /// if narrower, gap next to the ETH leg's existing caller-supplied
+    /// floor. Existing callers that only know about the 2-argument
+    /// overload are entirely unaffected — that overload now simply calls
+    /// this one with minPlatformTokensOut = 0.
+    function triggerFeeWalletSwap(address token, uint256 minEthOut, uint256 minPlatformTokensOut)
+        external
+        nonReentrant
+        returns (uint256 ethOut)
+    {
+        return _triggerFeeWalletSwap(token, minEthOut, minPlatformTokensOut);
+    }
+
+    /// @dev Shared implementation for both triggerFeeWalletSwap overloads.
+    /// Not itself nonReentrant (both external overloads already are) —
+    /// applying the modifier here too would make one overload's call into
+    /// this function revert as a false-positive reentrant call.
+    function _triggerFeeWalletSwap(address token, uint256 minEthOut, uint256 minPlatformTokensOut)
+        private
+        returns (uint256 ethOut)
+    {
         require(token != address(0), "FeeWalletDistributor: invalid token");
         uint256 balance = IERC20(token).balanceOf(address(this));
         require(balance > 0 && balance >= swapThreshold[token], "FeeWalletDistributor: below threshold");
@@ -337,7 +387,7 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
             ethOut = _executeFeeWalletLeg(token, ethLegAmount, minEthOut);
         }
         if (buybackAmount > 0) {
-            _executePlatformTokenBuyback(token, buybackAmount);
+            _executePlatformTokenBuyback(token, buybackAmount, minPlatformTokensOut);
         }
     }
 
@@ -386,13 +436,20 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
     /// pendingAirdropTokens via _splitAndProcess — ported directly from
     /// PlatformRewardsDistributor.triggerTokenBuyback, including its direct-
     /// token shortcut (if `token` already IS platformToken, no swap is
-    /// needed) and its Finding PR-2/PR-3 fixes. No caller-supplied
-    /// minTokensOut here — see triggerFeeWalletSwap's own comment for why —
-    /// so this relies solely on the protocol's own protective floor, which
-    /// degrades to 0 (no floor) if the [token, WETH, platformToken] path's
-    /// pools can't be quoted, consistent with how every other quote-derived
-    /// floor in this codebase degrades on a missing pool.
-    function _executePlatformTokenBuyback(address token, uint256 amountIn) private {
+    /// needed) and its Finding PR-2/PR-3 fixes.
+    /// @param minPlatformTokensOut Caller-supplied minimum-out floor for
+    /// this leg (see Finding FWD-1) — combined with the protocol's own
+    /// protective floor the same "whichever is stricter" way minEthOut
+    /// already is for the ETH leg. Callers that only use the 2-argument
+    /// triggerFeeWalletSwap overload pass 0 here, so this degrades to
+    /// relying solely on the protocol's own protective floor for them,
+    /// exactly as before FWD-1 was fixed. That protocol floor itself still
+    /// degrades to 0 (no floor at all) if the [token, WETH, platformToken]
+    /// path's pools can't be quoted, consistent with how every other
+    /// quote-derived floor in this codebase degrades on a missing pool —
+    /// callers who want a hard guarantee in that situation should supply
+    /// their own minPlatformTokensOut via the 3-argument overload.
+    function _executePlatformTokenBuyback(address token, uint256 amountIn, uint256 minPlatformTokensOut) private {
         if (token == address(platformToken)) {
             (uint256 burnedDirect, uint256 toAirdropDirect) = _splitAndProcess(amountIn);
             emit DirectPlatformTokensProcessed(token, amountIn, burnedDirect, toAirdropDirect);
@@ -404,7 +461,13 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
         path[1] = router.WETH();
         path[2] = address(platformToken);
 
+        // Finding FWD-1 (fixed): effectiveMinOut is whichever is stricter of
+        // the caller's own minPlatformTokensOut and the protocol's own
+        // reserve-derived floor — same combination already used for the ETH
+        // leg's minEthOut and for every buyback trigger in
+        // PlatformRewardsDistributor.
         uint256 protectiveFloor = _protectiveMinOut(path, amountIn);
+        uint256 effectiveMinOut = minPlatformTokensOut > protectiveFloor ? minPlatformTokensOut : protectiveFloor;
 
         // Finding PR-3 (ported): approving `amountIn` directly on top of any
         // existing allowance breaks against ERC20s (e.g. USDT and tokens
@@ -417,7 +480,7 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
         uint256 before = platformToken.balanceOf(address(this));
         router.swapExactTokensForTokensSupportingFeeOnTransferTokens(
             amountIn,
-            protectiveFloor,
+            effectiveMinOut,
             path,
             address(this),
             block.timestamp + 15 minutes
