@@ -6677,8 +6677,21 @@
           // this network.
           const taxWei = taxDistributor!==ZERO_ADDRESS ? (ethIn*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
           const swapEthIn = ethIn - taxWei;
-          const gross = getAmountOut(swapEthIn, reserves.wethReserve, reserves.tokenReserve);
-          if(gross<=0n) throw new Error("This pool can't quote that amount right now — try a smaller amount.");
+          const rawGross = getAmountOut(swapEthIn, reserves.wethReserve, reserves.tokenReserve);
+          if(rawGross<=0n) throw new Error("This pool can't quote that amount right now — try a smaller amount.");
+          // FIX: a buy transfers tokens FROM the pair TO the wallet, which is
+          // itself a taxed leg while taxActive() is true (see
+          // LaunchedToken._update's `from==pair` branch) — the wallet ends up
+          // with rawGross*(1-liveFeeBps), not the full AMM-quoted rawGross.
+          // currentQuote() above already nets this out for the on-screen
+          // estimate; amountOutMin below was still being computed from the
+          // untaxed rawGross, so it was a real minimum LARGER than what the
+          // trade could ever actually deliver whenever the token's own tax
+          // exceeded the chosen slippage tolerance — every such buy reverted
+          // on-chain with "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT" no matter
+          // how many times it was retried, with no way to tell from the
+          // error alone that tax (not real slippage) was the cause.
+          const gross = liveTaxActive ? (rawGross*(10000n-liveFeeBps))/10000n : rawGross;
           const amountOutMin = (gross*(10000n-slippageBps))/10000n;
 
           if(taxWei>0n){
@@ -6721,7 +6734,20 @@
             if(approveReceipt.status !== "0x1") throw new Error("The approval reverted on-chain — nothing was sold.");
           }
 
-          const gross = getAmountOut(tokensIn, reserves.tokenReserve, reserves.wethReserve);
+          // FIX: selling transfers tokens FROM the wallet TO the pair, which
+          // is itself a taxed leg while taxActive() is true (see
+          // LaunchedToken._update's `to==pair` branch) — only
+          // tokensIn*(1-liveFeeBps) actually reaches the pool, not the full
+          // tokensIn. currentQuote() above already nets this out (netIn) for
+          // the on-screen estimate; amountOutMin below was still being
+          // computed straight from the untaxed tokensIn, which overstates
+          // what the pool could ever pay out. Whenever the token's own tax
+          // exceeded the chosen slippage tolerance (the whole point of a
+          // "test token" still mid-tax, well before graduation), every sell
+          // reverted on-chain with "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT" —
+          // this is what was actually blocking the sell, not real slippage.
+          const netIn = liveTaxActive ? (tokensIn*(10000n-liveFeeBps))/10000n : tokensIn;
+          const gross = getAmountOut(netIn, reserves.tokenReserve, reserves.wethReserve);
           if(gross<=0n) throw new Error("This pool can't quote that amount right now — try a smaller amount.");
           const amountOutMin = (gross*(10000n-slippageBps))/10000n;
 
@@ -10386,10 +10412,23 @@
   // sequences the same setRewardsDistributor/setPlatformToken transactions
   // those granular fields would send individually, skipping whichever ones
   // are already correct so it never sends a no-op transaction.
-  function computeRewardsLinkState(tfAddress, tfState, ctfAddress, ctfState, distributorAddress){
+  // FIX: this used to only ever look at TokenFactory/CustomTokenFactory —
+  // BondingCurveFactory and CustomBondingCurveFactory (the two Quick Launch
+  // factories, which clone the exact same LaunchedToken/CustomToken
+  // implementations as TokenFactory/CustomTokenFactory respectively, and
+  // expose the identical rewardsDistributor()/setRewardsDistributor(address)
+  // surface) were silently excluded from both the ON/OFF/PARTIAL badge and
+  // the toggle's own link/unlink actions below. A platform with Quick Launch
+  // deployed could show "ON" while those two factories were never actually
+  // linked, or "OFF" while they still were. Now takes all four factories and
+  // treats them uniformly — same field name (`rewardsDistributor`) on every
+  // one of their loaded states.
+  function computeRewardsLinkState(tfAddress, tfState, ctfAddress, ctfState, bcfAddress, bcfState, cbcfAddress, cbcfState, distributorAddress){
     const deployed = [];
     if(tfAddress && tfState) deployed.push({ key:"tf", label:"TokenFactory", linked: !!distributorAddress && tfState.rewardsDistributor.toLowerCase()===distributorAddress.toLowerCase() });
     if(ctfAddress && ctfState) deployed.push({ key:"ctf", label:"CustomTokenFactory", linked: !!distributorAddress && ctfState.rewardsDistributor.toLowerCase()===distributorAddress.toLowerCase() });
+    if(bcfAddress && bcfState) deployed.push({ key:"bcf", label:"BondingCurveFactory", linked: !!distributorAddress && bcfState.rewardsDistributor.toLowerCase()===distributorAddress.toLowerCase() });
+    if(cbcfAddress && cbcfState) deployed.push({ key:"cbcf", label:"CustomBondingCurveFactory", linked: !!distributorAddress && cbcfState.rewardsDistributor.toLowerCase()===distributorAddress.toLowerCase() });
     const linkedCount = deployed.filter(d=>d.linked).length;
     let status;
     if(deployed.length===0) status = "unavailable";
@@ -10399,7 +10438,7 @@
     return { deployed, linkedCount, status };
   }
 
-  function platformRewardsPanelHTML(distributorAddress, prdState, tfAddress, tfState, ctfAddress, ctfState){
+  function platformRewardsPanelHTML(distributorAddress, prdState, tfAddress, tfState, ctfAddress, ctfState, bcfAddress, bcfState, cbcfAddress, cbcfState){
     if(!distributorAddress){
       return `
         <div class="panel admin-panel" style="grid-column:1 / -1;">
@@ -10414,7 +10453,7 @@
           <p class="admin-empty">Couldn't read PlatformRewardsDistributor's on-chain state — check your wallet's network and try again.</p>
         </div>`;
     }
-    const { deployed, status } = computeRewardsLinkState(tfAddress, tfState, ctfAddress, ctfState, distributorAddress);
+    const { deployed, status } = computeRewardsLinkState(tfAddress, tfState, ctfAddress, ctfState, bcfAddress, bcfState, cbcfAddress, cbcfState, distributorAddress);
     const isOn = status==="on";
     const badge = status==="on" ? `<span class="admin-status-badge on">ON</span>`
       : status==="partial" ? `<span class="admin-status-badge partial">PARTIAL</span>`
@@ -10470,9 +10509,13 @@
       if(!prdState){ toast("Couldn't read PlatformRewardsDistributor's on-chain state — check your wallet's network and try again."); return; }
       const tfAddress = adminFactoryAddress("tf");
       const ctfAddress = adminFactoryAddress("ctf");
-      const [tfState, ctfState] = await Promise.all([
+      const bcfAddress = adminFactoryAddress("bcf");
+      const cbcfAddress = adminFactoryAddress("cbcf");
+      const [tfState, ctfState, bcfState, cbcfState] = await Promise.all([
         tfAddress ? loadFactoryAdminState(tfAddress).catch(()=>null) : Promise.resolve(null),
         ctfAddress ? loadFactoryAdminState(ctfAddress).catch(()=>null) : Promise.resolve(null),
+        bcfAddress ? loadCurveFactoryAdminState(bcfAddress, true).catch(()=>null) : Promise.resolve(null),
+        cbcfAddress ? loadCurveFactoryAdminState(cbcfAddress, false).catch(()=>null) : Promise.resolve(null),
       ]);
 
       const steps = [];
@@ -10490,6 +10533,12 @@
         if(ctfAddress && ctfState && ctfState.rewardsDistributor.toLowerCase() !== distributorAddress.toLowerCase()){
           steps.push({ to: ctfAddress, data: encodeAddressCalldata(SET_REWARDS_DISTRIBUTOR_SELECTOR, distributorAddress), label: "Linking CustomTokenFactory" });
         }
+        if(bcfAddress && bcfState && bcfState.rewardsDistributor.toLowerCase() !== distributorAddress.toLowerCase()){
+          steps.push({ to: bcfAddress, data: encodeAddressCalldata(SET_REWARDS_DISTRIBUTOR_SELECTOR, distributorAddress), label: "Linking BondingCurveFactory" });
+        }
+        if(cbcfAddress && cbcfState && cbcfState.rewardsDistributor.toLowerCase() !== distributorAddress.toLowerCase()){
+          steps.push({ to: cbcfAddress, data: encodeAddressCalldata(SET_REWARDS_DISTRIBUTOR_SELECTOR, distributorAddress), label: "Linking CustomBondingCurveFactory" });
+        }
         if(steps.length===0){ toast("Already on — nothing to update."); return; }
       } else {
         if(tfAddress && tfState && tfState.rewardsDistributor.toLowerCase() === distributorAddress.toLowerCase()){
@@ -10497,6 +10546,12 @@
         }
         if(ctfAddress && ctfState && ctfState.rewardsDistributor.toLowerCase() === distributorAddress.toLowerCase()){
           steps.push({ to: ctfAddress, data: encodeAddressCalldata(SET_REWARDS_DISTRIBUTOR_SELECTOR, ZERO_ADDRESS), label: "Unlinking CustomTokenFactory" });
+        }
+        if(bcfAddress && bcfState && bcfState.rewardsDistributor.toLowerCase() === distributorAddress.toLowerCase()){
+          steps.push({ to: bcfAddress, data: encodeAddressCalldata(SET_REWARDS_DISTRIBUTOR_SELECTOR, ZERO_ADDRESS), label: "Unlinking BondingCurveFactory" });
+        }
+        if(cbcfAddress && cbcfState && cbcfState.rewardsDistributor.toLowerCase() === distributorAddress.toLowerCase()){
+          steps.push({ to: cbcfAddress, data: encodeAddressCalldata(SET_REWARDS_DISTRIBUTOR_SELECTOR, ZERO_ADDRESS), label: "Unlinking CustomBondingCurveFactory" });
         }
         if(steps.length===0){ toast("Already off — nothing to update."); return; }
       }
@@ -11386,7 +11441,7 @@
 
     const rewardsWrap = document.getElementById("platformRewardsWrap");
     if(rewardsWrap){
-      rewardsWrap.innerHTML = platformRewardsPanelHTML(prdAddress, prdState, tfAddress, tfState, ctfAddress, ctfState);
+      rewardsWrap.innerHTML = platformRewardsPanelHTML(prdAddress, prdState, tfAddress, tfState, ctfAddress, ctfState, bcfAddress, bcfState, cbcfAddress, cbcfState);
       const toggleEl = document.getElementById("admin_rewards_toggle");
       if(toggleEl) toggleEl.addEventListener("change", (e)=> runRewardsToggleAction(e.target.checked, e.target));
     }
