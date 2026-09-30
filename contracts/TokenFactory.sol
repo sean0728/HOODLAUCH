@@ -498,7 +498,7 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         if (!addLiquidityAtLaunch) {
             require(msg.value == deployFee, "TokenFactory: incorrect ETH sent for Deploy Token");
             feeCollected = deployFee;
-            LaunchedToken(token).initialize(name_, symbol_, totalSupply_, msg.sender, msg.sender, address(this));
+            LaunchedToken(token).initialize(name_, symbol_, totalSupply_, msg.sender, msg.sender, address(this), false);
         } else {
             (lpAmount, lockId, creatorTokensBought, pair) = _createWithLiquidity(
                 token,
@@ -536,7 +536,7 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
             msg.value - launchFee == liquidityEthAmount + creatorBuyEthAmount,
             "TokenFactory: msg.value doesn't match liquidity + buy-in"
         );
-        LaunchedToken(token).initialize(name_, symbol_, totalSupply_, msg.sender, address(this), address(this));
+        LaunchedToken(token).initialize(name_, symbol_, totalSupply_, msg.sender, address(this), address(this), false);
         (lpAmount, lockId, creatorTokensBought, pair) = _launchWithLiquidity(
             token,
             totalSupply_,
@@ -684,11 +684,11 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
 
         if (!voucher.addLiquidityAtLaunch) {
             LaunchedToken(token).initialize(
-                voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, voucher.creator, address(this)
+                voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, voucher.creator, address(this), false
             );
         } else {
             LaunchedToken(token).initialize(
-                voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, address(this), address(this)
+                voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, address(this), address(this), false
             );
             (lpAmount, lockId, creatorTokensBought, pair) = _relayedLaunchWithLiquidity(
                 token,

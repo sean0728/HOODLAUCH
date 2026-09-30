@@ -38,6 +38,26 @@ contract LaunchedToken is ERC20 {
     string private _tokenName;
     string private _tokenSymbol;
 
+    /// @notice FIX (this review, Finding TF-1): true for a token cloned and
+    /// initialized by a bonding-curve factory (currently BondingCurveFactory
+    /// — every "Quick Launch" curve token), false for a token cloned by
+    /// TokenFactory (both "Deploy Token" and "Deploy and Add Liquidity").
+    /// Set once, at initialize() time, and never changed afterward — same
+    /// "immutable after init" convention as `factory` itself.
+    ///
+    /// The ONLY thing this flag does is gate _maybeAutoActivateTax() in
+    /// _update() below (see that function's own doc comment for the full
+    /// vulnerability this closes): a curve-managed token never runs that
+    /// auto-detection at all, no matter what transfer triggers it or what
+    /// pool a third party may have pre-created for its address, because a
+    /// curve-managed token's tax is only ever meant to activate through its
+    /// factory's own explicit graduation call (see
+    /// BondingCurveFactory._doGraduate -> configureTax()). It has no other
+    /// effect anywhere in this contract — feeBps, feeWallet, pair,
+    /// taxActive, and every reward-diversion field still only ever get set
+    /// by configureTax() itself for either kind of token.
+    bool public curveManaged;
+
     // ---- tax state, set once via configureTax(). Everything below stays
     // zero/false/unset for a "Just Launch" token, which never calls
     // configureTax() at all. ----
@@ -142,13 +162,20 @@ contract LaunchedToken is ERC20 {
         _initialized = true;
     }
 
+    /// @param curveManaged_ FIX (this review, Finding TF-1): true only when
+    /// the caller is a bonding-curve factory (BondingCurveFactory today)
+    /// cloning this token for curve trading; false for every TokenFactory
+    /// launch ("Deploy Token" or "Deploy and Add Liquidity"). See the
+    /// curveManaged state variable's own doc comment above for exactly what
+    /// this does and why it's needed.
     function initialize(
         string memory name_,
         string memory symbol_,
         uint256 totalSupply_,
         address creator_,
         address mintTo_,
-        address factory_
+        address factory_,
+        bool curveManaged_
     ) external {
         require(!_initialized, "LaunchedToken: already initialized");
         require(totalSupply_ > 0, "LaunchedToken: supply must be > 0");
@@ -162,6 +189,7 @@ contract LaunchedToken is ERC20 {
         _tokenSymbol = symbol_;
         creator = creator_;
         factory = factory_;
+        curveManaged = curveManaged_;
         launchedAt = block.timestamp;
 
         _mint(mintTo_, totalSupply_);
@@ -198,6 +226,25 @@ contract LaunchedToken is ERC20 {
         // it here too costs nothing and removes the dependency on the
         // caller always doing so correctly.
         require(feeBps_ <= 2_000, "LaunchedToken: feeBps exceeds 20% ceiling");
+        // FIX (this review, hardening — same rationale as Finding F-3 above):
+        // TokenFactory.setTaxDefaults already requires graduationTargetUsd_ > 0
+        // and maxOracleStaleness_ > 0 unconditionally before either value is
+        // ever stored, so in TokenFactory's own normal flow these can never
+        // reach this function as 0 in the first place. But exactly like
+        // feeBps_ above, configureTax() is the last line of defense if the
+        // factory itself is ever compromised or misconfigured — and unlike
+        // feeBps_, neither value had a local backstop here. A 0
+        // graduationTargetUsd_ would make _maybeDisableTaxWithDecimals treat
+        // any nonzero market cap as already past graduation, disabling the
+        // tax on the very next confirmed transfer; a 0 maxOracleStaleness_
+        // makes currentMarketCapInFeedDecimals's own freshness check
+        // (block.timestamp - updatedAt > maxOracleStaleness) fail almost
+        // immediately for any real oracle round, permanently treating the
+        // feed as stale and leaving the tax stuck on forever instead of ever
+        // gracefully disabling. Bounding both here too costs nothing and
+        // removes the dependency on the caller always doing so correctly.
+        require(graduationTargetUsd_ > 0, "LaunchedToken: graduation target must be > 0");
+        require(maxOracleStaleness_ > 0, "LaunchedToken: oracle staleness must be > 0");
         require(rewardBps_ + creatorRewardBps_ <= feeBps_, "LaunchedToken: rewardBps+creatorRewardBps exceeds feeBps");
         require(rewardsDistributor_ != address(0) || rewardBps_ == 0, "LaunchedToken: rewardBps requires a distributor");
         require(
@@ -280,6 +327,27 @@ contract LaunchedToken is ERC20 {
     /// the extra gas of this detection attempt (a couple of staticcalls),
     /// in exchange for activation needing no explicit call from anyone,
     /// ever.
+    ///
+    /// FIX (this review, Finding TF-1): _update() now also gates this call
+    /// on `!curveManaged`, so a bonding-curve token (BondingCurveFactory)
+    /// never reaches this function at all, no matter what transfer would
+    /// otherwise trigger it. Before this fix, this same detection ran on
+    /// any curve-token transfer where `from` wasn't the factory — which
+    /// includes an ordinary curve sell() (transferFrom(seller, factory,
+    /// amount)) and any plain wallet-to-wallet transfer of already-bought
+    /// curve tokens, both routine actions any holder takes well before a
+    /// curve ever graduates. Since creating an empty (zero-reserve)
+    /// Uniswap pair for an arbitrary token address is permissionless and
+    /// nearly free, anyone could pre-create one for a brand-new curve
+    /// token, then simply wait for the next ordinary sell/transfer to
+    /// silently flip taxConfigured to true against that empty shell —
+    /// after which BondingCurveFactory._doGraduate()'s own configureTax()
+    /// call would revert forever on `require(!taxConfigured)`, permanently
+    /// and irreversibly blocking that token from ever graduating to a real,
+    /// LP-locked pool. A curve-managed token's tax is only ever meant to
+    /// activate through its own factory's explicit graduation call, never
+    /// through this auto-detection path, which exists purely for
+    /// TokenFactory's "Just Launch" mode.
     ///
     /// Returns true only if THIS call is the one that just flipped
     /// taxConfigured on, so _update() can make sure the exact transfer
@@ -394,8 +462,24 @@ contract LaunchedToken is ERC20 {
         // comment for why) so a misbehaving/incomplete factory or router
         // can never brick this transfer — it just leaves taxConfigured
         // false for now, retried on a later one.
+        //
+        // FIX (this review, Finding TF-1): also gated on `!curveManaged`.
+        // A bonding-curve token's `factory` field points at its curve
+        // factory (BondingCurveFactory), which is never the sender on a
+        // curve sell() (that's a transferFrom FROM the seller) or on any
+        // ordinary wallet-to-wallet transfer of curve tokens — both are
+        // routine, unprivileged actions that would otherwise satisfy
+        // `from != factory` well before graduation. Without this guard, a
+        // third party could permissionlessly pre-create an empty DEX pair
+        // for the token's address and let the very next such transfer
+        // auto-activate the tax against it, permanently blocking
+        // BondingCurveFactory._doGraduate()'s own configureTax() call
+        // (`require(!taxConfigured)`) from ever succeeding again — see
+        // _maybeAutoActivateTax's own doc comment for the full writeup.
+        // curveManaged is false for every TokenFactory-launched token, so
+        // this changes nothing about that existing, intended feature.
         bool justActivated = false;
-        if (!taxConfigured && from != factory) {
+        if (!taxConfigured && !curveManaged && from != factory) {
             try this._maybeAutoActivateTax() returns (bool activated) {
                 justActivated = activated;
             } catch {

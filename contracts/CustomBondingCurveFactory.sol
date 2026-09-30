@@ -36,20 +36,42 @@ import "./interfaces/IUniswapV2Router02.sol";
 /// token being cloned, and how the curve wires it into a pool at graduation,
 /// differ.
 ///
-/// Reuses CustomToken.sol, LiquidityLocker.sol, and the router interfaces
-/// completely unmodified -- CustomToken.initialize() already accepts an
-/// arbitrary mintTo_/factory_ pair (see CustomTokenFactory's own two
-/// initialize() call sites for precedent: deploy-only mints to the creator
-/// with factory_ == the factory; "deploy and add liquidity" mints to the
-/// factory itself with factory_ == the factory too). A curve-phase token
-/// here always uses the second shape -- mintTo_ == factory_ == address(this)
-/// -- for the entire curve phase, which is exactly what makes CustomToken's
-/// own from == factory guard in _update() skip its independent-pool-detection
-/// attempt on every curve-phase transfer this factory itself originates (buys
-/// paying out from the factory, and the liquidity-seeding transfer inside
-/// _doGraduate's addLiquidityETH call) -- see CustomToken._update's own
-/// comment on that guard, which this factory relies on exactly the way
-/// CustomTokenFactory's atomic "addLiquidity=true" path already does.
+/// Reuses CustomToken.sol, LiquidityLocker.sol, and the router interfaces --
+/// CustomToken.initialize() already accepts an arbitrary mintTo_/factory_
+/// pair (see CustomTokenFactory's own two initialize() call sites for
+/// precedent: deploy-only mints to the creator with factory_ == the
+/// factory; "deploy and add liquidity" mints to the factory itself with
+/// factory_ == the factory too). A curve-phase token here always uses the
+/// second shape -- mintTo_ == factory_ == address(this) -- for the entire
+/// curve phase, which correctly makes CustomToken's `from == factory` guard
+/// in _update() skip independent-pool-detection on every curve-phase
+/// transfer this factory itself originates (buys paying out from the
+/// factory, and the liquidity-seeding transfer inside _doGraduate's
+/// addLiquidityETH call).
+///
+/// FIX (this review, Finding CT-2): that guard alone is NOT sufficient,
+/// and CustomToken.sol was not "completely unmodified" as this comment
+/// used to claim. `from == factory` only covers transfers the factory
+/// itself originates -- it does nothing for an ordinary curve sell()
+/// (transferFrom(seller, factory, amount): from == the seller, a trader,
+/// not this factory) or a plain wallet-to-wallet transfer of curve tokens,
+/// both of which are routine during the genuinely long pre-graduation
+/// phase every curve token sits in. Since creating an empty Uniswap-V2-
+/// style pair for any token is permissionless and needs no liquidity, an
+/// attacker could pre-create a rogue pair for a not-yet-graduated curve
+/// token and let the next ordinary sell/transfer permanently lock `pair`
+/// to it via CustomToken._activatePoolIfFound() -- causing this factory's
+/// own _doGraduate() -> setPair() call below to revert forever on
+/// PairAlreadySet(), permanently blocking that token from ever graduating
+/// to a real, LP-locked pool. CustomToken.sol now carries a `curveManaged`
+/// flag (see its own doc comment) set to `true` by both of this factory's
+/// initialize() call sites below, which additionally gates _update()'s
+/// auto-activation guard AND activateIndependentPair()'s manual path -- so
+/// a curve-managed token never attempts pool auto-detection at all,
+/// regardless of what transfer would otherwise trigger it or what rogue
+/// pair a third party pre-created. Only this factory's own explicit
+/// setPair() call inside _doGraduate() below -- after real liquidity has
+/// genuinely been seeded -- can ever set `pair` for these tokens now.
 ///
 /// This factory uses its OWN, freshly-deployed LiquidityLocker instance --
 /// never BondingCurveFactory's or CustomTokenFactory's -- because a
@@ -594,10 +616,13 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
 
         token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(msg.sender, salt));
         // mintTo_ == factory_ == address(this) for the entire curve phase --
-        // required so CustomToken._update's `from == factory` guard skips
-        // independent-pool-detection on every transfer this factory
-        // originates during the curve phase and during graduation's own
-        // liquidity-seeding transfer. See this contract's header comment.
+        // needed so CustomToken._update's `from == factory` check correctly
+        // skips this factory's own internal transfers (curve buy()/sell()
+        // pulls tokens through this contract, and graduation's own
+        // liquidity-seeding transfer originates here too). This alone is
+        // NOT what keeps independent-pool-detection from firing during the
+        // curve phase, though -- see curveManaged_ below and CustomToken's
+        // own curveManaged doc comment (Finding CT-2) for why.
         CustomToken(payable(token)).initialize(
             name_,
             symbol_,
@@ -609,7 +634,8 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
             buyFees_,
             sellFees_,
             reflectionAsset_,
-            marketingWallet_
+            marketingWallet_,
+            true // curveManaged_ -- Finding CT-2 fix: this token is cloned by CustomBondingCurveFactory, so it must never auto-detect/auto-activate an independent pool -- only this factory's own setPair() call inside _doGraduate(), after real liquidity has genuinely been seeded, may ever set `pair`
         );
 
         uint256 curveSupply = (totalSupply_ * curveSupplyBps) / 10_000;
@@ -752,7 +778,8 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
 
         token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(voucher.creator, voucher.salt));
         // mintTo_ == factory_ == address(this) for the entire curve phase --
-        // see createCurveToken()'s own comment on why.
+        // see createCurveToken()'s own comment on why, and on curveManaged_
+        // below (Finding CT-2).
         CustomToken(payable(token)).initialize(
             voucher.name,
             voucher.symbol,
@@ -764,7 +791,8 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
             voucher.buyFees,
             voucher.sellFees,
             voucher.reflectionAsset,
-            voucher.marketingWallet
+            voucher.marketingWallet,
+            true // curveManaged_ -- Finding CT-2 fix: see createCurveToken()'s own comment above
         );
 
         uint256 curveSupply = (voucher.totalSupply * curveSupplyBps) / 10_000;

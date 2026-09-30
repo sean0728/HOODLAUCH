@@ -79,6 +79,43 @@ contract CustomToken is ERC20, ReentrancyGuard {
     address public factory;
     address public router;
     address public pair; // set once, by the factory, right after it seeds this token's pool
+
+    /// @notice True for a clone deployed by CustomBondingCurveFactory
+    /// (i.e. a "Quick Launch" curve token), false for a clone deployed
+    /// directly by CustomTokenFactory ("Deploy Custom Tax Token" /
+    /// "Deploy and Add Liquidity"). Set once, at initialize(), and never
+    /// changed again.
+    ///
+    /// @dev Finding CT-2 fix. Mirrors LaunchedToken.curveManaged exactly,
+    /// closing the same vulnerability class in this contract:
+    /// _activatePoolIfFound()'s auto-activation in _update() below was
+    /// originally guarded only by `pair == address(0) && from != factory`,
+    /// which correctly excludes CustomTokenFactory's own atomic
+    /// "deploy + seed liquidity" internal transfer (from == factory
+    /// there) but does NOT exclude a CustomBondingCurveFactory curve
+    /// token's ordinary curve sell() (transferFrom(seller, factory,
+    /// amount) — from == seller, the trader, not the factory) or any
+    /// plain wallet-to-wallet transfer of curve tokens during the
+    /// pre-graduation phase. Since creating an empty Uniswap-V2-style
+    /// pair for any token is permissionless and requires no liquidity, an
+    /// attacker could pre-create a rogue pair for a not-yet-graduated
+    /// curve token, and the very next ordinary sell/transfer would
+    /// permanently lock `pair` to that rogue shell via
+    /// _activatePoolIfFound() — causing CustomBondingCurveFactory's own
+    /// _doGraduate() -> setPair() call to revert forever on
+    /// PairAlreadySet(), permanently blocking that token from ever
+    /// graduating to a real, LP-locked pool. No funds are ever at risk;
+    /// this was a permanent, low-cost, permissionless denial-of-service
+    /// against the graduation feature specifically. A curve-managed
+    /// token (curveManaged == true) now never attempts pool
+    /// auto-detection at all — _update()'s guard below additionally
+    /// requires `!curveManaged` — so this class of pre-graduation pair
+    /// hijack is closed regardless of what transfer would otherwise have
+    /// triggered it or what rogue pair a third party pre-created. Only
+    /// CustomBondingCurveFactory's own explicit setPair() call (inside
+    /// _doGraduate(), after real liquidity has genuinely been seeded)
+    /// can ever set `pair` for a curve-managed token.
+    bool public curveManaged;
     uint256 public launchedAt;
     string private _tokenName;
     string private _tokenSymbol;
@@ -385,6 +422,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     error CombinedTaxExceedsLimit(); // combined platform and creator tax exceeds 100%
     error PlatformTaxNotConfigured();
     error InvalidPriceFeed();
+    error InvalidGraduationTarget(); // graduation target must be > 0
     error InvalidOracleStaleness(); // oracle staleness must be > 0
     error PriceFeedStillFresh(); // current price feed is still fresh, cannot be repointed
 
@@ -430,7 +468,8 @@ contract CustomToken is ERC20, ReentrancyGuard {
         FeeSet memory buyFees_,
         FeeSet memory sellFees_,
         address reflectionAsset_,
-        address marketingWallet_
+        address marketingWallet_,
+        bool curveManaged_
     ) external {
         if (_initialized) revert AlreadyInitialized();
         if (totalSupply_ == 0) revert SupplyMustBePositive();
@@ -460,6 +499,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
         sellFees = sellFees_;
         reflectionAsset = reflectionAsset_;
         marketingWallet = marketingWallet_;
+        curveManaged = curveManaged_; // Finding CT-2 fix -- see the state variable's own doc comment
         swapThreshold = totalSupply_ / 1000; // 0.1% default; see setSwapThreshold()
         processingSlippageBps = 600; // 6.00% default; see setProcessingSlippageBps()
         reflectionsEnabled = buyFees_.reflectionBps > 0 || sellFees_.reflectionBps > 0;
@@ -616,6 +656,15 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// real purpose and was merely inconsistent with the automatic path.
     function activateIndependentPair() external {
         if (pair != address(0)) revert PairAlreadySet();
+        // Finding CT-2 fix: this manual convenience path funnels through
+        // the exact same _activatePoolIfFound() as _update()'s automatic
+        // detection, and is callable by literally anyone -- so leaving it
+        // ungated here would let an attacker trigger the same rogue-pair
+        // hijack on a curve-managed token directly, on demand, without
+        // even waiting for an ordinary sell/transfer to trip the
+        // _update() guard. See curveManaged's own doc comment for the
+        // full writeup of the vulnerability this closes.
+        if (curveManaged) revert NoPoolFound();
         bool activated = this._activatePoolIfFound();
         if (!activated) revert NoPoolFound();
     }
@@ -647,6 +696,25 @@ contract CustomToken is ERC20, ReentrancyGuard {
         if (creatorRewardsDistributor_ == address(0) && creatorRewardBps_ != 0) {
             revert CreatorRewardBpsRequiresDistributor();
         }
+        // Finding CT-3 fix (mirrors LaunchedToken Finding F-3/TF-2):
+        // CustomTokenFactory.setTaxDefaults already requires
+        // graduationTargetUsd_ > 0 and maxOracleStaleness_ > 0 before
+        // either value can be set at the platform level, so under normal
+        // operation this pair always arrives here already validated. But
+        // nothing about this function's own signature enforces that --
+        // _activatePoolIfFound()'s auto-configure path reads both values
+        // fresh off the factory on every call, and a graduationTargetUsd
+        // of 0 would make currentMarketCapInFeedDecimals()'s very first
+        // observation "confirm" graduation immediately (permanently
+        // disabling the platform's tax before it ever collected anything
+        // meaningful), while a maxOracleStaleness of 0 would make every
+        // price-feed read treat the feed as stale, permanently disabling
+        // _maybeDisablePlatformTax()'s ability to ever graduate the token
+        // at all. Bounding both here too costs nothing and removes the
+        // dependency on the caller (whether the factory or a future
+        // integration) always getting this right upstream.
+        if (graduationTargetUsd_ == 0) revert InvalidGraduationTarget();
+        if (maxOracleStaleness_ == 0) revert InvalidOracleStaleness();
         // Defends against the platform's own feeBps_ and this token's
         // already-locked-in creator-side tax (buyFees/sellFees, set back
         // at initialize()) summing past 100%. If they ever did,
@@ -957,7 +1025,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
         // transfer — it just leaves `pair` unset for now, retried on a
         // later one.
         bool justActivated = false;
-        if (pair == address(0) && from != factory) {
+        if (pair == address(0) && !curveManaged && from != factory) {
             try this._activatePoolIfFound() returns (bool activated) {
                 justActivated = activated;
             } catch {

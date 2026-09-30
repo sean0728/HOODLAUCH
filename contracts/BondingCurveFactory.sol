@@ -38,15 +38,31 @@ import "./interfaces/IUniswapV2Router02.sol";
 /// the single-shared-factory architecture; it does not reuse or extend that
 /// file.
 ///
-/// Reuses LaunchedToken.sol, LiquidityLocker.sol, and the router interfaces
-/// completely unmodified. This works because LaunchedToken.initialize()
-/// already accepts an arbitrary mintTo_/factory_ pair, and its onlyFactory
-/// modifier just checks msg.sender == factory -- a plain address, never
-/// hardcoded to TokenFactory (see LaunchedToken.sol:134-137). A curve-phase
-/// token has factory_ == address(this), so its tax never auto-activates
-/// pre-graduation (there's no real pair for _maybeAutoActivateTax to find
-/// yet), and _doGraduate below calls the exact same configureTax() every
-/// other factory calls once its own pool exists.
+/// Reuses LaunchedToken.sol, LiquidityLocker.sol, and the router interfaces.
+/// This works because LaunchedToken.initialize() already accepts an
+/// arbitrary mintTo_/factory_ pair, and its onlyFactory modifier just checks
+/// msg.sender == factory -- a plain address, never hardcoded to TokenFactory
+/// (see LaunchedToken.sol:134-137). A curve-phase token has factory_ ==
+/// address(this), and _doGraduate below calls the exact same configureTax()
+/// every other factory calls once its own pool exists.
+///
+/// FIX (HoodLaunch review, Finding TF-1): the claim this comment used to
+/// make here -- that a curve-phase token's tax "never auto-activates
+/// pre-graduation because there's no real pair for _maybeAutoActivateTax to
+/// find yet" -- was wrong, and LaunchedToken.sol is no longer byte-for-byte
+/// unmodified as a result. Creating an empty (zero-reserve) DEX pair for an
+/// arbitrary token address is permissionless and nearly free, so a third
+/// party could pre-create one for any not-yet-graduated curve token, and the
+/// very next ordinary sell() or wallet-to-wallet transfer of that token --
+/// both routine, unprivileged actions -- would have silently auto-activated
+/// the tax against that empty shell, permanently blocking _doGraduate()'s
+/// own configureTax() call (`require(!taxConfigured)`) from ever succeeding
+/// again. LaunchedToken.sol now takes an explicit curveManaged_ flag at
+/// initialize() time (both call sites below pass true) that gates
+/// _maybeAutoActivateTax entirely for a curve-managed token, so it truly
+/// never runs pre-graduation, regardless of what pair a third party creates.
+/// This is the only behavioral change this fix makes to how this factory's
+/// own tokens work -- _doGraduate()'s own configureTax() call is unaffected.
 ///
 /// Single shared factory, not one contract per curve: cheaper per launch,
 /// same architecture TokenFactory/CustomTokenFactory already use, at the
@@ -691,7 +707,12 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         require(priceFeed != address(0), "BondingCurveFactory: price feed not configured");
 
         token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(msg.sender, salt));
-        LaunchedToken(token).initialize(name_, symbol_, totalSupply_, msg.sender, address(this), address(this));
+        // FIX (HoodLaunch review, Finding TF-1): curveManaged_ = true here —
+        // see LaunchedToken.curveManaged's own doc comment. This is what
+        // stops a permissionlessly-pre-created DEX pair from ever being
+        // able to auto-activate this token's tax before graduation and
+        // permanently block _doGraduate()'s own configureTax() call.
+        LaunchedToken(token).initialize(name_, symbol_, totalSupply_, msg.sender, address(this), address(this), true);
 
         uint256 curveSupply = (totalSupply_ * curveSupplyBps) / 10_000;
         require(curveSupply > 0, "BondingCurveFactory: curve supply rounds to zero");
@@ -846,8 +867,11 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         d.settled = true; // effects before interactions, same discipline as createCurveToken/_executeBuy
 
         token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(voucher.creator, voucher.salt));
+        // FIX (HoodLaunch review, Finding TF-1): curveManaged_ = true — see
+        // the matching call in createCurveToken() above and
+        // LaunchedToken.curveManaged's own doc comment.
         LaunchedToken(token).initialize(
-            voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, address(this), address(this)
+            voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, address(this), address(this), true
         );
 
         uint256 curveSupply = (voucher.totalSupply * curveSupplyBps) / 10_000;

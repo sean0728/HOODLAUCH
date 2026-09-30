@@ -417,7 +417,8 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
                 voucher.buyFees,
                 voucher.sellFees,
                 voucher.reflectionAsset,
-                voucher.marketingWallet
+                voucher.marketingWallet,
+                false // curveManaged_ -- Finding CT-2 fix: this token is launched directly by CustomTokenFactory, not cloned by CustomBondingCurveFactory
             );
         } else {
             require(voucher.liquidityEthAmount > 0, "CustomTokenFactory: no ETH sent for liquidity");
@@ -432,7 +433,8 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
                 voucher.buyFees,
                 voucher.sellFees,
                 voucher.reflectionAsset,
-                voucher.marketingWallet
+                voucher.marketingWallet,
+                false // curveManaged_ -- Finding CT-2 fix: see the other call site's comment above
             );
 
             (pair, lpAmount, lockId, creatorTokensBought) = _relayedSeedLiquidityAndBuyIn(
@@ -624,7 +626,8 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
                 buyFees_,
                 sellFees_,
                 reflectionAsset_,
-                marketingWallet_
+                marketingWallet_,
+                false // curveManaged_ -- Finding CT-2 fix: this token is launched directly by CustomTokenFactory, not cloned by CustomBondingCurveFactory
             );
         } else {
             // "Deploy and Add Liquidity (Live)": the only path where either
@@ -649,7 +652,8 @@ contract CustomTokenFactory is Ownable2Step, ReentrancyGuard {
                 buyFees_,
                 sellFees_,
                 reflectionAsset_,
-                marketingWallet_
+                marketingWallet_,
+                false // curveManaged_ -- Finding CT-2 fix: see the other call site's comment above
             );
 
             (pair, lpAmount, lockId, creatorTokensBought) = _seedLiquidityAndBuyIn(
