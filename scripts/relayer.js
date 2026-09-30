@@ -434,12 +434,16 @@ function relayerSettingsMessage(settings, timestamp) {
 //
 // PlatformTaxDistributor (see scripts/deploy.js's own big comment on it) is
 // deliberately NOT included here: it's a standalone contract that is never
-// wired into any HoodLaunch factory, and — per that same comment — wiring
-// its address into the front end requires hand-editing index.html's own
-// PLATFORM_TAX_DISTRIBUTOR constant, something no admin-panel action can do
-// safely from a running server. It stays a command-line-only, deliberately
-// manual step; deploy it with `npx hardhat run scripts/deploy.js` and
-// DEPLOY_PLATFORM_TAX_DISTRIBUTOR=true exactly as before.
+// wired into any HoodLaunch factory, so there is no owner-only follow-up
+// call this route could make on its behalf the way it does for every other
+// contract above (wiring rewardsDistributor, setPlatformToken, etc.). It
+// stays a command-line-only, deliberately manual deploy step — run it with
+// `npx hardhat run scripts/deploy.js` and DEPLOY_PLATFORM_TAX_DISTRIBUTOR=true
+// exactly as before. Once deployed, though, wiring its address into the
+// front end is now an ordinary admin-panel action like any other contract
+// address (the "platformTaxDistributor" field in the "Platform contracts"
+// panel, saved through the same signed POST /platform-config this route's
+// siblings use) — it no longer requires hand-editing index.html.
 //
 // Ownership handoff: every Ownable2Step contract this deploys ends the run
 // owned by relayerWallet (the deploying account) — required so the relayer
