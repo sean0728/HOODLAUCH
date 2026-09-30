@@ -1,14 +1,14 @@
 {
   "tokenFactory": {
-    "demo": "0xBC0E6376a90505A6eB9aD6C1675e6b32Be524d84",
+    "demo": "0x51df673d346CcB51Bdc1600Cd381CcBed05CE564",
     "live": null
   },
   "customTokenFactory": {
-    "demo": "0x8e37F930991369bE46Dd79f43E77dd2A095f31a2",
+    "demo": "0x0b7f4b877284eA8343d85F1107C11d2d1626B36d",
     "live": null
   },
   "rewardsDistributor": {
-    "demo": "0xb8749F939C7C667FD9a51b69C32019d4a59da404",
+    "demo": "0x3fD90E2eEE6e6d9A8792C231e8d44E56C9f97af4",
     "live": null
   },
   "priceFeed": {
