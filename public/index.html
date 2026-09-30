@@ -1244,33 +1244,28 @@
     }
   };
 
-  // ---------------- platform trade tax (standalone, NOT part of this
-  // platform's own contracts or admin config) ----------------
+  // ---------------- platform trade tax ----------------
   // A flat 0.30% fee this page itself adds to every buy/sell/curve-buy/
   // curve-sell it executes, on top of ordinary gas — sent to a standalone
   // PlatformTaxDistributor contract that is deployed and owned entirely
-  // independently of this platform (its own owner, its own deployment,
-  // never touched by TokenFactory/relayer.js/this admin panel). Nothing
-  // about that contract's own settings is read or controlled from here —
-  // this is only the address every trade on this page sends its 0.30% to,
-  // and it is a plain code constant rather than part of CONFIG_KEYS below
-  // on purpose: this fee is not "platform config," it isn't saved to the
-  // relayer, and it never goes through the ADMIN_WALLET-signed config
-  // flow those keys do. Fill in the real deployed address per network
-  // after deploying PlatformTaxDistributor.sol; leaving a network's entry
-  // as the zero address simply means trades on that network skip the fee
-  // entirely (fails open — never blocks or breaks a trade over a missing
-  // address).
-  const PLATFORM_TAX_DISTRIBUTOR = {
-    demo: "0x0000000000000000000000000000000000000000",
-    live: "0x0000000000000000000000000000000000000000",
-  };
+  // independently of this platform's own factories/tokens (its own owner,
+  // its own deployment, never touched by TokenFactory/relayer.js's on-chain
+  // logic). Nothing about that contract's own settings (feeWallet,
+  // disburseThreshold, etc.) is read or controlled from here — this page
+  // only ever needs its ADDRESS, which now lives in the same admin-managed
+  // platformConfig every other contract address below does (see
+  // "platformTaxDistributor" in CONFIG_KEYS) rather than a separate
+  // hardcoded constant, so it can be set/updated from the admin panel's
+  // "Platform contracts" tab exactly like TokenFactory or the price feed,
+  // no code edit or redeploy of this file required. See
+  // platformTaxDistributorAddress() further down, alongside the other
+  // config-backed address getters. The 0.30% RATE itself is still a plain
+  // page constant (deliberately not admin-configurable) since changing it
+  // is a rare, deliberate decision rather than a per-network deployment
+  // address. Leaving a network's platformTaxDistributor address unset
+  // simply means trades on that network skip the fee entirely (fails open
+  // — never blocks or breaks a trade over a missing address).
   const PLATFORM_TRADE_TAX_BPS = 30n; // 0.30% — this page's own constant, independent of any contract
-
-  function platformTaxDistributorAddress(networkMode){
-    const addr = PLATFORM_TAX_DISTRIBUTOR[networkMode] || PLATFORM_TAX_DISTRIBUTOR[appMode];
-    return (addr && addr.toLowerCase() !== ZERO_ADDRESS) ? addr : ZERO_ADDRESS;
-  }
 
   // ---------------- platform config (contract addresses) ----------------
   // Every address needed to run the live version, centralized here instead
@@ -1309,8 +1304,14 @@
   // verify for anyone who has these two fields filled in — "Save (this
   // browser)" and manually editing config.json both still work in the
   // meantime, since neither goes through that signature check.
-  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl"];
-  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
+  // platformTaxDistributor is appended at the END, same convention as
+  // bondingCurveFactory/customBondingCurveFactory above it were when THEY
+  // were added — see the comment on canonicalizePlatformConfig just below
+  // for why insertion position matters (it's embedded in the signed
+  // message's JSON key order) and why appending at the end is the safe
+  // direction for an existing deployment's in-flight signed saves.
+  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl", "platformTaxDistributor"];
+  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "platformTaxDistributor"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
 
   // Must produce byte-identical output to relayer.js's own
   // canonicalizePlatformConfig for the same input, or a signature made here
@@ -1356,6 +1357,7 @@
     creatorRewardsDistributor: "CreatorRewardsDistributor",
     priceFeed: "Price feed (Chainlink AggregatorV3Interface)",
     relayerApiUrl: "Gasless relayer API",
+    platformTaxDistributor: "PlatformTaxDistributor (0.30% trade tax)",
   };
   const CONFIG_HELP = {
     tokenFactory: "TokenFactory address — fill in once scripts/deploy.js has run against this network. Left unset, the wizard falls back to a fully local, simulated launch instead of calling a contract that doesn't exist.",
@@ -1366,6 +1368,7 @@
     creatorRewardsDistributor: "CreatorRewardsDistributor address — pays each token's own creator() a per-token ETH share of the ongoing trading tax (see scripts/deployCreatorRewards.js). Stays unset until deployed; until then both factories keep creatorRewardBps effectively inactive on-chain regardless of what's entered here. Unlike PlatformRewardsDistributor, nothing pools across holders — every launched token gets its own independent claimable balance, read directly off this contract from each creator's Portfolio.",
     priceFeed: "Chainlink ETH/USD AggregatorV3Interface on Robinhood Chain, used only to display a live USD price for the ETH-denominated fees. Confirmed mainnet address ships as the default below; testnet is unconfirmed (Chainlink's address directory renders that table client-side) — the price fetcher falls back to a plain HTTP API and then a hardcoded estimate when this is unset for the current network.",
     relayerApiUrl: "Base URL of a running scripts/relayer.js instance (see the contracts repo's README) — e.g. https://relayer.yourdomain.com. When set, the wizard offers a gasless launch: the creator signs a free EIP-712 voucher and sends one cheap ETH deposit, and the relayer submits the real deploy transaction and pays its own gas. Left unset, launches always fall back to the creator's wallet submitting (and paying gas for) the deploy transaction directly, exactly as before this feature existed. This same relayer instance, when given CREATOR_REWARDS_DISTRIBUTOR_ADDRESS in its own environment, also auto-sweeps creator rewards into ETH in the background — see scripts/relayer.js.",
+    platformTaxDistributor: "PlatformTaxDistributor address — a fully standalone contract (its own deployment, its own owner, not part of scripts/deploy.js's own pipeline or controlled by TokenFactory/relayer.js) that every buy/sell/curve-buy/curve-sell on this page sends a flat 0.30% trade tax to, as a plain extra ETH transfer alongside the trade itself (see PLATFORM_TRADE_TAX_BPS). Deploy PlatformTaxDistributor.sol separately, then set its address here per network. Left unset (or set to the zero address), trades on that network simply skip the fee entirely — never blocks or breaks a trade over a missing address.",
   };
   const DEFAULT_CONFIG = {
     // Testnet (demo) values below are the actual TokenFactory/
@@ -1407,6 +1410,10 @@
     // actionable message instead of surfacing later as unexplained dropped
     // requests.
     relayerApiUrl: { demo: location.origin, live: null }, // fill in once a mainnet relayer instance is hosted somewhere reachable (must share this page's origin, or the CSP connect-src allowlist above needs widening first — see gatherPlatformConfigLayerFromForm)
+    // Unset on both networks until PlatformTaxDistributor.sol is actually
+    // deployed somewhere — same null-until-deployed convention as every
+    // other factory/distributor above. See CONFIG_HELP.platformTaxDistributor.
+    platformTaxDistributor: { demo: null, live: null },
   };
   const PLATFORM_CONFIG_STORAGE_KEY = "hoodlaunch_platform_config";
 
@@ -1533,6 +1540,16 @@
   function rewardsDistributorAddress(mode){ return platformConfig.rewardsDistributor[mode || appMode] || null; }
   function creatorRewardsDistributorAddress(mode){ return platformConfig.creatorRewardsDistributor[mode || appMode] || null; }
   function priceFeedAddress(mode){ return platformConfig.priceFeed[mode || appMode] || null; }
+  // Returns ZERO_ADDRESS (never null) when unset, unlike the getters above —
+  // every call site (the buy/sell/curve-buy/curve-sell trade flows) checks
+  // `!== ZERO_ADDRESS` directly rather than a truthiness check, so this
+  // keeps that exact fails-open contract from before this address moved
+  // into platformConfig (see the platform-trade-tax comment above
+  // PLATFORM_TRADE_TAX_BPS).
+  function platformTaxDistributorAddress(mode){
+    const addr = platformConfig.platformTaxDistributor[mode || appMode] || null;
+    return (addr && addr.toLowerCase() !== ZERO_ADDRESS) ? addr : ZERO_ADDRESS;
+  }
 
   // Which network the platform shows is no longer a personal, per-browser
   // preference (it used to live in localStorage and any visitor could flip
@@ -6595,7 +6612,7 @@
       const taxDistributor = platformTaxDistributorAddress(t.networkMode);
       if(tradeSide==="buy"){
         const ethIn = parseEtherToWei(amtStr);
-        // The 0.30% platform trade tax (see PLATFORM_TAX_DISTRIBUTOR above)
+        // The 0.30% platform trade tax (see the platform-trade-tax comment above PLATFORM_TRADE_TAX_BPS)
         // comes off the ETH BEFORE it reaches the pool — only the
         // remainder actually buys tokens — so the quote below has to use
         // that reduced amount to match what submitTrade() will actually
@@ -6668,7 +6685,7 @@
         if(tradeSide==="buy"){
           const ethIn = parseEtherToWei(amtStr);
           if(ethIn<=0n) throw new Error("Enter an amount greater than 0.");
-          // Platform trade tax (see PLATFORM_TAX_DISTRIBUTOR above): 0.30%
+          // Platform trade tax (see the platform-trade-tax comment above PLATFORM_TRADE_TAX_BPS): 0.30%
           // of the ETH the user entered is taken off BEFORE the swap, so
           // only the remainder actually buys tokens — one extra wallet
           // transaction, sent first, on top of the swap itself. Skipped
@@ -6828,7 +6845,7 @@
 
     // ethInOverride lets a caller quote off a DIFFERENT ETH amount than
     // what's actually in the input box — needed for the platform trade tax
-    // (see PLATFORM_TAX_DISTRIBUTOR above): only ethIn-minus-tax actually
+    // (see the platform-trade-tax comment above PLATFORM_TRADE_TAX_BPS): only ethIn-minus-tax actually
     // reaches the curve on a buy, so both renderQuote (display) and
     // submitTrade (the real transaction) need to quote off that reduced
     // amount rather than the raw amtInput.value this function otherwise
@@ -6926,7 +6943,7 @@
         if(tradeSide==="buy"){
           const ethIn = parseEtherToWei(amtStr);
           if(ethIn<=0n) throw new Error("Enter an amount greater than 0.");
-          // Platform trade tax (see PLATFORM_TAX_DISTRIBUTOR above): 0.30%
+          // Platform trade tax (see the platform-trade-tax comment above PLATFORM_TRADE_TAX_BPS): 0.30%
           // of the ETH the user entered is taken off BEFORE it reaches the
           // curve, as its own separate wallet transaction sent first — the
           // quote below has to be re-derived off that reduced amount
@@ -11126,7 +11143,7 @@
       <div class="panel admin-panel" style="grid-column:1 / -1;">
         <div class="admin-banner" style="margin-bottom:22px;">
           <span class="icon">⚠️</span>
-          <p>This runs the full deploy pipeline from THIS relayer's own wallet (<code>${escapeHtml(hints.deployerAddress || "")}</code>) — real gas, real contracts, potentially several minutes end to end. Every contract it deploys fresh proposes ownership to your wallet (<code>${escapeHtml(hints.adminWallet || ADMIN_WALLET)}</code>) when it finishes; accept it from the Contract admin tab afterward. PlatformTaxDistributor is standalone and NOT included here — it still needs its own <code>npx hardhat run scripts/deploy.js</code> run, since wiring its address in requires editing this file's own PLATFORM_TAX_DISTRIBUTOR constant.</p>
+          <p>This runs the full deploy pipeline from THIS relayer's own wallet (<code>${escapeHtml(hints.deployerAddress || "")}</code>) — real gas, real contracts, potentially several minutes end to end. Every contract it deploys fresh proposes ownership to your wallet (<code>${escapeHtml(hints.adminWallet || ADMIN_WALLET)}</code>) when it finishes; accept it from the Contract admin tab afterward. PlatformTaxDistributor is standalone and NOT included here — it still needs its own <code>npx hardhat run scripts/deploy.js</code> run; once deployed, set its address in the "Platform contracts" panel below (no code edit needed).</p>
         </div>
 
         <div class="admin-deploy-section">
