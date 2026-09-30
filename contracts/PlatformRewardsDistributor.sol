@@ -126,23 +126,47 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     uint256 public roundSupplySnapshot; // denominator: eligible supply frozen at round start (see startAirdropRound)
     uint256 public roundCursor; // next holder-registry index processAirdropBatch will start from
 
-    /// @notice Finding PR-5 fix: platformToken.holderCount() at the exact
-    /// moment startAirdropRound() froze roundSupplySnapshot -- the round's
-    /// own "finish line," frozen the same way its payout pool and
-    /// denominator already are. Before this existed, processAirdropBatch()
+    /// @notice Finding PR-5 fix, layer 1 of 2: platformToken.holderCount()
+    /// at the exact moment startAirdropRound() froze roundSupplySnapshot --
+    /// the round's own "finish line," frozen the same way its payout pool
+    /// and denominator already are. Before this existed, processAirdropBatch()
     /// capped its own walk using a LIVE, freshly re-read holderCount() on
     /// every single call, which let an address that first became a holder
     /// AFTER the round had already started still be walked (if its
     /// registry index fell inside a not-yet-processed batch) and assigned a
     /// share of roundAmount/roundSupplySnapshot -- a pool it was never part
-    /// of when the denominator was computed. processAirdropBatch() now caps
-    /// its walk at whichever is SMALLER of the live holderCount() and this
+    /// of when the denominator was computed. processAirdropBatch() caps its
+    /// walk at whichever is SMALLER of the live holderCount() and this
     /// value, so the round can still tolerate the registry SHRINKING
     /// mid-round (an existing holder's balance dropping to zero, removed via
     /// swap-and-pop, exactly as before) but can never walk past whoever
-    /// existed when the round actually started -- a holder who joins later
-    /// is correctly picked up by the NEXT round's own fresh snapshot instead.
+    /// existed when the round actually started. Every genuine round-start
+    /// holder is guaranteed to stay at SOME index below this bound for the
+    /// round's entire lifetime (PlatformToken's swap-and-pop only ever moves
+    /// an existing entry to a LOWER index, filling a vacated slot -- it never
+    /// pushes one higher), so this bound alone never excludes a legitimate
+    /// holder. It is not, on its own, enough to EXCLUDE every impostor,
+    /// though: that same swap-and-pop mechanic can also hand a freshly
+    /// vacated LOW index (still under this bound) to a brand-new holder who
+    /// only entered after the round started -- see roundGenerationAtStart
+    /// below, layer 2, for how that residual case is closed.
     uint256 public roundHolderCountAtStart;
+
+    /// @notice Finding PR-5 fix, layer 2 of 2: platformToken's own
+    /// holderGenerationCounter() at the exact moment startAirdropRound() ran
+    /// (captured in the same call already reading holderCount() above, so no
+    /// extra external call is introduced). Every address PlatformToken has
+    /// ever added to its registry is stamped with the generation counter's
+    /// value at the moment of that addition (or re-addition, if it had
+    /// previously dropped to zero and left the registry) -- see
+    /// PlatformToken.holderGeneration's own comment. processAirdropBatch()
+    /// skips any holder whose OWN generation is strictly newer than this
+    /// value, regardless of what index it's sitting at -- this is what
+    /// actually closes the residual gap layer 1 above cannot: a holder that
+    /// recycles a vacated low index via swap-and-pop after the round already
+    /// started is correctly identified as ineligible by its generation stamp
+    /// alone, independent of the index it happens to occupy.
+    uint256 public roundGenerationAtStart;
 
     event PlatformTokenSet(address indexed newToken);
     event EthBuybackThresholdUpdated(uint256 newThreshold);
@@ -157,6 +181,14 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     event AirdropBatchProcessed(uint256 fromIndex, uint256 toIndex, uint256 amountDistributed);
     event AirdropPayoutSkipped(address indexed holder, uint256 amount);
     event AirdropRoundCompleted(uint256 totalDistributed);
+    /// @notice Finding PR-5 fix, layer 2: fired instead of AirdropPayoutSkipped
+    /// when a walked holder is excluded because it entered (or re-entered)
+    /// PlatformToken's registry after this round already started -- as
+    /// opposed to AirdropPayoutSkipped, which fires for a genuinely eligible
+    /// holder whose payout transfer itself failed. No share is computed or
+    /// requeued for an ineligible holder here, since it was never part of
+    /// roundSupplySnapshot's denominator in the first place.
+    event AirdropHolderIneligibleThisRound(address indexed holder, uint256 holderGeneration, uint256 roundGeneration);
 
     constructor(address router_, address initialOwner_) Ownable(initialOwner_) {
         require(router_ != address(0), "PlatformRewardsDistributor: invalid router");
@@ -406,8 +438,8 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         roundCursor = 0;
         roundActive = true;
 
-        // Finding PR-5 fix: freeze the round's own finish line here, the
-        // same moment roundSupplySnapshot itself is frozen -- see
+        // Finding PR-5 fix (layer 1): freeze the round's own finish line
+        // here, the same moment roundSupplySnapshot itself is frozen -- see
         // roundHolderCountAtStart's own comment above for why a live-only
         // holderCount() check in processAirdropBatch() let a holder from
         // OUTSIDE this snapshot draw against it. Captured once into a local
@@ -416,6 +448,13 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         // that could theoretically observe different results).
         uint256 holderCountAtStart = platformToken.holderCount();
         roundHolderCountAtStart = holderCountAtStart;
+
+        // Finding PR-5 fix (layer 2): freeze PlatformToken's own
+        // holderGenerationCounter() too -- see roundGenerationAtStart's own
+        // comment above for why layer 1's count bound alone isn't enough to
+        // exclude a holder that recycles a vacated low index via
+        // swap-and-pop after this round has already started.
+        roundGenerationAtStart = platformToken.holderGenerationCounter();
 
         emit AirdropRoundStarted(roundAmount, roundSupplySnapshot, holderCountAtStart);
     }
@@ -493,6 +532,21 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         for (uint256 i = from; i < to; i++) {
             address holder = platformToken.holderAt(i);
             if (holder == address(this)) continue;
+            // Finding PR-5 fix (layer 2): a holder whose registry generation
+            // is NEWER than roundGenerationAtStart entered (or re-entered)
+            // PlatformToken's registry after this round already started --
+            // regardless of which index it's sitting at, including one
+            // recycled from an existing holder draining to zero, which layer
+            // 1's count bound alone cannot tell apart from a genuine
+            // round-start holder. No share is computed or requeued for it:
+            // it was never part of roundSupplySnapshot's denominator, so it
+            // has no legitimate claim on this round's pool at all -- it will
+            // be included fairly by whichever LATER round's own fresh
+            // snapshot it's actually a holder at the start of.
+            if (platformToken.holderGeneration(holder) > roundGenerationAtStart) {
+                emit AirdropHolderIneligibleThisRound(holder, platformToken.holderGeneration(holder), roundGenerationAtStart);
+                continue;
+            }
             uint256 share = (roundAmount * platformToken.balanceOf(holder)) / roundSupplySnapshot;
             if (share == 0) continue;
             if (_sendPlatformToken(holder, share)) {
