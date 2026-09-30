@@ -319,6 +319,16 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// here rather than retrofitted.
     uint256 public strandedFees;
 
+    /// @notice Finding CBCF-2 fix: running total of realEthReserve across
+    /// every curve this factory has ever created -- identical convention to
+    /// BondingCurveFactory's own totalCurveReserveEth (see that contract's
+    /// doc comment for the full reasoning), kept in lockstep with every
+    /// place curve.realEthReserve itself changes (_executeBuy, sell(),
+    /// _doGraduate). Exists so rescueStrayEth (see below) can identify a
+    /// genuine stray ETH transfer in O(1), with no loop over every curve
+    /// this factory has ever created.
+    uint256 public totalCurveReserveEth;
+
     event CurveTokenCreated(
         address indexed token,
         address indexed creator,
@@ -348,6 +358,8 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     event FeeTransferFailed(address indexed recipient, uint256 amount);
     event StrandedFeesRescued(address indexed to, uint256 amount);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
+    /// @notice Finding CBCF-2 fix -- see rescueStrayEth below.
+    event StrayEthRescued(address indexed to, uint256 amount);
 
     event CurveFeeBpsUpdated(uint256 newBps);
     event CurveSupplyBpsUpdated(uint256 newBps);
@@ -473,9 +485,16 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @notice Absorbs any ETH the router refunds mid-addLiquidityETH, and any
-    /// stray direct transfer -- see rescueStrandedFees()/rescueToken() for how
-    /// the latter gets recovered. Identical reasoning to
-    /// BondingCurveFactory.receive().
+    /// stray direct transfer.
+    ///
+    /// FIX (this review, Finding CBCF-2): this comment used to claim a
+    /// stray transfer was already recoverable "via rescueStrandedFees()/
+    /// rescueToken()" -- identical mistake to BondingCurveFactory's own
+    /// BCF-2. rescueStrandedFees() is scoped strictly to the strandedFees
+    /// counter (only ever incremented by a failed fee-distribution
+    /// transfer, never an ordinary direct send), and rescueToken() only
+    /// ever moves ERC20 balances, never ETH. Use rescueStrayEth() instead,
+    /// which computes the genuinely unaccounted-for ETH balance directly.
     receive() external payable {}
 
     /// @dev See TokenFactory._deriveTokenSalt -- binds the actual CREATE2
@@ -554,6 +573,7 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         require(tokensOut >= minTokensOut, "CustomBondingCurveFactory: slippage");
 
         curve.realEthReserve += netEthIn;
+        totalCurveReserveEth += netEthIn; // Finding CBCF-2 -- keep the running total in lockstep with curve.realEthReserve
         curve.tokensRemaining -= tokensOut;
 
         _distributeEthFee(feeAmount);
@@ -907,6 +927,7 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
 
         curve.tokensRemaining += tokenAmountIn;
         curve.realEthReserve -= ethOutGross;
+        totalCurveReserveEth -= ethOutGross; // Finding CBCF-2 -- keep the running total in lockstep with curve.realEthReserve
 
         bool pulled = IERC20(token).transferFrom(msg.sender, address(this), tokenAmountIn);
         require(pulled, "CustomBondingCurveFactory: token transferFrom failed");
@@ -970,6 +991,7 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         uint256 tokensForPool = IERC20(token).balanceOf(address(this));
         uint256 ethForPool = curve.realEthReserve;
         curve.realEthReserve = 0;
+        totalCurveReserveEth -= ethForPool; // Finding CBCF-2 -- keep the running total in lockstep with curve.realEthReserve
         require(tokensForPool > 0 && ethForPool > 0, "CustomBondingCurveFactory: nothing to graduate");
 
         IERC20(token).approve(address(router), tokensForPool);
@@ -1273,6 +1295,21 @@ contract CustomBondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         bool sent = IERC20(token).transfer(to, amount);
         require(sent, "CustomBondingCurveFactory: token rescue failed");
         emit TokenRescued(token, to, amount);
+    }
+
+    /// @notice Finding CBCF-2 fix: sweeps ETH that is neither a tracked
+    /// strandedFees failure nor any live curve's own realEthReserve --
+    /// identical mechanics to BondingCurveFactory.rescueStrayEth (see that
+    /// function's own doc comment for the full reasoning).
+    function rescueStrayEth(address to) external onlyOwner returns (uint256 amount) {
+        require(to != address(0), "CustomBondingCurveFactory: invalid recipient");
+        uint256 accountedFor = totalCurveReserveEth + strandedFees;
+        uint256 balance = address(this).balance;
+        require(balance > accountedFor, "CustomBondingCurveFactory: no stray ETH to rescue");
+        amount = balance - accountedFor;
+        (bool sent, ) = payable(to).call{value: amount}("");
+        require(sent, "CustomBondingCurveFactory: stray ETH rescue failed");
+        emit StrayEthRescued(to, amount);
     }
 
     /// @notice Circuit breaker on new buy() calls only -- sell() is never

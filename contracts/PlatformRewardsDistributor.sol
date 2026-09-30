@@ -58,11 +58,16 @@ import "./interfaces/IPlatformToken.sol";
 ///    permanently revert against non-standard ERC20s (USDT-style) that
 ///    reject changing a nonzero allowance directly to another nonzero
 ///    value.
-/// A fourth, lower-severity finding (PR-4 — no rescue path for a token
-/// balance that never clears) is discussed in the report but deliberately
-/// NOT fixed here — see that finding for why an unrestricted rescue
-/// function would trade a minor availability gap for a worse
-/// centralization risk.
+///  - Finding PR-4 (Informational, fixed at the platform owner's explicit
+///    request): there was no rescue path for ETH or an ERC20 balance that
+///    never clears its own buyback threshold (or, for platformToken
+///    specifically, a balance left behind after setPlatformToken() moves
+///    on to a different token). rescueEth()/rescueToken() below close this
+///    — see each function's own comment for how they avoid the
+///    centralization risk a fully unrestricted rescue would otherwise
+///    carry: rescueToken() can never touch platformToken's own
+///    pendingAirdropTokens or an active round's roundAmount, so holder
+///    funds already earmarked for a payout can never be diverted by this.
 contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     IUniswapV2Router02 public immutable router;
 
@@ -189,6 +194,9 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     /// requeued for an ineligible holder here, since it was never part of
     /// roundSupplySnapshot's denominator in the first place.
     event AirdropHolderIneligibleThisRound(address indexed holder, uint256 holderGeneration, uint256 roundGeneration);
+    /// @notice Finding PR-4 fix -- see rescueEth/rescueToken below.
+    event EthRescued(address indexed to, uint256 amount);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     constructor(address router_, address initialOwner_) Ownable(initialOwner_) {
         require(router_ != address(0), "PlatformRewardsDistributor: invalid router");
@@ -567,5 +575,71 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
             roundActive = false;
             emit AirdropRoundCompleted(roundAmount);
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Rescue — Finding PR-4, fixed at the platform owner's explicit
+    // request. See the contract-level "Security review" note above for
+    // why an earlier revision of this file left this deliberately unfixed,
+    // and why the scoping below is what makes it safe to add now.
+    // ---------------------------------------------------------------
+
+    /// @notice Sweeps this contract's ETH balance to `to`. ETH here is
+    /// always just platform revenue waiting for triggerEthBuyback() —
+    /// unlike platformToken (see rescueToken below), no ETH balance is ever
+    /// earmarked for a specific holder, so this is a plain, unrestricted
+    /// sweep, gated only by onlyOwner. Exists for exactly the gap Finding
+    /// PR-4 described: a balance sitting below ethBuybackThreshold (or one
+    /// that accumulated before platformToken was ever configured) had no
+    /// way to move at all.
+    function rescueEth(address to) external onlyOwner nonReentrant returns (uint256 amount) {
+        require(to != address(0), "PlatformRewardsDistributor: invalid recipient");
+        amount = address(this).balance;
+        require(amount > 0, "PlatformRewardsDistributor: nothing to rescue");
+        (bool sent, ) = payable(to).call{value: amount}("");
+        require(sent, "PlatformRewardsDistributor: ETH rescue failed");
+        emit EthRescued(to, amount);
+    }
+
+    /// @notice Sweeps an ERC20 balance this contract is holding to `to`.
+    ///
+    /// For any token OTHER than the currently-configured platformToken,
+    /// this is unrestricted: an input token stuck below its own
+    /// tokenBuybackThreshold (or one whose pool no longer exists to swap
+    /// against) carries no per-holder claim — it's simply platform revenue
+    /// awaiting a buyback that may never come, the exact gap Finding PR-4
+    /// described. This also reaches a PREVIOUS platformToken instance's
+    /// leftover balance after setPlatformToken() has since moved on to a
+    /// new one — that old instance's IPlatformToken reference is gone from
+    /// storage, but any balance of it sitting here can never be the
+    /// CURRENT platformToken's pendingAirdropTokens/roundAmount (those are
+    /// only ever denominated in whatever `platformToken` points to right
+    /// now), so it is always fully rescuable under the same check below.
+    ///
+    /// For platformToken itself, this is deliberately NOT unrestricted:
+    /// pendingAirdropTokens (and, while a round is active, roundAmount) are
+    /// holder funds already earmarked for a specific payout, computed
+    /// against a live balance the airdrop machinery expects to still be
+    /// here. Rescuing those out from under it would either brick
+    /// processAirdropBatch (insufficient balance for _sendPlatformToken) or
+    /// let an owner unilaterally divert funds holders already have a claim
+    /// on — exactly the "worse centralization risk" an earlier revision of
+    /// this file traded the availability gap for. The rescuable amount is
+    /// therefore capped at whatever balance remains ABOVE both
+    /// commitments — e.g. burn()'s own truncation dust, or a stray direct
+    /// transfer of platformToken to this address outside the buyback flow.
+    function rescueToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        require(to != address(0), "PlatformRewardsDistributor: invalid recipient");
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        if (token == address(platformToken)) {
+            uint256 committed = pendingAirdropTokens + (roundActive ? roundAmount : 0);
+            uint256 rescuable = balance > committed ? balance - committed : 0;
+            require(amount <= rescuable, "PlatformRewardsDistributor: exceeds rescuable balance");
+        } else {
+            require(amount <= balance, "PlatformRewardsDistributor: exceeds balance");
+        }
+        bool sent = IERC20(token).transfer(to, amount);
+        require(sent, "PlatformRewardsDistributor: token rescue failed");
+        emit TokenRescued(token, to, amount);
     }
 }
