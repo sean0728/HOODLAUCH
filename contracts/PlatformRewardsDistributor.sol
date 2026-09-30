@@ -126,6 +126,24 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
     uint256 public roundSupplySnapshot; // denominator: eligible supply frozen at round start (see startAirdropRound)
     uint256 public roundCursor; // next holder-registry index processAirdropBatch will start from
 
+    /// @notice Finding PR-5 fix: platformToken.holderCount() at the exact
+    /// moment startAirdropRound() froze roundSupplySnapshot -- the round's
+    /// own "finish line," frozen the same way its payout pool and
+    /// denominator already are. Before this existed, processAirdropBatch()
+    /// capped its own walk using a LIVE, freshly re-read holderCount() on
+    /// every single call, which let an address that first became a holder
+    /// AFTER the round had already started still be walked (if its
+    /// registry index fell inside a not-yet-processed batch) and assigned a
+    /// share of roundAmount/roundSupplySnapshot -- a pool it was never part
+    /// of when the denominator was computed. processAirdropBatch() now caps
+    /// its walk at whichever is SMALLER of the live holderCount() and this
+    /// value, so the round can still tolerate the registry SHRINKING
+    /// mid-round (an existing holder's balance dropping to zero, removed via
+    /// swap-and-pop, exactly as before) but can never walk past whoever
+    /// existed when the round actually started -- a holder who joins later
+    /// is correctly picked up by the NEXT round's own fresh snapshot instead.
+    uint256 public roundHolderCountAtStart;
+
     event PlatformTokenSet(address indexed newToken);
     event EthBuybackThresholdUpdated(uint256 newThreshold);
     event TokenBuybackThresholdUpdated(address indexed token, uint256 newThreshold);
@@ -388,7 +406,18 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         roundCursor = 0;
         roundActive = true;
 
-        emit AirdropRoundStarted(roundAmount, roundSupplySnapshot, platformToken.holderCount());
+        // Finding PR-5 fix: freeze the round's own finish line here, the
+        // same moment roundSupplySnapshot itself is frozen -- see
+        // roundHolderCountAtStart's own comment above for why a live-only
+        // holderCount() check in processAirdropBatch() let a holder from
+        // OUTSIDE this snapshot draw against it. Captured once into a local
+        // so the value backing the event and the value stored as state are
+        // guaranteed identical (rather than two separate external calls
+        // that could theoretically observe different results).
+        uint256 holderCountAtStart = platformToken.holderCount();
+        roundHolderCountAtStart = holderCountAtStart;
+
+        emit AirdropRoundStarted(roundAmount, roundSupplySnapshot, holderCountAtStart);
     }
 
     /// @dev Finding PR-1 fix: wraps the actual token transfer in try/catch
@@ -445,7 +474,17 @@ contract PlatformRewardsDistributor is Ownable2Step, ReentrancyGuard {
         require(roundActive, "PlatformRewardsDistributor: no active round");
         require(maxHolders > 0, "PlatformRewardsDistributor: maxHolders must be > 0");
 
-        uint256 total = platformToken.holderCount();
+        // Finding PR-5 fix: bound this round's walk at whichever is SMALLER
+        // of the live holderCount() and roundHolderCountAtStart (frozen in
+        // startAirdropRound()) -- never the live value alone. See that
+        // field's own comment for the full reasoning; in short, capping at
+        // the smaller of the two still lets the registry shrink mid-round
+        // (an existing holder emptying their balance, removed via
+        // swap-and-pop) exactly as before, while guaranteeing this round
+        // never walks an address that only became a holder after
+        // roundSupplySnapshot was already frozen.
+        uint256 liveHolderCount = platformToken.holderCount();
+        uint256 total = liveHolderCount < roundHolderCountAtStart ? liveHolderCount : roundHolderCountAtStart;
         uint256 from = roundCursor;
         uint256 to = from + maxHolders;
         if (to > total) to = total;
