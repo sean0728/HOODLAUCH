@@ -33,6 +33,21 @@
 // token at a time. See the FEE_WALLET_* constants and feeWalletPollLoop
 // below.
 //
+// Once FeeWalletDistributor.platformToken() is configured, the same
+// feeWalletPollLoop tick ALSO drives that contract's own accumulate ->
+// burn/airdrop half (see FeeWalletDistributor.sol's own contract-level
+// comment): startAirdropRound/processAirdropBatch push whatever's
+// accumulated in pendingAirdropTokens out to platformToken's holders,
+// proportional to their live holdings, in gas-bounded batches — the exact
+// same PERMISSIONLESS calls the admin panel's own manual "Airdrop rounds"
+// button already makes, just on a schedule. This is the FeeWalletDistributor
+// counterpart to PlatformRewardsDistributor's own airdrop sweep described
+// below; before this, FeeWalletDistributor's burn half of every buyback ran
+// automatically (it happens inline in _splitAndProcess) but the holder half
+// just sat in pendingAirdropTokens forever unless someone called
+// startAirdropRound/processAirdropBatch by hand. See the
+// FEE_WALLET_AIRDROP_* constants and sweepFeeWalletAirdropRoundOnce below.
+//
 // A second, identical auto-sweep-and-claim runs for the per-token creator
 // reward: set CREATOR_REWARDS_DISTRIBUTOR_ADDRESS and this service
 // periodically calls CreatorRewardsDistributor.triggerCreatorSwap for every
@@ -280,11 +295,18 @@ const PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS = process.env.PLATFORM_REWARDS_DISTRI
 // how many platformToken holders one tick's processAirdropBatch calls can
 // touch, so a very large holder set can't turn one tick into an unbounded
 // run of transactions — an unfinished round simply continues on the next
-// tick (roundActive/roundCursor persist on-chain).
+// tick (roundActive/roundCursor persist on-chain). The feeWalletAirdrop*
+// pair below is the identical pair of knobs for FeeWalletDistributor's own
+// airdrop-round sweep (see sweepFeeWalletAirdropRoundOnce), kept as its own
+// independent setting rather than reusing platformAirdropBatchSize/
+// platformAirdropMaxBatchesPerTick since the two distributors' holder sets
+// and tick schedules are unrelated.
 const RELAYER_SETTINGS_DEFAULTS = {
   feeWalletPollIntervalMs: Number(process.env.FEE_WALLET_POLL_INTERVAL_MS || 5 * 60_000),
   feeWalletSlippageBps: Number(process.env.FEE_WALLET_SLIPPAGE_BPS || 300), // 3%
   feeWalletClaimMinWei: String(process.env.FEE_WALLET_CLAIM_MIN_WEI || 0),
+  feeWalletAirdropBatchSize: Number(process.env.FEE_WALLET_AIRDROP_BATCH_SIZE || 200),
+  feeWalletAirdropMaxBatchesPerTick: Number(process.env.FEE_WALLET_AIRDROP_MAX_BATCHES_PER_TICK || 10),
   creatorRewardsPollIntervalMs: Number(process.env.CREATOR_REWARDS_POLL_INTERVAL_MS || 5 * 60_000),
   creatorRewardsSlippageBps: Number(process.env.CREATOR_REWARDS_SLIPPAGE_BPS || 300), // 3%
   creatorRewardsClaimMinWei: String(process.env.CREATOR_REWARDS_CLAIM_MIN_WEI || 0),
@@ -302,6 +324,8 @@ const RELAYER_SETTINGS_BOUNDS = {
   feeWalletPollIntervalMs: { min: 15_000, max: 24 * 60 * 60_000 }, // 15s .. 24h
   feeWalletSlippageBps: { min: 0, max: 2000 }, // 0%..20%
   feeWalletClaimMinWei: { min: 0n },
+  feeWalletAirdropBatchSize: { min: 1, max: 2000 },
+  feeWalletAirdropMaxBatchesPerTick: { min: 1, max: 200 },
   creatorRewardsPollIntervalMs: { min: 15_000, max: 24 * 60 * 60_000 },
   creatorRewardsSlippageBps: { min: 0, max: 2000 },
   creatorRewardsClaimMinWei: { min: 0n },
@@ -3747,8 +3771,48 @@ async function main() {
     }
   }
 
+  // Drives FeeWalletDistributor's OTHER half of its buyback pipeline — the
+  // platformToken accumulate -> burn/airdrop mechanism ported directly from
+  // PlatformRewardsDistributor (see FeeWalletDistributor.sol's own
+  // contract-level comment). The burn half of every _splitAndProcess() call
+  // already happens automatically, inline, the instant a buyback lands —
+  // this sub-sweep is what's needed for the OTHER half (whatever landed in
+  // pendingAirdropTokens) to actually reach platformToken's holders, rather
+  // than sitting there until someone calls startAirdropRound/
+  // processAirdropBatch by hand from the admin panel. Mirrors
+  // sweepPlatformAirdropRoundOnce() above exactly, substituting
+  // feeWalletDistributor and the feeWalletAirdrop* settings; an unfinished
+  // round simply continues on the next tick (roundActive/roundCursor persist
+  // on-chain, same as the platform-rewards version).
+  async function sweepFeeWalletAirdropRoundOnce() {
+    const platformTokenAddress = await feeWalletDistributor.platformToken();
+    if (platformTokenAddress === hre.ethers.ZeroAddress) return; // not configured yet — nothing to do
+
+    let roundActive = await feeWalletDistributor.roundActive();
+    if (!roundActive) {
+      const pending = await feeWalletDistributor.pendingAirdropTokens();
+      if (pending === 0n) return; // nothing to distribute yet
+
+      const tx = await feeWalletDistributor.startAirdropRound();
+      const receipt = await tx.wait();
+      console.log(`[fee-wallet] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
+      roundActive = true;
+    }
+
+    for (let i = 0; i < relayerSettings.feeWalletAirdropMaxBatchesPerTick && roundActive; i++) {
+      const tx = await feeWalletDistributor.processAirdropBatch(relayerSettings.feeWalletAirdropBatchSize);
+      const receipt = await tx.wait();
+      roundActive = await feeWalletDistributor.roundActive();
+      console.log(
+        `[fee-wallet] airdrop batch processed in tx ${receipt.hash}` +
+          (roundActive ? " (round continues next tick)." : " (round completed).")
+      );
+    }
+  }
+
   async function feeWalletPollLoop() {
     await sweepFeeWalletRewardsOnce().catch((err) => console.error(`[fee-wallet] sweep error: ${err.message}`));
+    await sweepFeeWalletAirdropRoundOnce().catch((err) => console.error(`[fee-wallet] airdrop round sweep error: ${err.message}`));
     setTimeout(feeWalletPollLoop, relayerSettings.feeWalletPollIntervalMs);
   }
 
@@ -3926,7 +3990,8 @@ async function main() {
   if (feeWalletDistributor) {
     console.log(
       `Sweeping and auto-claiming fee-wallet rewards every ${relayerSettings.feeWalletPollIntervalMs}ms ` +
-        `(claim floor ${relayerSettings.feeWalletClaimMinWei} wei).`
+        `(claim floor ${relayerSettings.feeWalletClaimMinWei} wei), including its platformToken airdrop-round ` +
+        `sweep once platformToken() is configured.`
     );
     feeWalletPollLoop();
   }
