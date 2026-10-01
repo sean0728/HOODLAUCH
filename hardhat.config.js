@@ -21,7 +21,7 @@ module.exports = {
   solidity: {
     version: "0.8.24",
     settings: {
-      optimizer: { enabled: true, runs: 200 },
+      optimizer: { enabled: true, runs: 1 },
       // TokenFactory.createToken() and its helpers pass enough
       // parameters/return values around (name/symbol/supply/mode/ETH
       // splits/pair/lpAmount/lockId/creatorTokensBought) to blow the EVM's
