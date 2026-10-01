@@ -19,7 +19,7 @@ const EXPLORER_API_KEY = process.env.EXPLORER_API_KEY || "empty";
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.28",
+    version: "0.8.24",
     settings: {
       optimizer: { enabled: true, runs: 200 },
       // TokenFactory.createToken() and its helpers pass enough
