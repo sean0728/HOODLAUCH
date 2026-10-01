@@ -14,5 +14,21 @@
   "priceFeed": {
     "demo": "0x96B1Ebd9daB675F41C6B5688F1601c2b0619e32f",
     "live": "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9"
+  },
+ "bondingCurveFactory": {
+    "demo": "0xD6105b1A3481902016491baa36CF3569ed835Be0",
+    "live": null
+  },
+"customBondingCurveFactory": {
+    "demo": "0x6872951CA77F673096754eF143925Eb9E487E224",
+    "live": null
+  },
+  "feeWalletDistributor": {
+    "demo": "0xF3d6Aee6DC25D9192d30bf0Fa02CFE2AC6b0c50e",
+    "live": null
+  },
+  "creatorRewardsDistributor": {
+    "demo": "0xF4c332e5157Fac4BF6e894e5460ae5fb3d350d4b",
+    "live": null
   }
-}
+  }
