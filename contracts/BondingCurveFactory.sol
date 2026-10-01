@@ -1010,6 +1010,27 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         curve.tokensRemaining += tokenAmountIn;
         curve.realEthReserve -= ethOutGross;
 
+        ethOut = _settleSell(token, curve, tokenAmountIn, feeAmount, netEthOut);
+    }
+
+    /// @dev Split out of sell() purely to keep the number of locals live at
+    /// once in any single function small enough for solc's viaIR/Yul stack
+    /// allocator under real-world optimizer settings -- sell() had grown
+    /// enough live variables (curve storage ref, the quote's three outputs,
+    /// the pull/invariant-check/payout machinery) to sit right at that limit.
+    /// No behavior change: still the exact same checks-effects-interactions
+    /// order sell() always used, called only after sell() has already
+    /// applied all its storage effects (curve.tokensRemaining/
+    /// curve.realEthReserve), with sell()'s own nonReentrant guard covering
+    /// this call -- this function carries no guard of its own because it's
+    /// private and only ever reachable through sell().
+    function _settleSell(
+        address token,
+        Curve storage curve,
+        uint256 tokenAmountIn,
+        uint256 feeAmount,
+        uint256 netEthOut
+    ) private returns (uint256 ethOut) {
         bool pulled = IERC20(token).transferFrom(msg.sender, address(this), tokenAmountIn);
         require(pulled, "BondingCurveFactory: token transferFrom failed");
         require(
