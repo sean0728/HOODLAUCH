@@ -581,17 +581,29 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         tokensOut = (netEthIn * effToken) / (effEth + netEthIn);
     }
 
+    /// @dev Grouped return value for _quoteSell -- see the struct-based fix
+    /// note on _settleSell below for why this exists: a struct collapses to
+    /// one stack slot regardless of how many fields it carries, which is
+    /// what actually closes off solc's viaIR/Yul "stack too deep" class of
+    /// error for this whole sell path, rather than just moving it from one
+    /// function to the next each time one gets split.
+    struct SellQuote {
+        uint256 ethOutGross;
+        uint256 feeAmount;
+        uint256 netEthOut;
+    }
+
     /// @dev Constant-product quote for a sell, fee-last: the gross ETH the
     /// constant-product formula implies is computed first, then this
     /// curve's own snapshotted curveFeeBps is skimmed off that gross amount
     /// -- symmetric with _quoteBuy applying its fee before pricing, since
     /// here the ETH being priced is the OUTPUT leg, not the input.
-    function _quoteSell(Curve storage curve, uint256 tokenAmountIn) private view returns (uint256 ethOutGross, uint256 feeAmount, uint256 netEthOut) {
+    function _quoteSell(Curve storage curve, uint256 tokenAmountIn) private view returns (SellQuote memory quote) {
         uint256 effEth = curve.virtualEthReserve + curve.realEthReserve;
         uint256 effToken = curve.virtualTokenReserve + curve.tokensRemaining;
-        ethOutGross = (tokenAmountIn * effEth) / (effToken + tokenAmountIn);
-        feeAmount = (ethOutGross * curve.curveFeeBps) / 10_000;
-        netEthOut = ethOutGross - feeAmount;
+        quote.ethOutGross = (tokenAmountIn * effEth) / (effToken + tokenAmountIn);
+        quote.feeAmount = (quote.ethOutGross * curve.curveFeeBps) / 10_000;
+        quote.netEthOut = quote.ethOutGross - quote.feeAmount;
     }
 
     /// @dev Same 50/50 feeTreasury/rewardsDistributor split as
@@ -1003,14 +1015,14 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         require(!curve.graduated, "BondingCurveFactory: already graduated");
         require(tokenAmountIn > 0, "BondingCurveFactory: zero amount");
 
-        (uint256 ethOutGross, uint256 feeAmount, uint256 netEthOut) = _quoteSell(curve, tokenAmountIn);
-        require(ethOutGross <= curve.realEthReserve, "BondingCurveFactory: exceeds real ETH reserve");
-        require(netEthOut >= minEthOut, "BondingCurveFactory: slippage");
+        SellQuote memory quote = _quoteSell(curve, tokenAmountIn);
+        require(quote.ethOutGross <= curve.realEthReserve, "BondingCurveFactory: exceeds real ETH reserve");
+        require(quote.netEthOut >= minEthOut, "BondingCurveFactory: slippage");
 
         curve.tokensRemaining += tokenAmountIn;
-        curve.realEthReserve -= ethOutGross;
+        curve.realEthReserve -= quote.ethOutGross;
 
-        ethOut = _settleSell(token, curve, tokenAmountIn, feeAmount, netEthOut);
+        ethOut = _settleSell(token, curve, tokenAmountIn, quote);
     }
 
     /// @dev Split out of sell() purely to keep the number of locals live at
@@ -1018,18 +1030,23 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     /// allocator under real-world optimizer settings -- sell() had grown
     /// enough live variables (curve storage ref, the quote's three outputs,
     /// the pull/invariant-check/payout machinery) to sit right at that limit.
-    /// No behavior change: still the exact same checks-effects-interactions
-    /// order sell() always used, called only after sell() has already
-    /// applied all its storage effects (curve.tokensRemaining/
-    /// curve.realEthReserve), with sell()'s own nonReentrant guard covering
-    /// this call -- this function carries no guard of its own because it's
-    /// private and only ever reachable through sell().
+    /// `quote` is passed as a single SellQuote struct rather than as three
+    /// loose uint256 locals specifically so splitting this function out
+    /// actually closes the stack-depth problem instead of just moving it
+    /// here -- a struct occupies one stack slot (a memory pointer)
+    /// regardless of how many fields it carries, where three separate
+    /// uint256 parameters would still count as three. No behavior change:
+    /// still the exact same checks-effects-interactions order sell() always
+    /// used, called only after sell() has already applied all its storage
+    /// effects (curve.tokensRemaining/curve.realEthReserve), with sell()'s
+    /// own nonReentrant guard covering this call -- this function carries no
+    /// guard of its own because it's private and only ever reachable
+    /// through sell().
     function _settleSell(
         address token,
         Curve storage curve,
         uint256 tokenAmountIn,
-        uint256 feeAmount,
-        uint256 netEthOut
+        SellQuote memory quote
     ) private returns (uint256 ethOut) {
         bool pulled = IERC20(token).transferFrom(msg.sender, address(this), tokenAmountIn);
         require(pulled, "BondingCurveFactory: token transferFrom failed");
@@ -1038,13 +1055,13 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
             "BondingCurveFactory: token balance invariant violated"
         );
 
-        _distributeEthFee(feeAmount);
+        _distributeEthFee(quote.feeAmount);
 
-        ethOut = netEthOut;
+        ethOut = quote.netEthOut;
         (bool sentEth, ) = payable(msg.sender).call{value: ethOut}("");
         require(sentEth, "BondingCurveFactory: ETH payout failed");
 
-        emit CurveSold(token, msg.sender, tokenAmountIn, feeAmount, ethOut, curve.realEthReserve);
+        emit CurveSold(token, msg.sender, tokenAmountIn, quote.feeAmount, ethOut, curve.realEthReserve);
     }
 
     /// @notice Permissionless graduation once a curve's realEthReserve has
@@ -1147,7 +1164,9 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     function quoteSell(address token, uint256 tokenAmountIn) external view returns (uint256 ethOut, uint256 feeAmount) {
         Curve storage curve = curves[token];
         require(curve.totalSupply > 0, "BondingCurveFactory: unknown curve");
-        (, feeAmount, ethOut) = _quoteSell(curve, tokenAmountIn);
+        SellQuote memory quote = _quoteSell(curve, tokenAmountIn);
+        ethOut = quote.netEthOut;
+        feeAmount = quote.feeAmount;
     }
 
     function curveState(address token)
