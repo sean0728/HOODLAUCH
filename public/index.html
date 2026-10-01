@@ -1310,8 +1310,21 @@
   // for why insertion position matters (it's embedded in the signed
   // message's JSON key order) and why appending at the end is the safe
   // direction for an existing deployment's in-flight signed saves.
-  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl", "platformTaxDistributor"];
-  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "platformTaxDistributor"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
+  //
+  // feeWalletDistributor is appended at the END for the exact same reason,
+  // added here for the first time — previously this key didn't exist in
+  // this global config system at all (its address could only be set
+  // per-factory via each factory's own admin panel, which still works
+  // unchanged; this just gives the page a single place to also know the
+  // FeeWalletDistributor contract's own address, mirroring
+  // creatorRewardsDistributor's entry above). Note relayer.js's own
+  // canonicalizePlatformConfig needs updating to include this key too
+  // before "Save (all visitors)" will verify for anyone who fills it in —
+  // same already-tracked gap as bondingCurveFactory/customBondingCurveFactory
+  // above; "Save (this browser)" and manually editing config.json both work
+  // in the meantime.
+  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl", "platformTaxDistributor", "feeWalletDistributor"];
+  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "platformTaxDistributor", "feeWalletDistributor"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
 
   // Must produce byte-identical output to relayer.js's own
   // canonicalizePlatformConfig for the same input, or a signature made here
@@ -1358,6 +1371,7 @@
     priceFeed: "Price feed (Chainlink AggregatorV3Interface)",
     relayerApiUrl: "Gasless relayer API",
     platformTaxDistributor: "PlatformTaxDistributor (0.30% trade tax)",
+    feeWalletDistributor: "FeeWalletDistributor",
   };
   const CONFIG_HELP = {
     tokenFactory: "TokenFactory address — fill in once scripts/deploy.js has run against this network. Left unset, the wizard falls back to a fully local, simulated launch instead of calling a contract that doesn't exist.",
@@ -1369,6 +1383,7 @@
     priceFeed: "Chainlink ETH/USD AggregatorV3Interface on Robinhood Chain, used only to display a live USD price for the ETH-denominated fees. Confirmed mainnet address ships as the default below; testnet is unconfirmed (Chainlink's address directory renders that table client-side) — the price fetcher falls back to a plain HTTP API and then a hardcoded estimate when this is unset for the current network.",
     relayerApiUrl: "Base URL of a running scripts/relayer.js instance (see the contracts repo's README) — e.g. https://relayer.yourdomain.com. When set, the wizard offers a gasless launch: the creator signs a free EIP-712 voucher and sends one cheap ETH deposit, and the relayer submits the real deploy transaction and pays its own gas. Left unset, launches always fall back to the creator's wallet submitting (and paying gas for) the deploy transaction directly, exactly as before this feature existed. This same relayer instance, when given CREATOR_REWARDS_DISTRIBUTOR_ADDRESS in its own environment, also auto-sweeps creator rewards into ETH in the background — see scripts/relayer.js.",
     platformTaxDistributor: "PlatformTaxDistributor address — a fully standalone contract (its own deployment, its own owner, not part of scripts/deploy.js's own pipeline or controlled by TokenFactory/relayer.js) that every buy/sell/curve-buy/curve-sell on this page sends a flat 0.30% trade tax to, as a plain extra ETH transfer alongside the trade itself (see PLATFORM_TRADE_TAX_BPS). Deploy PlatformTaxDistributor.sol separately, then set its address here per network. Left unset (or set to the zero address), trades on that network simply skip the fee entirely — never blocks or breaks a trade over a missing address.",
+    feeWalletDistributor: "FeeWalletDistributor address — the platform's own fee-wallet-remainder contract (see scripts/deployFeeWalletDistributor.js), converting each taxed token's accumulated fee-wallet cut to ETH automatically instead of letting it sit as whatever token it was taxed in. Stays unset until deployed; until then both factories keep feeWalletDistributor unset on-chain regardless of what's entered here. This field only tracks the contract's own address for the page's reference (e.g. the relayer keeper panel above, and any future claim UI) — actually wiring a deployed FeeWalletDistributor into a factory is still done per-factory, via that factory's own admin panel below.",
   };
   const DEFAULT_CONFIG = {
     // Testnet (demo) values below are the actual TokenFactory/
@@ -1414,6 +1429,10 @@
     // deployed somewhere — same null-until-deployed convention as every
     // other factory/distributor above. See CONFIG_HELP.platformTaxDistributor.
     platformTaxDistributor: { demo: null, live: null },
+    // Unset on both networks until FeeWalletDistributor.sol is actually
+    // deployed somewhere — same null-until-deployed convention as every
+    // other factory/distributor above. See CONFIG_HELP.feeWalletDistributor.
+    feeWalletDistributor: { demo: null, live: null },
   };
   const PLATFORM_CONFIG_STORAGE_KEY = "hoodlaunch_platform_config";
 
@@ -1539,6 +1558,7 @@
   function relayerApiUrl(mode){ const v = platformConfig.relayerApiUrl[mode || appMode] || null; return v ? v.replace(/\/+$/, "") : null; }
   function rewardsDistributorAddress(mode){ return platformConfig.rewardsDistributor[mode || appMode] || null; }
   function creatorRewardsDistributorAddress(mode){ return platformConfig.creatorRewardsDistributor[mode || appMode] || null; }
+  function feeWalletDistributorAddress(mode){ return platformConfig.feeWalletDistributor[mode || appMode] || null; }
   function priceFeedAddress(mode){ return platformConfig.priceFeed[mode || appMode] || null; }
   // Returns ZERO_ADDRESS (never null) when unset, unlike the getters above —
   // every call site (the buy/sell/curve-buy/curve-sell trade flows) checks
@@ -9515,11 +9535,16 @@
 
   // ---- CreatorRewardsDistributor admin panel — same platform-wide,
   // read-off-whichever-factory-has-it shape as FeeWalletDistributor just
-  // below (no dedicated CONFIG_KEYS/platformConfig slot of its own; the only
-  // place its address is actually wired up is each factory's own
-  // creatorRewardsDistributor() getter — see the "Creator rewards
-  // distributor (address)" field under TokenFactory/CustomTokenFactory
-  // above). Added so the two anti-dust knobs the relayer's own
+  // below. NOTE: CONFIG_KEYS does have a creatorRewardsDistributor entry
+  // (see DEFAULT_CONFIG/CONFIG_HELP above) — that's a separate, purely
+  // informational reference address for the Portfolio claim page, kept
+  // deliberately independent of this function. This admin panel still
+  // resolves the live, authoritative address itself straight off whichever
+  // factory is configured, via each factory's own creatorRewardsDistributor()
+  // getter — see the "Creator rewards distributor (address)" field under
+  // TokenFactory/CustomTokenFactory above — rather than trusting the
+  // CONFIG_KEYS value, which could drift out of sync with what's actually
+  // wired on-chain. Added so the two anti-dust knobs the relayer's own
   // creatorRewardsPollLoop reads before it auto-sweeps a token
   // (swapThreshold/maxSwapAmount — see scripts/relayer.js) are actually
   // reachable from this page; before this, CRD_SET_SWAP_THRESHOLD_SELECTOR
@@ -9741,13 +9766,18 @@
   }
 
   // ---- FeeWalletDistributor admin panel — another single, platform-wide
-  // contract, same shape as PlatformRewardsDistributor below. Unlike that
-  // one, though, FeeWalletDistributor has no dedicated platformConfig slot
-  // of its own (no CONFIG_KEYS entry) — the only place its address is wired
-  // up at all is per-factory, via each factory's own feeWalletDistributor()
-  // getter (see the "Fee wallet distributor (address)" field under
-  // TokenFactory/CustomTokenFactory above). So rather than adding a
-  // parallel, potentially-drifting config entry, this reads it straight off
+  // contract, same shape as PlatformRewardsDistributor below. NOTE: CONFIG_KEYS
+  // now does have a feeWalletDistributor entry too (see DEFAULT_CONFIG/
+  // CONFIG_HELP above) — same purely-informational-reference treatment as
+  // creatorRewardsDistributor's entry (relayer keeper panel / future claim
+  // UI), deliberately kept independent of this function. The only place
+  // FeeWalletDistributor's address is actually WIRED up on-chain is still
+  // per-factory, via each factory's own feeWalletDistributor() getter (see
+  // the "Fee wallet distributor (address)" field under TokenFactory/
+  // CustomTokenFactory above). So rather than trusting the CONFIG_KEYS value
+  // — which only reflects whatever an admin last typed into Platform
+  // Contracts, and can drift out of sync with what's actually set on-chain —
+  // this admin panel reads the live, authoritative address straight off
   // whichever factory is configured — exactly like getDexInfo derives the
   // shared DEX factory/WETH from a factory's own router().
   async function feeWalletDistributorContractAddress(mode){
