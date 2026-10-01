@@ -19,17 +19,13 @@ const EXPLORER_API_KEY = process.env.EXPLORER_API_KEY || "empty";
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.24",
-    settings: {
-      optimizer: { enabled: true, runs: 1 },
-      // TokenFactory.createToken() and its helpers pass enough
-      // parameters/return values around (name/symbol/supply/mode/ETH
-      // splits/pair/lpAmount/lockId/creatorTokensBought) to blow the EVM's
-      // 16-slot local stack under the legacy codegen even after splitting
-      // the function up. The IR pipeline doesn't have that limit.
-      viaIR: true,
-    },
+  version: "0.8.24",
+  settings: {
+    optimizer: { enabled: true, runs: 200 },
+    viaIR: true,
+    evmVersion: "shanghai",
   },
+},
   networks: {
     robinhoodTestnet: {
       url: process.env.ROBINHOOD_TESTNET_RPC_URL || ROBINHOOD_NETWORKS.robinhoodTestnet.defaultRpcUrl,
