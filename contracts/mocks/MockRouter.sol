@@ -183,14 +183,57 @@ contract MockRouter {
         MockLPToken(payable(pair)).withdrawEth(payable(to), ethOut);
     }
 
+    /// @dev Hop 1 of swapExactTokensForTokensSupportingFeeOnTransferTokens
+    /// below, extracted purely to keep that function's own live-variable
+    /// count low enough for solc's viaIR/Yul stack allocator -- the combined
+    /// two-hop function had enough locals across both legs (tokenIn,
+    /// tokenOut, pairIn, pairOut, both hops' reserves/balances/outputs) to
+    /// exceed it. No behavior change: identical math and ordering to what
+    /// used to be hop 1 inline -- tokenIn -> ETH, held by this router only
+    /// for the duration of the outer call, no payoutBps applied to this leg
+    /// (only hop 2's final output is scaled by payoutBps, matching this
+    /// mock's existing, deliberate single-slippage-per-call behavior).
+    function _swapTokenToEthHop(address pair, address token, uint256 amountIn) private returns (uint256 ethOut) {
+        (uint256 tokenReserve, uint256 ethReserve) = _reservesFor(pair, token);
+        uint256 pairBalBefore = IERC20(token).balanceOf(pair);
+        bool pulled = IERC20(token).transferFrom(msg.sender, pair, amountIn);
+        require(pulled, "MockRouter: transferFrom failed");
+        uint256 actualIn = IERC20(token).balanceOf(pair) - pairBalBefore;
+        ethOut = (ethReserve * actualIn) / (tokenReserve + actualIn);
+        MockLPToken(payable(pair)).withdrawEth(payable(address(this)), ethOut);
+    }
+
+    /// @dev Hop 2 of swapExactTokensForTokensSupportingFeeOnTransferTokens
+    /// below -- same extraction reasoning as hop 1 above. Identical math and
+    /// ordering to what used to be hop 2 inline -- ETH -> tokenOut, sent to
+    /// `to`, scaled by payoutBps, checked against the caller's amountOutMin.
+    function _swapEthToTokenHop(
+        address pair,
+        address token,
+        uint256 ethIn,
+        address to,
+        uint256 amountOutMin
+    ) private returns (uint256 received) {
+        (uint256 tokenReserve, uint256 ethReserve) = _reservesFor(pair, token);
+        uint256 grossOut = (tokenReserve * ethIn) / (ethReserve + ethIn);
+        grossOut = (grossOut * payoutBps) / 10_000;
+        (bool sentEth, ) = pair.call{value: ethIn}("");
+        require(sentEth, "MockRouter: ETH forward failed");
+        uint256 balBefore = IERC20(token).balanceOf(to);
+        MockLPToken(payable(pair)).withdrawToken(to, grossOut);
+        received = IERC20(token).balanceOf(to) - balBefore;
+        require(received >= amountOutMin, "MockRouter: insufficient output amount");
+    }
+
     /// @dev CustomToken's only use for a 3-address path: [ourToken, WETH,
     /// reflectionAsset], to swap collected fee-tokens for whatever ERC20 a
     /// creator picked for reflections. Implemented as two hops through the
     /// same per-token/WETH pairs the rest of this mock already uses —
-    /// tokenIn -> ETH (same math as the sell function above), then
-    /// ETH -> tokenOut (same math as the buy function above) — rather than
-    /// modeling a real router's internal WETH deposit/withdraw dance,
-    /// which doesn't matter for what these tests need to prove.
+    /// tokenIn -> ETH (_swapTokenToEthHop, same math as the sell function
+    /// above), then ETH -> tokenOut (_swapEthToTokenHop, same math as the
+    /// buy function above) — rather than modeling a real router's internal
+    /// WETH deposit/withdraw dance, which doesn't matter for what these
+    /// tests need to prove.
     function swapExactTokensForTokensSupportingFeeOnTransferTokens(
         uint256 amountIn,
         uint256 amountOutMin,
@@ -208,26 +251,8 @@ contract MockRouter {
         address pairOut = pairs[tokenOut];
         require(pairOut != address(0), "MockRouter: no pair for output token");
 
-        // Hop 1: tokenIn -> ETH, held by this router only for the duration
-        // of this call.
-        (uint256 tokenReserveIn, uint256 ethReserveIn) = _reservesFor(pairIn, tokenIn);
-        uint256 pairInBalBefore = IERC20(tokenIn).balanceOf(pairIn);
-        bool pulled = IERC20(tokenIn).transferFrom(msg.sender, pairIn, amountIn);
-        require(pulled, "MockRouter: transferFrom failed");
-        uint256 actualIn = IERC20(tokenIn).balanceOf(pairIn) - pairInBalBefore;
-        uint256 ethOut = (ethReserveIn * actualIn) / (tokenReserveIn + actualIn);
-        MockLPToken(payable(pairIn)).withdrawEth(payable(address(this)), ethOut);
-
-        // Hop 2: ETH -> tokenOut, sent to `to`.
-        (uint256 tokenReserveOut, uint256 ethReserveOut) = _reservesFor(pairOut, tokenOut);
-        uint256 grossOut = (tokenReserveOut * ethOut) / (ethReserveOut + ethOut);
-        grossOut = (grossOut * payoutBps) / 10_000;
-        (bool sentEth, ) = pairOut.call{value: ethOut}("");
-        require(sentEth, "MockRouter: ETH forward failed");
-        uint256 balBefore = IERC20(tokenOut).balanceOf(to);
-        MockLPToken(payable(pairOut)).withdrawToken(to, grossOut);
-        uint256 received = IERC20(tokenOut).balanceOf(to) - balBefore;
-        require(received >= amountOutMin, "MockRouter: insufficient output amount");
+        uint256 ethOut = _swapTokenToEthHop(pairIn, tokenIn, amountIn);
+        _swapEthToTokenHop(pairOut, tokenOut, ethOut, to, amountOutMin);
     }
 
     function _reservesFor(address pair, address token) private view returns (uint256 tokenReserve, uint256 ethReserve) {
