@@ -608,6 +608,56 @@ function parseOptionalWei(value, fieldName) {
   }
 }
 
+// ---------------------------------------------------------------------
+// Serializes every transaction THIS process sends from the relayer's own
+// wallet (relayerWallet in main(), `deployerWallet` here in
+// runFullStackDeploy — the exact same wallet; see that function's own
+// comment). At least six independent, concurrently-running things can each
+// try to send a transaction from this one wallet: the voucher-relay poll
+// (every POLL_INTERVAL_MS, ~15s default), the three reward-sweep loops
+// (fee-wallet/creator-rewards/platform-rewards, each on their own
+// relayerSettings.*PollIntervalMs), an admin-triggered POST /deploy
+// (runFullStackDeploy below, a long chain of its own sequential sends), and
+// the relayer-health poll (read-only, no sends, but listed for completeness
+// of "what's running concurrently"). Without this, two of them landing in
+// the same window — which WILL happen: each loop reschedules itself only
+// after its own work finishes, so actual wall-clock timing drifts with
+// network conditions regardless of how far apart their configured intervals
+// are — race to read the wallet's next nonce, both get the same value, and
+// one send gets rejected with "nonce too low" (or silently stuck as a
+// dropped/replaced transaction). Ethers does not serialize concurrent sends
+// from the same Wallet/Signer for you.
+//
+// The fix: route every relayerWallet-signed send through sendRelayerTx()
+// instead of calling the contract method directly. It chains each send onto
+// a single promise queue so only one transaction is ever being
+// populated+broadcast at a time — by the time the next queued send reads
+// the wallet's nonce, the previous one has already been broadcast (and the
+// node has bumped the pending-nonce count accordingly), even though the two
+// calls were kicked off from completely unrelated loops or requests.
+// Deliberately wraps ONLY the call that returns the TransactionResponse
+// (that's the moment a nonce is chosen) — never a subsequent `.wait()` for
+// the receipt, which would otherwise hold every other queued send hostage
+// for the full confirmation time for no benefit.
+//
+// Module-level (not inside main()) so both main()'s nested poll loops and
+// the top-level runFullStackDeploy share the exact same queue — there must
+// only ever be one, covering every sender of a relayerWallet transaction in
+// this process.
+//
+// A rejected/reverted send must not wedge the queue for everything queued
+// after it — relayerTxQueue is re-armed via .catch(()=>{}) on every link so
+// a failure here is swallowed for queue-sequencing purposes only; the real
+// rejection still propagates to whichever caller awaited this specific
+// sendRelayerTx() call, and that caller's own existing try/catch handles it
+// exactly as before this change.
+let relayerTxQueue = Promise.resolve();
+function sendRelayerTx(fn) {
+  const run = relayerTxQueue.catch(() => {}).then(() => fn());
+  relayerTxQueue = run.catch(() => {});
+  return run;
+}
+
 // Runs the actual deploy — a near-line-for-line port of scripts/deploy.js's
 // own main() body, with `deployerWallet` (this service's relayerWallet)
 // standing in for that script's `deployer` signer, and every env var
@@ -732,7 +782,7 @@ async function runFullStackDeploy(body, deployerWallet) {
   const factory = await TokenFactory.deploy(...tokenFactoryConstructorArgs);
   await factory.waitForDeployment();
   const factoryAddress = await factory.getAddress();
-  await (await locker.setFactory(factoryAddress)).wait();
+  await (await sendRelayerTx(() => locker.setFactory(factoryAddress))).wait();
   const tokenFactoryVerification = await verifyContract(factoryAddress, tokenFactoryConstructorArgs);
   deployedFreshOwnable.push({ label: "tokenFactory", contract: factory });
 
@@ -761,7 +811,7 @@ async function runFullStackDeploy(body, deployerWallet) {
   const customFactory = await CustomTokenFactory.deploy(...customTokenFactoryConstructorArgs);
   await customFactory.waitForDeployment();
   const customFactoryAddress = await customFactory.getAddress();
-  await (await customLocker.setFactory(customFactoryAddress)).wait();
+  await (await sendRelayerTx(() => customLocker.setFactory(customFactoryAddress))).wait();
   const customTokenFactoryVerification = await verifyContract(customFactoryAddress, customTokenFactoryConstructorArgs);
   deployedFreshOwnable.push({ label: "customTokenFactory", contract: customFactory });
 
@@ -784,9 +834,9 @@ async function runFullStackDeploy(body, deployerWallet) {
   const bondingCurveFactory = await BondingCurveFactory.deploy(...bondingCurveFactoryConstructorArgs);
   await bondingCurveFactory.waitForDeployment();
   const bondingCurveFactoryAddress = await bondingCurveFactory.getAddress();
-  await (await bondingCurveLocker.setFactory(bondingCurveFactoryAddress)).wait();
+  await (await sendRelayerTx(() => bondingCurveLocker.setFactory(bondingCurveFactoryAddress))).wait();
   const poolSeedTargetWei = parseOptionalWei(body.poolSeedTargetWei, "poolSeedTargetWei");
-  if (poolSeedTargetWei != null) await (await bondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei)).wait();
+  if (poolSeedTargetWei != null) await (await sendRelayerTx(() => bondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei))).wait();
   const bondingCurveFactoryVerification = await verifyContract(bondingCurveFactoryAddress, bondingCurveFactoryConstructorArgs);
   deployedFreshOwnable.push({ label: "bondingCurveFactory", contract: bondingCurveFactory });
 
@@ -809,8 +859,8 @@ async function runFullStackDeploy(body, deployerWallet) {
   const customBondingCurveFactory = await CustomBondingCurveFactory.deploy(...customBondingCurveFactoryConstructorArgs);
   await customBondingCurveFactory.waitForDeployment();
   const customBondingCurveFactoryAddress = await customBondingCurveFactory.getAddress();
-  await (await customBondingCurveLocker.setFactory(customBondingCurveFactoryAddress)).wait();
-  if (poolSeedTargetWei != null) await (await customBondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei)).wait();
+  await (await sendRelayerTx(() => customBondingCurveLocker.setFactory(customBondingCurveFactoryAddress))).wait();
+  if (poolSeedTargetWei != null) await (await sendRelayerTx(() => customBondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei))).wait();
   const customBondingCurveFactoryVerification = await verifyContract(
     customBondingCurveFactoryAddress,
     customBondingCurveFactoryConstructorArgs
@@ -842,14 +892,14 @@ async function runFullStackDeploy(body, deployerWallet) {
     const distributor = await PlatformRewardsDistributor.deploy(routerAddress, deployerWallet.address);
     await distributor.waitForDeployment();
     rewardsDistributorAddress = await distributor.getAddress();
-    await (await distributor.setPlatformToken(platformTokenAddress)).wait();
+    await (await sendRelayerTx(() => distributor.setPlatformToken(platformTokenAddress))).wait();
     deployedFreshOwnable.push({ label: "platformRewardsDistributor", contract: distributor });
   }
   if (rewardsDistributorAddress) {
-    await (await factory.setRewardsDistributor(rewardsDistributorAddress)).wait();
-    await (await customFactory.setRewardsDistributor(rewardsDistributorAddress)).wait();
-    await (await bondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress)).wait();
-    await (await customBondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress)).wait();
+    await (await sendRelayerTx(() => factory.setRewardsDistributor(rewardsDistributorAddress))).wait();
+    await (await sendRelayerTx(() => customFactory.setRewardsDistributor(rewardsDistributorAddress))).wait();
+    await (await sendRelayerTx(() => bondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress))).wait();
+    await (await sendRelayerTx(() => customBondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress))).wait();
   }
 
   // ---- Creator rewards (optional) ----
@@ -862,10 +912,10 @@ async function runFullStackDeploy(body, deployerWallet) {
     deployedFreshOwnable.push({ label: "creatorRewardsDistributor", contract: creatorDistributor });
   }
   if (creatorRewardsDistributorAddress) {
-    await (await factory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress)).wait();
-    await (await customFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress)).wait();
-    await (await bondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress)).wait();
-    await (await customBondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress)).wait();
+    await (await sendRelayerTx(() => factory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress))).wait();
+    await (await sendRelayerTx(() => customFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress))).wait();
+    await (await sendRelayerTx(() => bondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress))).wait();
+    await (await sendRelayerTx(() => customBondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress))).wait();
   }
 
   // ---- Fee-wallet distributor (optional) ----
@@ -879,10 +929,10 @@ async function runFullStackDeploy(body, deployerWallet) {
     deployedFreshOwnable.push({ label: "feeWalletDistributor", contract: feeWalletDistributorContract });
   }
   if (feeWalletDistributorAddress) {
-    await (await factory.setFeeWalletDistributor(feeWalletDistributorAddress)).wait();
-    await (await customFactory.setFeeWalletDistributor(feeWalletDistributorAddress)).wait();
-    await (await bondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress)).wait();
-    await (await customBondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress)).wait();
+    await (await sendRelayerTx(() => factory.setFeeWalletDistributor(feeWalletDistributorAddress))).wait();
+    await (await sendRelayerTx(() => customFactory.setFeeWalletDistributor(feeWalletDistributorAddress))).wait();
+    await (await sendRelayerTx(() => bondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress))).wait();
+    await (await sendRelayerTx(() => customBondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress))).wait();
   }
 
   // ---- Ownership handoff — the very last step, after every owner-only
@@ -894,7 +944,7 @@ async function runFullStackDeploy(body, deployerWallet) {
   for (const { label, contract } of deployedFreshOwnable) {
     const address = await contract.getAddress();
     try {
-      await (await contract.transferOwnership(ADMIN_WALLET)).wait();
+      await (await sendRelayerTx(() => contract.transferOwnership(ADMIN_WALLET))).wait();
       ownershipProposals.push({ label, address, proposedTo: ADMIN_WALLET, ok: true });
     } catch (err) {
       // Never let a failed handoff undo or hide the deployment itself — the
@@ -3033,7 +3083,7 @@ async function main() {
     console.log(`[${watcher.kind}] deposit confirmed for ${voucherHash}, relaying...`);
 
     try {
-      const tx = await watcher.relayFn(voucher, record.signature);
+      const tx = await sendRelayerTx(() => watcher.relayFn(voucher, record.signature));
       console.log(`[${watcher.kind}] submitted relay tx ${tx.hash} for ${voucherHash}, waiting for confirmation...`);
       const receipt = await tx.wait();
 
@@ -3910,7 +3960,7 @@ async function main() {
 
         const minEthOut = (predictedEthOut * (10000n - creatorRewardsSlippageBpsBig())) / 10000n;
 
-        const tx = await creatorRewardsDistributor.triggerCreatorSwap(tokenAddress, minEthOut);
+        const tx = await sendRelayerTx(() => creatorRewardsDistributor.triggerCreatorSwap(tokenAddress, minEthOut));
         const receipt = await tx.wait();
         console.log(
           `[creator-rewards] swept ${tokenAddress} (balance ${balance}, predicted ${predictedEthOut} wei, ` +
@@ -3939,7 +3989,7 @@ async function main() {
         const claimable = await creatorRewardsDistributor.claimableEth(tokenAddress);
         if (claimable === 0n || claimable < creatorRewardsClaimMinWeiBig()) return;
 
-        const tx = await creatorRewardsDistributor.claimCreatorRewards(tokenAddress);
+        const tx = await sendRelayerTx(() => creatorRewardsDistributor.claimCreatorRewards(tokenAddress));
         const receipt = await tx.wait();
         console.log(`[creator-rewards] claimed ${claimable} wei for ${tokenAddress} in tx ${receipt.hash}.`);
       } catch (err) {
@@ -4028,7 +4078,7 @@ async function main() {
         // 3% rather than a UI's tighter 2%.
         const minEthOut = (predictedEthOut * (10000n - feeWalletSlippageBpsBig())) / 10000n;
 
-        const tx = await feeWalletDistributor.triggerFeeWalletSwap(tokenAddress, minEthOut);
+        const tx = await sendRelayerTx(() => feeWalletDistributor.triggerFeeWalletSwap(tokenAddress, minEthOut));
         const receipt = await tx.wait();
         console.log(
           `[fee-wallet] swept ${tokenAddress} (balance ${balance}, predicted ${predictedEthOut} wei, ` +
@@ -4058,7 +4108,7 @@ async function main() {
         const claimable = await feeWalletDistributor.claimableEth(tokenAddress);
         if (claimable === 0n || claimable < feeWalletClaimMinWeiBig()) return;
 
-        const tx = await feeWalletDistributor.claimFeeWalletRewards(tokenAddress);
+        const tx = await sendRelayerTx(() => feeWalletDistributor.claimFeeWalletRewards(tokenAddress));
         const receipt = await tx.wait();
         console.log(`[fee-wallet] claimed ${claimable} wei for ${tokenAddress} in tx ${receipt.hash}.`);
       } catch (err) {
@@ -4098,14 +4148,14 @@ async function main() {
       const pending = await feeWalletDistributor.pendingAirdropTokens();
       if (pending === 0n) return; // nothing to distribute yet
 
-      const tx = await feeWalletDistributor.startAirdropRound();
+      const tx = await sendRelayerTx(() => feeWalletDistributor.startAirdropRound());
       const receipt = await tx.wait();
       console.log(`[fee-wallet] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
       roundActive = true;
     }
 
     for (let i = 0; i < relayerSettings.feeWalletAirdropMaxBatchesPerTick && roundActive; i++) {
-      const tx = await feeWalletDistributor.processAirdropBatch(relayerSettings.feeWalletAirdropBatchSize);
+      const tx = await sendRelayerTx(() => feeWalletDistributor.processAirdropBatch(relayerSettings.feeWalletAirdropBatchSize));
       const receipt = await tx.wait();
       roundActive = await feeWalletDistributor.roundActive();
       console.log(
@@ -4161,7 +4211,7 @@ async function main() {
     if (quotedTokensOut === 0n) return; // dust, or no platformToken pool/liquidity yet — nothing worth logging
 
     const minTokensOut = (quotedTokensOut * (10000n - platformBuybackSlippageBpsBig())) / 10000n;
-    const tx = await platformRewardsDistributor.triggerEthBuyback(minTokensOut);
+    const tx = await sendRelayerTx(() => platformRewardsDistributor.triggerEthBuyback(minTokensOut));
     const receipt = await tx.wait();
     console.log(`[platform-rewards] ETH buyback: ${ethIn} wei -> ~${quotedTokensOut} platformToken in tx ${receipt.hash}.`);
   }
@@ -4214,7 +4264,7 @@ async function main() {
           minTokensOut = (quotedTokensOut * (10000n - platformBuybackSlippageBpsBig())) / 10000n;
         }
 
-        const tx = await platformRewardsDistributor.triggerTokenBuyback(tokenAddress, minTokensOut);
+        const tx = await sendRelayerTx(() => platformRewardsDistributor.triggerTokenBuyback(tokenAddress, minTokensOut));
         const receipt = await tx.wait();
         console.log(
           `[platform-rewards] ${isPlatformTokenItself ? "direct-credited" : "token buyback"} ${tokenAddress} ` +
@@ -4247,14 +4297,14 @@ async function main() {
       const pending = await platformRewardsDistributor.pendingAirdropTokens();
       if (pending === 0n) return; // nothing to distribute yet
 
-      const tx = await platformRewardsDistributor.startAirdropRound();
+      const tx = await sendRelayerTx(() => platformRewardsDistributor.startAirdropRound());
       const receipt = await tx.wait();
       console.log(`[platform-rewards] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
       roundActive = true;
     }
 
     for (let i = 0; i < relayerSettings.platformAirdropMaxBatchesPerTick && roundActive; i++) {
-      const tx = await platformRewardsDistributor.processAirdropBatch(relayerSettings.platformAirdropBatchSize);
+      const tx = await sendRelayerTx(() => platformRewardsDistributor.processAirdropBatch(relayerSettings.platformAirdropBatchSize));
       const receipt = await tx.wait();
       roundActive = await platformRewardsDistributor.roundActive();
       console.log(
