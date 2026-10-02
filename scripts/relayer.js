@@ -232,23 +232,29 @@ const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5
 
 // ---- Telegram notifications — entirely optional, same "unset = does
 // nothing extra" posture as FEE_WALLET_DISTRIBUTOR_ADDRESS/etc. above.
-// TELEGRAM_BOT_TOKEN is shared across both channels (one bot, create it once
-// via @BotFather); the two chat IDs are deliberately separate so a
-// public-facing "new launch" announcement never lands in the same place as
-// an admin-only "something's broken" alert, or vice versa. Leaving either
-// chat ID unset simply mutes that one category — the other still works, and
-// neither ever blocks or slows down the actual relaying/discovery logic
-// (see sendTelegramMessage's own comment: it never throws).
-//   TELEGRAM_BOT_TOKEN           — from @BotFather, shared by both channels
-//   TELEGRAM_LAUNCHES_CHAT_ID    — public channel: "new launch" announcements
-//   TELEGRAM_ALERTS_CHAT_ID      — private channel: relayer-mismatch alerts
+// The bot token is shared across both channels (one bot, create it once via
+// @BotFather); the two chat IDs are deliberately separate so a public-facing
+// "new launch" announcement never lands in the same place as an admin-only
+// "something's broken" alert, or vice versa. Leaving either chat ID unset
+// simply mutes that one category — the other still works, and neither ever
+// blocks or slows down the actual relaying/discovery logic (see
+// sendTelegramMessage's own comment: it never throws).
+//   telegramBotToken        — from @BotFather, shared by both channels
+//   telegramLaunchesChatId  — public channel: "new launch" announcements
+//   telegramAlertsChatId    — private channel: relayer-mismatch alerts
 // To get a channel's chat ID: add the bot to the channel as an admin, post
 // any message in it, then visit
 // https://api.telegram.org/bot<TOKEN>/getUpdates and read the
 // "chat":{"id": ...} field off that message.
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
-const TELEGRAM_LAUNCHES_CHAT_ID = process.env.TELEGRAM_LAUNCHES_CHAT_ID || null;
-const TELEGRAM_ALERTS_CHAT_ID = process.env.TELEGRAM_ALERTS_CHAT_ID || null;
+//
+// These three used to be standalone env-var-only consts, read once at
+// process start. They now live in RELAYER_SETTINGS_DEFAULTS/relayerSettings
+// below (still seeded from the same TELEGRAM_BOT_TOKEN/TELEGRAM_LAUNCHES_
+// CHAT_ID/TELEGRAM_ALERTS_CHAT_ID env vars as a default) so an admin can set
+// or change them from the admin panel's "Relayer settings" tab without
+// touching .env or restarting this process — see the "secret" bounds type
+// and redactSecretSettings() for how the bot token avoids ever being
+// exposed back through the public GET /relayer-settings route.
 // How often the relayer-wallet-vs-factory-relayer() check re-runs after
 // startup — see relayerHealthPollLoop below. A relayer mismatch costs
 // nothing extra by sitting undetected a few minutes longer (every relayed
@@ -342,12 +348,28 @@ const RELAYER_SETTINGS_DEFAULTS = {
   platformBuybackSlippageBps: Number(process.env.PLATFORM_BUYBACK_SLIPPAGE_BPS || 300), // 3%
   platformAirdropBatchSize: Number(process.env.PLATFORM_AIRDROP_BATCH_SIZE || 200),
   platformAirdropMaxBatchesPerTick: Number(process.env.PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK || 10),
+  // Telegram notification settings — see the big comment above. Kept as
+  // ordinary strings (never null) so they round-trip through JSON the same
+  // way every other relayerSettings field does; "" means "unset", matching
+  // the old `|| null` env-var convention closely enough for every reader
+  // below (`if (!relayerSettings.telegramBotToken || !chatId)` etc. all
+  // treat "" the same as the old null).
+  telegramBotToken: String(process.env.TELEGRAM_BOT_TOKEN || ""),
+  telegramLaunchesChatId: String(process.env.TELEGRAM_LAUNCHES_CHAT_ID || ""),
+  telegramAlertsChatId: String(process.env.TELEGRAM_ALERTS_CHAT_ID || ""),
 };
 // Hard bounds enforced on every one of the fields above, both when loading a
 // persisted override at startup and on every POST /relayer-settings save —
 // so a stray admin typo (or a corrupted settings file) can't turn a
 // 5-minute sweep into a runaway sub-second loop, or a claim-min so high
 // nothing is ever swept. See clampRelayerSetting/validateRelayerSettingsPatch.
+// The three telegram* entries use a `type: "string"`/`type: "secret"` shape
+// instead of {min,max} — clampRelayerSetting branches on `bounds.type` for
+// these. "secret" additionally means: never echo the real value back through
+// GET /relayer-settings (see redactSecretSettings), and a blank submission on
+// POST /relayer-settings leaves the persisted value unchanged rather than
+// clearing it, since the admin UI can never safely redisplay the real token
+// to let an admin re-submit it unchanged.
 const RELAYER_SETTINGS_BOUNDS = {
   feeWalletPollIntervalMs: { min: 15_000, max: 24 * 60 * 60_000 }, // 15s .. 24h
   feeWalletSlippageBps: { min: 0, max: 2000 }, // 0%..20%
@@ -361,6 +383,9 @@ const RELAYER_SETTINGS_BOUNDS = {
   platformBuybackSlippageBps: { min: 0, max: 2000 },
   platformAirdropBatchSize: { min: 1, max: 2000 },
   platformAirdropMaxBatchesPerTick: { min: 1, max: 200 },
+  telegramBotToken: { type: "secret", maxLength: 200 },
+  telegramLaunchesChatId: { type: "string", maxLength: 64 },
+  telegramAlertsChatId: { type: "string", maxLength: 64 },
 };
 // The live, mutable object every poll loop actually reads — seeded from
 // defaults here; main() overlays any persisted override once the storage
@@ -385,6 +410,16 @@ function platformBuybackSlippageBpsBig() { return BigInt(relayerSettings.platfor
 function clampRelayerSetting(key, rawValue) {
   const bounds = RELAYER_SETTINGS_BOUNDS[key];
   if (!bounds) return null;
+  if (bounds.type === "string" || bounds.type === "secret") {
+    // Empty string is always valid here (it's the "unset"/"no change"
+    // value, handled by the two call sites: validateRelayerSettingsPatch
+    // just clamps it like any other value, and POST /relayer-settings
+    // strips a "" secret back out of the patch before applying it — see
+    // that route's own comment).
+    const str = rawValue == null ? "" : String(rawValue).trim();
+    if (str.length > bounds.maxLength) return null;
+    return str;
+  }
   if (key === "feeWalletClaimMinWei" || key === "creatorRewardsClaimMinWei") {
     let big;
     try {
@@ -443,6 +478,25 @@ function canonicalizeRelayerSettingsForMessage(settings) {
 }
 function relayerSettingsMessage(settings, timestamp) {
   return `Hood Launch admin: update relayer settings to ${JSON.stringify(canonicalizeRelayerSettingsForMessage(settings))} at ${timestamp}`;
+}
+
+// GET /relayer-settings is intentionally PUBLIC/unauthenticated (see that
+// route's own comment — "nothing sensitive in a poll interval or a slippage
+// percentage"). That stopped being true the moment a `type: "secret"` field
+// (telegramBotToken) joined RELAYER_SETTINGS_BOUNDS, so every response that
+// route sends — both the live `settings` and the `defaults` — is passed
+// through this first: any secret field is collapsed to a boolean (is a
+// non-empty value currently set?) rather than the real value, in both
+// objects. Non-secret fields pass through unchanged. Never skip this when
+// adding a new public-facing read of relayerSettings/RELAYER_SETTINGS_DEFAULTS.
+function redactSecretSettings(settingsObj) {
+  const out = { ...settingsObj };
+  for (const key of Object.keys(RELAYER_SETTINGS_BOUNDS)) {
+    if (RELAYER_SETTINGS_BOUNDS[key].type === "secret") {
+      out[key] = Boolean(settingsObj && settingsObj[key]);
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------
@@ -1311,14 +1365,18 @@ async function postLaunchPipeline({
 // or slows down the caller: a Telegram outage, a bad token, or a chat ID the
 // bot isn't actually a member of should never be able to stall a relayed
 // launch or a discovery poll. Silently no-ops (resolves immediately) if
-// TELEGRAM_BOT_TOKEN or `chatId` is unset, same "unset = does nothing extra"
-// convention as every other optional integration in this file. `text` is
-// sent as Telegram HTML parse_mode — escape any untrusted interpolated
-// value (e.g. a token name a creator chose) with escapeTelegramHtml below
-// before including it, the same instinct index.html's escapeHtml already
-// applies to anything user-supplied.
+// relayerSettings.telegramBotToken or `chatId` is unset, same "unset = does
+// nothing extra" convention as every other optional integration in this
+// file. Reads the token off the live relayerSettings object (not a startup
+// const) so a token saved through the admin panel takes effect on the very
+// next call — no restart needed. `text` is sent as Telegram HTML parse_mode
+// — escape any untrusted interpolated value (e.g. a token name a creator
+// chose) with escapeTelegramHtml below before including it, the same
+// instinct index.html's escapeHtml already applies to anything
+// user-supplied.
 function sendTelegramMessage(chatId, text) {
-  if (!TELEGRAM_BOT_TOKEN || !chatId) return Promise.resolve();
+  const token = relayerSettings.telegramBotToken;
+  if (!token || !chatId) return Promise.resolve();
   const payload = JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true });
   return new Promise((resolve) => {
     let settled = false;
@@ -1330,7 +1388,7 @@ function sendTelegramMessage(chatId, text) {
     const req = https.request(
       {
         hostname: "api.telegram.org",
-        path: `/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        path: `/bot${token}/sendMessage`,
         method: "POST",
         headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
         timeout: 10_000,
@@ -1378,9 +1436,9 @@ function escapeTelegramHtml(str) {
 // process, which is exactly the kind of drift that produces
 // "<Factory>: caller is not the relayer" on an otherwise-correct launch —
 // the incident that prompted adding this check in the first place. Alerts
-// to TELEGRAM_ALERTS_CHAT_ID only on a STATE CHANGE (newly mismatched, or
-// newly resolved), tracked in relayerMismatchState, so a persistent
-// misconfiguration doesn't spam the channel on every tick.
+// to relayerSettings.telegramAlertsChatId only on a STATE CHANGE (newly
+// mismatched, or newly resolved), tracked in relayerMismatchState, so a
+// persistent misconfiguration doesn't spam the channel on every tick.
 const FACTORY_LABELS = {
   token: "TokenFactory",
   custom: "CustomTokenFactory",
@@ -1407,7 +1465,7 @@ async function checkRelayerHealth(watchers, relayerWallet) {
           "Relayed launches through this factory will revert until the factory owner calls setRelayer (admin panel → Contracts)."
       );
       await sendTelegramMessage(
-        TELEGRAM_ALERTS_CHAT_ID,
+        relayerSettings.telegramAlertsChatId,
         `⚠️ <b>${escapeTelegramHtml(label)}</b> relayer mismatch\n` +
           `On-chain relayer(): <code>${escapeTelegramHtml(onChainRelayer)}</code>\n` +
           `This relayer's wallet: <code>${escapeTelegramHtml(relayerWallet.address)}</code>\n\n` +
@@ -1416,7 +1474,7 @@ async function checkRelayerHealth(watchers, relayerWallet) {
     } else if (!mismatched && wasMismatched) {
       console.log(`[relayer-health] ${label}.relayer() mismatch resolved — now matches ${relayerWallet.address}.`);
       await sendTelegramMessage(
-        TELEGRAM_ALERTS_CHAT_ID,
+        relayerSettings.telegramAlertsChatId,
         `✅ <b>${escapeTelegramHtml(label)}</b> relayer mismatch resolved — now matches this relayer's wallet (<code>${escapeTelegramHtml(relayerWallet.address)}</code>).`
       );
     }
@@ -1442,7 +1500,7 @@ async function announceLaunchToTelegram(network, kind, { token, name, symbol, pa
   const link = explorerBrowserUrl ? `${explorerBrowserUrl.replace(/\/$/, "")}/address/${token}` : null;
   const kindNote = kind === "curve" || kind === "custom-curve" ? "⚡ Quick Launch" : pairAddress ? "Launch + liquidity" : "Deploy";
   await sendTelegramMessage(
-    TELEGRAM_LAUNCHES_CHAT_ID,
+    relayerSettings.telegramLaunchesChatId,
     `🚀 New launch: <b>${escapeTelegramHtml(name)}</b> ($${escapeTelegramHtml(symbol)})\n` +
       `${escapeTelegramHtml(kindNote)} via ${escapeTelegramHtml(label)}\n` +
       `<code>${escapeTelegramHtml(token)}</code>` +
@@ -1545,7 +1603,10 @@ async function loadRelayerSettingsFromStore() {
   if (rejected.length) {
     console.warn(`[relayer-settings] ignored unparseable persisted key(s): ${rejected.join(", ")}`);
   }
-  console.log(`[relayer-settings] loaded persisted overrides: ${JSON.stringify(patch)}`);
+  // redactSecretSettings here too — `patch` can carry a persisted
+  // telegramBotToken in plaintext, and this line must never put it in the
+  // startup logs.
+  console.log(`[relayer-settings] loaded persisted overrides: ${JSON.stringify(redactSecretSettings(patch))}`);
 }
 
 async function main() {
@@ -1763,7 +1824,9 @@ async function main() {
   // rather than running only once at startup.
   console.log(
     `Checking relayer-wallet-vs-factory-relayer() health every ${RELAYER_HEALTH_POLL_INTERVAL_MS}ms` +
-      (TELEGRAM_ALERTS_CHAT_ID ? " (alerting to Telegram on change)." : " (set TELEGRAM_BOT_TOKEN/TELEGRAM_ALERTS_CHAT_ID to also alert on Telegram).")
+      (relayerSettings.telegramAlertsChatId
+        ? " (alerting to Telegram on change)."
+        : " (set a Telegram bot token + alerts chat ID — admin panel → Relayer settings, or TELEGRAM_BOT_TOKEN/TELEGRAM_ALERTS_CHAT_ID env vars — to also alert on Telegram).")
   );
   relayerHealthPollLoop(watchers, relayerWallet);
 
@@ -2194,9 +2257,16 @@ async function main() {
   // to render its form, and there's nothing sensitive in a poll interval or
   // a slippage percentage. `defaults`/`bounds` are included so the UI can
   // show "reset to default" and validate client-side before ever signing,
-  // without hardcoding a second copy of either.
+  // without hardcoding a second copy of either. `settings`/`defaults` are
+  // both passed through redactSecretSettings so the one secret field
+  // (telegramBotToken) never leaves this process as plaintext over this
+  // unauthenticated route — the UI only ever learns whether it's set.
   app.get("/relayer-settings", (_req, res) => {
-    sendJson(res, 200, { settings: relayerSettings, defaults: RELAYER_SETTINGS_DEFAULTS, bounds: RELAYER_SETTINGS_BOUNDS });
+    sendJson(res, 200, {
+      settings: redactSecretSettings(relayerSettings),
+      defaults: redactSecretSettings(RELAYER_SETTINGS_DEFAULTS),
+      bounds: RELAYER_SETTINGS_BOUNDS,
+    });
   });
 
   // Body: { settings, timestamp, signature }. Same admin-signed shape as
@@ -2224,6 +2294,21 @@ async function main() {
     if (rejected.length) {
       return sendJson(res, 400, { error: `Could not parse: ${rejected.join(", ")}` });
     }
+    // A blank submission of a `type: "secret"` field means "leave it
+    // unchanged," not "clear it" — the opposite of how every other field
+    // here behaves. This is the only way a secret CAN behave: the admin
+    // panel is served the redacted (boolean-only) value from GET above, so
+    // it has no real value to re-submit unchanged, and re-signing the exact
+    // current token on every unrelated settings save isn't something we can
+    // ask of the admin. Deleting the key from `patch` here (rather than in
+    // clampRelayerSetting, which still validates length/type normally)
+    // means Object.assign below simply never touches the already-persisted
+    // value for that key.
+    for (const key of Object.keys(RELAYER_SETTINGS_BOUNDS)) {
+      if (RELAYER_SETTINGS_BOUNDS[key].type === "secret" && patch[key] === "") {
+        delete patch[key];
+      }
+    }
     Object.assign(relayerSettings, patch);
     try {
       await setRelayerSettings(relayerSettings);
@@ -2234,12 +2319,15 @@ async function main() {
       // lose this change, rather than silently pretending it's durable.
       console.error(`[relayer-settings] saved in-memory but failed to persist: ${err.message}`);
       return sendJson(res, 200, {
-        settings: relayerSettings,
+        settings: redactSecretSettings(relayerSettings),
         warning: "Applied immediately, but could not be saved to disk/DB — it will revert to the previous value on restart. Check server logs.",
       });
     }
-    console.log(`[admin] relayer settings saved: ${JSON.stringify(patch)}`);
-    sendJson(res, 200, { settings: relayerSettings });
+    // Redact `patch` before logging it too — it's the same shape as
+    // relayerSettings and would otherwise print a freshly-set bot token
+    // straight into the server logs.
+    console.log(`[admin] relayer settings saved: ${JSON.stringify(redactSecretSettings(patch))}`);
+    sendJson(res, 200, { settings: redactSecretSettings(relayerSettings) });
   });
 
   // ---- contract deployment (admin-gated) ----
