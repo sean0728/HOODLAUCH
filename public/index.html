@@ -2162,6 +2162,31 @@
   const HASH_CUSTOM_LAUNCH_VOUCHER_SELECTOR = "6c3a81c5"; // hashCustomLaunchVoucher((address,string,string,uint256,bool,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,address,uint256,uint256,uint256,uint256,uint256))
   const DEPOSIT_FOR_RELAYED_LAUNCH_SELECTOR = "141d658c"; // depositForRelayedLaunch(bytes32,uint256) — identical on both factories (all four: TokenFactory/CustomTokenFactory/BondingCurveFactory/CustomBondingCurveFactory)
   const RELAYER_SELECTOR = "8406c079"; // relayer() — identical on both factories
+  // deposits(address,bytes32) — the public `deposits` escrow mapping getter,
+  // returning (uint256 amount, uint256 deadline, bool settled, bool reclaimed).
+  // Identical selector on all four factories (same Deposit struct/mapping
+  // shape copy-pasted across TokenFactory/CustomTokenFactory/
+  // BondingCurveFactory/CustomBondingCurveFactory) — used by the admin
+  // panel's "Failed Launches" list to show whatever ETH is still sitting in
+  // escrow for a launch that never completed (see renderLaunchActivityList).
+  const DEPOSITS_SELECTOR = "2260a9c2";
+  // Maps a /failed-launches entry's `kind` string (set by scripts/relayer.js's
+  // own `watchers` array) to the adminFactoryAddress()/adminFactoryPanelHTML
+  // key for the matching factory — so a failed voucher can be looked up
+  // against the right contract.
+  const RELAY_KIND_TO_FACTORY_KEY = { token: "tf", custom: "ctf", curve: "bcf", "custom-curve": "cbcf" };
+  function decodeDepositInfo(hex){
+    const words = splitWords(hex.replace(/^0x/i,""));
+    return {
+      amountWei: decodeUint256("0x"+words[0]),
+      deadline: decodeUint256("0x"+words[1]),
+      settled: BigInt("0x"+words[2]) !== 0n,
+      reclaimed: BigInt("0x"+words[3]) !== 0n,
+    };
+  }
+  function encodeDepositsCalldata(creatorAddr, voucherHash){
+    return "0x"+DEPOSITS_SELECTOR+encodeAddressParam(creatorAddr)+voucherHash.replace(/^0x/i,"").toLowerCase().padStart(64,"0");
+  }
 
   // Quick Launch's own gasless-relay voucher hashers — a fast-follow added
   // to BondingCurveFactory/CustomBondingCurveFactory after the two factories
@@ -9117,7 +9142,7 @@
       ownerHex, pendingOwnerHex, deployFeeHex, launchFeeHex, feeTreasuryHex, lpLockDurationHex,
       maxCreatorBuyBpsHex, platformFeeWalletHex, feeBpsHex, priceFeedHex, graduationTargetUsdHex, maxOracleStalenessHex,
       rewardsDistributorHex, rewardBpsHex, creatorRewardsDistributorHex, creatorRewardBpsHex,
-      feeWalletDistributorHex,
+      feeWalletDistributorHex, relayerHex, maxRelayerGasReimbursementWeiHex,
     ] = await Promise.all([
       ethCall(address, "0x"+OWNER_SELECTOR),
       ethCall(address, "0x"+PENDING_OWNER_SELECTOR),
@@ -9136,6 +9161,8 @@
       ethCall(address, "0x"+CREATOR_REWARDS_DISTRIBUTOR_SELECTOR),
       ethCall(address, "0x"+CREATOR_REWARD_BPS_SELECTOR),
       ethCall(address, "0x"+FEE_WALLET_DISTRIBUTOR_SELECTOR),
+      ethCall(address, "0x"+RELAYER_SELECTOR),
+      ethCall(address, "0x"+MAX_RELAYER_GAS_REIMBURSEMENT_SELECTOR),
     ]);
     return {
       owner: decodeAddress(ownerHex),
@@ -9155,6 +9182,8 @@
       creatorRewardsDistributor: decodeAddress(creatorRewardsDistributorHex),
       creatorRewardBps: decodeUint256(creatorRewardBpsHex),
       feeWalletDistributor: decodeAddress(feeWalletDistributorHex),
+      relayer: decodeAddress(relayerHex),
+      maxRelayerGasReimbursementWei: decodeUint256(maxRelayerGasReimbursementWeiHex),
     };
   }
 
@@ -9191,6 +9220,8 @@
           <div class="admin-readout"><div class="l">Fee treasury</div><div class="v">${escapeHtml(state.feeTreasury)}</div></div>
           <div class="admin-readout"><div class="l">LP lock duration</div><div class="v">${fmtInt(Number(state.lpLockDurationSeconds)/86400)} days</div></div>
           <div class="admin-readout"><div class="l">Max creator buy-in</div><div class="v">${(Number(state.maxCreatorBuyBps)/100).toFixed(2)}%</div></div>
+          <div class="admin-readout"><div class="l">Gasless relayer</div><div class="v">${state.relayer.toLowerCase()===ZERO_ADDRESS ? "Unset — gasless relayed launches disabled" : escapeHtml(state.relayer)}</div></div>
+          <div class="admin-readout"><div class="l">Max relayer gas reimbursement</div><div class="v">${weiToEtherString(state.maxRelayerGasReimbursementWei,6)} ETH</div></div>
           <div class="admin-readout"><div class="l">Platform fee wallet</div><div class="v">${state.platformFeeWallet.toLowerCase()===ZERO_ADDRESS ? "Unset" : escapeHtml(state.platformFeeWallet)}</div></div>
           <div class="admin-readout"><div class="l">Platform tax</div><div class="v">${(Number(state.feeBps)/100).toFixed(2)}%</div></div>
           <div class="admin-readout"><div class="l">Price feed</div><div class="v">${state.priceFeed.toLowerCase()===ZERO_ADDRESS ? "Unset" : escapeHtml(state.priceFeed)}</div></div>
@@ -9223,6 +9254,20 @@
         <div class="admin-action-row">
           <div class="field"><label>Max creator buy-in (bps, 10000 = 100%)</label><input type="number" step="1" min="0" max="10000" id="admin_${key}_maxBuyBps" placeholder="${state.maxCreatorBuyBps}"></div>
           <button class="btn btn-primary btn-sm" data-admin-action="maxCreatorBuyBps" data-factory-key="${key}">Update</button>
+        </div>
+
+        <div class="admin-section-label">Gasless relay · powers this factory's "Skip gas" Quick Launch flow</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Points relayedCreateToken's onlyRelayer gate at the platform's relayer hot wallet (see scripts/relayer.js/scripts/setRelayer.js). The zero address (the default) disables gasless relayed launches entirely — depositForRelayedLaunch/reclaimDeposit still work either way, and a creator can always fall back to paying their own gas.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Relayer address</label><input type="text" id="admin_${key}_relayer" placeholder="${state.relayer.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.relayer}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="relayer" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable gasless relaying. Must be set to a non-zero max gas reimbursement below BEFORE a relayer can be enabled — the contract enforces this on-chain too.</span>
+        </div>
+        <div class="admin-action-row">
+          <div class="field"><label>Max relayer gas reimbursement (ETH)</label><input type="number" step="any" min="0" id="admin_${key}_maxRelayerGasReimbursement" placeholder="${weiToEtherString(state.maxRelayerGasReimbursementWei,6)}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="maxRelayerGasReimbursement" data-factory-key="${key}">Update</button>
         </div>
 
         <div class="admin-section-label">Platform tax defaults · applies to launches from now on, existing tokens unaffected</div>
@@ -10848,7 +10893,7 @@
         list.innerHTML = `<p class="admin-empty">No failed launches. Nothing here yet.</p>`;
         return;
       }
-      list.innerHTML = failed.map(f => {
+      list.innerHTML = failed.map((f, i) => {
         const label = (f.name || f.symbol) ? `${escapeHtml(f.name || f.symbol)}${f.name && f.symbol ? ` <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(f.symbol)}</span>` : ""}` : "(name unknown)";
         const when = f.updatedAt ? new Date(f.updatedAt).toLocaleString() : "Unknown time";
         return `
@@ -10857,9 +10902,11 @@
               <div class="mtr-name">${label} <span class="tc-status creator-held" style="display:inline-block; margin-left:6px; vertical-align:middle;">${escapeHtml(f.kind || "unknown")}</span></div>
               <div class="mtr-meta">${f.creator ? fmtAddrSafe(f.creator) : "Unknown creator"} · ${escapeHtml(when)}</div>
               <div class="mtr-meta" style="margin-top:6px; white-space:pre-wrap; word-break:break-word; max-height:120px; overflow-y:auto; color:var(--critical-500);">${escapeHtml(f.error)}</div>
+              <div class="mtr-meta" id="failed-deposit-${i}" style="margin-top:8px;">Checking escrowed deposit…</div>
             </div>
           </div>`;
       }).join("");
+      loadFailedLaunchDeposits(failed);
       return;
     }
 
@@ -10910,6 +10957,81 @@
         }, 4000);
       });
     });
+  }
+
+  // For each entry in the "Failed Launches" tab, looks up the voucher's
+  // actual on-chain escrow (the `deposits` mapping — see DEPOSITS_SELECTOR
+  // above) so the admin can see whether there's really ETH stuck for that
+  // creator, instead of only the relayer's own error text. This is a
+  // read-only lookup via the network's public RPC (publicEthCall — same one
+  // the platform-token spotlight uses), not the connected wallet, so it
+  // works even with no wallet connected, matching the rest of this panel.
+  //
+  // IMPORTANT: there is no on-chain way for the admin (or anyone but the
+  // depositor) to actually move this escrowed ETH — reclaimDeposit() is
+  // hard-gated to msg.sender on every factory, by design, so the platform
+  // owner can never touch a creator's escrowed deposit. Once the deadline
+  // passes the creator can always reclaim it themselves with their own
+  // wallet, no admin action required or possible. What this DOES give the
+  // admin is everything needed to manually send a goodwill refund from the
+  // treasury right away rather than waiting on the creator to notice and
+  // reclaim it — see the "Copy refund details" button below.
+  async function loadFailedLaunchDeposits(failed){
+    await Promise.all(failed.map(async (f, i) => {
+      const cell = document.getElementById(`failed-deposit-${i}`);
+      if(!cell) return; // tab switched away before this resolved
+      try{
+        if(!f.voucherHash || !f.creator){
+          cell.textContent = "No voucher/creator on file — can't look up an escrowed deposit for this one.";
+          return;
+        }
+        const factoryKey = RELAY_KIND_TO_FACTORY_KEY[f.kind];
+        const factoryAddress = factoryKey ? adminFactoryAddress(factoryKey) : null;
+        if(!factoryAddress){
+          cell.textContent = `No ${escapeHtml(f.kind || "matching")} factory configured on ${escapeHtml(NETWORKS[appMode].label)} — can't check escrow.`;
+          return;
+        }
+        const raw = await publicEthCall(appMode, factoryAddress, encodeDepositsCalldata(f.creator, f.voucherHash));
+        const dep = decodeDepositInfo(raw);
+        if(dep.amountWei === 0n){
+          cell.textContent = "No ETH was ever escrowed for this voucher — nothing to refund.";
+          return;
+        }
+        const ethAmount = weiToEtherString(dep.amountWei, 6);
+        if(dep.reclaimed){
+          cell.textContent = `${ethAmount} ETH — already reclaimed by the creator themselves. Nothing owed.`;
+          return;
+        }
+        if(dep.settled){
+          cell.innerHTML = `${escapeHtml(ethAmount)} ETH — this voucher actually settled on-chain (the deploy went through) despite being logged as failed. Check Recent Launches / the token address before refunding anything.`;
+          return;
+        }
+        const deadlineMs = Number(dep.deadline) * 1000;
+        const deadlinePassed = Date.now() > deadlineMs;
+        const whenText = deadlinePassed ? "now (its deadline has already passed)" : `starting ${new Date(deadlineMs).toLocaleString()}`;
+        const refundText = [
+          `Refund owed: ${ethAmount} ETH`,
+          `To: ${f.creator}`,
+          `For: ${(f.name || f.symbol || "unnamed launch")}${f.symbol ? ` ($${f.symbol})` : ""} — ${f.kind || "unknown"} launch, failed ${f.updatedAt ? new Date(f.updatedAt).toLocaleString() : "at an unknown time"}`,
+          `Reason it failed: ${f.error || "Unknown error"}`,
+          `Voucher: ${f.voucherHash}`,
+          `Still escrowed on-chain; the creator can reclaim it themselves ${whenText}.`,
+        ].join("\n");
+        cell.innerHTML = `
+          <div>${escapeHtml(ethAmount)} ETH still escrowed on-chain — reclaimable by the creator ${escapeHtml(whenText)}.</div>
+          <div style="margin-top:6px;"><button class="btn btn-ghost" style="padding:5px 10px; font-size:.78rem;" data-copy-refund>Copy refund details</button></div>`;
+        cell.querySelector("[data-copy-refund]").addEventListener("click", async ()=>{
+          try{
+            await navigator.clipboard.writeText(refundText);
+            toast("Refund details copied");
+          }catch(e){
+            toast("Couldn't copy — clipboard access blocked");
+          }
+        });
+      }catch(err){
+        cell.textContent = `Couldn't check this voucher's on-chain deposit (${err && err.message ? err.message : "unknown error"}).`;
+      }
+    }));
   }
 
   // Executes the actual delete once the two-click confirm above fires —
