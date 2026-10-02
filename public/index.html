@@ -256,6 +256,8 @@
   .readout .lbl{font-family:var(--font-mono); font-size:.68rem; letter-spacing:.08em; text-transform:uppercase; color:var(--paper-500); margin-top:2px;}
 
   /* console panel */
+  .hero-right{display:flex; flex-direction:column; gap:16px;}
+  .launch-console .console-body{height:200px;}
   .console{
     position:relative; background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg);
     box-shadow:var(--shadow-panel), 0 0 26px -18px rgba(61,199,222,.12);
@@ -282,9 +284,11 @@
   .feed-line .tk{color:var(--signal-300); font-weight:600;}
   .feed-line .msg{color:var(--paper-300);}
   .feed-curve-tag{margin-right:1px;}
-  /* Big launch-announcement row — same feed-line shape so it sits in the
-     same list/pruning/scroll behavior, just visually louder so a brand-new
-     token launch doesn't read like just another trade line. */
+  /* Launch-announcement row — reuses the feed-line shape/pruning/scroll
+     behavior, now inside its own "New launches" window (#launchFeedBody,
+     see .launch-console above) rather than mixed into the trade-activity
+     feed, so a brand-new launch no longer gets evicted by ordinary trade
+     lines within a minute of appearing. */
   .feed-announce{background:linear-gradient(90deg, rgba(255,157,60,.14), rgba(61,199,222,.07)); padding:12px 14px;}
   .feed-announce .msg{color:var(--paper-100); font-weight:600; font-size:.86rem;}
   .feed-announce-badge{
@@ -791,12 +795,22 @@
           </div>
         </div>
 
-        <div class="console">
-          <div class="console-head">
-            <span class="eyebrow">Live feed · demo</span>
-            <div class="dots"><span></span><span></span><span></span></div>
+        <div class="hero-right">
+          <div class="console">
+            <div class="console-head">
+              <span class="eyebrow" id="liveFeedEyebrow">Live feed · Testnet</span>
+              <div class="dots"><span></span><span></span><span></span></div>
+            </div>
+            <div class="console-body" id="feedBody"></div>
           </div>
-          <div class="console-body" id="feedBody"></div>
+
+          <div class="console launch-console">
+            <div class="console-head">
+              <span class="eyebrow">New launches</span>
+              <div class="dots"><span></span><span></span><span></span></div>
+            </div>
+            <div class="console-body" id="launchFeedBody"></div>
+          </div>
         </div>
       </div>
 
@@ -1595,6 +1609,15 @@
     netPill.classList.toggle("live", appMode==="live");
     modeDemoBtn.setAttribute("aria-pressed", String(appMode==="demo"));
     modeLiveBtn.setAttribute("aria-pressed", String(appMode==="live"));
+    // The hero's live-feed console used to say "Live feed · demo" as static
+    // markup, regardless of which network was actually active — harmless on
+    // testnet, but it would keep reading "demo" verbatim even once this
+    // platform goes live on mainnet, right above genuinely real trades
+    // (see refreshLiveFeed's own comment: this feed has polled real Swap
+    // events, not simulated ones, for a while now). Kept in sync with the
+    // same Testnet/Mainnet wording the mode toggle buttons already use.
+    const liveFeedEyebrow = document.getElementById("liveFeedEyebrow");
+    if(liveFeedEyebrow) liveFeedEyebrow.textContent = `Live feed · ${appMode==="live" ? "Mainnet" : "Testnet"}`;
   }
   // Low-level: just applies a mode locally and refreshes everything that
   // depends on it. Never calls out to change the platform-wide value itself
@@ -5596,7 +5619,11 @@
     }catch(e){ return; }
     const launches = Array.isArray(payload && payload.launches) ? payload.launches : [];
     const alreadySeeded = remoteLaunchesSeededModes.has(mode);
-    if(!launches.length){ remoteLaunchesSeededModes.add(mode); return; }
+    if(!launches.length){
+      remoteLaunchesSeededModes.add(mode);
+      if(!alreadySeeded && mode===appMode) renderLaunchFeedFromTokens();
+      return;
+    }
 
     // Rank of each status in the one-way DEPLOYED -> LAUNCHED -> GRADUATED
     // progression, so an already-known token's status can be advanced below
@@ -5690,6 +5717,7 @@
       }
     }
     remoteLaunchesSeededModes.add(mode);
+    if(!alreadySeeded && mode===appMode) renderLaunchFeedFromTokens(); // first sync for this network — seed the "New launches" window's baseline now that it's actually known
     if(added || updated){
       renderGrid();
       renderStats();
@@ -10890,11 +10918,66 @@
           ${mismatchLine}
         </div>`;
     }).join("");
+
+    // Per-factory relayer-wallet check — this is what actually gates
+    // relayedCreateToken/relayedCreateCurveToken (every factory's own
+    // onlyRelayer modifier), so a drift here is exactly what produces
+    // "<Factory>: caller is not the relayer" on an otherwise-correct
+    // relayed launch, same root cause as the TokenFactory incident that
+    // prompted this whole panel addition. Same ON/OFF/MISMATCH badge
+    // language as the reward rows above, just compared against h.relayer
+    // (the one wallet the whole relayer process runs as) instead of a
+    // per-feature distributor address. Factory addresses don't need a
+    // wallet to resolve (adminFactoryAddress is pure config), so these
+    // render on the first, wallet-free pass too — only the on-chain
+    // relayer() value itself (onChain.<key>Relayer) needs the second pass.
+    const relayerFactories = [
+      { key: "tf", label: "TokenFactory" },
+      { key: "ctf", label: "CustomTokenFactory" },
+      { key: "bcf", label: "BondingCurveFactory" },
+      { key: "cbcf", label: "CustomBondingCurveFactory" },
+    ]
+      .map(f => ({ ...f, address: adminFactoryAddress(f.key) }))
+      .filter(f => f.address); // skip factories not deployed on this network
+
+    const relayerRowsHTML = relayerFactories.map(f=>{
+      if(!onChain){
+        return `
+          <div class="admin-readout" style="grid-column:span 1;">
+            <div class="l">${escapeHtml(f.label)} relayer</div>
+            <p class="admin-empty" style="margin:4px 0 0;">Connect the admin wallet to check this against the relayer's own wallet.</p>
+          </div>`;
+      }
+      const onChainRelayer = onChain[`${f.key}Relayer`];
+      if(onChainRelayer === undefined){
+        return `
+          <div class="admin-readout" style="grid-column:span 1;">
+            <div class="l">${escapeHtml(f.label)} relayer</div>
+            <p class="admin-empty" style="margin:4px 0 0;">Couldn't read this factory's on-chain relayer() just now — check your wallet's network and try again.</p>
+          </div>`;
+      }
+      const onChainIsZero = onChainRelayer.toLowerCase() === ZERO_ADDRESS;
+      const matches = !onChainIsZero && h.relayer && onChainRelayer.toLowerCase() === h.relayer.toLowerCase();
+      const badge = onChainIsZero ? `<span class="admin-status-badge">OFF</span>`
+        : matches ? `<span class="admin-status-badge on">ON</span>`
+        : `<span class="admin-status-badge partial">MISMATCH</span>`;
+      const line = onChainIsZero
+        ? `Gasless relaying is disabled for this factory (relayer() is unset) — depositForRelayedLaunch/reclaimDeposit still work, but relayedCreate… will always revert until an owner calls setRelayer below.`
+        : matches
+          ? `Matches the relayer process's own wallet — relayed launches through this factory should work.`
+          : `⚠ On-chain relayer is <span class="admin-addr-line" style="display:inline; padding:0; border:0; background:none;">${escapeHtml(onChainRelayer)}</span>, but the running relayer process is using <span class="admin-addr-line" style="display:inline; padding:0; border:0; background:none;">${h.relayer ? escapeHtml(h.relayer) : "an unknown wallet"}</span> — every relayed launch through this factory will revert with "caller is not the relayer" until the factory owner calls setRelayer(${h.relayer ? escapeHtml(h.relayer) : "…"}) below, or the relayer process is restarted with the key for ${escapeHtml(onChainRelayer)}.`;
+      return `
+        <div class="admin-readout" style="grid-column:span 1;">
+          <div class="l">${escapeHtml(f.label)} relayer ${badge}</div>
+          <p class="admin-empty" style="margin:4px 0 0;${matches || onChainIsZero ? "" : " color:var(--signal-300);"}">${line}</p>
+        </div>`;
+    }).join("");
+
     wrap.innerHTML = `
       <div class="panel admin-panel" style="grid-column:1 / -1;">
         <div class="admin-panel-head"><h3>Relayer keeper (scripts/relayer.js)</h3></div>
         <p class="admin-empty" style="margin-bottom:14px;">Live, in-memory state reported by the relayer process itself just now — not what this page's own config shows, but what the running keeper actually resolved at its last startup. Relayer wallet: ${h.relayer ? escapeHtml(h.relayer) : "unknown"}.</p>
-        <div class="admin-readout-grid">${rowsHTML}</div>
+        <div class="admin-readout-grid">${rowsHTML}${relayerRowsHTML}</div>
       </div>`;
   }
 
@@ -11246,6 +11329,9 @@
     { key: "platformBuybackSlippageBps", label: "Platform buyback slippage (bps)", help: "Slippage tolerance applied to both the ETH buyback and the per-token buyback's minTokensOut floor." },
     { key: "platformAirdropBatchSize", label: "Airdrop holders per batch", help: "How many platformToken holders one processAirdropBatch call sweeps." },
     { key: "platformAirdropMaxBatchesPerTick", label: "Airdrop batches per tick", help: "How many processAirdropBatch calls one sweep tick makes before yielding to the next tick — bounds one tick's gas spend on a large holder set." },
+    { key: "telegramBotToken", label: "Telegram bot token", help: "From @BotFather — shared by both channels below. Write-only: once saved, the real value is never sent back to this page, so this field always shows blank. Leave it blank to keep the currently-saved token unchanged; paste a new one only to replace it.", secret: true },
+    { key: "telegramLaunchesChatId", label: "Telegram launches chat ID", help: "Public channel's chat ID — new-launch announcements post here. Leave blank to disable launch announcements." },
+    { key: "telegramAlertsChatId", label: "Telegram alerts chat ID", help: "Private channel's chat ID — relayer-wallet-mismatch alerts post here. Leave blank to disable these alerts." },
   ];
   const RELAYER_SETTINGS_KEYS = RELAYER_SETTINGS_FIELDS.map(f => f.key);
 
@@ -11261,22 +11347,49 @@
   }
 
   function relayerSettingsPanelHTML(settings, bounds){
-    const rows = RELAYER_SETTINGS_FIELDS.map(f=>{
+    const rows = RELAYER_SETTINGS_FIELDS.map((f, i)=>{
+      // The three telegram* fields were appended after the reward-sweep
+      // fields (see RELAYER_SETTINGS_FIELDS' own comment on key order
+      // needing to match relayer.js byte-for-byte) — insert a section
+      // divider right before the first one so this one table reads as two
+      // grouped settings sections rather than one long undifferentiated list.
+      const sectionBreak = f.key === "telegramBotToken"
+        ? `<div class="admin-cfg-row admin-cfg-head" style="margin-top:10px;"><div class="admin-cfg-col-head" style="grid-column:1 / -1;">Telegram notifications</div></div>`
+        : "";
       const b = bounds[f.key] || {};
+      const isStringField = b.type === "string" || b.type === "secret";
+      // A `secret` field (telegramBotToken) arrives here already redacted to
+      // a boolean by the relayer's own redactSecretSettings — this page must
+      // never try to prefill or re-display the real value, since the server
+      // never sends it. The input always starts blank; a blank save means
+      // "no change" (see runRelayerSettingsSave/server-side handling), and
+      // the placeholder is the only thing that reflects current state.
+      if(f.secret){
+        const isSet = Boolean(settings[f.key]);
+        const placeholder = isSet ? "✓ currently set — paste a new token to replace it" : "Not set — paste a bot token to enable";
+        return `${sectionBreak}
+        <div class="admin-cfg-row">
+          <div class="admin-cfg-label">${escapeHtml(f.label)} <span class="info-dot" title="${escapeHtml(f.help)}">?</span></div>
+          <div class="field" style="grid-column:2 / -1;">
+            <input type="password" id="rs_${f.key}" value="" placeholder="${escapeHtml(placeholder)}" autocomplete="off" aria-label="${escapeHtml(f.label)}" title="${escapeHtml(f.help)}">
+          </div>
+        </div>`;
+      }
       const value = (settings[f.key] !== undefined && settings[f.key] !== null) ? settings[f.key] : "";
       const rangeHint = (b.min !== undefined && b.max !== undefined) ? ` (range ${b.min}–${b.max})` : (b.min !== undefined ? ` (min ${b.min})` : "");
-      return `
+      const inputmodeAttr = isStringField ? "" : ` inputmode="numeric"`;
+      return `${sectionBreak}
         <div class="admin-cfg-row">
           <div class="admin-cfg-label">${escapeHtml(f.label)} <span class="info-dot" title="${escapeHtml(f.help + rangeHint)}">?</span></div>
           <div class="field" style="grid-column:2 / -1;">
-            <input type="text" id="rs_${f.key}" value="${escapeHtml(String(value))}" inputmode="numeric" aria-label="${escapeHtml(f.label)}" title="${escapeHtml(f.help)}">
+            <input type="text" id="rs_${f.key}" value="${escapeHtml(String(value))}"${inputmodeAttr} aria-label="${escapeHtml(f.label)}" title="${escapeHtml(f.help)}">
           </div>
         </div>`;
     }).join("");
     return `
       <div class="panel admin-panel" style="grid-column:1 / -1;">
-        <div class="admin-panel-head"><h3>Reward-sweep automation</h3></div>
-        <p class="help-text" style="margin:2px 0 14px;">Tunes the relayer's own unattended fee-wallet / creator-rewards / platform-rewards sweep loops (see Automation status in Overview) without editing .env or restarting the service — saving here takes effect on each loop's very next tick.</p>
+        <div class="admin-panel-head"><h3>Relayer settings</h3></div>
+        <p class="help-text" style="margin:2px 0 14px;">Tunes the relayer's own unattended fee-wallet / creator-rewards / platform-rewards sweep loops (see Automation status in Overview) and its Telegram notifications, without editing .env or restarting the service — saving here takes effect on each loop's very next tick.</p>
         <div class="admin-cfg-table">
           <div class="admin-cfg-row admin-cfg-head">
             <div class="admin-cfg-col-head">Setting</div>
@@ -11734,7 +11847,13 @@
     // keeper is watching a stale contract even though this page's own
     // "Creator rewards distributor"/"Fee wallet distributor" fields look
     // current.
-    renderAutomationStatusHTML({ crdAddress, fwdAddress, prdAddress });
+    renderAutomationStatusHTML({
+      crdAddress, fwdAddress, prdAddress,
+      tfRelayer: tfState ? tfState.relayer : undefined,
+      ctfRelayer: ctfState ? ctfState.relayer : undefined,
+      bcfRelayer: bcfState ? bcfState.relayer : undefined,
+      cbcfRelayer: cbcfState ? cbcfState.relayer : undefined,
+    });
 
     const rewardsWrap = document.getElementById("platformRewardsWrap");
     if(rewardsWrap){
@@ -12223,11 +12342,17 @@
     return div;
   }
 
-  // ---- launch announcements in the live feed ----
-  // Reuses refreshRemoteLaunches' own "is this tokenAddress already in
-  // `tokens`" check (see its `!existing` branch below) to detect a brand-new
-  // launch, then drops one of these into the same #feedBody list as a big,
-  // visually distinct row instead of an ordinary trade line.
+  // ---- "New launches" window (#launchFeedBody, see .launch-console) ----
+  // Used to live inline in the trade-activity feed (#feedBody), sharing its
+  // 8-line cap — which meant a brand-new launch got pushed out and
+  // disappeared within a minute of any ordinary trading elsewhere on the
+  // platform, often before anyone even saw it (launches are only polled
+  // every REMOTE_LAUNCHES_POLL_MS=5min to begin with). Now it's its own
+  // persistent window with its own cap, so a new launch stays visible on
+  // its own timeline instead of competing with every buy/sell for the same
+  // 8 slots.
+  const MAX_LAUNCH_FEED_ITEMS = 6;
+
   function launchAnnouncementHTML(t){
     const time = new Date(t.createdAtMs || Date.now()).toLocaleTimeString("en-US", {hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
     const badge = (t.mode==="curve"||t.mode==="customCurve") ? "⚡ Quick Launch" : "New launch";
@@ -12236,12 +12361,45 @@
     div.innerHTML = `<span class="t mono">${time}</span><span class="feed-announce-badge">${badge}</span><span class="msg">🚀 <span class="tk">$${escapeHtml(t.ticker)}</span> just launched on Hood Launch — ${escapeHtml(t.name)}</span>`;
     return div;
   }
+
+  // Rebuilds the "New launches" window from scratch out of whatever's
+  // already in the global `tokens` array for the current network — used to
+  // seed it the first time there's enough data to show (the initial page
+  // load, and the moment refreshRemoteLaunches finishes its first catch-up
+  // sync for a network) and to reset it cleanly on a network switch, so it
+  // never shows the previous network's launches while the new one is still
+  // loading. Newest-first by createdAtMs; a token missing that field (an
+  // old demo/simulated token from before it existed) is left out rather
+  // than sorting unpredictably against real ones.
+  function renderLaunchFeedFromTokens(){
+    const body = document.getElementById("launchFeedBody");
+    if(!body) return;
+    const relevant = tokens
+      .filter(t => t.networkMode===appMode && typeof t.createdAtMs==="number")
+      .sort((a,b)=> b.createdAtMs - a.createdAtMs)
+      .slice(0, MAX_LAUNCH_FEED_ITEMS);
+    if(!relevant.length){
+      body.innerHTML = `<div class="empty" style="padding:16px;">No recent launches on ${escapeHtml(NETWORKS[appMode].label)} yet.</div>`;
+      return;
+    }
+    body.innerHTML = "";
+    // Append oldest-of-the-slice first — .console-body's column-reverse
+    // flips the visual order, so the single newest launch still ends up on
+    // top, same orientation the trade feed already uses.
+    relevant.slice().reverse().forEach(t => body.appendChild(launchAnnouncementHTML(t)));
+  }
+
+  // Appends exactly one more row once the window above already has its
+  // baseline — this is the "a new one just happened, show it live" path,
+  // called only for a launch discovered AFTER a network's initial catch-up
+  // sync (see refreshRemoteLaunches's `alreadySeeded` check), so it never
+  // duplicates what renderLaunchFeedFromTokens already rendered.
   function announceLaunch(t){
-    const body = document.getElementById("feedBody");
+    const body = document.getElementById("launchFeedBody");
     if(!body) return;
     if(body.querySelector(".empty")) body.innerHTML = "";
     body.appendChild(launchAnnouncementHTML(t));
-    while(body.children.length>8) body.removeChild(body.firstChild);
+    while(body.children.length > MAX_LAUNCH_FEED_ITEMS) body.removeChild(body.firstChild);
   }
 
   // How far back a trade still counts toward "24h volume" — see the
@@ -12328,6 +12486,7 @@
 
   function seedFeed(){
     seenActivityKeys = new Set(); // switching networks (or a fresh load) starts the de-dupe set clean
+    renderLaunchFeedFromTokens(); // reset/reseed the "New launches" window for whichever network is active now
     const body = document.getElementById("feedBody");
     if(!body) return;
     if(!relayerApiUrl(appMode)){
