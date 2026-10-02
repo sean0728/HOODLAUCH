@@ -3215,9 +3215,23 @@ async function main() {
     // main()), so look it up generically instead of enumerating kinds here.
     const filter = watcher.factory.filters[watcher.createdEventName]();
     const events = await watcher.factory.queryFilter(filter, fromBlock, toBlock);
+    // Snapshot of everything already tracked BEFORE this tick's upserts
+    // below — used only to decide whether a given token is genuinely new
+    // (never seen before) for the Telegram announcement gate further down.
+    // Under normal single-process operation this loop never revisits a
+    // block range twice (the cursor at the bottom always advances past
+    // whatever was just scanned), so this check is a no-op belt-and-
+    // suspenders guard for the cases where that invariant doesn't hold: a
+    // crash/restart between upserting a token and this function's own
+    // setCursor call at the end (same already-scanned blocks get
+    // re-queried next boot), or two relayer processes briefly running
+    // against the same database during a deploy — either of which would
+    // otherwise re-announce the same launch to Telegram a second time.
+    const alreadyTrackedBeforeThisTick = events.length ? await readTrackedTokens(network) : {};
     for (const event of events) {
       const { token, creator, name, symbol, pair } = event.args;
       const pairAddress = pair && pair !== hre.ethers.ZeroAddress ? pair : null;
+      const isNewToken = !alreadyTrackedBeforeThisTick[token.toLowerCase()];
       await upsertTrackedToken(network, token, {
         kind: watcher.kind,
         creator,
@@ -3249,8 +3263,11 @@ async function main() {
       // could otherwise replay months of launch history into the Telegram
       // channel the moment this process starts. isNeverRunOrStuck is computed
       // once per call, above, from the same cursor state this loop is
-      // already using to decide fromBlock.
-      if (!isNeverRunOrStuck) {
+      // already using to decide fromBlock. isNewToken (see
+      // alreadyTrackedBeforeThisTick above) guards the separate case of this
+      // exact event being re-scanned — a duplicate Telegram post for a token
+      // already announced, rather than a flood of historical ones.
+      if (!isNeverRunOrStuck && isNewToken) {
         await announceLaunchToTelegram(network, watcher.kind, { token, name, symbol, pairAddress }).catch((err) =>
           console.warn(`[telegram] couldn't announce new launch ${token}: ${err.message}`)
         );
