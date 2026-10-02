@@ -115,6 +115,7 @@
 // relaying, not touch anyone else's funds).
 const path = require("path");
 const fs = require("fs"); // used only by the temporary /debug/data-dirs route below
+const https = require("https"); // used only by sendTelegramMessage below — Node's built-in client, no extra dependency
 const express = require("express");
 const hre = require("hardhat");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
@@ -228,6 +229,33 @@ const TOKEN_STATUS = { DEPLOYED: 0, LAUNCHED: 1, GRADUATED: 2 };
 const PORT = Number(process.env.PORT || process.env.RELAYER_PORT || 8787);
 const POLL_INTERVAL_MS = Number(process.env.RELAYER_POLL_INTERVAL_MS || 15_000);
 const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5_000);
+
+// ---- Telegram notifications — entirely optional, same "unset = does
+// nothing extra" posture as FEE_WALLET_DISTRIBUTOR_ADDRESS/etc. above.
+// TELEGRAM_BOT_TOKEN is shared across both channels (one bot, create it once
+// via @BotFather); the two chat IDs are deliberately separate so a
+// public-facing "new launch" announcement never lands in the same place as
+// an admin-only "something's broken" alert, or vice versa. Leaving either
+// chat ID unset simply mutes that one category — the other still works, and
+// neither ever blocks or slows down the actual relaying/discovery logic
+// (see sendTelegramMessage's own comment: it never throws).
+//   TELEGRAM_BOT_TOKEN           — from @BotFather, shared by both channels
+//   TELEGRAM_LAUNCHES_CHAT_ID    — public channel: "new launch" announcements
+//   TELEGRAM_ALERTS_CHAT_ID      — private channel: relayer-mismatch alerts
+// To get a channel's chat ID: add the bot to the channel as an admin, post
+// any message in it, then visit
+// https://api.telegram.org/bot<TOKEN>/getUpdates and read the
+// "chat":{"id": ...} field off that message.
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
+const TELEGRAM_LAUNCHES_CHAT_ID = process.env.TELEGRAM_LAUNCHES_CHAT_ID || null;
+const TELEGRAM_ALERTS_CHAT_ID = process.env.TELEGRAM_ALERTS_CHAT_ID || null;
+// How often the relayer-wallet-vs-factory-relayer() check re-runs after
+// startup — see relayerHealthPollLoop below. A relayer mismatch costs
+// nothing extra by sitting undetected a few minutes longer (every relayed
+// launch attempt already fails loudly to the creator in the meantime), so a
+// slow default cadence is fine and avoids an eth_call per factory every
+// POLL_INTERVAL_MS forever.
+const RELAYER_HEALTH_POLL_INTERVAL_MS = Number(process.env.RELAYER_HEALTH_POLL_INTERVAL_MS || 5 * 60_000);
 
 // Entirely optional: leaving FEE_WALLET_DISTRIBUTOR_ADDRESS unset means this
 // service does nothing extra, same as before this feature existed. When it
@@ -1279,6 +1307,149 @@ async function postLaunchPipeline({
   return { implVerification, proxyVerification };
 }
 
+// Best-effort Telegram post — NEVER throws, never rejects, and never blocks
+// or slows down the caller: a Telegram outage, a bad token, or a chat ID the
+// bot isn't actually a member of should never be able to stall a relayed
+// launch or a discovery poll. Silently no-ops (resolves immediately) if
+// TELEGRAM_BOT_TOKEN or `chatId` is unset, same "unset = does nothing extra"
+// convention as every other optional integration in this file. `text` is
+// sent as Telegram HTML parse_mode — escape any untrusted interpolated
+// value (e.g. a token name a creator chose) with escapeTelegramHtml below
+// before including it, the same instinct index.html's escapeHtml already
+// applies to anything user-supplied.
+function sendTelegramMessage(chatId, text) {
+  if (!TELEGRAM_BOT_TOKEN || !chatId) return Promise.resolve();
+  const payload = JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true });
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const req = https.request(
+      {
+        hostname: "api.telegram.org",
+        path: `/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+        timeout: 10_000,
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            console.warn(`[telegram] sendMessage to chat ${chatId} failed (${res.statusCode}): ${body}`);
+          }
+          done();
+        });
+      }
+    );
+    req.on("error", (err) => {
+      console.warn(`[telegram] sendMessage to chat ${chatId} errored: ${err.message}`);
+      done();
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      console.warn(`[telegram] sendMessage to chat ${chatId} timed out`);
+      done();
+    });
+    req.write(payload);
+    req.end();
+  });
+}
+
+// Telegram's HTML parse_mode only needs these three characters escaped
+// (unlike full HTML — no attribute/quote escaping needed since nothing here
+// ever goes inside a tag attribute).
+function escapeTelegramHtml(str) {
+  return String(str == null ? "" : str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// ---- relayer-wallet health check (Telegram-alerted) ----
+// Re-checks each configured factory's on-chain relayer() against this
+// process's own wallet on a slow, recurring cadence
+// (RELAYER_HEALTH_POLL_INTERVAL_MS) rather than only once at boot (the four
+// per-factory WARNING console.warn calls in main(), just above where
+// watchers are built, only ever fire during startup). That matters now more
+// than it used to: the admin panel's "Gasless relay" section makes it
+// trivial to change a factory's relayer address WITHOUT restarting this
+// process, which is exactly the kind of drift that produces
+// "<Factory>: caller is not the relayer" on an otherwise-correct launch —
+// the incident that prompted adding this check in the first place. Alerts
+// to TELEGRAM_ALERTS_CHAT_ID only on a STATE CHANGE (newly mismatched, or
+// newly resolved), tracked in relayerMismatchState, so a persistent
+// misconfiguration doesn't spam the channel on every tick.
+const FACTORY_LABELS = {
+  token: "TokenFactory",
+  custom: "CustomTokenFactory",
+  curve: "BondingCurveFactory",
+  "custom-curve": "CustomBondingCurveFactory",
+};
+const relayerMismatchState = {}; // { [kind]: boolean } — last known mismatch state, absent until the first check
+
+async function checkRelayerHealth(watchers, relayerWallet) {
+  for (const watcher of watchers) {
+    const label = FACTORY_LABELS[watcher.kind] || watcher.kind;
+    let onChainRelayer;
+    try {
+      onChainRelayer = await watcher.factory.relayer();
+    } catch (err) {
+      console.warn(`[relayer-health] couldn't read ${label}.relayer(): ${err.message}`);
+      continue;
+    }
+    const mismatched = onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase();
+    const wasMismatched = relayerMismatchState[watcher.kind];
+    if (mismatched && !wasMismatched) {
+      console.warn(
+        `WARNING: ${label}.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
+          "Relayed launches through this factory will revert until the factory owner calls setRelayer (admin panel → Contracts)."
+      );
+      await sendTelegramMessage(
+        TELEGRAM_ALERTS_CHAT_ID,
+        `⚠️ <b>${escapeTelegramHtml(label)}</b> relayer mismatch\n` +
+          `On-chain relayer(): <code>${escapeTelegramHtml(onChainRelayer)}</code>\n` +
+          `This relayer's wallet: <code>${escapeTelegramHtml(relayerWallet.address)}</code>\n\n` +
+          `Every relayed launch through ${escapeTelegramHtml(label)} will revert with "caller is not the relayer" until this is fixed — admin panel → Contracts → ${escapeTelegramHtml(label)} → Gasless relay.`
+      );
+    } else if (!mismatched && wasMismatched) {
+      console.log(`[relayer-health] ${label}.relayer() mismatch resolved — now matches ${relayerWallet.address}.`);
+      await sendTelegramMessage(
+        TELEGRAM_ALERTS_CHAT_ID,
+        `✅ <b>${escapeTelegramHtml(label)}</b> relayer mismatch resolved — now matches this relayer's wallet (<code>${escapeTelegramHtml(relayerWallet.address)}</code>).`
+      );
+    }
+    relayerMismatchState[watcher.kind] = mismatched;
+  }
+}
+
+async function relayerHealthPollLoop(watchers, relayerWallet) {
+  await checkRelayerHealth(watchers, relayerWallet).catch((err) => console.error(`[relayer-health] poll error: ${err.message}`));
+  setTimeout(() => relayerHealthPollLoop(watchers, relayerWallet), RELAYER_HEALTH_POLL_INTERVAL_MS);
+}
+
+// ---- "new launch" Telegram announcement ----
+// Called from discoverLaunchedTokens below, which scans TokenCreated/
+// CustomTokenCreated/CurveTokenCreated across ALL FOUR factories — unlike
+// postLaunchPipeline (relayed launches only), this is the one discovery path
+// that sees every launch regardless of whether it was gasless-relayed or
+// paid for directly by the creator's own wallet, so it's the right place to
+// hook a "new launch" announcement that never misses one.
+async function announceLaunchToTelegram(network, kind, { token, name, symbol, pairAddress }) {
+  const label = FACTORY_LABELS[kind] || kind;
+  const explorerBrowserUrl = process.env.EXPLORER_BROWSER_URL || (ROBINHOOD_NETWORKS[network] || {}).explorerBrowserUrl || null;
+  const link = explorerBrowserUrl ? `${explorerBrowserUrl.replace(/\/$/, "")}/address/${token}` : null;
+  const kindNote = kind === "curve" || kind === "custom-curve" ? "⚡ Quick Launch" : pairAddress ? "Launch + liquidity" : "Deploy";
+  await sendTelegramMessage(
+    TELEGRAM_LAUNCHES_CHAT_ID,
+    `🚀 New launch: <b>${escapeTelegramHtml(name)}</b> ($${escapeTelegramHtml(symbol)})\n` +
+      `${escapeTelegramHtml(kindNote)} via ${escapeTelegramHtml(label)}\n` +
+      `<code>${escapeTelegramHtml(token)}</code>` +
+      (link ? `\n${link}` : "")
+  );
+}
+
 // Reports which required env vars this process can actually see — never
 // the values themselves, just presence and length — printed unconditionally
 // at startup, before any of the "missing X" throws below. Purely a
@@ -1297,6 +1468,9 @@ function logEnvVarPresence() {
     "CUSTOM_BONDING_CURVE_FACTORY_ADDRESS",
     "FEE_WALLET_DISTRIBUTOR_ADDRESS",
     "PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_LAUNCHES_CHAT_ID",
+    "TELEGRAM_ALERTS_CHAT_ID",
     "HARDHAT_NETWORK",
     "PORT",
     "RELAYER_PORT",
@@ -1581,6 +1755,17 @@ async function main() {
       );
     }
   }
+
+  // Kicks off immediately (catching anything already mismatched at boot,
+  // same cases the four WARNING logs above would have just printed) and then
+  // every RELAYER_HEALTH_POLL_INTERVAL_MS after that — see
+  // checkRelayerHealth's own comment for why this needs to keep re-checking
+  // rather than running only once at startup.
+  console.log(
+    `Checking relayer-wallet-vs-factory-relayer() health every ${RELAYER_HEALTH_POLL_INTERVAL_MS}ms` +
+      (TELEGRAM_ALERTS_CHAT_ID ? " (alerting to Telegram on change)." : " (set TELEGRAM_BOT_TOKEN/TELEGRAM_ALERTS_CHAT_ID to also alert on Telegram).")
+  );
+  relayerHealthPollLoop(watchers, relayerWallet);
 
   // See the module comment's history note on why this was once removed and
   // restored — same optional-feature try/catch guard as FeeWalletDistributor
@@ -2971,6 +3156,17 @@ async function main() {
         discoveredAt: new Date().toISOString(),
       });
       console.log(`[discovery] tracking ${watcher.kind} token $${symbol} (${token})${pairAddress ? ` with pair ${pairAddress}` : ""}.`);
+      // Only announce launches found on a NORMAL incremental scan — not
+      // during the initial catch-up (or a stuck-cursor recovery) pass, which
+      // could otherwise replay months of launch history into the Telegram
+      // channel the moment this process starts. isNeverRunOrStuck is computed
+      // once per call, above, from the same cursor state this loop is
+      // already using to decide fromBlock.
+      if (!isNeverRunOrStuck) {
+        await announceLaunchToTelegram(network, watcher.kind, { token, name, symbol, pairAddress }).catch((err) =>
+          console.warn(`[telegram] couldn't announce new launch ${token}: ${err.message}`)
+        );
+      }
     }
     await setCursor(cursorKey, toBlock);
   }
