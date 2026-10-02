@@ -2187,6 +2187,18 @@
   function encodeDepositsCalldata(creatorAddr, voucherHash){
     return "0x"+DEPOSITS_SELECTOR+encodeAddressParam(creatorAddr)+voucherHash.replace(/^0x/i,"").toLowerCase().padStart(64,"0");
   }
+  // reclaimDeposit(bytes32) — identical selector on all four factories.
+  // Hard-gated on-chain to msg.sender (see each contract's own
+  // `deposits[msg.sender][voucherHash]` lookup) — nobody but the original
+  // depositor can ever call this successfully, including the platform
+  // owner/admin. That's why this is only ever wired up from Portfolio's
+  // "Stuck deposits" section (see loadMyStuckDeposits/reclaimFailedDeposit
+  // below), where the connected wallet IS the creator calling it for
+  // themselves — never from the admin panel, where it would just revert.
+  const RECLAIM_DEPOSIT_SELECTOR = "fa79c259";
+  function encodeReclaimDepositCalldata(voucherHash){
+    return "0x"+RECLAIM_DEPOSIT_SELECTOR+voucherHash.replace(/^0x/i,"").toLowerCase().padStart(64,"0");
+  }
 
   // Quick Launch's own gasless-relay voucher hashers — a fast-follow added
   // to BondingCurveFactory/CustomBondingCurveFactory after the two factories
@@ -8773,6 +8785,8 @@
 
       ${myTokensHTML}
 
+      <div id="stuckDepositsWrap"></div>
+
       <div class="panel">
         <div class="eyebrow" style="margin-bottom:6px;">Holdings</div>
         <p style="color:var(--paper-500); font-size:.82rem; margin:0 0 10px;">Your wallet's real balance on ${escapeHtml(NETWORKS[appMode].chainName)} — not simulated. A token needs a live pool for Hood Launch to price it; one you hold without a pool yet still shows up with its real balance.</p>
@@ -8792,6 +8806,118 @@
 
     loadRealPortfolio(wallet, myTokens);
     loadCreatorRewardsForMyTokens(wallet, myTokens);
+    loadMyStuckDeposits(wallet);
+  }
+
+  // "Stuck deposits" — Portfolio's self-service counterpart to the admin
+  // panel's "Failed Launches" list (see loadFailedLaunchDeposits above,
+  // which this mirrors closely). A gasless launch that failed after the
+  // creator's ETH was already escrowed (depositForRelayedLaunch) leaves
+  // that ETH sitting safely on-chain, and reclaimDeposit() is hard-gated to
+  // msg.sender on every factory — there is no admin override, by design, so
+  // this is the ONLY place on the whole site a stuck deposit can actually
+  // be gotten back, and only by the wallet that made it. Renders nothing at
+  // all (not even an empty panel) when this wallet has no stuck deposits,
+  // so Portfolio stays clean for everyone else. Pure fetch()+publicEthCall,
+  // same as the admin panel's version — no wallet signature needed just to
+  // see the list, only to actually reclaim.
+  async function loadMyStuckDeposits(forWallet){
+    const wrap = document.getElementById("stuckDepositsWrap");
+    if(!wrap) return;
+    const stillCurrent = () => wallet===forWallet && views.portfolio.classList.contains("active");
+
+    const url = relayerApiUrl(appMode);
+    if(!url) return; // no relayer configured for this network — nothing to check
+
+    let failedPayload;
+    try{
+      const r = await fetch(`${url}/failed-launches`);
+      failedPayload = r.ok ? await r.json() : null;
+    }catch(e){ failedPayload = null; }
+    if(!stillCurrent() || !failedPayload) return;
+
+    const mine = (Array.isArray(failedPayload.failedLaunches) ? failedPayload.failedLaunches : [])
+      .filter(f => f.creator && f.creator.toLowerCase() === forWallet.toLowerCase());
+    if(!mine.length) return; // nothing of this wallet's failed — leave the section blank
+
+    // Resolve each one's real on-chain escrow before showing anything, so a
+    // launch that already settled or was already reclaimed never flashes a
+    // misleading "you're owed ETH" row.
+    const resolved = await Promise.all(mine.map(async f => {
+      try{
+        const factoryKey = RELAY_KIND_TO_FACTORY_KEY[f.kind];
+        const factoryAddress = factoryKey ? adminFactoryAddress(factoryKey) : null;
+        if(!factoryAddress || !f.voucherHash) return null;
+        const raw = await publicEthCall(appMode, factoryAddress, encodeDepositsCalldata(f.creator, f.voucherHash));
+        const dep = decodeDepositInfo(raw);
+        if(dep.amountWei === 0n || dep.reclaimed || dep.settled) return null; // nothing actionable left
+        return { f, factoryAddress, dep };
+      }catch(e){ return null; }
+    }));
+    const stuck = resolved.filter(Boolean);
+    if(!stillCurrent() || !stuck.length) return;
+
+    wrap.innerHTML = `
+      <div class="panel" style="margin-bottom:20px;">
+        <div class="eyebrow" style="margin-bottom:6px;">Stuck deposits</div>
+        <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 4px;">A gasless launch attempt that failed after your ETH was already escrowed. Your funds are safe on-chain the whole time — only your own wallet can reclaim them, and only once each deposit's deadline passes.</p>
+        ${stuck.map(({f, factoryAddress, dep}, i) => {
+          const ethAmount = weiToEtherString(dep.amountWei, 6);
+          const deadlineMs = Number(dep.deadline) * 1000;
+          const deadlinePassed = Date.now() > deadlineMs;
+          const label = (f.name || f.symbol) ? `${escapeHtml(f.name || f.symbol)}${f.name && f.symbol ? ` <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(f.symbol)}</span>` : ""}` : "(name unknown)";
+          return `
+          <div class="my-token-row" id="stuck-deposit-row-${i}">
+            <div style="flex:1; min-width:0;">
+              <div class="mtr-name">${label}</div>
+              <div class="mtr-meta">${escapeHtml(ethAmount)} ETH escrowed · failed ${f.updatedAt ? new Date(f.updatedAt).toLocaleString() : "at an unknown time"}</div>
+              <div class="mtr-meta" style="margin-top:3px;">${deadlinePassed ? "Ready to reclaim now." : `Reclaimable starting ${new Date(deadlineMs).toLocaleString()}`}</div>
+            </div>
+            <div class="mtr-actions">
+              <button class="btn btn-primary" style="padding:7px 12px; font-size:.8rem;" data-reclaim-idx="${i}" ${deadlinePassed ? "" : "disabled"}>Reclaim ETH</button>
+            </div>
+          </div>`;
+        }).join("")}
+      </div>`;
+    wrap.querySelectorAll("[data-reclaim-idx]").forEach(b=>{
+      const entry = stuck[Number(b.dataset.reclaimIdx)];
+      b.addEventListener("click", ()=> reclaimFailedDeposit(entry, b));
+    });
+  }
+
+  // Fires the actual reclaimDeposit(voucherHash) transaction from the
+  // connected wallet — only reachable from a row loadMyStuckDeposits just
+  // built for THIS wallet (i.e. f.creator === wallet already), so the
+  // contract's own msg.sender check always passes here. Mirrors
+  // unlockLiquidity()'s own network-check/send/waitForReceipt shape above.
+  async function reclaimFailedDeposit({f, factoryAddress, dep}, btnEl){
+    const originalLabel = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = "Confirm in wallet…";
+    try{
+      if(!window.ethereum) throw new Error("No browser wallet detected.");
+      if(!wallet) throw new Error("Connect your wallet first.");
+      await ensureNetwork(appMode);
+      const currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      if(NETWORKS[appMode].chainIdHex && currentChainId.toLowerCase() !== NETWORKS[appMode].chainIdHex.toLowerCase()){
+        throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
+      }
+      const txHash = await window.ethereum.request({
+        method: "eth_sendTransaction",
+        params: [{ from: wallet, to: factoryAddress, data: encodeReclaimDepositCalldata(f.voucherHash) }],
+      });
+      toast("Transaction sent — waiting for confirmation…");
+      const receipt = await waitForReceipt(txHash);
+      if(receipt.status !== "0x1") throw new Error("The reclaim transaction reverted on-chain.");
+      toast(`${weiToEtherString(dep.amountWei, 6)} ETH reclaimed back to your wallet.`);
+      const row = btnEl.closest("[id^='stuck-deposit-row-']");
+      if(row) row.remove();
+    }catch(err){
+      toast(err && err.message ? err.message : "Reclaim failed — see console for details.");
+      console.error(err);
+      btnEl.disabled = false;
+      btnEl.textContent = originalLabel;
+    }
   }
 
   // Fills in the real numbers renderPortfolio() left as a loading state.
