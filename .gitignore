@@ -3,6 +3,9 @@ cache/
 artifacts/
 .env
 coverage
+cache-v4test/
+artifacts-v4test/
+
 
 # deployed-contracts/ (the per-network launch ledgers scripts/launch.js
 # writes to) and deployments/ (the per-network platform-contract addresses
