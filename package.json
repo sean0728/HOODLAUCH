@@ -6,7 +6,7 @@
   "main": "scripts/relayer.js",
   "scripts": {
     "compile": "hardhat compile",
-    "build": "hardhat compile",
+    "build": "echo skip",
     "start": "node scripts/relayer.js",
      "dev": "node scripts/relayer.js",
     "test": "hardhat test",
