@@ -94,6 +94,25 @@
 // regardless of who triggers it. See the PLATFORM_REWARDS_*/
 // PLATFORM_AIRDROP_* constants and platformRewardsPollLoop below.
 //
+// V4 custom-tax + curve factories (all optional, all DIRECT-LAUNCH ONLY):
+//   V4_CUSTOM_TOKEN_FACTORY_ADDRESS  V4CustomTokenFactory (watcher kind "v4custom")
+//   V4_CURVE_FACTORY_ADDRESS         V4CurveFactory       (watcher kind "v4curve")
+//   V4_COMPOUNDER_ADDRESS            V4LiquidityCompounder, used by the opt-in
+//                                    compounder keeper below
+//   V4_COMPOUND_MIN_SUPPLY_BPS       compound once pending >= this many bps of
+//                                    the token's supply (default 1 = 0.01%)
+//   V4_COMPOUND_POLL_INTERVAL_MS     compounder keeper tick (default: the
+//                                    fee-wallet keeper interval)
+// Neither factory has a gasless/voucher path, so their watchers carry no
+// hashFn/relayFn: every relaying/deposit/voucher/relayer-health loop skips
+// them and there are no POST /vouchers/... routes for them. They are still
+// discovered (discoverLaunchedTokens), priced (pollTokenPrices — the curve's
+// own marginal price until graduation, the V4 pool afterwards) and their
+// trades listed (pollTokenActivity). Any one of the V4 factory env vars
+// (V4_TOKEN_FACTORY_ADDRESS included) satisfies the "set at least one
+// factory" startup check. The compounder keeper only runs with
+// V4_KEEPER_ENABLED=true AND V4_COMPOUNDER_ADDRESS set.
+//
 // GET /status/:voucherHash lets the front end poll a launch's progress
 // (received -> deposited -> relayed, or failed) — merged with a live
 // on-chain read of the matching deposit, so the front end can tell a
@@ -1159,6 +1178,61 @@ const V4_FACTORY_SLOTS_ABI = [
 const V4_HOOK_EXEMPT_ABI = ["function taxExempt(address) view returns (bool)"];
 const V4_LP_FEE_PPM = 3000n; // must match V4TokenFactory / V4TokenSeller
 
+// V4CustomTokenFactory / V4CurveFactory (the V4PoolLauncher family) don't hold
+// the distributor slots themselves — they read them from a "tax source"
+// (the V4TokenFactory) exposed as the public taxSource(). getV4Context uses
+// this to find where the V4 distributor keeper should read its slots when no
+// V4TokenFactory watcher is configured.
+const V4_TAX_SOURCE_ABI = ["function taxSource() view returns (address)"];
+
+// ---- V4 compounder keeper (optional) ----
+// Opt-in: V4_KEEPER_ENABLED=true together with V4_COMPOUNDER_ADDRESS. Custom
+// tokens route the "liquidity" share of their fees, in tokens, to the
+// V4LiquidityCompounder; compound(token) is permissionless and turns whatever
+// waits there into permanent pool liquidity. The keeper only pays gas for it
+// once pending(token) is worth it: at least V4_COMPOUND_MIN_SUPPLY_BPS of the
+// token's total supply (default 1 bp = 0.01%) and strictly more than 1 wei
+// (the contract itself reverts "nothing to compound" below 2 wei).
+const V4_COMPOUNDER_ADDRESS = process.env.V4_COMPOUNDER_ADDRESS || null;
+const V4_COMPOUND_MIN_SUPPLY_BPS = (() => {
+  const n = Number(process.env.V4_COMPOUND_MIN_SUPPLY_BPS);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 1;
+})();
+const V4_COMPOUNDER_ABI = [
+  "function pending(address token) view returns (uint256)",
+  "function compound(address token) returns (uint128 liquidity)",
+];
+
+// A V4CustomToken's own config getters — used only as a fallback for a custom
+// curve whose CustomCurveConfigured event wasn't seen (see
+// readV4CurveCustomConfig in discoverLaunchedTokens' neighbourhood).
+const V4_CUSTOM_TOKEN_CONFIG_ABI = [
+  "function marketingWallet() view returns (address)",
+  "function buyFees() view returns (uint16 reflectionBps, uint16 marketingBps, uint16 liquidityBps, uint16 burnBps)",
+  "function sellFees() view returns (uint16 reflectionBps, uint16 marketingBps, uint16 liquidityBps, uint16 burnBps)",
+];
+// ethers returns a FeeSet as a Result of bigint-ish values; the tracked-tokens
+// store and GET /launches want plain JSON numbers.
+function feeSetToPlain(fs) {
+  return {
+    reflectionBps: Number(fs.reflectionBps),
+    marketingBps: Number(fs.marketingBps),
+    liquidityBps: Number(fs.liquidityBps),
+    burnBps: Number(fs.burnBps),
+  };
+}
+
+// Every watcher kind that lives on Uniswap V4 ("v4token", "v4custom",
+// "v4curve", and any later "v4*"), as opposed to the V2 kinds.
+function isV4Kind(kind) {
+  return typeof kind === "string" && kind.startsWith("v4");
+}
+// Watchers that can relay a gasless launch carry a voucher hash + relay
+// function; the direct-launch-only V4 factories (v4custom, v4curve) don't.
+function canRelay(watcher) {
+  return !!(watcher && watcher.relayFn && watcher.hashFn);
+}
+
 function bigIntSqrt(n) {
   if (n < 2n) return n;
   let x = n;
@@ -1425,12 +1499,19 @@ async function postLaunchPipeline({
     // token contract it initializes.
     // "v4token" (V4TokenFactory) clones V4LaunchedToken, a separate, tax-free
     // ERC20 (the tax lives in V4TaxHook, not the token).
+    // "v4custom" (V4CustomTokenFactory) and "v4curve" (V4CurveFactory) are
+    // direct-launch only, so postLaunchPipeline is never reached for them;
+    // the entries below just keep this table total if that ever changes
+    // (v4custom clones V4CustomToken; v4curve clones V4LaunchedToken or
+    // V4CustomToken depending on the curve, V4LaunchedToken here).
     const contractFile =
       kind === "custom" || kind === "custom-curve"
         ? "CustomToken.sol"
-        : kind === "v4token"
-          ? "V4LaunchedToken.sol"
-          : "LaunchedToken.sol";
+        : kind === "v4custom"
+          ? "V4CustomToken.sol"
+          : isV4Kind(kind)
+            ? "V4LaunchedToken.sol"
+            : "LaunchedToken.sol";
     const absPath = path.join(hre.config.paths.root, "contracts", contractFile);
     flattenedSource = await hre.run("flatten:get-flattened-sources", { files: [absPath] });
   } catch (err) {
@@ -1503,7 +1584,7 @@ async function postLaunchPipeline({
     // contract). Both fields ride in the record's JSON like any other
     // extra field — pairAddress stays null for V4 so nothing V2-shaped ever
     // tries to read a pair that doesn't exist.
-    ...(kind === "v4token" ? { protocol: "v4", poolId: poolId && poolId !== hre.ethers.ZeroHash ? poolId : null } : {}),
+    ...(isV4Kind(kind) ? { protocol: "v4", poolId: poolId && poolId !== hre.ethers.ZeroHash ? poolId : null } : {}),
     ...extra,
   };
 
@@ -1596,11 +1677,16 @@ const FACTORY_LABELS = {
   curve: "BondingCurveFactory",
   "custom-curve": "CustomBondingCurveFactory",
   v4token: "V4TokenFactory",
+  v4custom: "V4CustomTokenFactory",
+  v4curve: "V4CurveFactory",
 };
 const relayerMismatchState = {}; // { [kind]: boolean } — last known mismatch state, absent until the first check
 
 async function checkRelayerHealth(watchers, relayerWallet) {
   for (const watcher of watchers) {
+    // Direct-launch-only factories (v4custom/v4curve) have no relayer() to
+    // check — there is nothing for this wallet to relay through them.
+    if (!canRelay(watcher)) continue;
     const label = FACTORY_LABELS[watcher.kind] || watcher.kind;
     let onChainRelayer;
     try {
@@ -1677,6 +1763,9 @@ function logEnvVarPresence() {
     "BONDING_CURVE_FACTORY_ADDRESS",
     "CUSTOM_BONDING_CURVE_FACTORY_ADDRESS",
     "V4_TOKEN_FACTORY_ADDRESS",
+    "V4_CUSTOM_TOKEN_FACTORY_ADDRESS",
+    "V4_CURVE_FACTORY_ADDRESS",
+    "V4_COMPOUNDER_ADDRESS",
     "FEE_WALLET_DISTRIBUTOR_ADDRESS",
     "PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS",
     "TELEGRAM_BOT_TOKEN",
@@ -1788,10 +1877,25 @@ async function main() {
   // POST /vouchers/v4token route, its own cursor. Leaving it unset changes
   // nothing about V2.
   const v4TokenFactoryAddress = process.env.V4_TOKEN_FACTORY_ADDRESS || null;
-  if (!tokenFactoryAddress && !customTokenFactoryAddress && !bondingCurveFactoryAddress && !customBondingCurveFactoryAddress && !v4TokenFactoryAddress) {
+  // V4CustomTokenFactory / V4CurveFactory — optional, direct-launch only
+  // (no voucher/relay path, so no POST /vouchers/... route and nothing for
+  // the relaying loops to do). They exist here for discovery, price and
+  // activity polling, and the compounder keeper.
+  const v4CustomTokenFactoryAddress = process.env.V4_CUSTOM_TOKEN_FACTORY_ADDRESS || null;
+  const v4CurveFactoryAddress = process.env.V4_CURVE_FACTORY_ADDRESS || null;
+  if (
+    !tokenFactoryAddress &&
+    !customTokenFactoryAddress &&
+    !bondingCurveFactoryAddress &&
+    !customBondingCurveFactoryAddress &&
+    !v4TokenFactoryAddress &&
+    !v4CustomTokenFactoryAddress &&
+    !v4CurveFactoryAddress
+  ) {
     throw new Error(
       "Set at least one of TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS / " +
-        "BONDING_CURVE_FACTORY_ADDRESS / CUSTOM_BONDING_CURVE_FACTORY_ADDRESS / V4_TOKEN_FACTORY_ADDRESS."
+        "BONDING_CURVE_FACTORY_ADDRESS / CUSTOM_BONDING_CURVE_FACTORY_ADDRESS / V4_TOKEN_FACTORY_ADDRESS / " +
+        "V4_CUSTOM_TOKEN_FACTORY_ADDRESS / V4_CURVE_FACTORY_ADDRESS."
     );
   }
 
@@ -1876,6 +1980,53 @@ async function main() {
         `Could not load V4TokenFactory at ${v4TokenFactoryAddress} (${err.message}). Gasless relaying for V4 launches ` +
           "is DISABLED for this run — everything else starts normally regardless. This usually means the contract's " +
           "build artifact is missing (run a normal `npx hardhat compile` so contracts/V4TokenFactory.sol is built)."
+      );
+    }
+  }
+
+  // V4CustomTokenFactory: direct launches only, so this watcher has NO
+  // voucherFields/hashFn/expectedDepositFn/relayFn — every loop that relays,
+  // matches deposits, or checks relayer() skips a watcher without them (see
+  // canRelay()). Its CustomTokenCreated already carries the poolId, the
+  // marketing wallet and both fee sets, which discovery persists.
+  if (v4CustomTokenFactoryAddress) {
+    try {
+      const factory = await hre.ethers.getContractAt("V4CustomTokenFactory", v4CustomTokenFactoryAddress, relayerWallet);
+      watchers.push({
+        kind: "v4custom",
+        factory,
+        createdEventName: "CustomTokenCreated",
+        liquidityEventName: "LiquidityAdded",
+      });
+    } catch (err) {
+      console.error(
+        `Could not load V4CustomTokenFactory at ${v4CustomTokenFactoryAddress} (${err.message}). Discovery, price and ` +
+          "activity polling for V4 custom-tax launches is DISABLED for this run — everything else starts normally " +
+          "regardless. This usually means the contract's build artifact is missing (run a normal `npx hardhat compile` " +
+          "so contracts/V4CustomTokenFactory.sol is built)."
+      );
+    }
+  }
+
+  // V4CurveFactory: bonding curve for plain AND custom-tax tokens, direct
+  // launches only (no relay path, same as above). CurveTokenCreated carries
+  // no custom-tax info; discovery also reads CustomCurveConfigured (and falls
+  // back to isCustomCurve()) to learn it.
+  if (v4CurveFactoryAddress) {
+    try {
+      const factory = await hre.ethers.getContractAt("V4CurveFactory", v4CurveFactoryAddress, relayerWallet);
+      watchers.push({
+        kind: "v4curve",
+        factory,
+        createdEventName: "CurveTokenCreated",
+        liquidityEventName: null,
+      });
+    } catch (err) {
+      console.error(
+        `Could not load V4CurveFactory at ${v4CurveFactoryAddress} (${err.message}). Discovery, price and activity ` +
+          "polling for V4 curve launches is DISABLED for this run — everything else starts normally regardless. This " +
+          "usually means the contract's build artifact is missing (run a normal `npx hardhat compile` so " +
+          "contracts/V4CurveFactory.sol is built)."
       );
     }
   }
@@ -2182,6 +2333,8 @@ async function main() {
       bondingCurveFactoryAddress: bondingCurveFactoryAddress || null,
       customBondingCurveFactoryAddress: customBondingCurveFactoryAddress || null,
       v4TokenFactoryAddress: v4TokenFactoryAddress || null,
+      v4CustomTokenFactoryAddress: v4CustomTokenFactoryAddress || null,
+      v4CurveFactoryAddress: v4CurveFactoryAddress || null,
       creatorRewardsDistributorAddress: CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null,
       creatorRewardsAutoSweepEnabled: !!creatorRewardsDistributor,
       feeWalletDistributorAddress: FEE_WALLET_DISTRIBUTOR_ADDRESS || null,
@@ -2239,7 +2392,15 @@ async function main() {
         // remoteLaunchToTokenObject only ever checks this string for the
         // substring "curve" (and, within that, "custom"), so it's fully
         // compatible as-is.
-        mode: t.kind || null,
+        // V4 kinds: "v4curve" maps to "v4-curve"/"v4-custom-curve" (both contain
+        // "curve", the latter also "custom", so the page's curve/custom-curve
+        // detection works unchanged); "v4custom" stays as-is; "v4token" too.
+        mode:
+          t.kind === "v4curve"
+            ? t.isCustomCurve || t.customTax
+              ? "v4-custom-curve"
+              : "v4-curve"
+            : t.kind || null,
         protocol: t.protocol || null,
         poolId: t.poolId || null,
         tokenAddress: t.tokenAddress,
@@ -2301,6 +2462,14 @@ async function main() {
       publicEntry.logo = trackedEntry && trackedEntry.logo != null ? trackedEntry.logo : null;
       publicEntry.banner = trackedEntry && trackedEntry.banner != null ? trackedEntry.banner : null;
       publicEntry.socials = trackedEntry && trackedEntry.socials ? trackedEntry.socials : {};
+      // Custom-tax config for the V4 custom-tax / curve factories (written by
+      // discoverLaunchedTokens). Keys are always present: null when the
+      // tracked entry has no such field (every V2 / plain V4 launch).
+      publicEntry.customTax = trackedEntry && trackedEntry.customTax != null ? trackedEntry.customTax : null;
+      publicEntry.isCustomCurve = trackedEntry && trackedEntry.isCustomCurve != null ? trackedEntry.isCustomCurve : null;
+      publicEntry.marketingWallet = trackedEntry && trackedEntry.marketingWallet != null ? trackedEntry.marketingWallet : null;
+      publicEntry.buyFees = trackedEntry && trackedEntry.buyFees ? trackedEntry.buyFees : null;
+      publicEntry.sellFees = trackedEntry && trackedEntry.sellFees ? trackedEntry.sellFees : null;
       return publicEntry;
     });
     sendJson(res, 200, { network, launches });
@@ -2356,6 +2525,7 @@ async function main() {
   }));
 
   async function handleVoucherSubmission(req, res, watcher) {
+    if (!canRelay(watcher)) return sendJson(res, 404, { error: "Gasless launches aren't available through this factory." });
     try {
       const voucher = normalizeVoucher(req.body.voucher || {}, watcher.voucherFields, watcher.voucherUintFields);
       const signature = req.body.signature;
@@ -2651,7 +2821,10 @@ async function main() {
       return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
     }
     const normalized = hre.ethers.getAddress(tokenAddress);
-    if (watchers.length === 0) {
+    // The direct-launch-only V4 watchers (v4custom/v4curve) expose no V2
+    // router()/priceFeed(), so only a relay-capable watcher is a valid source.
+    const sourceWatcher = watchers.find(canRelay);
+    if (!sourceWatcher) {
       return sendJson(res, 500, { error: "No factory watcher configured on this relayer — can't resolve a router/price feed to track against." });
     }
     try {
@@ -2659,7 +2832,7 @@ async function main() {
       // own module comment), so any configured watcher's factory is an
       // equally valid source for them — this doesn't have to be the
       // factory that (didn't) launch this token.
-      const sourceFactory = watchers[0].factory;
+      const sourceFactory = sourceWatcher.factory;
       const [routerAddress, priceFeed] = await Promise.all([sourceFactory.router(), sourceFactory.priceFeed()]);
       const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
       const [wethAddress, factoryAddress] = await Promise.all([router.WETH(), router.factory()]);
@@ -2910,6 +3083,7 @@ async function main() {
       tokenAddress: req.params.tokenAddress,
       history: await readPriceHistory(network, req.params.tokenAddress),
       pairAddress: tracked ? tracked.pairAddress || null : null,
+      poolId: tracked ? tracked.poolId || null : null, // V4 tokens: lets the page see a V4 curve graduate without a wallet
       initialSupply: tracked ? tracked.initialSupply || null : null,
     });
   }));
@@ -3178,7 +3352,7 @@ async function main() {
 
     const watcher = watchers.find((w) => w.kind === record.kind);
     let onChainDeposit = null;
-    if (watcher) {
+    if (canRelay(watcher)) {
       try {
         const d = await watcher.factory.deposits(record.creator, req.params.voucherHash);
         onChainDeposit = { amount: d.amount, deadline: d.deadline, settled: d.settled, reclaimed: d.reclaimed };
@@ -3193,6 +3367,7 @@ async function main() {
 
   // ---- on-chain poller ----
   async function pollWatcher(watcher) {
+    if (!canRelay(watcher)) return; // direct-launch-only factory: no LaunchDeposited events exist
     const factoryAddress = await watcher.factory.getAddress();
     const latestBlock = await hre.ethers.provider.getBlockNumber();
     const storedCursor = await getCursor(factoryAddress);
@@ -3214,6 +3389,7 @@ async function main() {
   // below can run the identical logic for a deposit whose voucher only
   // showed up a tick or two late, without duplicating any of it.
   async function relayMatchedDeposit(watcher, { voucherHash, creator, amount, deadline }, record) {
+    if (!canRelay(watcher)) return; // never relay through a direct-launch-only factory
     if (record.creator.toLowerCase() !== creator.toLowerCase()) {
       console.warn(`[${watcher.kind}] deposit creator ${creator} doesn't match voucher's own creator ${record.creator} for ${voucherHash} — ignoring.`);
       return;
@@ -3323,6 +3499,7 @@ async function main() {
   // it's dropped for good and the creator is left to reclaim it, same as any
   // other unrecoverable case already was.
   async function handleDeposit(watcher, event) {
+    if (!canRelay(watcher)) return;
     const { voucherHash, creator, amount, deadline } = event.args;
     const record = await getVoucher(voucherHash);
     if (!record || record.kind !== watcher.kind) {
@@ -3349,6 +3526,7 @@ async function main() {
   // even a few seconds late still gets relayed on the very next tick instead
   // of being lost the way it would have been before this fix.
   async function retryPendingDeposits(watcher) {
+    if (!canRelay(watcher)) return;
     const pending = await readPendingDeposits();
     const nowSeconds = Math.floor(Date.now() / 1000);
     for (const [voucherHash, dep] of Object.entries(pending)) {
@@ -3376,6 +3554,9 @@ async function main() {
 
   async function pollLoop() {
     for (const watcher of watchers) {
+      // v4custom/v4curve are direct-launch only: no LaunchDeposited event, no
+      // vouchers, nothing to relay.
+      if (!canRelay(watcher)) continue;
       await retryPendingDeposits(watcher).catch((err) => console.error(`[${watcher.kind}] pending-deposit retry error: ${err.message}`));
       await pollWatcher(watcher).catch((err) => console.error(`[${watcher.kind}] poll error: ${err.message}`));
     }
@@ -3391,6 +3572,35 @@ async function main() {
   // already use for LaunchDeposited scanning — same factory, two independent
   // scans over two different event types, each needing its own "how far have
   // I gotten" bookmark.
+  // Resolves a V4CurveFactory token's custom-tax config into a tracked-entry
+  // patch. `configuredArgs` is the token's CustomCurveConfigured event args
+  // when discovery saw one; otherwise ask the factory (isCustomCurve) and, for
+  // a custom curve, read the config off the V4CustomToken itself. Plain curves
+  // get { isCustomCurve: false, customTax: false }. Never throws: a failed
+  // read returns {} (nothing written, so a later pass can still fill it in).
+  async function readV4CurveCustomConfig(factory, token, configuredArgs) {
+    try {
+      let isCustom = !!configuredArgs;
+      if (!isCustom) isCustom = await factory.isCustomCurve(token);
+      if (!isCustom) return { isCustomCurve: false, customTax: false };
+      if (configuredArgs) {
+        return {
+          isCustomCurve: true,
+          customTax: true,
+          marketingWallet: configuredArgs.marketingWallet,
+          buyFees: feeSetToPlain(configuredArgs.buyFees),
+          sellFees: feeSetToPlain(configuredArgs.sellFees),
+        };
+      }
+      const t = await hre.ethers.getContractAt(V4_CUSTOM_TOKEN_CONFIG_ABI, token, hre.ethers.provider);
+      const [marketingWallet, buyFees, sellFees] = await Promise.all([t.marketingWallet(), t.buyFees(), t.sellFees()]);
+      return { isCustomCurve: true, customTax: true, marketingWallet, buyFees: feeSetToPlain(buyFees), sellFees: feeSetToPlain(sellFees) };
+    } catch (err) {
+      console.warn(`[discovery] couldn't read custom-curve config for ${token}: ${err.message}`);
+      return {};
+    }
+  }
+
   async function discoverLaunchedTokens(watcher) {
     const factoryAddress = await watcher.factory.getAddress();
     const cursorKey = `${factoryAddress}:discovery`;
@@ -3433,14 +3643,37 @@ async function main() {
     // against the same database during a deploy — either of which would
     // otherwise re-announce the same launch to Telegram a second time.
     const alreadyTrackedBeforeThisTick = events.length ? await readTrackedTokens(network) : {};
+    // "v4curve": CurveTokenCreated carries no custom-tax info, but a custom
+    // curve emits CustomCurveConfigured in the SAME transaction, so the same
+    // block range holds it. Index it by token for the loop below.
+    const curveConfigByToken = new Map();
+    if (watcher.kind === "v4curve" && events.length) {
+      const cfgEvents = await watcher.factory.queryFilter(watcher.factory.filters.CustomCurveConfigured(), fromBlock, toBlock);
+      for (const cfg of cfgEvents) curveConfigByToken.set(cfg.args.token.toLowerCase(), cfg.args);
+    }
     for (const event of events) {
       const { token, creator, name, symbol, pair, poolId } = event.args;
       const pairAddress = pair && pair !== hre.ethers.ZeroAddress ? pair : null;
-      // V4 (kind "v4token"): TokenCreated carries a bytes32 poolId, not a
-      // pair. A zero poolId means "Deploy Token" (no pool), same as a zero
-      // pair on V2.
-      const isV4 = watcher.kind === "v4token";
+      // V4 (kinds "v4token"/"v4custom"/"v4curve"): "v4token"'s and
+      // "v4custom"'s created events carry a bytes32 poolId, not a pair. A zero
+      // poolId means "Deploy Token" (no pool), same as a zero pair on V2.
+      // "v4curve" has no pool until the curve graduates (poolId stays null
+      // here; pollTokenPrices fills it in from poolIdOf()).
+      const isV4 = isV4Kind(watcher.kind);
       const v4PoolId = isV4 && poolId && poolId !== hre.ethers.ZeroHash ? poolId : null;
+      // Custom-tax config. "v4custom" puts it right in CustomTokenCreated;
+      // "v4curve" learns it from CustomCurveConfigured / isCustomCurve().
+      let customPatch = {};
+      if (watcher.kind === "v4custom") {
+        customPatch = {
+          customTax: true,
+          marketingWallet: event.args.marketingWallet,
+          buyFees: feeSetToPlain(event.args.buyFees),
+          sellFees: feeSetToPlain(event.args.sellFees),
+        };
+      } else if (watcher.kind === "v4curve") {
+        customPatch = await readV4CurveCustomConfig(watcher.factory, token, curveConfigByToken.get(token.toLowerCase()));
+      }
       const isNewToken = !alreadyTrackedBeforeThisTick[token.toLowerCase()];
       await upsertTrackedToken(network, token, {
         kind: watcher.kind,
@@ -3470,8 +3703,12 @@ async function main() {
         // their own PoolManager-based branches (pollV4TokenPrice /
         // pollV4Activity) instead of V2 pair reserves/Swap events.
         ...(isV4 ? { protocol: "v4", poolId: v4PoolId } : {}),
+        ...customPatch,
       });
-      console.log(`[discovery] tracking ${watcher.kind} token $${symbol} (${token})${pairAddress ? ` with pair ${pairAddress}` : ""}.`);
+      console.log(
+        `[discovery] tracking ${watcher.kind} token $${symbol} (${token})${pairAddress ? ` with pair ${pairAddress}` : ""}` +
+          `${v4PoolId ? ` with V4 pool ${v4PoolId}` : ""}${customPatch.customTax ? " [custom tax]" : ""}.`
+      );
       // Only announce launches found on a NORMAL incremental scan — not
       // during the initial catch-up (or a stuck-cursor recovery) pass, which
       // could otherwise replay months of launch history into the Telegram
@@ -3596,13 +3833,28 @@ async function main() {
   function getV4Context() {
     if (!v4ContextPromise) {
       v4ContextPromise = (async () => {
-        const watcher = watchers.find((w) => w.kind === "v4token");
+        // Any V4 watcher will do: V4TokenFactory, V4CustomTokenFactory and
+        // V4CurveFactory all expose public poolManager() and hook(). Prefer
+        // "v4token" (it is also where the distributor keeper reads its slots).
+        const watcher = watchers.find((w) => w.kind === "v4token") || watchers.find((w) => isV4Kind(w.kind));
         if (!watcher) return null;
         const factoryAddress = await watcher.factory.getAddress();
         const refs = await hre.ethers.getContractAt(V4_FACTORY_REFS_ABI, factoryAddress, hre.ethers.provider);
         const [pmAddress, hookAddress] = await Promise.all([refs.poolManager(), refs.hook()]);
+        // Where the distributor keeper reads feeWalletDistributor() etc. from:
+        // the factory itself for "v4token"; for the V4PoolLauncher family, its
+        // taxSource() (the V4TokenFactory).
+        let slotsAddress = factoryAddress;
+        if (watcher.kind !== "v4token") {
+          try {
+            slotsAddress = await (await hre.ethers.getContractAt(V4_TAX_SOURCE_ABI, factoryAddress, hre.ethers.provider)).taxSource();
+          } catch (err) {
+            slotsAddress = factoryAddress; // keeper will find no slots there and idle
+          }
+        }
         return {
           factoryAddress,
+          slotsAddress,
           pm: await hre.ethers.getContractAt(V4_POOL_MANAGER_ABI, pmAddress, hre.ethers.provider),
           pmAddress,
           hook: await hre.ethers.getContractAt(V4_HOOK_STATE_ABI, hookAddress, hre.ethers.provider),
@@ -3714,6 +3966,146 @@ async function main() {
     await setCursor(cursorKey, toBlock);
   }
 
+  // ---- V4 curve ("v4curve", V4CurveFactory) pre-graduation helpers ----
+  // Before graduation a V4 curve token has no pool (poolId null), so it is
+  // priced and its trades read off the curve factory itself, exactly like the
+  // V2 "curve"/"custom-curve" branches in pollTokenActivity/pollTokenPrices.
+  // The moment curveState().graduated flips, pollTokenPrices backfills poolId
+  // from poolIdOf() and the token follows the ordinary V4 pool path.
+
+  // The ETH/USD feed a curve prices against: the platform tax terms the curve
+  // snapshotted at creation (curveTaxConfig(token).priceFeed). Persisted on the
+  // tracked entry once read; undefined (-> FALLBACK_ETH_USD) if unreadable.
+  async function getV4CurvePriceFeed(watcher, entry) {
+    if (entry.priceFeed) return entry.priceFeed;
+    try {
+      const cfg = await watcher.factory.curveTaxConfig(entry.tokenAddress);
+      const feed = cfg.priceFeed;
+      if (feed && feed !== hre.ethers.ZeroAddress) {
+        entry.priceFeed = feed;
+        await upsertTrackedToken(network, entry.tokenAddress, { priceFeed: feed });
+        return feed;
+      }
+    } catch (err) {
+      // best effort — fetchEthUsdFromFeed(undefined) falls back to FALLBACK_ETH_USD
+    }
+    return undefined;
+  }
+
+  // One pollTokenPrices tick for a v4curve entry with no poolId. Returns true
+  // when the curve has graduated and entry.poolId is now set (the caller then
+  // falls through to pollV4TokenPrice this same tick), false when it sampled a
+  // pre-graduation curve price (or had nothing to do) and the caller is done.
+  async function pollV4CurvePrice(entry) {
+    const watcher = watchers.find((w) => w.kind === "v4curve");
+    if (!watcher) return false;
+    const state = await watcher.factory.curveState(entry.tokenAddress);
+    // One-time fill for entries discovered before their config could be read
+    // (a failed isCustomCurve() call at discovery leaves these unset).
+    if (entry.isCustomCurve == null) {
+      const customPatch = await readV4CurveCustomConfig(watcher.factory, entry.tokenAddress, null);
+      if (Object.keys(customPatch).length) {
+        Object.assign(entry, customPatch);
+        await upsertTrackedToken(network, entry.tokenAddress, customPatch);
+      }
+    }
+    if (state.graduated) {
+      // Graduation happens inside the buy that crosses the target (or a
+      // graduate(token) call); poolIdOf() is written in the same transaction.
+      const poolId = await watcher.factory.poolIdOf(entry.tokenAddress);
+      if (!poolId || poolId === hre.ethers.ZeroHash) return false; // not visible yet — next tick
+      entry.poolId = poolId;
+      const patch = { poolId };
+      // DEPLOYED (curve only) -> LAUNCHED (live V4 pool); never past GRADUATED.
+      if (entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
+        entry.tokenStatus = TOKEN_STATUS.LAUNCHED;
+        patch.tokenStatus = TOKEN_STATUS.LAUNCHED;
+      }
+      await upsertTrackedToken(network, entry.tokenAddress, patch);
+      console.log(`[price] v4curve ${entry.tokenAddress} graduated -> V4 pool ${poolId}.`);
+      return true;
+    }
+    // Still pre-pool: marginal spot price off the curve's own constant-product
+    // reserves — the same effective-reserve math as the V2 curve branch.
+    const effEthReserve = state.virtualEthReserve + state.realEthReserve;
+    const effTokenReserve = state.virtualTokenReserve + state.tokensRemaining;
+    const ethUsd = await fetchEthUsdFromFeed(await getV4CurvePriceFeed(watcher, entry));
+    const priceUsd = computeTokenPriceUsd(effTokenReserve, effEthReserve, ethUsd);
+    const mcapUsd = computeMarketCapUsd(priceUsd, state.totalSupply_);
+    // A curve graduates once realEthReserve crosses poolSeedTargetWei, so
+    // progress tracks that crossing directly (see the V2 curve branch).
+    const taxProgressPct =
+      state.poolSeedTargetWei_ > 0n
+        ? Math.min(100, (Number(state.realEthReserve) / Number(state.poolSeedTargetWei_)) * 100)
+        : null;
+    const holders = await fetchHolderCount(entry.tokenAddress);
+    const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive: true };
+    if (holders !== null) point.holders = holders;
+    await appendPricePoint(network, entry.tokenAddress, point);
+    return false;
+  }
+
+  // CurveBought/CurveSold for one v4curve token, straight off the curve
+  // factory (scoped by the event's indexed `token`). Same conventions as the
+  // V2 curve branch of pollTokenActivity: no history backfill on a token's
+  // first tick, per-token cursor (keyed with the factory address), de-duped by
+  // tx:logIndex. Returns true once the cursor has caught up to the chain tip.
+  async function pollV4CurveActivity(entry, seen, blockTimestampMs) {
+    const watcher = watchers.find((w) => w.kind === "v4curve");
+    if (!watcher) return true;
+    const factoryAddress = await watcher.factory.getAddress();
+    const cursorKey = `${factoryAddress}:curve-activity:${entry.tokenAddress}`;
+    const latestBlock = await hre.ethers.provider.getBlockNumber();
+    const storedCursor = await getCursor(cursorKey);
+    const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // skip pre-existing history
+    if (fromBlock > latestBlock) return true;
+    const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
+
+    const [boughtEvents, soldEvents] = await Promise.all([
+      watcher.factory.queryFilter(watcher.factory.filters.CurveBought(entry.tokenAddress), fromBlock, toBlock),
+      watcher.factory.queryFilter(watcher.factory.filters.CurveSold(entry.tokenAddress), fromBlock, toBlock),
+    ]);
+    if (boughtEvents.length || soldEvents.length) {
+      const ethUsd = await fetchEthUsdFromFeed(await getV4CurvePriceFeed(watcher, entry));
+      for (const event of boughtEvents) {
+        const key = `${event.transactionHash}:${event.index}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const { buyer, ethIn, tokensOut } = event.args;
+        await appendActivity(network, {
+          t: await blockTimestampMs(event.blockNumber),
+          txHash: event.transactionHash,
+          logIndex: event.index,
+          tokenAddress: entry.tokenAddress,
+          symbol: entry.symbol || null,
+          side: "buy",
+          wallet: buyer,
+          tokenAmount: tokensOut.toString(),
+          usdValue: (Number(ethIn) / 1e18) * ethUsd,
+        });
+      }
+      for (const event of soldEvents) {
+        const key = `${event.transactionHash}:${event.index}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const { seller, tokensIn, ethOut } = event.args;
+        await appendActivity(network, {
+          t: await blockTimestampMs(event.blockNumber),
+          txHash: event.transactionHash,
+          logIndex: event.index,
+          tokenAddress: entry.tokenAddress,
+          symbol: entry.symbol || null,
+          side: "sell",
+          wallet: seller,
+          tokenAmount: tokensIn.toString(),
+          usdValue: (Number(ethOut) / 1e18) * ethUsd,
+        });
+      }
+    }
+    await setCursor(cursorKey, toBlock);
+    return toBlock >= latestBlock;
+  }
+
   // ---- real trade activity (backs GET /activity) ----
   // Watches real Swap events on every tracked token's own pool. Only tokens
   // that already have a pairAddress on file are watched (a "Just Launch"
@@ -3740,6 +4132,25 @@ async function main() {
     }
 
     for (const entry of Object.values(tracked)) {
+      // v4curve with no pool yet: its trades are CurveBought/CurveSold on the
+      // curve factory. This MUST come before the generic V4 branch below
+      // (which needs a poolId and would just skip the token). After
+      // graduation the token has a poolId and follows pollV4Activity; the
+      // curve-activity cursor is drained one last time first (flag
+      // curveActivityDrained) so the buy that crossed the target, and any
+      // curve trade between the last tick and graduation, isn't lost.
+      if (entry.kind === "v4curve" && (!entry.poolId || !entry.curveActivityDrained)) {
+        try {
+          const caughtUp = await pollV4CurveActivity(entry, seen, blockTimestampMs);
+          if (entry.poolId && caughtUp) {
+            entry.curveActivityDrained = true;
+            await upsertTrackedToken(network, entry.tokenAddress, { curveActivityDrained: true });
+          }
+        } catch (err) {
+          console.warn(`[activity] skip v4 curve ${entry.tokenAddress}: ${err.message}`);
+        }
+        if (!entry.poolId) continue;
+      }
       if (entry.protocol === "v4") {
         try {
           await pollV4Activity(entry, seen, blockTimestampMs);
@@ -3887,6 +4298,13 @@ async function main() {
     for (const entry of Object.values(tracked)) {
       if (entry.protocol === "v4") {
         try {
+          // v4curve with no pool yet: sample the curve itself (or, if it just
+          // graduated, record its poolId and fall through to the ordinary V4
+          // pool price this same tick).
+          if (entry.kind === "v4curve" && !entry.poolId) {
+            const graduated = await pollV4CurvePrice(entry);
+            if (!graduated) continue;
+          }
           await pollV4TokenPrice(entry);
         } catch (err) {
           console.warn(`[price] skip v4 ${entry.tokenAddress}: ${err.message}`);
@@ -3908,9 +4326,10 @@ async function main() {
           // pairOf()-backfill below but sourced from the DEX itself rather
           // than a launch factory, since this token was never launched
           // through one.
-          if (!entry.pairAddress && watchers.length > 0) {
+          const platformSourceWatcher = watchers.find(canRelay);
+          if (!entry.pairAddress && platformSourceWatcher) {
             try {
-              const sourceFactory = watchers[0].factory;
+              const sourceFactory = platformSourceWatcher.factory;
               const routerAddress = await sourceFactory.router();
               const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
               const [wethAddress, dexFactoryAddress] = await Promise.all([router.WETH(), router.factory()]);
@@ -4655,7 +5074,7 @@ async function main() {
   async function v4KeeperDistributor(slotGetter, abi, label) {
     const ctx = await getV4Context();
     if (!ctx) return null;
-    const slots = await hre.ethers.getContractAt(V4_FACTORY_SLOTS_ABI, ctx.factoryAddress, hre.ethers.provider);
+    const slots = await hre.ethers.getContractAt(V4_FACTORY_SLOTS_ABI, ctx.slotsAddress, hre.ethers.provider);
     const address = await slots[slotGetter]();
     if (!address || address === hre.ethers.ZeroAddress) return null;
     const contract = await hre.ethers.getContractAt(abi, address, relayerWallet);
@@ -4917,6 +5336,45 @@ async function main() {
     setTimeout(v4PlatformRewardsPollLoop, relayerSettings.platformRewardsPollIntervalMs);
   }
 
+  // ---- V4 compounder keeper (optional; see V4_COMPOUNDER_ADDRESS above) ----
+  // Custom-tax tokens (v4custom, and a v4curve once graduated with customTax)
+  // send the "liquidity" share of their fees, in tokens, to the shared
+  // V4LiquidityCompounder. compound(token) is permissionless: it sells half of
+  // what's waiting and adds the rest + the ETH as permanent pool liquidity.
+  // Each tick, for every tracked V4 token with customTax and a poolId, this
+  // reads pending(token) and, once it reaches V4_COMPOUND_MIN_SUPPLY_BPS of
+  // the token's total supply (and is > 1 wei), sends compound(token) from the
+  // relayer wallet. A failing call is logged and skipped; "nothing to
+  // compound" (a race with someone else compounding first) is silent.
+  async function compoundV4TokensOnce() {
+    const compounder = await hre.ethers.getContractAt(V4_COMPOUNDER_ABI, V4_COMPOUNDER_ADDRESS, relayerWallet);
+    for (const entry of await v4KeeperTokens()) {
+      if (!entry.customTax) continue;
+      const tokenAddress = entry.tokenAddress;
+      try {
+        const pending = await compounder.pending(tokenAddress);
+        if (pending <= 1n) continue;
+        const token = await hre.ethers.getContractAt(ERC20_META_ABI, tokenAddress, hre.ethers.provider);
+        const totalSupply = await token.totalSupply();
+        if (pending < (totalSupply * BigInt(V4_COMPOUND_MIN_SUPPLY_BPS)) / 10000n) continue;
+        const tx = await sendRelayerTx(() => compounder.compound(tokenAddress));
+        const receipt = await tx.wait();
+        console.log(`[v4-compounder] compounded ${tokenAddress} (pending ${pending} of supply ${totalSupply}) in tx ${receipt.hash}.`);
+      } catch (err) {
+        if (/nothing to compound/i.test((err && (err.message || err.reason)) || "")) continue;
+        if (err && err.code !== "BAD_DATA") console.warn(`[v4-compounder] compound skip ${tokenAddress}: ${err.message}`); // BAD_DATA = no contract at this address on this chain (stale tracked entry)
+      }
+    }
+  }
+  const V4_COMPOUND_POLL_INTERVAL_MS = () =>
+    Number(process.env.V4_COMPOUND_POLL_INTERVAL_MS) > 0
+      ? Number(process.env.V4_COMPOUND_POLL_INTERVAL_MS)
+      : relayerSettings.feeWalletPollIntervalMs; // same cadence as the other V4 keeper loops by default
+  async function v4CompoundPollLoop() {
+    await compoundV4TokensOnce().catch((err) => console.error(`[v4-compounder] sweep error: ${err.message}`));
+    setTimeout(v4CompoundPollLoop, V4_COMPOUND_POLL_INTERVAL_MS());
+  }
+
   console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits (only deposits made from now on — see cursors.json).`);
   pollLoop();
 
@@ -4953,17 +5411,29 @@ async function main() {
   }
 
   if (V4_KEEPER_ENABLED) {
-    if (!v4TokenFactoryAddress) {
-      console.warn("V4_KEEPER_ENABLED=true but V4_TOKEN_FACTORY_ADDRESS is not set — the V4 distributor keeper is OFF.");
+    if (!v4TokenFactoryAddress && !v4CustomTokenFactoryAddress && !v4CurveFactoryAddress) {
+      console.warn(
+        "V4_KEEPER_ENABLED=true but none of V4_TOKEN_FACTORY_ADDRESS / V4_CUSTOM_TOKEN_FACTORY_ADDRESS / V4_CURVE_FACTORY_ADDRESS " +
+          "is set — the V4 distributor and compounder keepers are OFF."
+      );
     } else {
       console.log(
-        `V4 distributor keeper ON for factory ${v4TokenFactoryAddress}: fee-wallet every ${relayerSettings.feeWalletPollIntervalMs}ms, ` +
+        `V4 distributor keeper ON for factory ${v4TokenFactoryAddress || v4CustomTokenFactoryAddress || v4CurveFactoryAddress}: fee-wallet every ${relayerSettings.feeWalletPollIntervalMs}ms, ` +
           `creator rewards every ${relayerSettings.creatorRewardsPollIntervalMs}ms, platform rewards every ${relayerSettings.platformRewardsPollIntervalMs}ms ` +
           "(distributor addresses are read from the factory each tick; a slot that's unset just idles)."
       );
       v4FeeWalletPollLoop();
       v4CreatorRewardsPollLoop();
       v4PlatformRewardsPollLoop();
+      if (!V4_COMPOUNDER_ADDRESS) {
+        console.warn("V4_KEEPER_ENABLED=true but V4_COMPOUNDER_ADDRESS is not set — the V4 compounder keeper is OFF.");
+      } else {
+        console.log(
+          `V4 compounder keeper ON (${V4_COMPOUNDER_ADDRESS}): every ${V4_COMPOUND_POLL_INTERVAL_MS()}ms, compounding a custom-tax token ` +
+            `once pending >= ${V4_COMPOUND_MIN_SUPPLY_BPS} bps of its supply.`
+        );
+        v4CompoundPollLoop();
+      }
     }
   }
 }
