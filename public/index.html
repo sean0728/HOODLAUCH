@@ -1366,8 +1366,8 @@
   // same already-tracked gap as bondingCurveFactory/customBondingCurveFactory
   // above; "Save (this browser)" and manually editing config.json both work
   // in the meantime.
-  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl", "platformTaxDistributor", "feeWalletDistributor", "v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter"];
-  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "platformTaxDistributor", "feeWalletDistributor", "v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
+  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl", "platformTaxDistributor", "feeWalletDistributor", "v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"];
+  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "platformTaxDistributor", "feeWalletDistributor", "v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
 
   // Must produce byte-identical output to relayer.js's own
   // canonicalizePlatformConfig for the same input, or a signature made here
@@ -1419,6 +1419,9 @@
     v4TaxHook: "V4TaxHook (Uniswap V4)",
     v4LiquidityLocker: "V4LiquidityLocker (Uniswap V4)",
     v4SwapRouter: "V4SwapRouter (Uniswap V4 trading)",
+    v4CustomTokenFactory: "V4CustomTokenFactory (Uniswap V4, custom tax)",
+    v4CurveFactory: "V4CurveFactory (Uniswap V4, bonding curve)",
+    v4LiquidityCompounder: "V4LiquidityCompounder (custom-tax liquidity share)",
   };
   const CONFIG_HELP = {
     tokenFactory: "TokenFactory address — fill in once scripts/deploy.js has run against this network. Left unset, the wizard falls back to a fully local, simulated launch instead of calling a contract that doesn't exist.",
@@ -1435,6 +1438,9 @@
     v4TaxHook: "V4TaxHook address (contracts/V4TaxHook.sol) — the Uniswap V4 hook that collects the trading tax at the pool, deployed via CREATE2 at a flag-encoded address. Reference only; listed in Admin → Deployed contracts.",
     v4LiquidityLocker: "V4LiquidityLocker address (contracts/V4LiquidityLocker.sol) — holds each creator's locked V4 liquidity position. Reference only; listed in Admin → Deployed contracts.",
     v4SwapRouter: "V4SwapRouter address (contracts/V4SwapRouter.sol) — the small stateless router the token page sends V4 buys and sells through (a wallet can't call a V4 pool directly). Left unset, V4 token pages show the pool but no buy/sell widget.",
+    v4CustomTokenFactory: "V4CustomTokenFactory address (contracts/V4CustomTokenFactory.sol) — backs the admin-only V4 “Custom tax” launch mode: creator-set buy/sell fees (reflection, marketing, liquidity, burn) paid in-kind at the pool on top of the platform tax. Launch for this mode stays disabled until it is set.",
+    v4CurveFactory: "V4CurveFactory address (contracts/V4CurveFactory.sol) — backs the admin-only V4 “Quick Launch” and “Quick Launch + custom tax” modes: a bonding curve that seeds a V4 pool at graduation. Launch for these modes stays disabled until it is set.",
+    v4LiquidityCompounder: "V4LiquidityCompounder address (contracts/V4LiquidityCompounder.sol) — receives the liquidity share of custom fees and turns it into permanent pool liquidity when someone (normally the relayer keeper) calls compound(token). Reference only; listed in Admin → Deployed contracts.",
   };
   const DEFAULT_CONFIG = {
     // Testnet (demo) values below are the actual TokenFactory/
@@ -1490,6 +1496,9 @@
     v4TaxHook: { demo: null, live: null },
     v4LiquidityLocker: { demo: null, live: null },
     v4SwapRouter: { demo: null, live: null },
+    v4CustomTokenFactory: { demo: null, live: null },
+    v4CurveFactory: { demo: null, live: null },
+    v4LiquidityCompounder: { demo: null, live: null },
   };
   const PLATFORM_CONFIG_STORAGE_KEY = "hoodlaunch_platform_config";
 
@@ -1615,9 +1624,25 @@
   // ADMIN_WALLET comment: the real authorization is on-chain), everyone else
   // sees it greyed out as "Under development". V4 launches are additionally
   // blocked outright for now: the V4 transaction flow isn't wired in yet.
-  const V4_MODES = ["just", "liquidity"]; // only the TokenFactory pilot modes exist on V4
+  const V4_MODES = ["just", "liquidity", "custom", "curve", "customCurve"]; // every mode except "customDeploy" (deploy-only custom tax) exists on V4
   function v4TokenFactoryAddress(mode){ return (platformConfig.v4TokenFactory && platformConfig.v4TokenFactory[mode || appMode]) || null; }
   function v4SwapRouterAddress(mode){ return (platformConfig.v4SwapRouter && platformConfig.v4SwapRouter[mode || appMode]) || null; }
+  function v4CustomTokenFactoryAddress(mode){ return (platformConfig.v4CustomTokenFactory && platformConfig.v4CustomTokenFactory[mode || appMode]) || null; }
+  function v4CurveFactoryAddress(mode){ return (platformConfig.v4CurveFactory && platformConfig.v4CurveFactory[mode || appMode]) || null; }
+  function v4CompounderAddress(mode){ return (platformConfig.v4LiquidityCompounder && platformConfig.v4LiquidityCompounder[mode || appMode]) || null; }
+  // Which V4 factory backs a wizard mode. "just"/"liquidity" go through
+  // V4TokenFactory, "custom" through V4CustomTokenFactory, and both Quick
+  // Launch modes through V4CurveFactory. "customDeploy" has no V4 version.
+  function v4FactoryForMode(mode, netMode){
+    if(mode==="custom") return v4CustomTokenFactoryAddress(netMode);
+    if(mode==="curve" || mode==="customCurve") return v4CurveFactoryAddress(netMode);
+    return v4TokenFactoryAddress(netMode);
+  }
+  function v4FactoryNameForMode(mode){
+    if(mode==="custom") return "V4CustomTokenFactory";
+    if(mode==="curve" || mode==="customCurve") return "V4CurveFactory";
+    return "V4TokenFactory";
+  }
   function v4Selectable(){ return isAdminWallet(wallet); }
   function draftProtocol(){ return (draft && draft.protocol==="v4" && v4Selectable()) ? "v4" : "v2"; }
   // Which protocol a token was launched on. Anything without an explicit
@@ -2111,7 +2136,24 @@
   const V4_LIQUIDITY_ADDED_TOPIC0 = "0xea3191ffbe2f62bfd724ee8d971b15ff9b7994e3a9169dc4c60443be3e4a43c4"; // LiquidityAdded(address,address,uint256,uint256,uint256,uint256,uint256)
   const POOL_ID_OF_SELECTOR = "30040054"; // poolIdOf(address) -> bytes32
   const V4_EIP712_DOMAIN_NAME = "HoodLaunchV4TokenFactory";
-  const V4_CONFIG_KEYS = ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter"];
+  const V4_CONFIG_KEYS = ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"];
+  // V4 custom-tax factory + V4 bonding-curve factory (V4CustomTokenFactory /
+  // V4CurveFactory). Selectors/topics computed with ethers from the compiled
+  // ABIs. createCurveToken/buy/sell/curveState/graduate/curveLaunchFee and the
+  // CurveTokenCreated/CurveBought/CurveSold/CreatorBought events are
+  // byte-identical to V2's, so those V2 constants are reused as-is.
+  const V4_CREATE_CUSTOM_TOKEN_SELECTOR = "ac33aaec"; // createCustomToken(string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,uint256,uint256,uint256,uint256) — (name,symbol,supply,buyFees,sellFees,marketingWallet,liquidityEthAmount,creatorBuyEthAmount,minCreatorTokensOut,salt)
+  const V4_CREATE_CUSTOM_CURVE_TOKEN_SELECTOR = "7c0e3943"; // createCustomCurveToken(string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,uint256,uint256,uint256) — (name,symbol,supply,buyFees,sellFees,marketingWallet,creatorBuyEthAmount,minCreatorTokensOut,salt)
+  const V4_CUSTOM_TOKEN_CREATED_TOPIC0 = "0xec119cb0aa9b367234271f222ece89ff8753b1e3c7b6fe9f9e6417b556747837"; // CustomTokenCreated(address,address,string,string,uint256,bytes32,address,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16))
+  const V4_CURVE_GRADUATED_TOPIC0 = "0xc08e1752fb18394e7dd57511830f351a283b241f80d42146ab5d926daa0539a4"; // CurveGraduated(address indexed token, bytes32 indexed poolId, ethAdded, tokensAdded, liquidity, unlockTime, lockId)
+  const V4_PREDICT_CURVE_TOKEN_SELECTOR = "6ecba597"; // predictTokenAddress(address,uint256,bool) on V4CurveFactory — (creator, salt, custom)
+  const V4_PLAIN_TOKEN_IMPL_SELECTOR = "d19b17c5"; // plainTokenImplementation()
+  const V4_CUSTOM_TOKEN_IMPL_SELECTOR = "73b25656"; // customTokenImplementation()
+  const V4_IS_CUSTOM_CURVE_SELECTOR = "c10894de"; // isCustomCurve(address)
+  const V4_PENDING_REFLECTIONS_SELECTOR = "695d69b3"; // pendingReflections(address) on V4CustomToken
+  const V4_CLAIM_REFLECTIONS_SELECTOR = "82262808"; // claimReflections() on V4CustomToken
+  const V4_TOTAL_REFLECTIONS_CLAIMED_SELECTOR = "47c56876"; // totalReflectionsClaimed()
+  const V4_MARKETING_WALLET_SELECTOR = "75f0a874"; // marketingWallet()
   // Admin V4 panels (selectors computed with keccak256 of the canonical signatures)
   const V4_BUY_IN_SLIPPAGE_BPS_SELECTOR = "6593b2db";      // buyInSlippageBps()
   const V4_SET_BUY_IN_SLIPPAGE_BPS_SELECTOR = "9e385c58";  // setBuyInSlippageBps(uint256)
@@ -2123,6 +2165,9 @@
   const V4_LOCK_COUNT_SELECTOR = "9b10b6f5";               // lockCount() — locker
   // V4 distributors + hook tax-exempt list
   const V4_SET_TAX_EXEMPT_SELECTOR = "1dc61040";           // setTaxExempt(address,bool) — on the V4TokenFactory
+  const V4_HOOK_COMPOUNDER_SELECTOR = "0de85b2a";          // liquidityCompounder() — on the hook
+  const V4_HOOK_IS_LAUNCHER_SELECTOR = "fa275e11";         // isLauncher(address) — on the hook
+  const V4_LOCKER_EXTRA_FACTORIES_SELECTOR = "fae888c1";   // extraFactories(address) — on the locker
   const V4_TAX_EXEMPT_SELECTOR = "d1ecfc68";               // taxExempt(address) — on the hook
   const V4_PLATFORM_TOKEN_SELECTOR = "d1b812cd";           // platformToken()
   const V4_PENDING_AIRDROP_SELECTOR = "36a8bb1f";          // pendingAirdropTokens()
@@ -2544,6 +2589,51 @@
       toHex32(BigInt(salt)),
     ].join("");
     return "0x" + CREATE_CUSTOM_TOKEN_SELECTOR + head + nameTail + symbolTail;
+  }
+  // V4CustomTokenFactory.createCustomToken: no reflectionAsset (reflections
+  // are always paid in the token itself) and a single launch mode, so the
+  // head is 16 words: name offset, symbol offset, totalSupply, buyFees (4),
+  // sellFees (4), marketingWallet, liquidityEthAmount, creatorBuyEthAmount,
+  // minCreatorTokensOut, salt.
+  function encodeCreateV4CustomTokenCalldata({name, symbol, totalSupply, buyFees, sellFees, marketingWallet, liquidityWei, buyInWei, minTokensOut, salt}){
+    const HEAD_SLOTS = 16;
+    const headBytes = BigInt(HEAD_SLOTS*32);
+    const nameTail = encodeAbiString(name);
+    const symbolTail = encodeAbiString(symbol);
+    const head = [
+      toHex32(headBytes),
+      toHex32(headBytes + BigInt(nameTail.length/2)),
+      toHex32(BigInt(totalSupply)),
+      encodeFeeSet(buyFees),
+      encodeFeeSet(sellFees),
+      encodeAddressParam(marketingWallet || ZERO_ADDRESS),
+      toHex32(BigInt(liquidityWei)),
+      toHex32(BigInt(buyInWei)),
+      toHex32(BigInt(minTokensOut)),
+      toHex32(BigInt(salt)),
+    ].join("");
+    return "0x" + V4_CREATE_CUSTOM_TOKEN_SELECTOR + head + nameTail + symbolTail;
+  }
+  // V4CurveFactory.createCustomCurveToken — 15 head words (no liquidity, no
+  // reflectionAsset). The plain createCurveToken reuses
+  // encodeCreateCurveTokenCalldata unchanged.
+  function encodeCreateV4CustomCurveTokenCalldata({name, symbol, totalSupply, buyFees, sellFees, marketingWallet, buyInWei, minTokensOut, salt}){
+    const HEAD_SLOTS = 15;
+    const headBytes = BigInt(HEAD_SLOTS*32);
+    const nameTail = encodeAbiString(name);
+    const symbolTail = encodeAbiString(symbol);
+    const head = [
+      toHex32(headBytes),
+      toHex32(headBytes + BigInt(nameTail.length/2)),
+      toHex32(BigInt(totalSupply)),
+      encodeFeeSet(buyFees),
+      encodeFeeSet(sellFees),
+      encodeAddressParam(marketingWallet || ZERO_ADDRESS),
+      toHex32(BigInt(buyInWei)),
+      toHex32(BigInt(minTokensOut)),
+      toHex32(BigInt(salt)),
+    ].join("");
+    return "0x" + V4_CREATE_CUSTOM_CURVE_TOKEN_SELECTOR + head + nameTail + symbolTail;
   }
   // Decodes a static (uint16,uint16,uint16,uint16) FeeSet return value —
   // used to read buyFees()/sellFees() back for display.
@@ -3405,7 +3495,11 @@
   const CURVE_VIRTUAL_ETH_RESERVE_DEFAULT = 3_000_000_000_000_000_000n; // 3 ETH
   const CURVE_VIRTUAL_TOKEN_RESERVE_BPS_DEFAULT = 8_000; // 80.00% of totalSupply_
   async function refreshOnChainDefaults(){
-    const factoryAddress = tokenFactoryAddress();
+    // When the wizard is on V4, the same live* display variables are filled
+    // from the V4 factories instead, so fees, the curve target and the
+    // creator-buy cap shown are the ones the V4 contracts will enforce.
+    const v4Wizard = draftProtocol()==="v4";
+    const factoryAddress = v4Wizard ? v4TokenFactoryAddress() : tokenFactoryAddress();
     liveDeployFeeEth = null;
     liveLaunchFeeEth = null;
     liveLpLockDays = null;
@@ -3445,24 +3539,25 @@
         }catch(e){ /* display estimate only — fall back silently to defaults */ }
       })());
     }
-    const customFactoryAddress = customTokenFactoryAddress();
+    const customFactoryAddress = v4Wizard ? v4CustomTokenFactoryAddress() : customTokenFactoryAddress();
     if(customFactoryAddress && window.ethereum){
       reads.push((async()=>{
         try{
           const [deployFeeHex, launchFeeHex, lockHex, maxBuyBpsHex] = await Promise.all([
-            ethCall(customFactoryAddress, "0x"+DEPLOY_FEE_SELECTOR),
+            // V4CustomTokenFactory has no deploy-only mode, so no deployFee().
+            v4Wizard ? Promise.resolve(null) : ethCall(customFactoryAddress, "0x"+DEPLOY_FEE_SELECTOR),
             ethCall(customFactoryAddress, "0x"+LAUNCH_FEE_SELECTOR),
             ethCall(customFactoryAddress, "0x"+LP_LOCK_DURATION_SELECTOR),
             ethCall(customFactoryAddress, "0x"+MAX_CREATOR_BUY_BPS_SELECTOR),
           ]);
-          liveCustomDeployFeeEth = Number(weiToEtherString(decodeUint256(deployFeeHex), 6));
+          if(deployFeeHex) liveCustomDeployFeeEth = Number(weiToEtherString(decodeUint256(deployFeeHex), 6));
           liveCustomLaunchFeeEth = Number(weiToEtherString(decodeUint256(launchFeeHex), 6));
           liveCustomLpLockDays = Math.round(Number(decodeUint256(lockHex)) / 86400);
           liveCustomMaxCreatorBuyBps = Number(decodeUint256(maxBuyBpsHex));
         }catch(e){ /* display estimate only — fall back silently to defaults */ }
       })());
     }
-    const curveFactoryAddress = bondingCurveFactoryAddress();
+    const curveFactoryAddress = v4Wizard ? v4CurveFactoryAddress() : bondingCurveFactoryAddress();
     if(curveFactoryAddress && window.ethereum){
       reads.push((async()=>{
         try{
@@ -3485,7 +3580,7 @@
         }catch(e){ /* display estimate only — fall back silently to defaults */ }
       })());
     }
-    const customCurveFactoryAddress = customBondingCurveFactoryAddress();
+    const customCurveFactoryAddress = v4Wizard ? v4CurveFactoryAddress() : customBondingCurveFactoryAddress();
     if(customCurveFactoryAddress && window.ethereum){
       reads.push((async()=>{
         try{
@@ -5278,6 +5373,255 @@
     }
   }
 
+  /* ---------------- V4 custom-tax + bonding-curve launches (admin-only) ----------------
+     V4CustomTokenFactory ("custom") and V4CurveFactory ("curve" and
+     "customCurve"). Direct-wallet only: no gasless voucher exists for these
+     contracts, so the creator always submits (and pays gas for) the
+     transaction. Custom-tax rates are paid in the token itself on V4, so
+     there is no reflections-asset argument. Everything after the transaction
+     (name/symbol read-back, explorer check, pool/lock/buy-in confirmation)
+     reuses the same finish* helpers as the V2 and V4TokenFactory flows —
+     their events and views are byte-identical.
+  */
+  async function ensureWalletOnAppNetwork(){
+    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!wallet) throw new Error("Connect your wallet first.");
+    const expected = NETWORKS[appMode].chainIdHex;
+    if(expected){
+      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+        await ensureNetwork(appMode);
+        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        if(currentChainId.toLowerCase() !== expected.toLowerCase()){
+          throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
+        }
+      }
+    }
+  }
+  // Mines a vanity salt against `implementationAddress`, double-checks it with
+  // the factory's own predictor (`predictData` is the full calldata), and
+  // returns the salt.
+  async function mineAndCheckV4Salt(factoryAddress, implementationAddress, predictCalldataFor, onStep){
+    onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
+    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const predicted = decodeAddress(await ethCall(factoryAddress, predictCalldataFor(salt)));
+    if(!predicted.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
+      throw new Error("Vanity address prediction didn't match on-chain — aborting before spending anything. Please try again.");
+    }
+    return salt;
+  }
+  async function sendV4LaunchTx(factoryAddress, totalWei, data, onStep){
+    onStep("deploy", "active", "Confirm the transaction in your wallet…");
+    toast("Confirm the transaction in your wallet…");
+    const txHash = await window.ethereum.request({
+      method:"eth_sendTransaction",
+      params:[{ from: wallet, to: factoryAddress, value: "0x"+totalWei.toString(16), data }],
+    });
+    onStep("deploy", "active", "Transaction sent — waiting for confirmation…");
+    toast("Transaction sent — waiting for confirmation…");
+    const receipt = await waitForReceipt(txHash);
+    if(receipt.status !== "0x1"){
+      onStep("deploy", "error", "The transaction reverted on-chain — nothing was launched.");
+      throw new Error("The transaction reverted on-chain — nothing was launched.");
+    }
+    return { txHash, receipt };
+  }
+  function findFactoryLog(receipt, factoryAddress, topic0){
+    return (receipt.logs||[]).find(l =>
+      l.address && l.address.toLowerCase()===factoryAddress.toLowerCase() &&
+      l.topics && l.topics[0] && l.topics[0].toLowerCase()===topic0.toLowerCase()
+    );
+  }
+
+  // "Launch Custom Tax Token" on V4: create + seed the pool + (optional)
+  // taxed creator buy-in, all in one transaction.
+  async function performOnChainV4CustomLaunch(factoryAddress, onStep){
+    if(!onStep) onStep = ()=>{};
+    await ensureWalletOnAppNetwork();
+    const [feeHex, lpLockDurationHex, implementationHex] = await Promise.all([
+      ethCall(factoryAddress, "0x"+LAUNCH_FEE_SELECTOR),
+      ethCall(factoryAddress, "0x"+LP_LOCK_DURATION_SELECTOR),
+      ethCall(factoryAddress, "0x"+TOKEN_IMPLEMENTATION_SELECTOR),
+    ]);
+    const feeWei = decodeUint256(feeHex);
+    const lpLockDurationSeconds = decodeUint256(lpLockDurationHex);
+    const implementationAddress = decodeAddress(implementationHex);
+    const liquidityWei = parseEtherToWei(draft.liquidityEth);
+    const buyInWei = parseEtherToWei(draft.buyInEth);
+    const totalWei = feeWei + liquidityWei + buyInWei;
+    const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
+
+    const salt = await mineAndCheckV4Salt(factoryAddress, implementationAddress,
+      (sl)=>encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, sl), onStep);
+    const data = encodeCreateV4CustomTokenCalldata({
+      name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
+      buyFees: draft.customFees.buy, sellFees: draft.customFees.sell, marketingWallet,
+      liquidityWei, buyInWei, minTokensOut: 0n, salt,
+    });
+    const { txHash, receipt } = await sendV4LaunchTx(factoryAddress, totalWei, data, onStep);
+
+    const createdLog = findFactoryLog(receipt, factoryAddress, V4_CUSTOM_TOKEN_CREATED_TOPIC0);
+    if(!createdLog){
+      onStep("deploy", "error", "Transaction confirmed, but no CustomTokenCreated event was found — check the explorer.");
+      throw new Error("Transaction confirmed, but no CustomTokenCreated event was found — check the explorer.");
+    }
+    const tokenAddress = decodeAddress(createdLog.topics[1]);
+    onStep("deploy", "done", `Contract deployed at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · tx <span class="num">${fmtAddrSafe(txHash)}</span>`);
+
+    // The token itself is the shared V4 verification: name/symbol/supply, the
+    // explorer check, then poolIdOf + LiquidityAdded + CreatorBought.
+    const { poolId, lockId, unlockAt } = await finishTokenFactoryVerification({
+      factoryAddress, tokenAddress, receipt, isLiquidity:true, buyInWei, lpLockDurationSeconds, onStep,
+    });
+    return {
+      txHash, tokenAddress, poolId, lockId, unlockAt, factoryAddress,
+      lpLockDurationDays: Math.round(Number(lpLockDurationSeconds) / 86400),
+      liquidityEth: Number(draft.liquidityEth), buyInEth: Number(draft.buyInEth),
+    };
+  }
+
+  // "Quick Launch" (plain or custom tax) on V4: a bonding curve now, a V4
+  // pool seeded automatically at graduation.
+  async function performOnChainV4CurveLaunch(factoryAddress, onStep){
+    if(!onStep) onStep = ()=>{};
+    await ensureWalletOnAppNetwork();
+    const isCustom = draft.mode==="customCurve";
+    const [feeHex, implementationHex] = await Promise.all([
+      ethCall(factoryAddress, "0x"+CURVE_LAUNCH_FEE_SELECTOR),
+      ethCall(factoryAddress, "0x"+(isCustom ? V4_CUSTOM_TOKEN_IMPL_SELECTOR : V4_PLAIN_TOKEN_IMPL_SELECTOR)),
+    ]);
+    const feeWei = decodeUint256(feeHex);
+    const implementationAddress = decodeAddress(implementationHex);
+    const buyInWei = parseEtherToWei(draft.buyInEth);
+    const totalWei = feeWei + buyInWei;
+
+    const salt = await mineAndCheckV4Salt(factoryAddress, implementationAddress,
+      (sl)=>"0x"+V4_PREDICT_CURVE_TOKEN_SELECTOR+encodeAddressParam(wallet)+toHex32(BigInt(sl))+toHex32(isCustom ? 1n : 0n), onStep);
+    const supply = BigInt(draft.supply) * (10n**18n);
+    const data = isCustom
+      ? encodeCreateV4CustomCurveTokenCalldata({
+          name: draft.name, symbol: draft.ticker, totalSupply: supply,
+          buyFees: draft.customFees.buy, sellFees: draft.customFees.sell,
+          marketingWallet: draft.customFees.marketingWallet || ZERO_ADDRESS,
+          buyInWei, minTokensOut: 0n, salt,
+        })
+      : encodeCreateCurveTokenCalldata({
+          name: draft.name, symbol: draft.ticker, totalSupply: supply, buyInWei, minTokensOut: 0n, salt,
+        });
+    const { txHash, receipt } = await sendV4LaunchTx(factoryAddress, totalWei, data, onStep);
+
+    const createdLog = findFactoryLog(receipt, factoryAddress, CURVE_TOKEN_CREATED_TOPIC0);
+    if(!createdLog){
+      onStep("deploy", "error", "Transaction confirmed, but no CurveTokenCreated event was found — check the explorer.");
+      throw new Error("Transaction confirmed, but no CurveTokenCreated event was found — check the explorer.");
+    }
+    const tokenAddress = decodeAddress(createdLog.topics[1]);
+    onStep("deploy", "done", `Contract deployed at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · tx <span class="num">${fmtAddrSafe(txHash)}</span>`);
+
+    const { poolSeedTargetWei, realEthReserve } = await finishCurveFactoryVerification({
+      factoryAddress, tokenAddress, receipt, buyInWei, onStep,
+    });
+    // A creator buy-in big enough to cross the target graduates the curve in
+    // the very same transaction — pick the pool up from the receipt.
+    let poolId = null, lockId = null, unlockAt = null;
+    const gradLog = findFactoryLog(receipt, factoryAddress, V4_CURVE_GRADUATED_TOPIC0);
+    if(gradLog){
+      poolId = gradLog.topics[2] ? gradLog.topics[2].toLowerCase() : null;
+      const w = splitWords(gradLog.data); // ethAdded, tokensAdded, liquidity, unlockTime, lockId
+      unlockAt = Number(decodeUint256("0x"+w[3])) * 1000;
+      lockId = decodeUint256("0x"+w[4]).toString();
+    }
+    return {
+      txHash, tokenAddress, buyInEth: Number(draft.buyInEth), factoryAddress,
+      poolSeedTargetWei, realEthReserve, poolId, lockId, unlockAt,
+    };
+  }
+
+  // Wrapper for all three V4 modes above — builds the token record (protocol
+  // "v4"), updates the progress dialog and resets the draft.
+  async function launchV4ExtraOnChainFlow(factoryAddress){
+    const mode = draft.mode;
+    const isCurve = mode==="curve" || mode==="customCurve";
+    const isCustomTax = mode==="custom" || mode==="customCurve";
+    const launchBtn = document.getElementById("wizLaunch");
+    const originalLabel = launchBtn ? launchBtn.textContent : "";
+    if(launchBtn){ launchBtn.disabled = true; launchBtn.textContent = "Confirm in wallet…"; }
+    const steps = [{ key:"deploy", label:"Deploying" }, { key:"verify", label:"Verifying" }, { key:"explorerVerify", label:"Confirming verification" }];
+    if(!isCurve) steps.push({ key:"liquidity", label:"Adding liquidity" });
+    if(draft.buyInEth>0) steps.push({ key:"bought", label:"Buying tokens" });
+    steps.push({ key:"live", label: isCurve ? "Curve live" : "Token live" });
+    startLaunchProgress(steps);
+
+    try{
+      const result = isCurve
+        ? await performOnChainV4CurveLaunch(factoryAddress, setLaunchStep)
+        : await performOnChainV4CustomLaunch(factoryAddress, setLaunchStep);
+      const customFields = isCustomTax ? {
+        customTax:true, buyFees: {...draft.customFees.buy}, sellFees: {...draft.customFees.sell},
+        reflectionAsset: null, reflectionInKind: true,
+        marketingWallet: draft.customFees.marketingWallet || null,
+      } : {};
+      const base = {
+        id: result.tokenAddress, name: draft.name, ticker: draft.ticker,
+        desc: draft.desc || "A freshly launched community token.",
+        catColor:"var(--signal-500)", createdCustom:true, protocol:"v4",
+        onChain:true, tokenAddress: result.tokenAddress, txHash: result.txHash, factoryAddress,
+        creatorBuyInEth: result.buyInEth,
+        networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
+        createdAtMs: Date.now(), ...customFields,
+      };
+      let newToken;
+      if(isCurve){
+        const graduatedNow = !!result.poolId;
+        newToken = {
+          ...base, price: 0, change24h: 0, hist: [0.0000001, 0.0000001],
+          holders: result.buyInEth>0 ? 2 : 1, mcap: 0, vol: 0, mode,
+          status: graduatedNow ? "taxed" : "curve-trading",
+          isCustomCurve: mode==="customCurve",
+          curveRealEthReserveWei: result.realEthReserve.toString(), curvePoolSeedTargetWeiVal: result.poolSeedTargetWei.toString(),
+          poolId: result.poolId || null, lockId: result.lockId, unlockAt: result.unlockAt, lpWithdrawn:false,
+          taxProgress: graduatedNow ? 0 : undefined,
+        };
+      }else{
+        newToken = {
+          ...base, price: 0, change24h: 0, hist: [0.0000001, 0.0000001],
+          taxProgress: 0, holders: result.buyInEth>0 ? 2 : 1, mcap: 0, vol: 0, mode:"liquidity", status:"taxed", // same convention as V2: a custom-tax launch is a "liquidity" token carrying customTax
+         
+          lpDaysLeft: result.lpLockDurationDays, liquidityEth: result.liquidityEth,
+          poolId: result.poolId || null, lockId: result.lockId, unlockAt: result.unlockAt,
+          lpLockDurationDays: result.lpLockDurationDays, lpWithdrawn:false,
+        };
+      }
+      tokens.unshift(newToken);
+      saveCustomTokens();
+      syncTokenMetadataToServer(newToken).catch(()=>{});
+      if(isCurve) refreshLiveTokenPrices();
+      if(isCurve){
+        setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on the bonding curve on ${escapeHtml(NETWORKS[appMode].chainName)} — a Uniswap V4 pool is created automatically once it holds ${curvePoolSeedEthDisplay(mode)} ETH.`);
+        toast(`⚡ $${newToken.ticker} Quick Launched on V4 — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
+      }else{
+        setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on Uniswap V4 with your custom tax.`);
+        toast(`🚀 $${newToken.ticker} launched on V4 — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
+      }
+      appendLaunchActions(newToken);
+      renderStats();
+      renderGrid();
+      seedFeed();
+      resetLaunchDraft();
+    }catch(err){
+      console.error(err);
+      const message = (err && err.code===4001) ? "Transaction was rejected in your wallet." : ("Launch failed: " + ((err && err.message) ? err.message : String(err)));
+      toast(message);
+      const activeStep = launchProgressSteps.find(s=>s.state==="active");
+      if(activeStep) setLaunchStep(activeStep.key, "error", escapeHtml(message));
+      else clearLaunchProgress();
+      const wrap = document.querySelector(".wizard-wrap");
+      if(wrap) wrap.hidden = false;
+    }finally{
+      if(launchBtn){ launchBtn.disabled = false; launchBtn.textContent = originalLabel; }
+    }
+  }
+
   /* ---------------- liquidity detection (Deploy Token -> Unlocked pool) ----------------
      TokenFactory itself has no way to know if a "Deploy Token" creator later
      adds liquidity somewhere else entirely (e.g. straight through Uniswap's
@@ -5569,6 +5913,13 @@
         // token to "graduated" once its tax has actually disabled, and it
         // picks this token up automatically now that it matches
         // isLiveTrackedToken's taxed+pairAddress branch on the next call.
+        // V4 curve graduation: same idea, but the pool is a poolId.
+        if(t.status==="curve-trading" && tokenProtocol(t)==="v4" && payload.poolId && !t.poolId){
+          t.poolId = String(payload.poolId).toLowerCase();
+          t.status = "taxed";
+          if(t.taxProgress==null) t.taxProgress = 0;
+          if(!t.unlockAt) t.unlockAt = Date.now() + LP_LOCK_DAYS*86400000;
+        }
         if(t.status==="curve-trading" && payload.pairAddress && payload.pairAddress.toLowerCase()!==ZERO_ADDRESS && !t.pairAddress){
           t.pairAddress = payload.pairAddress;
           t.status = "taxed";
@@ -5687,6 +6038,7 @@
     // wiring a router-based trade panel against a pair that doesn't exist.
     const isCurveEntry = typeof entry.mode === "string" && entry.mode.indexOf("curve") !== -1;
     const isCustomCurveEntry = isCurveEntry && entry.mode.indexOf("custom") !== -1;
+    const isV4CustomEntry = isV4Entry && !isCurveEntry && entry.mode==="v4custom";
     return {
       id: entry.tokenAddress,
       name: entry.name || entry.symbol || "Unnamed token",
@@ -5698,6 +6050,13 @@
       catColor: "var(--signal-500)",
       mode: isCurveEntry ? (isCustomCurveEntry ? "customCurve" : "curve") : (isLiquidity ? "liquidity" : "just"),
       isCustomCurve: isCurveEntry ? isCustomCurveEntry : undefined,
+      // V4 custom-tax fields (V4CustomTokenFactory launches, and V4 custom
+      // curves): in-kind rates straight off the relayer's tracked record.
+      ...(isV4Entry && entry.customTax ? {
+        customTax: true, reflectionAsset: null, reflectionInKind: true,
+        marketingWallet: entry.marketingWallet || null,
+        buyFees: entry.buyFees || undefined, sellFees: entry.sellFees || undefined,
+      } : {}),
       // A graduated curve token behaves exactly like any other graduated
       // pool token from here on (same statusFromTokenStatus progression,
       // same trade panel) — only the pre-graduation, no-pool-yet window
@@ -5721,8 +6080,8 @@
       // network, both admin-configured platform-wide, not per-launch — read
       // straight from platformConfig instead of the ledger.
       factoryAddress: isCurveEntry
-        ? (isCustomCurveEntry ? customBondingCurveFactoryAddress(mode) : bondingCurveFactoryAddress(mode))
-        : (isV4Entry ? v4TokenFactoryAddress(mode) : null),
+        ? (isV4Entry ? v4CurveFactoryAddress(mode) : (isCustomCurveEntry ? customBondingCurveFactoryAddress(mode) : bondingCurveFactoryAddress(mode)))
+        : (isV4Entry ? (isV4CustomEntry ? v4CustomTokenFactoryAddress(mode) : v4TokenFactoryAddress(mode)) : null),
       txHash: entry.deploymentTxHash || null,
       lockId: entry.liquidityLockId!=null ? String(entry.liquidityLockId) : null,
       unlockAt: isLiquidity ? unlockAtMs : null,
@@ -5867,7 +6226,13 @@
       if(entry.protocol==="v4" && tokenProtocol(existing)!=="v4"){
         existing.protocol = "v4";
         existing.poolId = entry.poolId || existing.poolId || null;
-        existing.factoryAddress = existing.factoryAddress || v4TokenFactoryAddress(mode);
+        existing.factoryAddress = existing.factoryAddress || (entry.mode==="v4custom" ? v4CustomTokenFactoryAddress(mode) : (typeof entry.mode==="string" && entry.mode.indexOf("curve")!==-1) ? v4CurveFactoryAddress(mode) : v4TokenFactoryAddress(mode));
+        updated = true;
+      }
+      // A V4 curve graduates server-side first: pick the new poolId up here so
+      // the token page switches to the V4 pool without needing a wallet.
+      if(entry.protocol==="v4" && entry.poolId && existing.poolId!==entry.poolId){
+        existing.poolId = entry.poolId;
         updated = true;
       }
       const nextLogo = entry.logo ?? null;
@@ -5880,7 +6245,9 @@
         updated = true;
       }
       if(typeof entry.tokenStatus !== "number") continue;
-      const isLiquidityNow = !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS);
+      const isLiquidityNow = entry.protocol==="v4"
+        ? !!entry.poolId
+        : !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS);
       // SELF-HEAL: the relayer's own ledger `mode` (entry.mode, e.g.
       // "relayed-curve"/"relayed-custom-curve") is the authoritative record
       // of what kind of launch this actually is — written once, at launch
@@ -6015,7 +6382,7 @@
     // stuck showing the simulated trade widget instead of the real pool it
     // actually graduated onto.
     const pendingCurves = tokens.filter(t=> t.onChain && t.tokenAddress && t.factoryAddress && t.networkMode===appMode
-      && (t.status==="curve-trading" || ((t.status==="taxed"||t.status==="graduated") && (t.mode==="curve"||t.mode==="customCurve") && (!t.pairAddress || t.pairAddress.toLowerCase()===ZERO_ADDRESS))));
+      && (t.status==="curve-trading" || ((t.status==="taxed"||t.status==="graduated") && (t.mode==="curve"||t.mode==="customCurve") && curveLacksPool(t))));
     if(!pending.length && !pendingCurves.length) return;
     let changed = false;
     if(pending.length){
@@ -6055,8 +6422,9 @@
         const beforeReserve = t.curveRealEthReserveWei;
         const beforeStatus = t.status;
         const beforePair = t.pairAddress;
+        const beforePool = t.poolId;
         await refreshCurveTokenPanel(t);
-        if(t.curveRealEthReserveWei !== beforeReserve || t.pairAddress !== beforePair) changed = true;
+        if(t.curveRealEthReserveWei !== beforeReserve || t.pairAddress !== beforePair || t.poolId !== beforePool) changed = true;
         // Only redraw an open detail view for an actual status change this
         // tick — pendingCurves also re-includes a token whose curve already
         // graduated but whose pair lookup is still retrying, and that alone
@@ -6385,9 +6753,28 @@
     // "live-pool" transition in checkPendingLiquidity). Once status
     // reaches "live-pool" the creator's tax really is live on real trades
     // — this panel switches its own copy to match.
-    const inactive = t.mode==="just" && t.status!=="live-pool";
+    const isV4Custom = tokenProtocol(t)==="v4";
+    const inactive = !isV4Custom && t.mode==="just" && t.status!=="live-pool";
     const awaitingActivation = t.status==="pool-detected";
-    const eyebrowSuffix = !inactive ? "" : awaitingActivation ? " — pool found, not yet activated" : " — inactive (no pool)";
+    const v4PreGraduation = isV4Custom && t.status==="curve-trading";
+    const eyebrowSuffix = v4PreGraduation ? " — active once the curve graduates"
+      : !inactive ? "" : awaitingActivation ? " — pool found, not yet activated" : " — inactive (no pool)";
+    if(isV4Custom){
+      return `
+      <div style="margin-top:22px; padding-top:22px; border-top:1px solid var(--line-strong);">
+        <div class="eyebrow" style="margin-bottom:10px;">Custom tax structure${eyebrowSuffix}</div>
+        <div class="review-list">
+          <div class="review-row"><span class="k">Buy tax</span><span class="v num">${customTaxSummaryLine(t.buyFees)}</span></div>
+          <div class="review-row"><span class="k">Sell tax</span><span class="v num">${customTaxSummaryLine(t.sellFees)}</span></div>
+          <div class="review-row"><span class="k">Paid in</span><span class="v">In-kind ($${escapeHtml(t.ticker)})</span></div>
+          <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${t.marketingWallet ? fmtAddrSafe(t.marketingWallet) : "— (marketing share is burned)"}</span></div>
+        </div>
+        <div class="hint" style="margin-top:8px;">${v4PreGraduation
+          ? "This curve trades with the curve's own 1.00% fee. Once it graduates to a Uniswap V4 pool, these rates apply at the pool on top of the platform's tax."
+          : "These rates are taken in the token itself at the pool, on top of the platform's own tax. Reflections accrue to every holder pro rata and are claimed in the token; marketing goes to the marketing wallet; the liquidity share is added to the pool as permanent liquidity by a keeper; burn reduces total supply. Every rate locked in at launch — only the marketing wallet can change, and only the creator can change it."}</div>
+        ${t.onChain && !v4PreGraduation ? `<div id="v4ReflectionBox" style="margin-top:12px;"></div>` : ""}
+      </div>`;
+    }
     return `
       <div style="margin-top:22px; padding-top:22px; border-top:1px solid var(--line-strong);">
         <div class="eyebrow" style="margin-bottom:10px;">Custom tax structure${eyebrowSuffix}</div>
@@ -6404,6 +6791,51 @@
             : "These rates are recorded on-chain but cannot take effect until a pool exists — the contract only ever taxes trades against a live pair. Once the creator adds liquidity independently (e.g. on Uniswap) and activates it, these rates go live; the platform's own 1.00%-until-graduation tax stays permanently off for this token either way."
         }</div>
       </div>`;
+  }
+
+  // V4 custom token: shows the connected wallet's unclaimed reflections
+  // (V4CustomToken.pendingReflections) and a Claim button
+  // (claimReflections()). Reflections are paid in the token itself.
+  async function wireV4ReflectionPanel(t){
+    const box = document.getElementById("v4ReflectionBox");
+    if(!box) return;
+    if(!wallet || !window.ethereum){
+      box.innerHTML = `<div class="hint">Connect a wallet to see your claimable reflections.</div>`;
+      return;
+    }
+    const render = async ()=>{
+      const el = document.getElementById("v4ReflectionBox");
+      if(!el || currentDetailTokenId!==t.id) return;
+      let pending = 0n;
+      try{
+        pending = decodeUint256(await ethCall(t.tokenAddress, "0x"+V4_PENDING_REFLECTIONS_SELECTOR+encodeAddressParam(wallet)));
+      }catch(e){
+        el.innerHTML = `<div class="hint">Couldn't read your reflections right now.</div>`;
+        return;
+      }
+      el.innerHTML = `
+        <div class="review-list"><div class="review-row"><span class="k">Your claimable reflections</span><span class="v num" id="v4PendingVal">${fmtInt(Number(weiToEtherString(pending,2)))} $${escapeHtml(t.ticker)}</span></div></div>
+        <button class="btn btn-ghost btn-sm" id="v4ClaimBtn" style="margin-top:8px;" ${pending>0n ? "" : "disabled"}>Claim reflections</button>`;
+      const btn = document.getElementById("v4ClaimBtn");
+      if(btn) btn.addEventListener("click", async ()=>{
+        btn.disabled = true; btn.textContent = "Confirm in wallet…";
+        try{
+          await ensureWalletOnAppNetwork();
+          const txHash = await window.ethereum.request({
+            method:"eth_sendTransaction",
+            params:[{ from: wallet, to: t.tokenAddress, data: "0x"+V4_CLAIM_REFLECTIONS_SELECTOR }],
+          });
+          toast("Claim sent — waiting for confirmation…");
+          const receipt = await waitForReceipt(txHash);
+          if(receipt.status!=="0x1") throw new Error("The claim reverted on-chain.");
+          toast(`✅ Reflections claimed for $${t.ticker}.`);
+        }catch(err){
+          toast(err && err.code===4001 ? "Transaction was rejected in your wallet." : "Claim failed: "+((err && err.message) ? err.message : String(err)));
+        }
+        render();
+      });
+    };
+    render();
   }
 
   // Fetches the real top-holder breakdown from the relayer's own
@@ -6471,7 +6903,11 @@
     // A V4 token has no V2 pair, and the router-based/simulated panels below
     // would be wrong for it either way — it gets its own panel instead.
     const isV4Token = tokenProtocol(t)==="v4";
-    const noSimulatedMarket = isCreatorHeld || isPoolDetected || isLivePool || isV4Token;
+    // A V4 token still on its bonding curve (V4CurveFactory) trades on the
+    // curve exactly like a V2 curve token; the V4 pool panel only applies once
+    // a pool exists (or for the non-curve V4 modes).
+    const useV4Panel = isV4Token && !isCurveTrading;
+    const noSimulatedMarket = isCreatorHeld || isPoolDetected || isLivePool || useV4Panel;
     // A curve token viewed on the network it actually lives on, with a
     // known factory address to call back into — same on-chain/networkMode
     // gating as isRealLiquidityToken below, just against the curve factory
@@ -6683,8 +7119,8 @@
         ${v4InfoHTML}
         <p class="disclaimer-line" style="text-align:left; margin-top:8px;">Admin-only while V4 is under development.</p>
       </div>`;
-    if(isV4Token) progressHTML = ""; // the $50,000 tax-progress bar is V2-pair based; V4 progress isn't tracked yet
-    const tradePanelHTML = isV4Token ? v4PanelHTML : isCurveTrading ? (isCurveToken ? `
+    if(useV4Panel) progressHTML = ""; // the $50,000 tax-progress bar is V2-pair based; V4 progress isn't tracked yet
+    const tradePanelHTML = useV4Panel ? v4PanelHTML : isCurveTrading ? (isCurveToken ? `
       <div class="panel">
         <div class="trade-tabs">
           <button class="trade-tab" aria-selected="true" data-side="buy">Buy</button>
@@ -6843,12 +7279,13 @@
     if(detailActivateBtn) detailActivateBtn.addEventListener("click", ()=> activateCustomTokenTax(t.id, detailActivateBtn) );
 
     if(!noPriceChart && t.onChain && t.tokenAddress) fetchAndRenderHolderDistribution(t);
+    if(t.customTax && isV4Token && t.onChain && t.tokenAddress) wireV4ReflectionPanel(t);
 
-    if(isV4Token && v4Tradable){
+    if(useV4Panel && v4Tradable){
       tradeSide = "buy";
       wireV4TradePanel(t, v4Router);
     }
-    if(isV4Token && !noPriceChart) wireChartHover(t, hist);
+    if(useV4Panel && !noPriceChart) wireChartHover(t, hist);
     if(!noSimulatedMarket){
       tradeSide = "buy";
       document.querySelectorAll(".trade-tab").forEach(tb=>{
@@ -7001,6 +7438,15 @@
       if(panelAlive()) renderQuote();
     }
 
+    // Effective tax for one side: the platform tax (while it's still on) plus,
+    // for a custom-tax token, that side's custom components — the custom part
+    // never switches off.
+    function sideTax(side){
+      const f = t.customTax ? (side==="buy" ? t.buyFees : t.sellFees) : null;
+      const c = f ? BigInt((f.reflectionBps||0)+(f.marketingBps||0)+(f.liquidityBps||0)+(f.burnBps||0)) : 0n;
+      const base = tax.active ? tax.bps : 0n;
+      return { active: tax.active || c>0n, bps: base + c };
+    }
     function currentQuote(){
       const amtStr = amtInput.value;
       const amt = parseFloat(amtStr);
@@ -7015,9 +7461,9 @@
       if(tradeSide==="buy"){
         const platformTax = hasPlatformTax ? (wei*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
         const swapWei = wei - platformTax;
-        return { out: v4QuoteBuy(swapWei, state, tax), wei: swapWei, platformTax };
+        return { out: v4QuoteBuy(swapWei, state, sideTax("buy")), wei: swapWei, platformTax };
       }
-      const gross = v4QuoteSell(wei, state, tax);
+      const gross = v4QuoteSell(wei, state, sideTax("sell"));
       const platformTax = hasPlatformTax ? (gross*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
       return { out: gross - platformTax, gross, wei, platformTax };
     }
@@ -7025,7 +7471,8 @@
       if(!panelAlive()) return;
       const q = currentQuote();
       const platformNote = platformTaxDistributorAddress(t.networkMode)!==ZERO_ADDRESS ? " + platform fee 0.30%" : "";
-      const taxLine = (tax.active ? `Pool fee 0.30% + trading tax ${(Number(tax.bps)/100).toFixed(2)}%` : "Pool fee 0.30% · trading tax off") + platformNote;
+      const st = sideTax(tradeSide);
+      const taxLine = (st.active ? `Pool fee 0.30% + trading tax ${(Number(st.bps)/100).toFixed(2)}%${t.customTax ? " (platform + custom)" : ""}` : "Pool fee 0.30% · trading tax off") + platformNote;
       if(!q){ outEl.textContent = "0"; if(infoEl) infoEl.textContent = state ? taxLine : ""; return; }
       outEl.textContent = tradeSide==="buy"
         ? fmtInt(Number(weiToEtherString(q.out,6))) + " " + t.ticker
@@ -7038,7 +7485,7 @@
         const spotOut = tradeSide==="buy" ? (q.wei * r.tok / r.eth) : (q.wei * r.eth / r.tok);
         const swapOut = tradeSide==="buy" ? q.out : q.gross; // pre-platform-fee amount the pool actually paid
         if(spotOut>0n){
-          const feeFactor = tax.active ? (1000000n - V4_POOL_LP_FEE_PPM) * (10000n - tax.bps) : (1000000n - V4_POOL_LP_FEE_PPM) * 10000n;
+          const feeFactor = st.active ? (1000000n - V4_POOL_LP_FEE_PPM) * (10000n - st.bps) : (1000000n - V4_POOL_LP_FEE_PPM) * 10000n;
           const ideal = spotOut * feeFactor / (1000000n * 10000n);
           if(ideal>swapOut){
             const pct = Number((ideal - swapOut) * 100000n / ideal) / 1000;
@@ -7108,7 +7555,7 @@
           // as the V2 buy does: 0.30% of the ETH entered, the rest swaps.
           const taxWei = taxDistributor!==ZERO_ADDRESS ? (wei*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
           const swapWei = wei - taxWei;
-          const out = v4QuoteBuy(swapWei, state, tax);
+          const out = v4QuoteBuy(swapWei, state, sideTax("buy"));
           if(out<=0n) throw new Error("This pool can't quote that amount right now — try a smaller amount.");
           const minOut = out * (10000n - slippageBps) / 10000n;
           if(taxWei>0n){
@@ -7134,7 +7581,7 @@
           if(receipt.status !== "0x1") throw new Error("The buy reverted on-chain — try a smaller amount or a higher slippage tolerance.");
           toast(`✅ Bought $${t.ticker} — check your wallet or the explorer for the exact amount received.`);
         } else {
-          const out = v4QuoteSell(wei, state, tax);
+          const out = v4QuoteSell(wei, state, sideTax("sell"));
           if(out<=0n) throw new Error("This pool can't quote that amount right now — try a smaller amount.");
           const minOut = out * (10000n - slippageBps) / 10000n;
           const allowance = decodeUint256(await ethCall(t.tokenAddress, encodeAllowanceCalldata(wallet, routerAddress)));
@@ -7757,6 +8204,12 @@
   // requires mode==="liquidity") correctly keeps the "Unlock LP now" button
   // hidden here rather than wiring it to the wrong locker. Wiring that up is
   // follow-up work, not a bug in what's shipped now.
+  // True while a graduated-or-trading curve token has no pool recorded yet:
+  // a poolId for V4, a pair address for V2.
+  function curveLacksPool(t){
+    if(tokenProtocol(t)==="v4") return !t.poolId;
+    return !t.pairAddress || t.pairAddress.toLowerCase()===ZERO_ADDRESS;
+  }
   async function refreshCurveTokenPanel(t){
     const stateHex = await ethCall(t.factoryAddress, "0x"+CURVE_STATE_SELECTOR+encodeAddressParam(t.tokenAddress));
     const state = decodeCurveState(stateHex);
@@ -7783,10 +8236,35 @@
     // token up too the moment it has a pairAddress, and is what actually
     // advances it to "graduated" for real once taxActive() reads false.
     const justGraduated = state.graduated && t.status==="curve-trading";
-    const pairStillMissing = state.graduated && (t.status==="taxed"||t.status==="graduated")
-      && (!t.pairAddress || t.pairAddress.toLowerCase()===ZERO_ADDRESS);
+    const pairStillMissing = state.graduated && (t.status==="taxed"||t.status==="graduated") && curveLacksPool(t);
     if(justGraduated) t.status = "taxed";
-    if(justGraduated || pairStillMissing){
+    if((justGraduated || pairStillMissing) && tokenProtocol(t)==="v4"){
+      // V4: no pair — the pool is a poolId in the PoolManager, read back from
+      // the curve factory; the LP lock id/unlock time come from the
+      // CurveGraduated event (indexed by token).
+      try{
+        const w = await ethCall(t.factoryAddress, "0x"+POOL_ID_OF_SELECTOR+encodeAddressParam(t.tokenAddress));
+        if(/^0x[0-9a-fA-F]{64}$/.test(w) && !/^0x0{64}$/.test(w)) t.poolId = w.toLowerCase();
+      }catch(e){ /* retried on the next poll tick */ }
+      if(t.poolId && t.lockId==null){
+        try{
+          const logs = await window.ethereum.request({ method:"eth_getLogs", params:[{
+            address: t.factoryAddress, fromBlock:"0x0", toBlock:"latest",
+            topics:[V4_CURVE_GRADUATED_TOPIC0, "0x"+encodeAddressParam(t.tokenAddress)],
+          }]});
+          if(logs && logs.length){
+            const w2 = splitWords(logs[logs.length-1].data); // ethAdded, tokensAdded, liquidity, unlockTime, lockId
+            t.unlockAt = Number(decodeUint256("0x"+w2[3])) * 1000;
+            t.lockId = decodeUint256("0x"+w2[4]).toString();
+          }
+        }catch(e){ /* exact lock details are optional for display */ }
+      }
+      if(justGraduated){
+        if(!t.unlockAt) t.unlockAt = Date.now() + LP_LOCK_DAYS*86400000;
+        if(t.taxProgress==null) t.taxProgress = 0;
+        toast(`🎉 $${t.ticker} graduated — its Uniswap V4 pool is now live and tradeable.`);
+      }
+    } else if(justGraduated || pairStillMissing){
       try{
         const info = await getDexInfo(t.networkMode);
         if(info){
@@ -8288,10 +8766,10 @@
           </div>
           <div class="proto-card ${protoV4?'selected':''} ${canV4?'':'disabled'}" data-proto="v4" role="radio" aria-checked="${protoV4}" aria-disabled="${!canV4}" tabindex="${canV4?0:-1}" ${canV4?'':'title="Under development"'}>
             <div class="name">Uniswap V4 <span class="proto-badge v4">${canV4 ? "ADMIN ONLY" : "UNDER DEVELOPMENT"}</span></div>
-            <div class="desc">${canV4 ? "Hook-based tax. Deploy &amp; Launch 0% Tax modes only for now." : "Not available yet."}</div>
+            <div class="desc">${canV4 ? "Hook-based tax, in-kind custom fees. Every mode except Deploy Custom Tax Token." : "Not available yet."}</div>
           </div>
         </div>
-        ${protoV4 ? `<div class="hint" style="margin:-6px 0 14px; border-left:2px solid var(--signal-500); padding-left:10px;">V4 is selected. Only <strong>Deploy 0% Tax Token Only</strong> and <strong>Launch 0% Tax Token</strong> exist on V4 so far; the other modes are greyed out.</div>` : ""}
+        ${protoV4 ? `<div class="hint" style="margin:-6px 0 14px; border-left:2px solid var(--signal-500); padding-left:10px;">V4 is selected. Every mode is available except <strong>Deploy Custom Tax Token</strong> (deploy-only), which has no V4 version. Custom tax is paid in the token itself on V4, and V4 launches are always sent from your own wallet (no gasless option yet).</div>` : ""}
         <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 6px;">Every launch is verified before anything else happens. What comes next — and what it costs — depends on which mode you pick; nothing here is reversible after you launch.</p>
         <p class="hint" style="margin:0 0 18px;">${ethPriceNote()}</p>
         <div class="curve-options">
@@ -8400,7 +8878,7 @@
         <div class="review-row"><span class="k">Pool</span><span class="v">None — 100% to your wallet</span></div>
         <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")} (recorded, inactive)</span></div>
         <div class="review-row"><span class="k">Sell tax</span><span class="v num">${feeSideSummaryText("sell")} (recorded, inactive)</span></div>
-        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
+        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draftProtocol()==="v4" ? `In-kind ($${escapeHtml(draft.ticker||"TOKEN")})` : reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
         <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${draft.customFees.marketingWallet ? fmtAddrSafe(draft.customFees.marketingWallet) : "—"}</span></div>
         <div class="review-row"><span class="k">Platform tax</span><span class="v">None — requires a live pool</span></div>
       `;
@@ -8411,7 +8889,7 @@
         ${draft.buyInEth>0 ? `<div class="review-row"><span class="k">Your buy-in</span><span class="v num">${draft.buyInEth} ETH, same transaction</span></div>` : ""}
         <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")}</span></div>
         <div class="review-row"><span class="k">Sell tax</span><span class="v num">${feeSideSummaryText("sell")}</span></div>
-        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
+        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draftProtocol()==="v4" ? `In-kind ($${escapeHtml(draft.ticker||"TOKEN")})` : reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
         <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${draft.customFees.marketingWallet ? fmtAddrSafe(draft.customFees.marketingWallet) : "—"}</span></div>
         <div class="review-row"><span class="k">Plus platform tax</span><span class="v num">1.00% until $50,000 MC</span></div>
         <div class="review-row"><span class="k">LP lock</span><span class="v num">${lpLockDaysDisplay()} days</span></div>
@@ -8431,7 +8909,7 @@
         ${draft.buyInEth>0 ? `<div class="review-row"><span class="k">Your buy-in</span><span class="v num">${fmtEthAmt(draft.buyInEth)} ETH, same transaction</span></div>` : ""}
         <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")} (active once live on DEX)</span></div>
         <div class="review-row"><span class="k">Sell tax</span><span class="v num">${feeSideSummaryText("sell")} (active once live on DEX)</span></div>
-        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
+        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draftProtocol()==="v4" ? `In-kind ($${escapeHtml(draft.ticker||"TOKEN")})` : reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
         <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${draft.customFees.marketingWallet ? fmtAddrSafe(draft.customFees.marketingWallet) : "—"}</span></div>
         <div class="review-row"><span class="k">Curve fee</span><span class="v num">1.00% until live on DEX</span></div>
         <div class="review-row"><span class="k">Live on DEX at</span><span class="v num">${curvePoolSeedEthDisplay("customCurve")} ETH</span></div>
@@ -8458,8 +8936,8 @@
       ? (draft.mode==="customCurve" ? "CustomBondingCurveFactory" : "BondingCurveFactory")
       : usesCustomFactory ? "CustomTokenFactory" : "TokenFactory";
     const protoV4 = draftProtocol()==="v4";
-    const v4Ready = protoV4 && !!v4TokenFactoryAddress();
-    const v4Block = "V4 factory not configured for this network. Save a V4TokenFactory address in Admin first.";
+    const v4Ready = protoV4 && !!v4FactoryForMode(draft.mode);
+    const v4Block = `V4 factory not configured for this network. Save a ${v4FactoryNameForMode(draft.mode)} address in Admin first.`;
     const agreeLabel = protoV4
       ? `<span><strong>This sends a real transaction on Uniswap V4</strong> from your connected wallet on ${escapeHtml(NETWORKS[appMode].chainName)}, spending the ${totalEth} ETH above (plus gas). I understand the V4 contracts are new, unaudited and admin-only while under development, and I want to launch.</span>`
       : isRealLaunch
@@ -8482,7 +8960,7 @@
       ${protoV4 && !v4Ready
         ? `<div class="hint" role="alert" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:14px;"><strong>Launch is disabled.</strong> ${v4Block}</div>
       <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizLaunch" disabled>🚀 Launch (V4 unavailable)</button></div>`
-        : `${protoV4 ? `<div class="hint" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:14px;">V4 launch via <strong>V4TokenFactory</strong> — a real transaction with real ETH. V4 tokens aren't tradeable from this site yet; the pool is live on Uniswap V4 and its pool ID is shown after launch.</div>` : ""}<label class="agree-row"><input type="checkbox" id="fAgree">${agreeLabel}</label>
+        : `${protoV4 ? `<div class="hint" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:14px;">V4 launch via <strong>${v4FactoryNameForMode(draft.mode)}</strong> — a real transaction with real ETH, sent from your own wallet.${(draft.mode==="curve"||draft.mode==="customCurve") ? " The Uniswap V4 pool is created automatically when the curve graduates." : ""}</div>` : ""}<label class="agree-row"><input type="checkbox" id="fAgree">${agreeLabel}</label>
       <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizLaunch">${(isRealLaunch || protoV4) ? "🚀 Launch (real transaction)" : "🚀 Launch token"}</button></div>`}
     `;
   }
@@ -8534,6 +9012,7 @@
         draft.protocol = want;
         if(want==="v4" && !V4_MODES.includes(draft.mode)) draft.mode = "liquidity";
         renderWizardStepOnly(); renderPreview();
+        refreshOnChainDefaults(); // fees/targets shown follow the chosen protocol's factories
       };
       c.addEventListener("click", pick);
       c.addEventListener("keydown", e=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); pick(); } });
@@ -8843,6 +9322,15 @@
   // only Custom Token opens it, with the on-chain validity check above
   // surfacing right underneath it.
   function reflectionAssetFieldHTML(reflectionOnHint){
+    if(draftProtocol()==="v4"){
+      // V4: every custom component is taken in the token itself, at the pool.
+      draft.customFees.reflectionAsset = "";
+      return `
+      <div class="field" id="v4InKindNote">
+        <label style="margin-bottom:8px; display:block;">Paid in-kind (Uniswap V4)</label>
+        <div class="hint" style="border-left:2px solid var(--signal-500); padding-left:10px;">On V4 the tax is taken in <strong>$${escapeHtml(draft.ticker||"your token")}</strong> at the pool, not in ETH. <strong>Reflections</strong> accrue to holders in the token (claim any time from the token page). <strong>Marketing</strong> is sent to your marketing wallet in the token. <strong>Liquidity</strong> is turned into permanent pool liquidity by a keeper — it can never be withdrawn. <strong>Burn</strong> destroys tokens. ${reflectionOnHint}</div>
+      </div>`;
+    }
     const raw = draft.customFees.reflectionAsset || "";
     const mode = reflectionAssetMode(raw);
     const initialInfo = reflectionInfoDisplay();
@@ -8873,7 +9361,8 @@
       wizStep=3; renderWizard();
       return false;
     }
-    if(draft.customFees.reflectionAsset && !isAddressLike(draft.customFees.reflectionAsset)){
+    if(draftProtocol()==="v4") draft.customFees.reflectionAsset = "";
+    if(draftProtocol()!=="v4" && draft.customFees.reflectionAsset && !isAddressLike(draft.customFees.reflectionAsset)){
       toast("That doesn't look like a valid ERC20 address for reflections — use a 0x… address, or switch back to Native Token.");
       wizStep=3; renderWizard();
       return false;
@@ -8884,7 +9373,7 @@
     // launch. "offline" (no injected wallet at all) is left to fail at
     // launchDraftToken's own wallet checks instead of blocked here, since
     // it isn't specific to this address.
-    if(reflectionAssetMode(draft.customFees.reflectionAsset)==="custom"){
+    if(draftProtocol()!=="v4" && reflectionAssetMode(draft.customFees.reflectionAsset)==="custom"){
       const raw = draft.customFees.reflectionAsset.trim();
       const stale = reflectionTokenCheck.address.toLowerCase() !== raw.toLowerCase();
       const status = stale ? "idle" : reflectionTokenCheck.status;
@@ -8913,11 +9402,19 @@
       // V4 is admin-only (draftProtocol() is "v2" for anyone else, and the
       // check below refuses before anything else can run) and never falls
       // through to a V2 flow — that would silently launch the wrong
-      // protocol. Only the two TokenFactory-pilot modes exist on V4.
+      // protocol. Every mode except Deploy Custom Tax Token exists on V4.
       if(!v4Selectable()){ toast("V4 is under development."); return; }
       if(!V4_MODES.includes(draft.mode)){ toast("That mode isn't available on V4 yet."); return; }
-      const v4Address = v4TokenFactoryAddress();
-      if(!v4Address){ toast("V4 factory not configured — save its address in Admin first."); return; }
+      const v4Address = v4FactoryForMode(draft.mode);
+      if(!v4Address){ toast(`${v4FactoryNameForMode(draft.mode)} not configured — save its address in Admin first.`); return; }
+      if(draft.mode==="custom" || draft.mode==="customCurve"){
+        draft.customFees.reflectionAsset = ""; // V4 reflections are always in-kind
+        if(!validateCustomFeesOrToast()) return;
+      }
+      if(draft.mode==="custom" || draft.mode==="curve" || draft.mode==="customCurve"){
+        launchV4ExtraOnChainFlow(v4Address);
+        return;
+      }
       launchOnChainFlow(v4Address);
       return;
     }
@@ -12374,7 +12871,32 @@
         ethBalance: bal ? BigInt(bal) : null,
       };
     }));
-    return { factory, hook, locker, poolManager, fState, onchain, hookState, lockerState, code, slots };
+    // The custom-tax factory, the curve factory and the liquidity compounder:
+    // deployed? authorised on the hook/locker? compounder wired + exempt?
+    const extraAddrs = { customFactory: v4CustomTokenFactoryAddress(), curveFactory: v4CurveFactoryAddress(), compounder: v4CompounderAddress() };
+    const extra = {};
+    const hookCompH = await v4Read(hook, V4_HOOK_COMPOUNDER_SELECTOR);
+    const hookCompounder = hookCompH ? v4Addr(hookCompH) : null;
+    await Promise.all(Object.keys(extraAddrs).map(async (k) => {
+      const addr = extraAddrs[k];
+      if(!addr){ extra[k] = null; return; }
+      const hasCode = await v4HasCode(addr);
+      const [launcherH, extraFH, exemptH, ownerH] = await Promise.all([
+        hook && k!=="compounder" ? v4Read(hook, V4_HOOK_IS_LAUNCHER_SELECTOR + encodeAddressParam(addr)) : null,
+        locker && k!=="compounder" ? v4Read(locker, V4_LOCKER_EXTRA_FACTORIES_SELECTOR + encodeAddressParam(addr)) : null,
+        hook && k==="compounder" ? v4Read(hook, V4_TAX_EXEMPT_SELECTOR + encodeAddressParam(addr)) : null,
+        hasCode && k!=="compounder" ? v4Read(addr, OWNER_SELECTOR) : null,
+      ]);
+      extra[k] = {
+        addr, hasCode,
+        isLauncher: launcherH ? decodeUint256(launcherH) !== 0n : null,
+        isExtraFactory: extraFH ? decodeUint256(extraFH) !== 0n : null,
+        exempt: exemptH ? decodeUint256(exemptH) !== 0n : null,
+        owner: ownerH ? v4Addr(ownerH) : null,
+        setOnHook: k==="compounder" ? (hookCompounder ? sameAddr(hookCompounder, addr) : null) : null,
+      };
+    }));
+    return { factory, hook, locker, poolManager, fState, onchain, hookState, lockerState, code, slots, extra };
   }
 
   function v4CodePill(has, addr){
@@ -12437,6 +12959,33 @@
       }
       row("V4LiquidityLocker", locker, p, "Holds each creator's locked V4 position");
     }
+    // Custom-tax factory, curve factory, compounder
+    {
+      const ex = snap.extra || {};
+      const factoryPills = (e, notSet) => {
+        if(!e) return [v4Pill("warn", notSet)];
+        const p = [v4CodePill(e.hasCode, e.addr)];
+        if(e.isLauncher===null) p.push(v4Pill("warn","Hook link unreadable"));
+        else p.push(e.isLauncher ? v4Pill("ok","Authorised on hook") : v4Pill("bad","Not authorised on hook (hook.setLauncher)"));
+        if(e.isExtraFactory===null) p.push(v4Pill("warn","Locker link unreadable"));
+        else p.push(e.isExtraFactory ? v4Pill("ok","Authorised on locker") : v4Pill("bad","Not authorised on locker (locker.setExtraFactory)"));
+        if(e.owner) p.push(wallet && sameAddr(e.owner, wallet) ? v4Pill("ok","You are owner") : v4Pill("warn","Owner: "+fmtAddr(e.owner)));
+        return p;
+      };
+      row("V4CustomTokenFactory", v4CustomTokenFactoryAddress(), factoryPills(ex.customFactory, "Not configured — V4 custom tax launches disabled"), "Custom-tax launches (in-kind fees)");
+      row("V4CurveFactory", v4CurveFactoryAddress(), factoryPills(ex.curveFactory, "Not configured — V4 Quick Launch disabled"), "Bonding curve, then a V4 pool at graduation");
+      {
+        const e = ex.compounder;
+        const p = [];
+        if(!e) p.push(v4Pill("warn","Not configured — liquidity share can't compound"));
+        else {
+          p.push(v4CodePill(e.hasCode, e.addr));
+          p.push(e.setOnHook===null ? v4Pill("warn","Hook link unreadable") : e.setOnHook ? v4Pill("ok","Set on hook") : v4Pill("bad","Not the hook's compounder (hook.setLiquidityCompounder)"));
+          p.push(e.exempt===null ? v4Pill("warn","Couldn't check exemption") : e.exempt ? v4Pill("ok","Tax-exempt") : v4Pill("bad","Not tax-exempt — setTaxExempt(compounder,true)"));
+        }
+        row("V4LiquidityCompounder", v4CompounderAddress(), p, "Turns the custom liquidity share into permanent pool liquidity");
+      }
+    }
     // Uniswap V4 PoolManager
     row("Uniswap V4 PoolManager", poolManager, poolManager ? [v4CodePill(code.poolManager, poolManager)] : [v4Pill("warn","Read from the factory once it's configured")], "Uniswap's contract — not ours");
     // Things the factory points at
@@ -12489,6 +13038,9 @@
         if(!h.v4TokenFactoryAddress) checks.push(v4Pill("warn","Relayer has no V4_TOKEN_FACTORY_ADDRESS"));
         else if(factory && !sameAddr(h.v4TokenFactoryAddress, factory)) checks.push(v4Pill("bad","Relayer watches "+fmtAddr(h.v4TokenFactoryAddress)));
         else checks.push(v4Pill("ok","Relayer watches this factory"));
+        const cf = v4CustomTokenFactoryAddress(), qf = v4CurveFactoryAddress();
+        if(cf) checks.push(!h.v4CustomTokenFactoryAddress ? v4Pill("warn","Relayer isn't tracking V4CustomTokenFactory") : sameAddr(h.v4CustomTokenFactoryAddress, cf) ? v4Pill("ok","Tracks custom-tax factory") : v4Pill("bad","Relayer tracks a different custom-tax factory"));
+        if(qf) checks.push(!h.v4CurveFactoryAddress ? v4Pill("warn","Relayer isn't tracking V4CurveFactory") : sameAddr(h.v4CurveFactoryAddress, qf) ? v4Pill("ok","Tracks curve factory") : v4Pill("bad","Relayer tracks a different curve factory"));
         if(fState && h.relayer){
           if(isZeroAddr(fState.relayer)) checks.push(v4Pill("warn","Factory relayer unset — gasless off"));
           else if(sameAddr(fState.relayer, h.relayer)) checks.push(v4Pill("ok","Factory relayer = relayer wallet"));
@@ -12750,11 +13302,14 @@
       { key: "bondingCurveFactory", label: "BondingCurveFactory" },
       { key: "customBondingCurveFactory", label: "CustomBondingCurveFactory" },
     ]},
-    { proto: "v4", title: "Uniswap V4", note: "Admin-only, under development. Launching on V4 is disabled until the V4 transaction flow is wired in.", rows: [
+    { proto: "v4", title: "Uniswap V4", note: "Admin-only, under development. Each V4 launch mode stays disabled until its factory address is set.", rows: [
       { key: "v4TokenFactory", label: "V4TokenFactory" },
       { key: "v4TaxHook", label: "V4TaxHook" },
       { key: "v4LiquidityLocker", label: "V4LiquidityLocker" },
       { key: "v4SwapRouter", label: "V4SwapRouter" },
+      { key: "v4CustomTokenFactory", label: "V4CustomTokenFactory" },
+      { key: "v4CurveFactory", label: "V4CurveFactory" },
+      { key: "v4LiquidityCompounder", label: "V4LiquidityCompounder" },
     ]},
   ];
   function fmtDeployedDate(iso){
