@@ -48,6 +48,11 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     /// deployment, because the factory's constructor needs this address first.
     address public factory;
 
+    /// @notice Additional launchers (V4CustomTokenFactory, V4CurveFactory) that
+    /// may create locks, authorized by the owner. Each lock's position is
+    /// keyed by its lockId, so launchers can never touch each other's locks.
+    mapping(address => bool) public extraFactories;
+
     struct Lock {
         address token; // currency1 of the pool (currency0 is always native ETH)
         address hooks;
@@ -68,6 +73,7 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     }
 
     event FactorySet(address indexed factory);
+    event ExtraFactorySet(address indexed factory, bool allowed);
     event Locked(
         uint256 indexed lockId, bytes32 indexed poolId, address indexed owner, uint128 liquidity, uint256 unlockTime
     );
@@ -76,7 +82,9 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     event EthRescued(address indexed to, uint256 amount);
 
     modifier onlyFactory() {
-        require(msg.sender == factory, "V4LiquidityLocker: caller is not the factory");
+        require(
+            msg.sender == factory || extraFactories[msg.sender], "V4LiquidityLocker: caller is not the factory"
+        );
         _;
     }
 
@@ -90,6 +98,14 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         require(factory_ != address(0), "V4LiquidityLocker: invalid factory");
         factory = factory_;
         emit FactorySet(factory_);
+    }
+
+    /// @notice Authorize (or revoke) an additional launcher. Revoking one
+    /// never affects locks it already created.
+    function setExtraFactory(address factory_, bool allowed) external onlyOwner {
+        require(factory_ != address(0), "V4LiquidityLocker: invalid factory");
+        extraFactories[factory_] = allowed;
+        emit ExtraFactorySet(factory_, allowed);
     }
 
     /// @notice Same safety rail as V2: ownership can't be renounced before a

@@ -17,6 +17,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import "./interfaces/V4IAggregatorV3.sol";
 
+/// @dev The slice of V4CustomToken the hook talks to.
+interface IV4CustomTokenHooked {
+    function marketingWallet() external view returns (address);
+    function notifyReflection(uint256 amount) external;
+    function burn(uint256 amount) external;
+}
+
 /// @title V4TaxHook
 /// @notice The Uniswap V4 hook that collects HoodLaunch's trading tax at the
 /// pool, as part of each swap. It replaces the V2 design where the token's own
@@ -80,6 +87,35 @@ contract V4TaxHook {
     /// pool on this hook or to configure one. Set once.
     address public factory;
 
+    /// @notice Extra pool launchers (V4CustomTokenFactory, V4CurveFactory)
+    /// allowed to initialize + configure pools on this hook, in addition to
+    /// `factory`. Managed by the deployer. Each pool remembers who configured
+    /// it (poolLauncher) and only that launcher may touch it afterwards.
+    mapping(address => bool) public launchers;
+    mapping(PoolId => address) public poolLauncher;
+
+    /// @notice Per-side creator fee split for a "custom tax" pool, in bps of
+    /// the token leg of each swap. Fixed for the pool's life. All four parts
+    /// of one side together are capped at MAX_CUSTOM_SIDE_BPS.
+    struct CustomFees {
+        uint16 buyReflectionBps;
+        uint16 buyMarketingBps;
+        uint16 buyLiquidityBps;
+        uint16 buyBurnBps;
+        uint16 sellReflectionBps;
+        uint16 sellMarketingBps;
+        uint16 sellLiquidityBps;
+        uint16 sellBurnBps;
+    }
+    uint256 public constant MAX_CUSTOM_SIDE_BPS = 500; // 5.00% per side, same cap as V2's CustomToken
+    mapping(PoolId => CustomFees) public customFees;
+    mapping(PoolId => bool) public hasCustomFees;
+
+    /// @notice Where the "liquidity" share of a custom fee is delivered: the
+    /// V4LiquidityCompounder, which turns it into permanent pool liquidity.
+    /// Set once by the deployer.
+    address public liquidityCompounder;
+
     struct PoolTax {
         bool configured;
         bool taxActive;
@@ -111,6 +147,10 @@ contract V4TaxHook {
     event TaxExemptSet(address indexed swapper, bool exempt);
     event PoolConfigured(PoolId indexed poolId, address indexed token, address feeWallet, uint256 feeBps, uint256 graduationTargetUsd);
     event TaxCollected(PoolId indexed poolId, uint256 fee, uint256 toRewards, uint256 toCreator, uint256 toFeeWallet);
+    event CustomTaxCollected(PoolId indexed poolId, uint256 reflection, uint256 marketing, uint256 liquidity, uint256 burned);
+    event CustomFeesConfigured(PoolId indexed poolId, address indexed launcher);
+    event LauncherSet(address indexed launcher, bool allowed);
+    event LiquidityCompounderSet(address indexed compounder);
     event TaxDisabled(PoolId indexed poolId, uint256 marketCapInFeedDecimals);
     event GraduationCandidateObserved(PoolId indexed poolId, uint256 marketCapInFeedDecimals, uint256 confirmEligibleAt);
     event GraduationCandidateReset(PoolId indexed poolId);
@@ -129,6 +169,15 @@ contract V4TaxHook {
 
     modifier onlyFactory() {
         if (msg.sender != factory) revert NotFactory();
+        _;
+    }
+
+    function isLauncher(address a) public view returns (bool) {
+        return a != address(0) && (a == factory || launchers[a]);
+    }
+
+    modifier onlyLauncher() {
+        if (!isLauncher(msg.sender)) revert NotFactory();
         _;
     }
 
@@ -158,8 +207,27 @@ contract V4TaxHook {
         emit TaxExemptSet(swapper, exempt);
     }
 
+    /// @notice Deployer-only: allow (or stop allowing) an additional pool
+    /// launcher. Revoking one does not touch pools it already configured.
+    function setLauncher(address launcher, bool allowed) external {
+        require(msg.sender == deployer, "V4TaxHook: not deployer");
+        require(launcher != address(0), "V4TaxHook: invalid launcher");
+        launchers[launcher] = allowed;
+        emit LauncherSet(launcher, allowed);
+    }
+
+    /// @notice Deployer-only, once: the contract that receives the "liquidity"
+    /// share of custom fees.
+    function setLiquidityCompounder(address compounder) external {
+        require(msg.sender == deployer, "V4TaxHook: not deployer");
+        require(liquidityCompounder == address(0), "V4TaxHook: compounder already set");
+        require(compounder != address(0), "V4TaxHook: invalid compounder");
+        liquidityCompounder = compounder;
+        emit LiquidityCompounderSet(compounder);
+    }
+
     // ---------------------------------------------------------------
-    // Pool configuration (factory only)
+    // Pool configuration (launchers only)
     // ---------------------------------------------------------------
 
     /// @notice Snapshots a pool's tax settings. Called by the factory right
@@ -178,7 +246,7 @@ contract V4TaxHook {
         address creatorRewardsDistributor_,
         uint256 creatorRewardBps_,
         address feeWalletDistributor_
-    ) external onlyFactory {
+    ) external onlyLauncher {
         if (address(key.hooks) != address(this)) revert InvalidPool();
         if (!(Currency.unwrap(key.currency0) == address(0))) revert InvalidPool();
         PoolId id = key.toId();
@@ -196,6 +264,7 @@ contract V4TaxHook {
         );
 
         p.configured = true;
+        poolLauncher[id] = msg.sender;
         p.token = Currency.unwrap(key.currency1);
         p.feeWallet = feeWallet_;
         p.feeBps = uint16(feeBps_);
@@ -212,13 +281,34 @@ contract V4TaxHook {
         emit PoolConfigured(id, p.token, feeWallet_, feeBps_, graduationTargetUsd_);
     }
 
+    /// @notice Attaches a creator fee split to a pool this launcher just
+    /// configured. Same call frame as pool creation, so no swap can happen
+    /// before it. One-shot; the split is final.
+    function configureCustomPool(PoolKey calldata key, CustomFees calldata f) external onlyLauncher {
+        PoolId id = key.toId();
+        require(poolTax[id].configured, "V4TaxHook: pool not configured");
+        require(poolLauncher[id] == msg.sender, "V4TaxHook: not this pool's launcher");
+        require(!hasCustomFees[id], "V4TaxHook: custom fees already set");
+        uint256 buyTotal = uint256(f.buyReflectionBps) + f.buyMarketingBps + f.buyLiquidityBps + f.buyBurnBps;
+        uint256 sellTotal = uint256(f.sellReflectionBps) + f.sellMarketingBps + f.sellLiquidityBps + f.sellBurnBps;
+        require(buyTotal <= MAX_CUSTOM_SIDE_BPS, "V4TaxHook: buy fees exceed 5%");
+        require(sellTotal <= MAX_CUSTOM_SIDE_BPS, "V4TaxHook: sell fees exceed 5%");
+        if (f.buyLiquidityBps > 0 || f.sellLiquidityBps > 0) {
+            require(liquidityCompounder != address(0), "V4TaxHook: liquidity compounder not set");
+        }
+        customFees[id] = f;
+        hasCustomFees[id] = true;
+        emit CustomFeesConfigured(id, msg.sender);
+    }
+
     /// @notice Escape hatch for a dead price feed -- same rules as V2's
     /// LaunchedToken.updatePriceFeed: factory-only (which gates it behind its
     /// own owner) and ONLY allowed while the current feed cannot report a fresh
     /// price, so it can never be used to nudge a healthy token's graduation.
-    function updatePriceFeed(PoolId id, address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyFactory {
+    function updatePriceFeed(PoolId id, address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyLauncher {
         PoolTax storage p = poolTax[id];
         require(p.configured, "V4TaxHook: pool not configured");
+        require(poolLauncher[id] == msg.sender, "V4TaxHook: not this pool's launcher");
         require(newPriceFeed_ != address(0), "V4TaxHook: invalid price feed");
         require(newMaxOracleStaleness_ > 0 && newMaxOracleStaleness_ <= type(uint32).max, "V4TaxHook: bad oracle staleness");
         (, bool feedIsFresh) = currentMarketCapInFeedDecimals(id);
@@ -236,9 +326,22 @@ contract V4TaxHook {
     /// asserts the (ETH, token) shape, so there is no way to attach this hook
     /// to a differently-shaped pool.
     function beforeInitialize(address sender, PoolKey calldata key, uint160) external view onlyPoolManager returns (bytes4) {
-        if (sender != factory || factory == address(0)) revert PoolInitNotByFactory();
+        if (!isLauncher(sender)) revert PoolInitNotByFactory();
         if (Currency.unwrap(key.currency0) != address(0)) revert InvalidPool();
         return IHooks.beforeInitialize.selector;
+    }
+
+    /// @dev Total tax for one direction of one pool, split into the platform's
+    /// part (switched off at graduation) and the creator's custom part (never
+    /// switched off). A buy is zeroForOne (ETH in, token out).
+    function _bps(PoolId id, PoolTax storage p, bool isBuy) private view returns (uint256 platformBps, uint256 customBps) {
+        platformBps = p.taxActive ? p.feeBps : 0;
+        if (hasCustomFees[id]) {
+            CustomFees storage f = customFees[id];
+            customBps = isBuy
+                ? uint256(f.buyReflectionBps) + f.buyMarketingBps + f.buyLiquidityBps + f.buyBurnBps
+                : uint256(f.sellReflectionBps) + f.sellMarketingBps + f.sellLiquidityBps + f.sellBurnBps;
+        }
     }
 
     /// @dev Handles the two cases where the TOKEN is the specified currency:
@@ -254,23 +357,26 @@ contract V4TaxHook {
         onlyPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        PoolTax storage p = poolTax[key.toId()];
-        if (p.taxActive && !taxExempt[sender]) {
-            bool exactIn = params.amountSpecified < 0;
-            // token is currency1: specified iff !(specifiedIsCurrency0)
-            bool tokenSpecified = (exactIn == params.zeroForOne) ? false : true;
-            if (tokenSpecified) {
+        PoolId id = key.toId();
+        PoolTax storage p = poolTax[id];
+        bool exactIn = params.amountSpecified < 0;
+        // token is currency1: specified iff !(specifiedIsCurrency0)
+        bool tokenSpecified = (exactIn == params.zeroForOne) ? false : true;
+        if (tokenSpecified && !taxExempt[sender]) {
+            (uint256 platformBps, uint256 customBps) = _bps(id, p, params.zeroForOne);
+            uint256 bps = platformBps + customBps;
+            if (bps > 0) {
                 uint256 fee;
                 if (exactIn) {
                     // SELL exact-in
-                    fee = (uint256(-params.amountSpecified) * p.feeBps) / 10_000;
+                    fee = (uint256(-params.amountSpecified) * bps) / 10_000;
                 } else {
                     // BUY exact-out
-                    fee = (uint256(params.amountSpecified) * p.feeBps) / (10_000 - p.feeBps);
+                    fee = (uint256(params.amountSpecified) * bps) / (10_000 - bps);
                 }
                 fee = _affordable(p.token, fee);
                 if (fee > 0) {
-                    _distribute(key.toId(), p, fee);
+                    _distribute(id, p, fee, platformBps, customBps, params.zeroForOne);
                     return (IHooks.beforeSwap.selector, toBeforeSwapDelta(fee.toInt128(), 0), 0);
                 }
             }
@@ -289,26 +395,35 @@ contract V4TaxHook {
     {
         PoolId id = key.toId();
         PoolTax storage p = poolTax[id];
-        if (!p.taxActive) return (IHooks.afterSwap.selector, 0);
+        if (!p.taxActive && !hasCustomFees[id]) return (IHooks.afterSwap.selector, 0);
 
         bool exactIn = params.amountSpecified < 0;
         bool tokenUnspecified = (exactIn == params.zeroForOne);
         uint256 fee;
         if (tokenUnspecified && !taxExempt[sender]) {
-            int128 tokenDelta = delta.amount1();
-            if (exactIn) {
-                // BUY exact-in: the swapper receives tokenDelta > 0
-                if (tokenDelta > 0) fee = (uint256(uint128(tokenDelta)) * p.feeBps) / 10_000;
-            } else {
-                // SELL exact-out: the swapper pays -tokenDelta
-                if (tokenDelta < 0) fee = (uint256(uint128(-tokenDelta)) * p.feeBps) / (10_000 - p.feeBps);
-            }
-            fee = _affordable(p.token, fee);
-            if (fee > 0) _distribute(id, p, fee);
+            fee = _afterSwapFee(id, p, params.zeroForOne, exactIn, delta.amount1());
         }
 
-        _maybeDisableTax(id, p);
+        if (p.taxActive) _maybeDisableTax(id, p);
         return (IHooks.afterSwap.selector, fee.toInt128());
+    }
+
+    function _afterSwapFee(PoolId id, PoolTax storage p, bool isBuy, bool exactIn, int128 tokenDelta)
+        private
+        returns (uint256 fee)
+    {
+        (uint256 platformBps, uint256 customBps) = _bps(id, p, isBuy);
+        uint256 bps = platformBps + customBps;
+        if (bps == 0) return 0;
+        if (exactIn) {
+            // BUY exact-in: the swapper receives tokenDelta > 0
+            if (tokenDelta > 0) fee = (uint256(uint128(tokenDelta)) * bps) / 10_000;
+        } else {
+            // SELL exact-out: the swapper pays -tokenDelta
+            if (tokenDelta < 0) fee = (uint256(uint128(-tokenDelta)) * bps) / (10_000 - bps);
+        }
+        fee = _affordable(p.token, fee);
+        if (fee > 0) _distribute(id, p, fee, platformBps, customBps, isBuy);
     }
 
     // ---------------------------------------------------------------
@@ -325,17 +440,31 @@ contract V4TaxHook {
         return IERC20(token).balanceOf(address(poolManager)) >= fee ? fee : 0;
     }
 
-    /// @dev Pays `fee` (a token amount) out of the PoolManager. take() books a
-    /// debt against this hook which the swap's returned delta credits back at
-    /// the end of the swap, netting to zero.
-    function _distribute(PoolId id, PoolTax storage p, uint256 fee) private {
+    /// @dev Splits `fee` (a token amount) between the platform's part and the
+    /// creator's custom part in proportion to their bps, then pays each out of
+    /// the PoolManager. take() books a debt against this hook which the swap's
+    /// returned delta credits back at the end of the swap, netting to zero.
+    function _distribute(PoolId id, PoolTax storage p, uint256 fee, uint256 platformBps, uint256 customBps, bool isBuy)
+        private
+    {
+        uint256 totalBps = platformBps + customBps;
+        uint256 platformFee = customBps == 0 ? fee : (platformBps == 0 ? 0 : (fee * platformBps) / totalBps);
+        uint256 customFee = fee - platformFee;
+        // Creator part first: its reflection share must be booked before any
+        // other token delivery changes who is eligible for it.
+        if (customFee > 0) _distributeCustom(id, p, customFee, customBps, isBuy);
+        if (platformFee > 0) _distributePlatform(id, p, platformFee, platformBps);
+    }
+
+    function _distributePlatform(PoolId id, PoolTax storage p, uint256 fee, uint256 platformBps) private {
         // Same split rule as V2: cuts are carved OUT OF the fee, derived from
         // the fee itself (not from a gross amount), so they can never add up to
         // more than the fee.
-        uint256 feeBps_ = p.feeBps;
-        uint256 rewardCut = (p.rewardsDistributor != address(0) && p.rewardBps > 0) ? (fee * p.rewardBps) / feeBps_ : 0;
-        uint256 creatorCut =
-            (p.creatorRewardsDistributor != address(0) && p.creatorRewardBps > 0) ? (fee * p.creatorRewardBps) / feeBps_ : 0;
+        uint256 rewardCut =
+            (p.rewardsDistributor != address(0) && p.rewardBps > 0) ? (fee * p.rewardBps) / platformBps : 0;
+        uint256 creatorCut = (p.creatorRewardsDistributor != address(0) && p.creatorRewardBps > 0)
+            ? (fee * p.creatorRewardBps) / platformBps
+            : 0;
         uint256 rest = fee - rewardCut - creatorCut;
 
         Currency token = Currency.wrap(p.token);
@@ -345,6 +474,47 @@ contract V4TaxHook {
             poolManager.take(token, p.feeWalletDistributor != address(0) ? p.feeWalletDistributor : p.feeWallet, rest);
         }
         emit TaxCollected(id, fee, rewardCut, creatorCut, rest);
+    }
+
+    /// @dev The creator's part. Reflection -> the token itself (shared out to
+    /// holders by the token), marketing -> the token's marketing wallet (burned
+    /// if the creator has renounced it to nobody), liquidity -> the compounder,
+    /// burn -> destroyed on the spot. Rounding dust goes to the first active
+    /// component so the whole customFee is always spent.
+    function _distributeCustom(PoolId id, PoolTax storage p, uint256 fee, uint256 customBps, bool isBuy) private {
+        CustomFees storage f = customFees[id];
+        uint256[4] memory bpsParts = isBuy
+            ? [uint256(f.buyReflectionBps), f.buyMarketingBps, f.buyLiquidityBps, f.buyBurnBps]
+            : [uint256(f.sellReflectionBps), f.sellMarketingBps, f.sellLiquidityBps, f.sellBurnBps];
+        uint256[4] memory amt;
+        uint256 spent;
+        uint256 firstActive = 4;
+        for (uint256 i = 0; i < 4; i++) {
+            if (bpsParts[i] == 0) continue;
+            if (firstActive == 4) firstActive = i;
+            amt[i] = (fee * bpsParts[i]) / customBps;
+            spent += amt[i];
+        }
+        amt[firstActive] += fee - spent;
+
+        address token = p.token;
+        Currency cur = Currency.wrap(token);
+        if (amt[0] > 0) {
+            poolManager.take(cur, token, amt[0]);
+            IV4CustomTokenHooked(token).notifyReflection(amt[0]);
+        }
+        uint256 burnAmt = amt[3];
+        if (amt[1] > 0) {
+            address wallet = IV4CustomTokenHooked(token).marketingWallet();
+            if (wallet == address(0)) burnAmt += amt[1];
+            else poolManager.take(cur, wallet, amt[1]);
+        }
+        if (amt[2] > 0) poolManager.take(cur, liquidityCompounder, amt[2]);
+        if (burnAmt > 0) {
+            poolManager.take(cur, address(this), burnAmt);
+            IV4CustomTokenHooked(token).burn(burnAmt);
+        }
+        emit CustomTaxCollected(id, amt[0], amt[1], amt[2], burnAmt);
     }
 
     // ---------------------------------------------------------------
