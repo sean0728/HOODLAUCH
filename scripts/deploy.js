@@ -50,8 +50,8 @@ const KNOWN_PRICE_FEED_ADDRESSES = {
 // fetched right before deploying. DEPLOY_FEE_WEI/LAUNCH_FEE_WEI in .env
 // override this conversion entirely, for anyone who'd rather set an exact
 // wei amount directly.
-const DEPLOY_FEE_USD = 50;
-const LAUNCH_FEE_USD = 100;
+const DEPLOY_FEE_USD = 25;
+const LAUNCH_FEE_USD = 25;
 
 // Quick Launch (bonding curve) pricing target — no pool exists yet at
 // curve-creation time, same "deploy only" situation deployFeeWei prices for
@@ -450,6 +450,8 @@ async function main() {
   // already-deployed distributor instead of deploying a second one.
   let rewardsDistributorAddress = process.env.REWARDS_DISTRIBUTOR_ADDRESS || null;
   let platformTokenAddress = process.env.PLATFORM_TOKEN_ADDRESS || null;
+  let platformTokenVerified = null;
+  let rewardsDistributorVerified = null;
 
   if (!rewardsDistributorAddress && process.env.DEPLOY_PLATFORM_TOKEN === "true") {
     const rewardsDistributorOwner = process.env.REWARDS_DISTRIBUTOR_OWNER_ADDRESS || deployer.address;
@@ -459,14 +461,15 @@ async function main() {
       const platformTokenSymbol = process.env.PLATFORM_TOKEN_SYMBOL || "HOOD";
       const platformTokenSupply = hre.ethers.parseEther(process.env.PLATFORM_TOKEN_SUPPLY || "1000000000"); // 1B, 18 decimals, by default
       const platformTokenInitialHolder = process.env.PLATFORM_TOKEN_INITIAL_HOLDER || deployer.address;
-
-      const PlatformToken = await hre.ethers.getContractFactory("PlatformToken");
-      const platformToken = await PlatformToken.deploy(
+      const platformTokenConstructorArgs = [
         platformTokenName,
         platformTokenSymbol,
         platformTokenSupply,
-        platformTokenInitialHolder
-      );
+        platformTokenInitialHolder,
+      ];
+
+      const PlatformToken = await hre.ethers.getContractFactory("PlatformToken");
+      const platformToken = await PlatformToken.deploy(...platformTokenConstructorArgs);
       await platformToken.waitForDeployment();
       platformTokenAddress = await platformToken.getAddress();
       console.log(
@@ -474,15 +477,29 @@ async function main() {
           `full supply minted to ${platformTokenInitialHolder}. Seeding its own DEX pool and adding real ` +
           "liquidity is a separate, later step from this deployment."
       );
+
+      // Real, unique bytecode — never verified by any earlier version of
+      // this script. Fixed here.
+      const platformTokenVerification = await verifyContract(platformTokenAddress, platformTokenConstructorArgs);
+      platformTokenVerified = platformTokenVerification.verified;
     } else {
       console.log(`Reusing already-deployed PlatformToken at ${platformTokenAddress}.`);
     }
 
+    const rewardsDistributorConstructorArgs = [routerAddress, rewardsDistributorOwner];
     const PlatformRewardsDistributor = await hre.ethers.getContractFactory("PlatformRewardsDistributor");
-    const distributor = await PlatformRewardsDistributor.deploy(routerAddress, rewardsDistributorOwner);
+    const distributor = await PlatformRewardsDistributor.deploy(...rewardsDistributorConstructorArgs);
     await distributor.waitForDeployment();
     rewardsDistributorAddress = await distributor.getAddress();
     console.log(`PlatformRewardsDistributor deployed at ${rewardsDistributorAddress}, owned by ${rewardsDistributorOwner}.`);
+
+    // Real, unique bytecode — never verified by any earlier version of this
+    // script. Fixed here.
+    const rewardsDistributorVerification = await verifyContract(
+      rewardsDistributorAddress,
+      rewardsDistributorConstructorArgs
+    );
+    rewardsDistributorVerified = rewardsDistributorVerification.verified;
 
     const setPlatformTokenTx = await distributor.connect(deployer).setPlatformToken(platformTokenAddress);
     await setPlatformTokenTx.wait();
@@ -515,77 +532,86 @@ async function main() {
   }
 
   // ---- Creator rewards (per-token ETH, claimable by the token's own
-  // creator) — entirely optional, and off by default. Leaving
-  // CREATOR_REWARDS_DISTRIBUTOR_ADDRESS unset leaves creatorRewardBps
-  // effectively inactive on both factories (LaunchedToken/CustomToken both
-  // require a nonzero distributor before crediting a nonzero bps at
-  // configureTax/configurePlatformTax time), so trading tax stays 100%
-  // unchanged until this is wired in deliberately. Unlike
-  // PlatformRewardsDistributor, this one pools nothing across holders —
-  // it swaps each token's own accumulated cut for ETH and lets that
-  // token's creator claim it individually, so it needs no PlatformToken
-  // reference and no separate "seed a token" step.
+  // creator) — ALWAYS deployed and wired into all four factories as of this
+  // version of the script. This used to be gated behind
+  // DEPLOY_CREATOR_REWARDS=true and off by default; that exact opt-in flag
+  // is what let creatorRewardBps sit silently inactive on every token
+  // launched after the Sept 2026 redeploy until someone noticed and patched
+  // it in after the fact (see scripts/setCreatorRewardsDistributor.js's own
+  // comment for that incident). Making this unconditional removes the
+  // "forgot to flip the flag" failure mode entirely. Set
+  // CREATOR_REWARDS_DISTRIBUTOR_ADDRESS to reuse an already-deployed
+  // instance instead of deploying a new one (e.g. when redeploying just the
+  // factories). Unlike PlatformRewardsDistributor, this one pools nothing
+  // across holders — it swaps each token's own accumulated cut for ETH and
+  // lets that token's creator claim it individually, so it needs no
+  // PlatformToken reference and no separate "seed a token" step.
   let creatorRewardsDistributorAddress = process.env.CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null;
+  let creatorRewardsDistributorVerified = null;
 
-  if (!creatorRewardsDistributorAddress && process.env.DEPLOY_CREATOR_REWARDS === "true") {
+  if (!creatorRewardsDistributorAddress) {
     const creatorRewardsDistributorOwner = process.env.CREATOR_REWARDS_DISTRIBUTOR_OWNER_ADDRESS || deployer.address;
+    const creatorRewardsDistributorConstructorArgs = [routerAddress, creatorRewardsDistributorOwner];
 
     const CreatorRewardsDistributor = await hre.ethers.getContractFactory("CreatorRewardsDistributor");
-    const creatorDistributor = await CreatorRewardsDistributor.deploy(routerAddress, creatorRewardsDistributorOwner);
+    const creatorDistributor = await CreatorRewardsDistributor.deploy(...creatorRewardsDistributorConstructorArgs);
     await creatorDistributor.waitForDeployment();
     creatorRewardsDistributorAddress = await creatorDistributor.getAddress();
     console.log(
       `CreatorRewardsDistributor deployed at ${creatorRewardsDistributorAddress}, owned by ${creatorRewardsDistributorOwner}.`
     );
-  } else if (creatorRewardsDistributorAddress) {
+
+    // Real, unique bytecode — never verified by any earlier version of this
+    // script even when DEPLOY_CREATOR_REWARDS=true was set. Fixed here.
+    const creatorRewardsDistributorVerification = await verifyContract(
+      creatorRewardsDistributorAddress,
+      creatorRewardsDistributorConstructorArgs
+    );
+    creatorRewardsDistributorVerified = creatorRewardsDistributorVerification.verified;
+  } else {
     console.log(`Reusing already-deployed CreatorRewardsDistributor at ${creatorRewardsDistributorAddress}.`);
   }
 
-  if (creatorRewardsDistributorAddress) {
-    const setCreatorRewardsTx1 = await factory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
-    await setCreatorRewardsTx1.wait();
-    const setCreatorRewardsTx2 = await customFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
-    await setCreatorRewardsTx2.wait();
-    const setCreatorRewardsTx3 = await bondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
-    await setCreatorRewardsTx3.wait();
-    const setCreatorRewardsTx4 = await customBondingCurveFactory.setCreatorRewardsDistributor(
-      creatorRewardsDistributorAddress
-    );
-    await setCreatorRewardsTx4.wait();
-    console.log(
-      "TokenFactory, CustomTokenFactory, BondingCurveFactory, and CustomBondingCurveFactory all wired to " +
-        `CreatorRewardsDistributor at ${creatorRewardsDistributorAddress}.`
-    );
-  }
+  const setCreatorRewardsTx1 = await factory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
+  await setCreatorRewardsTx1.wait();
+  const setCreatorRewardsTx2 = await customFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
+  await setCreatorRewardsTx2.wait();
+  const setCreatorRewardsTx3 = await bondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress);
+  await setCreatorRewardsTx3.wait();
+  const setCreatorRewardsTx4 = await customBondingCurveFactory.setCreatorRewardsDistributor(
+    creatorRewardsDistributorAddress
+  );
+  await setCreatorRewardsTx4.wait();
+  console.log(
+    "TokenFactory, CustomTokenFactory, BondingCurveFactory, and CustomBondingCurveFactory all wired to " +
+      `CreatorRewardsDistributor at ${creatorRewardsDistributorAddress}.`
+  );
 
   // ---- Fee-wallet distributor (the platform's own trading-tax remainder —
   // whatever's left of feeBps after rewardBps/creatorRewardBps are carved
   // out — converted to ETH automatically instead of sitting as whatever
-  // token it was taxed in) — entirely optional, same "off by default,
-  // wired in deliberately" shape as the two distributors above. Leaving
-  // FEE_WALLET_DISTRIBUTOR_ADDRESS unset leaves feeWalletDistributor unset
-  // on both factories, so every taxed transfer's fee-wallet remainder keeps
-  // going straight to the plain platformFeeWallet address, exactly as it
-  // always has (see LaunchedToken._update / CustomToken._update: `super.
-  // _update(from, feeWalletDistributor != address(0) ? feeWalletDistributor
-  // : feeWallet, toFeeWallet)`).
-  //
-  // THIS BLOCK DID NOT EXIST before — deploy.js never wired this up
-  // automatically, at all, for any run before this one. That's the exact
-  // same "silently off until wired" trap that left creatorRewardsDistributor
-  // unset on every token launched after the Sept 2026 redeploy (see
-  // scripts/setCreatorRewardsDistributor.js's own comment for that
-  // incident) — except there wasn't even an opt-in env var path here to
-  // forget to set; wiring feeWalletDistributor onto an already-deployed
-  // factory required either a manual admin-panel action or a one-off
-  // script, and neither happened. If you're redeploying the factories with
-  // an existing FeeWalletDistributor already live, set
-  // FEE_WALLET_DISTRIBUTOR_ADDRESS so this run wires it in immediately
-  // instead of leaving every new launch on the old plain-wallet behavior
-  // until someone remembers to do it by hand again.
+  // token it was taxed in) — ALWAYS deployed and wired into all four
+  // factories as of this version of the script, for the same reason as
+  // CreatorRewardsDistributor above: this used to require
+  // DEPLOY_FEE_WALLET_DISTRIBUTOR=true (added after the fact, with no
+  // opt-in path at all before that — wiring it onto an already-deployed
+  // factory required a manual admin-panel action or a one-off script, and
+  // neither happened), which is the exact "silently off until wired" trap
+  // that left creatorRewardsDistributor unset on every token launched after
+  // the Sept 2026 redeploy (see scripts/setCreatorRewardsDistributor.js's
+  // own comment for that incident). Making this unconditional removes that
+  // failure mode entirely — every taxed transfer's fee-wallet remainder now
+  // always routes through FeeWalletDistributor rather than the plain
+  // platformFeeWallet address (see LaunchedToken._update / CustomToken.
+  // _update: `super._update(from, feeWalletDistributor != address(0) ?
+  // feeWalletDistributor : feeWallet, toFeeWallet)`). Set
+  // FEE_WALLET_DISTRIBUTOR_ADDRESS to reuse an already-deployed instance
+  // instead of deploying a new one (e.g. when redeploying just the
+  // factories with an existing FeeWalletDistributor already live).
   let feeWalletDistributorAddress = process.env.FEE_WALLET_DISTRIBUTOR_ADDRESS || null;
+  let feeWalletDistributorVerified = null;
 
-  if (!feeWalletDistributorAddress && process.env.DEPLOY_FEE_WALLET_DISTRIBUTOR === "true") {
+  if (!feeWalletDistributorAddress) {
     const feeWalletDistributorOwner = process.env.FEE_WALLET_DISTRIBUTOR_OWNER_ADDRESS || deployer.address;
     // Defaults to the same platformFeeWallet this deploy already resolved
     // above — almost always what you want FeeWalletDistributor.feeWallet to
@@ -594,38 +620,122 @@ async function main() {
     // eventual ETH recipient should differ from the plain-token fallback
     // wallet.
     const feeWalletRecipient = process.env.FEE_WALLET_ADDRESS || platformFeeWallet;
+    const feeWalletDistributorConstructorArgs = [routerAddress, feeWalletDistributorOwner, feeWalletRecipient];
 
     const FeeWalletDistributor = await hre.ethers.getContractFactory("FeeWalletDistributor");
-    const feeWalletDistributor = await FeeWalletDistributor.deploy(
-      routerAddress,
-      feeWalletDistributorOwner,
-      feeWalletRecipient
-    );
+    const feeWalletDistributor = await FeeWalletDistributor.deploy(...feeWalletDistributorConstructorArgs);
     await feeWalletDistributor.waitForDeployment();
     feeWalletDistributorAddress = await feeWalletDistributor.getAddress();
     console.log(
       `FeeWalletDistributor deployed at ${feeWalletDistributorAddress}, owned by ${feeWalletDistributorOwner}, ` +
         `paying out to ${feeWalletRecipient}.`
     );
-  } else if (feeWalletDistributorAddress) {
+
+    // Real, unique bytecode — never verified by any earlier version of this
+    // script even when DEPLOY_FEE_WALLET_DISTRIBUTOR=true was set. Fixed here.
+    const feeWalletDistributorVerification = await verifyContract(
+      feeWalletDistributorAddress,
+      feeWalletDistributorConstructorArgs
+    );
+    feeWalletDistributorVerified = feeWalletDistributorVerification.verified;
+  } else {
     console.log(`Reusing already-deployed FeeWalletDistributor at ${feeWalletDistributorAddress}.`);
   }
 
-  if (feeWalletDistributorAddress) {
-    const setFeeWalletDistributorTx1 = await factory.setFeeWalletDistributor(feeWalletDistributorAddress);
-    await setFeeWalletDistributorTx1.wait();
-    const setFeeWalletDistributorTx2 = await customFactory.setFeeWalletDistributor(feeWalletDistributorAddress);
-    await setFeeWalletDistributorTx2.wait();
-    const setFeeWalletDistributorTx3 = await bondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress);
-    await setFeeWalletDistributorTx3.wait();
-    const setFeeWalletDistributorTx4 = await customBondingCurveFactory.setFeeWalletDistributor(
-      feeWalletDistributorAddress
-    );
-    await setFeeWalletDistributorTx4.wait();
+  const setFeeWalletDistributorTx1 = await factory.setFeeWalletDistributor(feeWalletDistributorAddress);
+  await setFeeWalletDistributorTx1.wait();
+  const setFeeWalletDistributorTx2 = await customFactory.setFeeWalletDistributor(feeWalletDistributorAddress);
+  await setFeeWalletDistributorTx2.wait();
+  const setFeeWalletDistributorTx3 = await bondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress);
+  await setFeeWalletDistributorTx3.wait();
+  const setFeeWalletDistributorTx4 = await customBondingCurveFactory.setFeeWalletDistributor(
+    feeWalletDistributorAddress
+  );
+  await setFeeWalletDistributorTx4.wait();
+  console.log(
+    "TokenFactory, CustomTokenFactory, BondingCurveFactory, and CustomBondingCurveFactory all wired to " +
+      `FeeWalletDistributor at ${feeWalletDistributorAddress}.`
+  );
+
+  // ---- Platform Tax Distributor — a fully STANDALONE contract, entirely
+  // independent of the HoodLaunch platform itself. This is NOT one of the
+  // platform's own reward/fee distributors above (PlatformRewardsDistributor/
+  // CreatorRewardsDistributor/FeeWalletDistributor): it exists only because
+  // the front end's own trading UI (public/index.html) collects an
+  // additional 0.30% tax on buys/sells made through this platform's trade
+  // panels and forwards it here — no HoodLaunch contract (LaunchedToken,
+  // CustomToken, TokenFactory, CustomTokenFactory, BondingCurveFactory,
+  // CustomBondingCurveFactory) has been modified for this, and none of them
+  // reference this contract's address. Per explicit instruction, this
+  // contract is "not associated with the platform and controlled by the
+  // deployer wallet" — it is deployed and verified by this script purely as
+  // a convenience (same deployer wallet, same run, same script), but unlike
+  // the three distributors above it is NEVER wired into any factory's
+  // setRewardsDistributor/setCreatorRewardsDistributor/
+  // setFeeWalletDistributor, and its ownership is not parameterized by a
+  // *_OWNER_ADDRESS env var the way theirs is — it is always owned by
+  // whichever account runs this script (Ownable2Step, so the deployer can
+  // transfer it later, entirely outside of this script or the platform's
+  // own admin panel). Leaving DEPLOY_PLATFORM_TAX_DISTRIBUTOR unset deploys
+  // nothing here and changes nothing else in this script.
+  let platformTaxDistributorAddress = process.env.PLATFORM_TAX_DISTRIBUTOR_ADDRESS || null;
+  let platformTaxDistributorVerified = null;
+
+  if (!platformTaxDistributorAddress && process.env.DEPLOY_PLATFORM_TAX_DISTRIBUTOR === "true") {
+    // The platform token to buy back on distribution — defaults to whatever
+    // this run already resolved for PlatformToken above (platformTokenAddress,
+    // set only when DEPLOY_PLATFORM_TOKEN=true or PLATFORM_TOKEN_ADDRESS was
+    // provided), since in practice this will almost always be the same
+    // token. Override with PLATFORM_TAX_DISTRIBUTOR_TOKEN_ADDRESS if this
+    // distributor should target a different token.
+    const platformTaxDistributorTokenAddress =
+      process.env.PLATFORM_TAX_DISTRIBUTOR_TOKEN_ADDRESS || platformTokenAddress;
+    if (!platformTaxDistributorTokenAddress) {
+      throw new Error(
+        "DEPLOY_PLATFORM_TAX_DISTRIBUTOR=true but no platform token address is available. Set " +
+          "PLATFORM_TAX_DISTRIBUTOR_TOKEN_ADDRESS explicitly, or run with DEPLOY_PLATFORM_TOKEN=true / " +
+          "PLATFORM_TOKEN_ADDRESS set so one exists to pass in."
+      );
+    }
+    // Fee-wallet half of the 50/50 split — independent of the platform's own
+    // platformFeeWallet/FEE_WALLET_ADDRESS above (this is a separate,
+    // standalone contract with its own fee-wallet concept, owner-changeable
+    // later via setFeeWallet()), but falls back to the same platformFeeWallet
+    // if nothing more specific is set, purely for convenience.
+    const platformTaxDistributorFeeWallet =
+      process.env.PLATFORM_TAX_DISTRIBUTOR_FEE_WALLET_ADDRESS || platformFeeWallet;
+
+    const platformTaxDistributorConstructorArgs = [
+      routerAddress,
+      platformTaxDistributorTokenAddress,
+      platformTaxDistributorFeeWallet,
+    ];
+    const PlatformTaxDistributor = await hre.ethers.getContractFactory("PlatformTaxDistributor");
+    const platformTaxDistributor = await PlatformTaxDistributor.deploy(...platformTaxDistributorConstructorArgs);
+    await platformTaxDistributor.waitForDeployment();
+    platformTaxDistributorAddress = await platformTaxDistributor.getAddress();
     console.log(
-      "TokenFactory, CustomTokenFactory, BondingCurveFactory, and CustomBondingCurveFactory all wired to " +
-        `FeeWalletDistributor at ${feeWalletDistributorAddress}.`
+      `PlatformTaxDistributor deployed at ${platformTaxDistributorAddress}, owned by ${deployer.address} ` +
+        "(standalone — not wired into any HoodLaunch factory or the admin/relayer config), platform token " +
+        `${platformTaxDistributorTokenAddress}, fee wallet ${platformTaxDistributorFeeWallet}, disburse ` +
+        "threshold 0.25 ETH (contract default)."
     );
+
+    // Real, unique bytecode (not a clone of anything) — verified here
+    // because it's requested explicitly, unlike PlatformRewardsDistributor/
+    // CreatorRewardsDistributor/FeeWalletDistributor above, which this
+    // script has never verified.
+    const platformTaxDistributorVerification = await verifyContract(
+      platformTaxDistributorAddress,
+      platformTaxDistributorConstructorArgs
+    );
+    platformTaxDistributorVerified = platformTaxDistributorVerification.verified;
+    console.log(
+      "Remember: this address still needs to be filled into PLATFORM_TAX_DISTRIBUTOR in public/index.html " +
+        "(per network) before the front end's trade panels will actually forward tax payments to it."
+    );
+  } else if (platformTaxDistributorAddress) {
+    console.log(`Reusing already-deployed PlatformTaxDistributor at ${platformTaxDistributorAddress}.`);
   }
 
   const deploymentSummary = {
@@ -662,12 +772,21 @@ async function main() {
     feeTreasury,
     platformFeeWallet,
     platformToken: platformTokenAddress || "(not deployed — set DEPLOY_PLATFORM_TOKEN=true to launch it)",
+    platformTokenVerified,
     rewardsDistributor: rewardsDistributorAddress || "(not deployed — factories keep their pre-existing behavior)",
-    creatorRewardsDistributor:
-      creatorRewardsDistributorAddress || "(not deployed — creatorRewardBps stays effectively inactive)",
-    feeWalletDistributor:
-      feeWalletDistributorAddress ||
-      "(not deployed — fee-wallet remainder keeps going straight to the plain platformFeeWallet address)",
+    rewardsDistributorVerified,
+    creatorRewardsDistributor: creatorRewardsDistributorAddress,
+    creatorRewardsDistributorVerified,
+    feeWalletDistributor: feeWalletDistributorAddress,
+    feeWalletDistributorVerified,
+    // Standalone — see the big comment above this block. Deliberately NOT
+    // wired into tokenFactory/customFactory/bondingCurveFactory/
+    // customBondingCurveFactory the way rewardsDistributor/
+    // creatorRewardsDistributor/feeWalletDistributor are above.
+    platformTaxDistributor:
+      platformTaxDistributorAddress ||
+      "(not deployed — set DEPLOY_PLATFORM_TAX_DISTRIBUTOR=true to launch it; standalone, never wired into any factory)",
+    platformTaxDistributorVerified,
   };
 
   console.log("\nDeployment summary:");

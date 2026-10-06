@@ -1086,6 +1086,90 @@ const UNIV2_PAIR_ABI = [
   "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
   "event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)",
 ];
+// V4 (Uniswap v4) polling. Pools live inside the singleton PoolManager and
+// are identified by a bytes32 poolId. Price comes from slot0 (read with the
+// PoolManager's extsload at keccak(poolId . 6), the same slot StateLibrary
+// uses), trades from the PoolManager's own Swap event filtered by poolId, and
+// the graduation flag / target from the hook's poolTax(poolId).
+const V4_POOL_MANAGER_ABI = [
+  "function extsload(bytes32 slot) view returns (bytes32 value)",
+  "event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)",
+];
+const V4_FACTORY_REFS_ABI = [
+  "function poolManager() view returns (address)",
+  "function hook() view returns (address)",
+];
+const V4_HOOK_STATE_ABI = [
+  "function poolTax(bytes32 poolId) view returns (bool configured, bool taxActive, address token, address feeWallet, uint16 feeBps, uint16 rewardBps, uint16 creatorRewardBps, address rewardsDistributor, address creatorRewardsDistributor, address feeWalletDistributor, address priceFeed, uint32 maxOracleStaleness, uint64 graduationCandidateAt, uint256 graduationTargetUsd)",
+];
+const V4_POOLS_MAPPING_SLOT = 6n; // PoolManager.pools
+
+// ---- V4 distributor keeper (optional) ----
+// Opt-in: V4_KEEPER_ENABLED=true together with V4_TOKEN_FACTORY_ADDRESS. The
+// keeper reads the three distributor slots (feeWalletDistributor,
+// creatorRewardsDistributor, rewardsDistributor) off the V4 factory on every
+// tick, so changing a slot in Admin takes effect on the next tick with no
+// restart, and an unset slot just means that keeper idles. It reuses the V2
+// keepers' tunable settings (poll interval / slippage / claim floor / airdrop
+// batch knobs in relayerSettings) rather than adding new signed settings, so
+// when both a V2 and a V4 distributor are running they share those knobs.
+const V4_KEEPER_ENABLED = String(process.env.V4_KEEPER_ENABLED || "").toLowerCase() === "true";
+const V4_SELLER_ABI = ["function swapSlippageBps() view returns (uint256)"];
+const V4_PLATFORM_REWARDS_BASE_ABI = [
+  "function platformToken() view returns (address)",
+  "function buybackRouter() view returns (address)",
+  "function roundActive() view returns (bool)",
+  "function pendingAirdropTokens() view returns (uint256)",
+  "function startAirdropRound()",
+  "function processAirdropBatch(uint256 maxHolders)",
+];
+const V4_FEE_WALLET_DISTRIBUTOR_ABI = [
+  ...V4_SELLER_ABI,
+  ...V4_PLATFORM_REWARDS_BASE_ABI,
+  "function swapThreshold(address) view returns (uint256)",
+  "function maxSwapAmount(address) view returns (uint256)",
+  "function claimableEth(address) view returns (uint256)",
+  "function triggerFeeWalletSwap(address token, uint256 minEthOut) returns (uint256)",
+  "function triggerFeeWalletSwap(address token, uint256 minEthOut, uint256 minPlatformTokensOut) returns (uint256)",
+  "function claimFeeWalletRewards(address token) returns (uint256)",
+];
+const V4_CREATOR_REWARDS_DISTRIBUTOR_ABI = [
+  ...V4_SELLER_ABI,
+  "function swapThreshold(address) view returns (uint256)",
+  "function maxSwapAmount(address) view returns (uint256)",
+  "function claimableEth(address) view returns (uint256)",
+  "function triggerCreatorSwap(address token, uint256 minEthOut) returns (uint256)",
+  "function claimCreatorRewards(address token) returns (uint256)",
+];
+const V4_PLATFORM_REWARDS_DISTRIBUTOR_ABI = [
+  ...V4_SELLER_ABI,
+  ...V4_PLATFORM_REWARDS_BASE_ABI,
+  "function tokenBuybackThreshold(address) view returns (uint256)",
+  "function maxTokenBuybackAmount(address) view returns (uint256)",
+  "function ethBuybackThreshold() view returns (uint256)",
+  "function maxEthBuybackAmount() view returns (uint256)",
+  "function triggerEthBuyback(uint256 minTokensOut) returns (uint256)",
+  "function triggerTokenBuyback(address token, uint256 minTokensOut) returns (uint256)",
+];
+const V4_FACTORY_SLOTS_ABI = [
+  "function feeWalletDistributor() view returns (address)",
+  "function creatorRewardsDistributor() view returns (address)",
+  "function rewardsDistributor() view returns (address)",
+];
+const V4_HOOK_EXEMPT_ABI = ["function taxExempt(address) view returns (bool)"];
+const V4_LP_FEE_PPM = 3000n; // must match V4TokenFactory / V4TokenSeller
+
+function bigIntSqrt(n) {
+  if (n < 2n) return n;
+  let x = n;
+  let y = (x + 1n) / 2n;
+  while (y < x) {
+    x = y;
+    y = (x + n / x) / 2n;
+  }
+  return x;
+}
+
 const AGGREGATOR_V3_ABI = [
   "function decimals() view returns (uint8)",
   "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
@@ -1327,6 +1411,7 @@ async function postLaunchPipeline({
   knownLiquidityEthAmount,
   boughtEvent,
   extra,
+  poolId,
 }) {
   const implVerification = await verifyContract(implementationAddress, []);
   const proxyVerification = await verifyProxyClone(tokenAddress, implementationAddress);
@@ -1338,7 +1423,14 @@ async function postLaunchPipeline({
     // (BondingCurveFactory) both clone the plain LaunchedToken — see each
     // factory's own createCurveToken()/relayedCreateCurveToken() for which
     // token contract it initializes.
-    const contractFile = kind === "custom" || kind === "custom-curve" ? "CustomToken.sol" : "LaunchedToken.sol";
+    // "v4token" (V4TokenFactory) clones V4LaunchedToken, a separate, tax-free
+    // ERC20 (the tax lives in V4TaxHook, not the token).
+    const contractFile =
+      kind === "custom" || kind === "custom-curve"
+        ? "CustomToken.sol"
+        : kind === "v4token"
+          ? "V4LaunchedToken.sol"
+          : "LaunchedToken.sol";
     const absPath = path.join(hre.config.paths.root, "contracts", contractFile);
     flattenedSource = await hre.run("flatten:get-flattened-sources", { files: [absPath] });
   } catch (err) {
@@ -1383,7 +1475,11 @@ async function postLaunchPipeline({
     })(),
     liquidityTokenAmount:
       liquidityEvent && liquidityEvent.name === "LiquidityAdded" ? liquidityEvent.args.tokenAmount.toString() : null,
-    liquidityLpAmount: liquidityEvent ? liquidityEvent.args.lpAmount.toString() : null,
+    // V2's LiquidityAdded calls this lpAmount; V4's calls it liquidity (a
+    // position's liquidity units, not an LP token amount).
+    liquidityLpAmount: liquidityEvent
+      ? (liquidityEvent.args.lpAmount !== undefined ? liquidityEvent.args.lpAmount : liquidityEvent.args.liquidity).toString()
+      : null,
     liquidityLockId: liquidityEvent ? liquidityEvent.args.lockId.toString() : null,
     liquidityUnlockTime: liquidityEvent ? new Date(Number(liquidityEvent.args.unlockTime) * 1000).toISOString() : null,
     creatorBuyEthAmount: boughtEvent ? boughtEvent.args.ethIn.toString() : null,
@@ -1403,6 +1499,11 @@ async function postLaunchPipeline({
         ].join("\n")
       : null,
     createdAt: new Date().toISOString(),
+    // V4 launches identify their pool by a bytes32 poolId (no pair
+    // contract). Both fields ride in the record's JSON like any other
+    // extra field — pairAddress stays null for V4 so nothing V2-shaped ever
+    // tries to read a pair that doesn't exist.
+    ...(kind === "v4token" ? { protocol: "v4", poolId: poolId && poolId !== hre.ethers.ZeroHash ? poolId : null } : {}),
     ...extra,
   };
 
@@ -1494,6 +1595,7 @@ const FACTORY_LABELS = {
   custom: "CustomTokenFactory",
   curve: "BondingCurveFactory",
   "custom-curve": "CustomBondingCurveFactory",
+  v4token: "V4TokenFactory",
 };
 const relayerMismatchState = {}; // { [kind]: boolean } — last known mismatch state, absent until the first check
 
@@ -1574,6 +1676,7 @@ function logEnvVarPresence() {
     "CUSTOM_TOKEN_FACTORY_ADDRESS",
     "BONDING_CURVE_FACTORY_ADDRESS",
     "CUSTOM_BONDING_CURVE_FACTORY_ADDRESS",
+    "V4_TOKEN_FACTORY_ADDRESS",
     "FEE_WALLET_DISTRIBUTOR_ADDRESS",
     "PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS",
     "TELEGRAM_BOT_TOKEN",
@@ -1680,10 +1783,15 @@ async function main() {
   // and the factory owner has run scripts/setRelayer.js against them.
   const bondingCurveFactoryAddress = process.env.BONDING_CURVE_FACTORY_ADDRESS || null;
   const customBondingCurveFactoryAddress = process.env.CUSTOM_BONDING_CURVE_FACTORY_ADDRESS || null;
-  if (!tokenFactoryAddress && !customTokenFactoryAddress && !bondingCurveFactoryAddress && !customBondingCurveFactoryAddress) {
+  // Uniswap V4 TokenFactory (admin-only, under development) — optional and
+  // fully independent of the V2 factories above: its own watcher, its own
+  // POST /vouchers/v4token route, its own cursor. Leaving it unset changes
+  // nothing about V2.
+  const v4TokenFactoryAddress = process.env.V4_TOKEN_FACTORY_ADDRESS || null;
+  if (!tokenFactoryAddress && !customTokenFactoryAddress && !bondingCurveFactoryAddress && !customBondingCurveFactoryAddress && !v4TokenFactoryAddress) {
     throw new Error(
       "Set at least one of TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS / " +
-        "BONDING_CURVE_FACTORY_ADDRESS / CUSTOM_BONDING_CURVE_FACTORY_ADDRESS."
+        "BONDING_CURVE_FACTORY_ADDRESS / CUSTOM_BONDING_CURVE_FACTORY_ADDRESS / V4_TOKEN_FACTORY_ADDRESS."
     );
   }
 
@@ -1733,6 +1841,41 @@ async function main() {
           "relaying, activity/price polling) starts normally regardless. This specific error usually means the " +
           "contract's build artifact wasn't included in this deploy (a stale/cached build) — a clean rebuild that " +
           "actually recompiles contracts/TokenFactory.sol should fix it."
+      );
+    }
+  }
+
+  if (v4TokenFactoryAddress) {
+    try {
+      const factory = await hre.ethers.getContractAt("V4TokenFactory", v4TokenFactoryAddress, relayerWallet);
+      const onChainRelayer = await factory.relayer();
+      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
+        console.warn(
+          `WARNING: V4TokenFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
+            `relayedCreateToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}).`
+        );
+      }
+      watchers.push({
+        kind: "v4token",
+        factory,
+        // V4TokenFactory's LaunchVoucher is field-for-field the same struct
+        // as TokenFactory's, so the same field lists/deposit math apply.
+        voucherFields: LAUNCH_VOUCHER_FIELDS,
+        voucherUintFields: LAUNCH_VOUCHER_UINT_FIELDS,
+        hashFn: (v) => factory.hashLaunchVoucher(v),
+        expectedDepositFn: expectedDepositForToken,
+        relayFn: (v, sig) => factory.relayedCreateToken(v, sig),
+        createdEventName: "TokenCreated",
+        // V4's LiquidityAdded: (token, creator, ethAmount, tokenAmount,
+        // liquidity, unlockTime, lockId) — same name as V2's, different shape
+        // (liquidity instead of lpAmount, no pair).
+        liquidityEventName: "LiquidityAdded",
+      });
+    } catch (err) {
+      console.error(
+        `Could not load V4TokenFactory at ${v4TokenFactoryAddress} (${err.message}). Gasless relaying for V4 launches ` +
+          "is DISABLED for this run — everything else starts normally regardless. This usually means the contract's " +
+          "build artifact is missing (run a normal `npx hardhat compile` so contracts/V4TokenFactory.sol is built)."
       );
     }
   }
@@ -2038,6 +2181,7 @@ async function main() {
       customTokenFactoryAddress: customTokenFactoryAddress || null,
       bondingCurveFactoryAddress: bondingCurveFactoryAddress || null,
       customBondingCurveFactoryAddress: customBondingCurveFactoryAddress || null,
+      v4TokenFactoryAddress: v4TokenFactoryAddress || null,
       creatorRewardsDistributorAddress: CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null,
       creatorRewardsAutoSweepEnabled: !!creatorRewardsDistributor,
       feeWalletDistributorAddress: FEE_WALLET_DISTRIBUTOR_ADDRESS || null,
@@ -2096,6 +2240,8 @@ async function main() {
         // substring "curve" (and, within that, "custom"), so it's fully
         // compatible as-is.
         mode: t.kind || null,
+        protocol: t.protocol || null,
+        poolId: t.poolId || null,
         tokenAddress: t.tokenAddress,
         pairAddress: t.pairAddress || null,
         creator: t.creator || null,
@@ -2147,6 +2293,11 @@ async function main() {
       // in the same tracked-tokens JSON blob as tokenStatus above, not the
       // launch ledger itself — merged in here the same way so every
       // consumer of GET /launches gets one already-current object.
+      // Protocol/poolId: V4 launches carry "v4" + a bytes32 poolId; every
+      // other (V2) entry reports "v2" and a null poolId.
+      const protocolSource = (trackedEntry && trackedEntry.protocol) || entry.protocol || null;
+      publicEntry.protocol = protocolSource === "v4" ? "v4" : "v2";
+      publicEntry.poolId = (trackedEntry && trackedEntry.poolId) || entry.poolId || null;
       publicEntry.logo = trackedEntry && trackedEntry.logo != null ? trackedEntry.logo : null;
       publicEntry.banner = trackedEntry && trackedEntry.banner != null ? trackedEntry.banner : null;
       publicEntry.socials = trackedEntry && trackedEntry.socials ? trackedEntry.socials : {};
@@ -3018,6 +3169,7 @@ async function main() {
   if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
   if (customTokenFactoryAddress) app.post("/vouchers/custom", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom")));
   if (bondingCurveFactoryAddress) app.post("/vouchers/curve", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "curve")));
+  if (v4TokenFactoryAddress) app.post("/vouchers/v4token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "v4token")));
   if (customBondingCurveFactoryAddress) app.post("/vouchers/custom-curve", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom-curve")));
 
   app.get("/status/:voucherHash", asyncRoute(async (req, res) => {
@@ -3107,7 +3259,8 @@ async function main() {
       const boughtEvent = parsedLogs.find((p) => p && p.name === "CreatorBought");
 
       const tokenAddress = created.args.token;
-      const pairAddress = created.args.pair || hre.ethers.ZeroAddress;
+      const pairAddress = created.args.pair || hre.ethers.ZeroAddress; // undefined on V4 (TokenCreated carries poolId instead)
+      const poolId = created.args.poolId || null; // V4 only
       const implementationAddress = await watcher.factory.tokenImplementation();
       const network = hre.network.name;
 
@@ -3116,6 +3269,7 @@ async function main() {
         txHash: receipt.hash,
         tokenAddress,
         pairAddress,
+        ...(poolId ? { poolId } : {}),
       });
       console.log(`[${watcher.kind}] relayed ${voucherHash} -> token ${tokenAddress} (tx ${receipt.hash}). Running verification + recordkeeping...`);
 
@@ -3138,6 +3292,7 @@ async function main() {
         knownLiquidityEthAmount: voucher.liquidityEthAmount,
         boughtEvent,
         extra: { voucherHash },
+        poolId,
       });
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
@@ -3279,8 +3434,13 @@ async function main() {
     // otherwise re-announce the same launch to Telegram a second time.
     const alreadyTrackedBeforeThisTick = events.length ? await readTrackedTokens(network) : {};
     for (const event of events) {
-      const { token, creator, name, symbol, pair } = event.args;
+      const { token, creator, name, symbol, pair, poolId } = event.args;
       const pairAddress = pair && pair !== hre.ethers.ZeroAddress ? pair : null;
+      // V4 (kind "v4token"): TokenCreated carries a bytes32 poolId, not a
+      // pair. A zero poolId means "Deploy Token" (no pool), same as a zero
+      // pair on V2.
+      const isV4 = watcher.kind === "v4token";
+      const v4PoolId = isV4 && poolId && poolId !== hre.ethers.ZeroHash ? poolId : null;
       const isNewToken = !alreadyTrackedBeforeThisTick[token.toLowerCase()];
       await upsertTrackedToken(network, token, {
         kind: watcher.kind,
@@ -3304,8 +3464,12 @@ async function main() {
         // exists — "live on DEX") and on to GRADUATED (2) once that pool's
         // own tax later disables at the $50,000 market-cap target, the same
         // two-step, never-regresses progression every other kind follows.
-        tokenStatus: pairAddress ? TOKEN_STATUS.LAUNCHED : TOKEN_STATUS.DEPLOYED,
+        tokenStatus: pairAddress || v4PoolId ? TOKEN_STATUS.LAUNCHED : TOKEN_STATUS.DEPLOYED,
         discoveredAt: new Date().toISOString(),
+        // pollTokenPrices/pollTokenActivity handle protocol "v4" entries via
+        // their own PoolManager-based branches (pollV4TokenPrice /
+        // pollV4Activity) instead of V2 pair reserves/Swap events.
+        ...(isV4 ? { protocol: "v4", poolId: v4PoolId } : {}),
       });
       console.log(`[discovery] tracking ${watcher.kind} token $${symbol} (${token})${pairAddress ? ` with pair ${pairAddress}` : ""}.`);
       // Only announce launches found on a NORMAL incremental scan — not
@@ -3317,7 +3481,9 @@ async function main() {
       // alreadyTrackedBeforeThisTick above) guards the separate case of this
       // exact event being re-scanned — a duplicate Telegram post for a token
       // already announced, rather than a flood of historical ones.
-      if (!isNeverRunOrStuck && isNewToken) {
+      // V4 is admin-only while under development — never announce it to the
+      // public launches channel.
+      if (!isNeverRunOrStuck && isNewToken && !isV4) {
         await announceLaunchToTelegram(network, watcher.kind, { token, name, symbol, pairAddress }).catch((err) =>
           console.warn(`[telegram] couldn't announce new launch ${token}: ${err.message}`)
         );
@@ -3425,6 +3591,129 @@ async function main() {
     }
   }
 
+  // ---- V4 pool helpers (price + activity pollers) ----
+  let v4ContextPromise = null;
+  function getV4Context() {
+    if (!v4ContextPromise) {
+      v4ContextPromise = (async () => {
+        const watcher = watchers.find((w) => w.kind === "v4token");
+        if (!watcher) return null;
+        const factoryAddress = await watcher.factory.getAddress();
+        const refs = await hre.ethers.getContractAt(V4_FACTORY_REFS_ABI, factoryAddress, hre.ethers.provider);
+        const [pmAddress, hookAddress] = await Promise.all([refs.poolManager(), refs.hook()]);
+        return {
+          factoryAddress,
+          pm: await hre.ethers.getContractAt(V4_POOL_MANAGER_ABI, pmAddress, hre.ethers.provider),
+          pmAddress,
+          hook: await hre.ethers.getContractAt(V4_HOOK_STATE_ABI, hookAddress, hre.ethers.provider),
+        };
+      })().catch((err) => {
+        v4ContextPromise = null; // retry next tick
+        throw err;
+      });
+    }
+    return v4ContextPromise;
+  }
+
+  // Reads a V4 pool's slot0: returns { sqrtPriceX96 } (0n when the pool was
+  // never initialized).
+  async function readV4Slot0(pm, poolId) {
+    const slot = hre.ethers.keccak256(
+      hre.ethers.AbiCoder.defaultAbiCoder().encode(["bytes32", "uint256"], [poolId, V4_POOLS_MAPPING_SLOT])
+    );
+    const word = BigInt(await pm.extsload(slot));
+    return { sqrtPriceX96: word & ((1n << 160n) - 1n) };
+  }
+
+  // The pool is (native ETH = currency0, token = currency1), so
+  // price = token1/token0 = tokens per wei = (sqrtP / 2^96)^2. The existing
+  // reserve-ratio math wants (tokenReserve, wethReserve), so hand it the
+  // squared sqrt price as the token side and 2^192 as the ETH side.
+  function v4ReservesFromSqrtPrice(sqrtPriceX96) {
+    return { tokenReserve: sqrtPriceX96 * sqrtPriceX96, wethReserve: 1n << 192n };
+  }
+
+  async function pollV4TokenPrice(entry) {
+    if (!entry.poolId) return; // "Deploy Token" - no pool to price yet
+    const ctx = await getV4Context();
+    if (!ctx) return;
+    const { sqrtPriceX96 } = await readV4Slot0(ctx.pm, entry.poolId);
+    if (sqrtPriceX96 === 0n) return; // pool not initialized
+    const [taxState, totalSupply] = await Promise.all([
+      ctx.hook.poolTax(entry.poolId),
+      (await hre.ethers.getContractAt(ERC20_META_ABI, entry.tokenAddress, hre.ethers.provider)).totalSupply(),
+    ]);
+    const taxActive = taxState.taxActive;
+    const feedAddress = taxState.priceFeed;
+    if (feedAddress && entry.priceFeed !== feedAddress) await upsertTrackedToken(network, entry.tokenAddress, { priceFeed: feedAddress });
+    if (taxActive === false && taxState.configured && entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
+      entry.tokenStatus = TOKEN_STATUS.GRADUATED;
+      await upsertTrackedToken(network, entry.tokenAddress, { tokenStatus: TOKEN_STATUS.GRADUATED });
+    }
+    const { tokenReserve, wethReserve } = v4ReservesFromSqrtPrice(sqrtPriceX96);
+    const ethUsd = await fetchEthUsdFromFeed(feedAddress);
+    const priceUsd = computeTokenPriceUsd(tokenReserve, wethReserve, ethUsd);
+    const mcapUsd = computeMarketCapUsd(priceUsd, totalSupply);
+    const taxProgressPct = computeTaxProgressPct(mcapUsd, taxState.graduationTargetUsd);
+    const holders = await fetchHolderCount(entry.tokenAddress);
+    const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive };
+    if (holders !== null) point.holders = holders;
+    await appendPricePoint(network, entry.tokenAddress, point);
+  }
+
+  // Trades for every tracked V4 token, from the PoolManager's Swap events
+  // filtered by poolId. Same conventions as the V2 loop: no history backfill
+  // on a token's first tick, per-pool cursor, de-duplicated by tx:logIndex.
+  // The event's `sender` is the router that called swap, not the trader, so
+  // the wallet is the transaction's `from` (right for direct trades through
+  // the site's V4SwapRouter; a gasless relayed trade shows the relayer).
+  async function pollV4Activity(entry, seen, blockTimestampMs) {
+    if (!entry.poolId) return;
+    const ctx = await getV4Context();
+    if (!ctx) return;
+    const cursorKey = `${ctx.pmAddress}:${entry.poolId}:activity`;
+    const latestBlock = await hre.ethers.provider.getBlockNumber();
+    const storedCursor = await getCursor(cursorKey);
+    const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock;
+    if (fromBlock > latestBlock) return;
+    const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
+    const events = await ctx.pm.queryFilter(ctx.pm.filters.Swap(entry.poolId), fromBlock, toBlock);
+    if (events.length) {
+      const taxState = await ctx.hook.poolTax(entry.poolId);
+      const ethUsd = await fetchEthUsdFromFeed(taxState.priceFeed);
+      for (const event of events) {
+        const key = `${event.transactionHash}:${event.index}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const { amount0, amount1 } = event.args;
+        // Amounts are from the swapper's side: ETH (amount0) negative = the
+        // swapper paid ETH = a buy of the token.
+        const side = amount0 < 0n ? "buy" : "sell";
+        const ethAmount = amount0 < 0n ? -amount0 : amount0;
+        const tokenAmount = amount1 < 0n ? -amount1 : amount1;
+        let wallet = event.args.sender;
+        try {
+          const tx = await hre.ethers.provider.getTransaction(event.transactionHash);
+          if (tx && tx.from) wallet = tx.from;
+        } catch (err) {
+          // keep the router address as a fallback
+        }
+        await appendActivity(network, {
+          t: await blockTimestampMs(event.blockNumber),
+          txHash: event.transactionHash,
+          logIndex: event.index,
+          tokenAddress: entry.tokenAddress,
+          symbol: entry.symbol || null,
+          side,
+          wallet,
+          tokenAmount: tokenAmount.toString(),
+          usdValue: (Number(ethAmount) / 1e18) * ethUsd,
+        });
+      }
+    }
+    await setCursor(cursorKey, toBlock);
+  }
+
   // ---- real trade activity (backs GET /activity) ----
   // Watches real Swap events on every tracked token's own pool. Only tokens
   // that already have a pairAddress on file are watched (a "Just Launch"
@@ -3451,6 +3740,14 @@ async function main() {
     }
 
     for (const entry of Object.values(tracked)) {
+      if (entry.protocol === "v4") {
+        try {
+          await pollV4Activity(entry, seen, blockTimestampMs);
+        } catch (err) {
+          console.warn(`[activity] skip v4 ${entry.tokenAddress}: ${err.message}`);
+        }
+        continue;
+      }
       // Quick Launch ("curve"/"custom-curve") tokens trade against their own
       // factory contract, not a Uniswap pair, until they graduate — there is
       // no pairAddress yet, so the ordinary Swap-event loop below (which
@@ -3588,6 +3885,14 @@ async function main() {
   async function pollTokenPrices() {
     const tracked = await readTrackedTokens(network);
     for (const entry of Object.values(tracked)) {
+      if (entry.protocol === "v4") {
+        try {
+          await pollV4TokenPrice(entry);
+        } catch (err) {
+          console.warn(`[price] skip v4 ${entry.tokenAddress}: ${err.message}`);
+        }
+        continue;
+      }
       try {
         // A manually-tracked plain token (kind: "platform" — see
         // POST /track-token above) was never launched through
@@ -4321,6 +4626,297 @@ async function main() {
     setTimeout(platformRewardsPollLoop, relayerSettings.platformRewardsPollIntervalMs);
   }
 
+  // ---- V4 distributor keeper (optional; see V4_KEEPER_ENABLED above) ----
+  // The V4 counterpart of the three V2 reward sweeps. Same shape: walk every
+  // token, convert whatever in-kind tax a distributor holds once it clears
+  // that token's own threshold, claim the resulting ETH, and drive the
+  // platform-token airdrop rounds. What differs on V4:
+  //  * The tokens to walk are this relayer's tracked V4 tokens (every launch
+  //    the V4 factory watcher saw, gasless or direct), not just the ledger.
+  //  * A distributor sells in the token's own V4 pool, not a V2 router, so the
+  //    keeper quotes the sale locally from the pool's slot0 + liquidity (the
+  //    launch pool is one full-range position, i.e. constant product),
+  //    respecting the contract's own price limit (swapSlippageBps) and the
+  //    hook tax when the distributor isn't exempt, then passes
+  //    minEthOut = quote less the keeper's slippage setting. This is what
+  //    protects an unattended sweep from a sandwich: the contract's price
+  //    limit is anchored to the spot price AT execution, the keeper's floor to
+  //    the price when it quoted.
+  //  * ETH -> platform token still goes through the distributor's V2
+  //    buybackRouter, quoted with getAmountsOut like the V2 keepers do.
+  // Each distributor address is re-read from the factory every tick.
+  const v4KeeperWarned = new Set();
+  function v4KeeperWarnOnce(key, message) {
+    if (v4KeeperWarned.has(key)) return;
+    v4KeeperWarned.add(key);
+    console.warn(message);
+  }
+
+  async function v4KeeperDistributor(slotGetter, abi, label) {
+    const ctx = await getV4Context();
+    if (!ctx) return null;
+    const slots = await hre.ethers.getContractAt(V4_FACTORY_SLOTS_ABI, ctx.factoryAddress, hre.ethers.provider);
+    const address = await slots[slotGetter]();
+    if (!address || address === hre.ethers.ZeroAddress) return null;
+    const contract = await hre.ethers.getContractAt(abi, address, relayerWallet);
+    // A distributor the hook doesn't exempt has its own sales taxed again;
+    // the sweep still works (the quote accounts for it) but it's almost
+    // certainly a setup mistake, so say so once.
+    try {
+      const hookAddress = await ctx.hook.getAddress();
+      const hook = await hre.ethers.getContractAt(V4_HOOK_EXEMPT_ABI, hookAddress, hre.ethers.provider);
+      if (!(await hook.taxExempt(address))) {
+        v4KeeperWarnOnce(
+          `exempt:${address}`,
+          `[v4-keeper] ${label} ${address} is NOT tax-exempt on the V4 hook, so every sale it makes is taxed a second time. ` +
+            "Call setTaxExempt(distributor, true) on the V4 factory (Admin → V4 → Rewards)."
+        );
+      }
+    } catch (err) {
+      // best effort
+    }
+    return { contract, address };
+  }
+
+  async function v4KeeperTokens() {
+    const tracked = await readTrackedTokens(network);
+    return Object.values(tracked)
+      .filter((e) => e.protocol === "v4" && e.poolId && e.tokenAddress)
+      .map((e) => e);
+  }
+
+  // Predicts the ETH a distributor would receive for selling `amountIn` of a
+  // V4 token, within the contract's own price limit. Returns 0n when it can't
+  // quote (no pool, no liquidity) — callers skip quietly, like the V2 sweeps.
+  async function quoteV4DistributorSale(entry, distributorAddress, distributor, amountIn) {
+    const ctx = await getV4Context();
+    if (!ctx || !entry.poolId) return 0n;
+    const { sqrtPriceX96 } = await readV4Slot0(ctx.pm, entry.poolId);
+    if (sqrtPriceX96 === 0n) return 0n;
+    const poolSlot = BigInt(
+      hre.ethers.keccak256(hre.ethers.AbiCoder.defaultAbiCoder().encode(["bytes32", "uint256"], [entry.poolId, V4_POOLS_MAPPING_SLOT]))
+    );
+    const liquidity = BigInt(await ctx.pm.extsload(hre.ethers.toBeHex(poolSlot + 3n, 32))) & ((1n << 128n) - 1n); // Pool.State.liquidity
+    if (liquidity === 0n) return 0n;
+
+    // Hook tax comes off the input first, unless this distributor is exempt.
+    let swapped = amountIn;
+    try {
+      const hookAddress = await ctx.hook.getAddress();
+      const hook = await hre.ethers.getContractAt(V4_HOOK_EXEMPT_ABI, hookAddress, hre.ethers.provider);
+      if (!(await hook.taxExempt(distributorAddress))) {
+        const tax = await ctx.hook.poolTax(entry.poolId);
+        if (tax.taxActive) swapped = (amountIn * (10000n - BigInt(tax.feeBps))) / 10000n;
+      }
+    } catch (err) {
+      // quote without tax; the on-chain floor still applies
+    }
+    let effIn = (swapped * (1000000n - V4_LP_FEE_PPM)) / 1000000n;
+
+    // Cap at what the contract's price limit allows (V4TokenSeller._sellPriceLimit).
+    const slippageBps = await distributor.swapSlippageBps();
+    const factorX4 = bigIntSqrt((10000n + BigInt(slippageBps)) * 10n ** 4n);
+    const limit = (sqrtPriceX96 * factorX4) / 10n ** 4n;
+    const maxEffIn = (liquidity * (limit - sqrtPriceX96)) >> 96n;
+    if (effIn > maxEffIn) effIn = maxEffIn;
+    if (effIn <= 0n) return 0n;
+
+    const ethReserve = (liquidity << 96n) / sqrtPriceX96;
+    const tokenReserve = (liquidity * sqrtPriceX96) >> 96n;
+    return (ethReserve * effIn) / (tokenReserve + effIn);
+  }
+
+  async function quoteV4PlatformBuy(routerAddress, platformTokenAddress, ethIn) {
+    if (ethIn === 0n) return 0n;
+    try {
+      const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
+      const weth = await router.WETH();
+      const amounts = await router.getAmountsOut(ethIn, [weth, platformTokenAddress]);
+      return amounts[amounts.length - 1];
+    } catch (err) {
+      return 0n;
+    }
+  }
+
+  // Shared airdrop-round driver for the two distributors that have one.
+  async function v4KeeperAirdropRound(label, distributor, batchSize, maxBatches) {
+    const platformTokenAddress = await distributor.platformToken();
+    if (platformTokenAddress === hre.ethers.ZeroAddress) return;
+    let roundActive = await distributor.roundActive();
+    if (!roundActive) {
+      const pending = await distributor.pendingAirdropTokens();
+      if (pending === 0n) return;
+      const tx = await sendRelayerTx(() => distributor.startAirdropRound());
+      const receipt = await tx.wait();
+      console.log(`[${label}] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
+      roundActive = true;
+    }
+    for (let i = 0; i < maxBatches && roundActive; i++) {
+      const tx = await sendRelayerTx(() => distributor.processAirdropBatch(batchSize));
+      const receipt = await tx.wait();
+      roundActive = await distributor.roundActive();
+      console.log(`[${label}] airdrop batch processed in tx ${receipt.hash}` + (roundActive ? " (round continues next tick)." : " (round completed)."));
+    }
+  }
+
+  async function sweepV4FeeWalletOnce() {
+    const d = await v4KeeperDistributor("feeWalletDistributor", V4_FEE_WALLET_DISTRIBUTOR_ABI, "V4FeeWalletDistributor");
+    if (!d) return;
+    const platformTokenAddress = await d.contract.platformToken();
+    const routerAddress = await d.contract.buybackRouter();
+    const buyback = platformTokenAddress !== hre.ethers.ZeroAddress && routerAddress !== hre.ethers.ZeroAddress;
+    const slipBps = feeWalletSlippageBpsBig();
+
+    for (const entry of await v4KeeperTokens()) {
+      const tokenAddress = entry.tokenAddress;
+      try {
+        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
+        const balance = await token.balanceOf(d.address);
+        if (balance > 0n && balance >= (await d.contract.swapThreshold(tokenAddress))) {
+          const cap = await d.contract.maxSwapAmount(tokenAddress);
+          let amountIn = cap > 0n && balance > cap ? cap : balance;
+          const isPlatformTokenItself = buyback && tokenAddress.toLowerCase() === platformTokenAddress.toLowerCase();
+          if (isPlatformTokenItself) amountIn -= amountIn / 2n; // half goes straight to burn/airdrop, the rest is sold
+          const predictedEth = amountIn > 0n ? await quoteV4DistributorSale(entry, d.address, d.contract, amountIn) : 0n;
+          if (predictedEth > 0n) {
+            const minEthOut = (predictedEth * (10000n - slipBps)) / 10000n;
+            let tx;
+            if (buyback && !isPlatformTokenItself) {
+              // Half the ETH buys the platform token; floor that leg too.
+              const quotedTokens = await quoteV4PlatformBuy(routerAddress, platformTokenAddress, predictedEth / 2n);
+              const minPlatform = (quotedTokens * (10000n - slipBps)) / 10000n;
+              tx = await sendRelayerTx(() =>
+                d.contract["triggerFeeWalletSwap(address,uint256,uint256)"](tokenAddress, minEthOut, minPlatform)
+              );
+            } else {
+              tx = await sendRelayerTx(() => d.contract["triggerFeeWalletSwap(address,uint256)"](tokenAddress, minEthOut));
+            }
+            const receipt = await tx.wait();
+            console.log(`[v4-fee-wallet] swept ${tokenAddress} (balance ${balance}, predicted ${predictedEth} wei, minEthOut ${minEthOut}) in tx ${receipt.hash}.`);
+          }
+        }
+      } catch (err) {
+        if (err && err.code !== "BAD_DATA") console.warn(`[v4-fee-wallet] swap skip ${tokenAddress}: ${err.message}`); // BAD_DATA = no contract at this address on this chain (stale tracked entry)
+      }
+      try {
+        const claimable = await d.contract.claimableEth(tokenAddress);
+        if (claimable > 0n && claimable >= feeWalletClaimMinWeiBig()) {
+          const tx = await sendRelayerTx(() => d.contract.claimFeeWalletRewards(tokenAddress));
+          const receipt = await tx.wait();
+          console.log(`[v4-fee-wallet] claimed ${claimable} wei for ${tokenAddress} in tx ${receipt.hash}.`);
+        }
+      } catch (err) {
+        console.warn(`[v4-fee-wallet] claim skip ${tokenAddress}: ${err.message}`);
+      }
+    }
+    await v4KeeperAirdropRound("v4-fee-wallet", d.contract, relayerSettings.feeWalletAirdropBatchSize, relayerSettings.feeWalletAirdropMaxBatchesPerTick);
+  }
+
+  async function sweepV4CreatorRewardsOnce() {
+    const d = await v4KeeperDistributor("creatorRewardsDistributor", V4_CREATOR_REWARDS_DISTRIBUTOR_ABI, "V4CreatorRewardsDistributor");
+    if (!d) return;
+    const slipBps = creatorRewardsSlippageBpsBig();
+    for (const entry of await v4KeeperTokens()) {
+      const tokenAddress = entry.tokenAddress;
+      try {
+        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
+        const balance = await token.balanceOf(d.address);
+        if (balance > 0n && balance >= (await d.contract.swapThreshold(tokenAddress))) {
+          const cap = await d.contract.maxSwapAmount(tokenAddress);
+          const amountIn = cap > 0n && balance > cap ? cap : balance;
+          const predictedEth = await quoteV4DistributorSale(entry, d.address, d.contract, amountIn);
+          if (predictedEth > 0n) {
+            const minEthOut = (predictedEth * (10000n - slipBps)) / 10000n;
+            const tx = await sendRelayerTx(() => d.contract.triggerCreatorSwap(tokenAddress, minEthOut));
+            const receipt = await tx.wait();
+            console.log(`[v4-creator-rewards] swept ${tokenAddress} (balance ${balance}, predicted ${predictedEth} wei, minEthOut ${minEthOut}) in tx ${receipt.hash}.`);
+          }
+        }
+      } catch (err) {
+        if (err && err.code !== "BAD_DATA") console.warn(`[v4-creator-rewards] swap skip ${tokenAddress}: ${err.message}`);
+      }
+      try {
+        const claimable = await d.contract.claimableEth(tokenAddress);
+        if (claimable > 0n && claimable >= creatorRewardsClaimMinWeiBig()) {
+          const tx = await sendRelayerTx(() => d.contract.claimCreatorRewards(tokenAddress));
+          const receipt = await tx.wait();
+          console.log(`[v4-creator-rewards] claimed ${claimable} wei for ${tokenAddress} in tx ${receipt.hash}.`);
+        }
+      } catch (err) {
+        console.warn(`[v4-creator-rewards] claim skip ${tokenAddress}: ${err.message}`);
+      }
+    }
+  }
+
+  async function sweepV4PlatformRewardsOnce() {
+    const d = await v4KeeperDistributor("rewardsDistributor", V4_PLATFORM_REWARDS_DISTRIBUTOR_ABI, "V4PlatformRewardsDistributor");
+    if (!d) return;
+    const platformTokenAddress = await d.contract.platformToken();
+    const routerAddress = await d.contract.buybackRouter();
+    if (platformTokenAddress === hre.ethers.ZeroAddress || routerAddress === hre.ethers.ZeroAddress) return; // buyback not available yet
+    const slipBps = platformBuybackSlippageBpsBig();
+
+    // 1. The factory's 50% launch-fee share arrives as plain ETH.
+    try {
+      const balance = await hre.ethers.provider.getBalance(d.address);
+      if (balance > 0n && balance >= (await d.contract.ethBuybackThreshold())) {
+        const cap = await d.contract.maxEthBuybackAmount();
+        const ethIn = cap > 0n && balance > cap ? cap : balance;
+        const quoted = await quoteV4PlatformBuy(routerAddress, platformTokenAddress, ethIn);
+        if (quoted > 0n) {
+          const minTokensOut = (quoted * (10000n - slipBps)) / 10000n;
+          const tx = await sendRelayerTx(() => d.contract.triggerEthBuyback(minTokensOut));
+          const receipt = await tx.wait();
+          console.log(`[v4-platform-rewards] ETH buyback: ${ethIn} wei -> ~${quoted} platformToken in tx ${receipt.hash}.`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[v4-platform-rewards] ETH buyback skip: ${err.message}`);
+    }
+
+    // 2. Each token's in-kind rewardBps cut.
+    for (const entry of await v4KeeperTokens()) {
+      const tokenAddress = entry.tokenAddress;
+      try {
+        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
+        const balance = await token.balanceOf(d.address);
+        if (balance === 0n || balance < (await d.contract.tokenBuybackThreshold(tokenAddress))) continue;
+        let minTokensOut = 0n; // unused by the contract when the token IS the platform token
+        let amountIn = balance;
+        if (tokenAddress.toLowerCase() !== platformTokenAddress.toLowerCase()) {
+          const cap = await d.contract.maxTokenBuybackAmount(tokenAddress);
+          amountIn = cap > 0n && balance > cap ? cap : balance;
+          const predictedEth = await quoteV4DistributorSale(entry, d.address, d.contract, amountIn);
+          if (predictedEth === 0n) continue;
+          const quoted = await quoteV4PlatformBuy(routerAddress, platformTokenAddress, predictedEth);
+          if (quoted === 0n) continue;
+          minTokensOut = (quoted * (10000n - slipBps)) / 10000n;
+        }
+        const tx = await sendRelayerTx(() => d.contract.triggerTokenBuyback(tokenAddress, minTokensOut));
+        const receipt = await tx.wait();
+        console.log(`[v4-platform-rewards] token buyback ${tokenAddress} (amountIn ${amountIn}) in tx ${receipt.hash}.`);
+      } catch (err) {
+        if (err && err.code !== "BAD_DATA") console.warn(`[v4-platform-rewards] token buyback skip ${tokenAddress}: ${err.message}`);
+      }
+    }
+
+    // 3. Airdrop rounds.
+    await v4KeeperAirdropRound("v4-platform-rewards", d.contract, relayerSettings.platformAirdropBatchSize, relayerSettings.platformAirdropMaxBatchesPerTick);
+  }
+
+  async function v4FeeWalletPollLoop() {
+    await sweepV4FeeWalletOnce().catch((err) => console.error(`[v4-fee-wallet] sweep error: ${err.message}`));
+    setTimeout(v4FeeWalletPollLoop, relayerSettings.feeWalletPollIntervalMs);
+  }
+  async function v4CreatorRewardsPollLoop() {
+    await sweepV4CreatorRewardsOnce().catch((err) => console.error(`[v4-creator-rewards] sweep error: ${err.message}`));
+    setTimeout(v4CreatorRewardsPollLoop, relayerSettings.creatorRewardsPollIntervalMs);
+  }
+  async function v4PlatformRewardsPollLoop() {
+    await sweepV4PlatformRewardsOnce().catch((err) => console.error(`[v4-platform-rewards] sweep error: ${err.message}`));
+    setTimeout(v4PlatformRewardsPollLoop, relayerSettings.platformRewardsPollIntervalMs);
+  }
+
   console.log(`Polling every ${POLL_INTERVAL_MS}ms for new deposits (only deposits made from now on — see cursors.json).`);
   pollLoop();
 
@@ -4354,6 +4950,21 @@ async function main() {
   if (platformRewardsDistributor) {
     console.log(`Sweeping platform rewards (buyback/burn/airdrop) every ${relayerSettings.platformRewardsPollIntervalMs}ms.`);
     platformRewardsPollLoop();
+  }
+
+  if (V4_KEEPER_ENABLED) {
+    if (!v4TokenFactoryAddress) {
+      console.warn("V4_KEEPER_ENABLED=true but V4_TOKEN_FACTORY_ADDRESS is not set — the V4 distributor keeper is OFF.");
+    } else {
+      console.log(
+        `V4 distributor keeper ON for factory ${v4TokenFactoryAddress}: fee-wallet every ${relayerSettings.feeWalletPollIntervalMs}ms, ` +
+          `creator rewards every ${relayerSettings.creatorRewardsPollIntervalMs}ms, platform rewards every ${relayerSettings.platformRewardsPollIntervalMs}ms ` +
+          "(distributor addresses are read from the factory each tick; a slot that's unset just idles)."
+      );
+      v4FeeWalletPollLoop();
+      v4CreatorRewardsPollLoop();
+      v4PlatformRewardsPollLoop();
+    }
   }
 }
 
