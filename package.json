@@ -7,8 +7,8 @@
   "scripts": {
     "compile": "hardhat compile",
     "build": "hardhat compile",
-    "start": "node scripts/relayer.js",
-    "dev": "node scripts/relayer.js",
+    "start": "hardhat compile && node scripts/relayer.js",
+     "dev": "hardhat compile && node scripts/relayer.js",
     "test": "hardhat test",
     "deploy:local": "hardhat run scripts/deploy.js --network hardhat",
     "test:v4": "cross-env V4_TEST=1 hardhat test test/V4TokenFactory.test.js"
