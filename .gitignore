@@ -4,6 +4,7 @@ cache/
 coverage
 cache-v4test/
 artifacts-v4test/
+artifacts/build-info/
 
 
 # deployed-contracts/ (the per-network launch ledgers scripts/launch.js
