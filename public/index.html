@@ -509,6 +509,35 @@
   .curve-card{border:1px solid var(--line-strong); border-radius:var(--radius-sm); padding:12px; cursor:pointer; background:var(--ink-950); text-align:center;}
   .curve-card svg{width:100%; height:44px; margin-bottom:8px;}
   .curve-card.selected{border-color:var(--signal-500); background:var(--signal-wash);}
+  .curve-card.locked{opacity:.45; cursor:not-allowed;}
+  .proto-row{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:0 0 18px;}
+  .proto-card{border:1px solid var(--line-strong); border-radius:var(--radius-sm); padding:12px 14px; cursor:pointer; background:var(--ink-950); text-align:left;}
+  .proto-card .name{font-family:var(--font-mono); font-size:.78rem; font-weight:600;}
+  .proto-card .desc{font-family:var(--font-mono); font-size:.62rem; color:var(--paper-700); margin-top:3px;}
+  .proto-card.selected{border-color:var(--signal-500); background:var(--signal-wash);}
+  .proto-card.disabled{opacity:.45; cursor:not-allowed;}
+  .dc-wrap{overflow-x:auto; margin-bottom:6px;}
+  .dc-table{width:100%; border-collapse:collapse; font-family:var(--font-mono); font-size:.72rem;}
+  .dc-table th{text-align:left; font-weight:600; color:var(--paper-500); letter-spacing:.04em; text-transform:uppercase; font-size:.62rem; padding:8px 10px; border-bottom:1px solid var(--line-strong); white-space:nowrap;}
+  .dc-table td{padding:9px 10px; border-bottom:1px solid var(--line); color:var(--paper-300); vertical-align:middle; white-space:nowrap;}
+  .dc-table td.dc-none{color:var(--paper-700);}
+  .dc-table a{color:var(--signal-300); text-decoration:none;}
+  .dc-table a:hover{text-decoration:underline;}
+  .proto-badge{display:inline-block; font-family:var(--font-mono); font-size:.6rem; font-weight:700; letter-spacing:.06em; padding:2px 7px; border-radius:3px; border:1px solid var(--line-strong); color:var(--paper-300); vertical-align:middle;}
+  .proto-badge.v4{border-color:var(--signal-500); color:var(--signal-300); background:var(--signal-wash);}
+  /* Admin V2/V4 switch: both protocols' panels are rendered, CSS shows one. */
+  #adminWrap[data-proto="v4"] [data-admin-proto="v2"]{display:none !important;}
+  #adminWrap[data-proto="v2"] [data-admin-proto="v4"]{display:none !important;}
+  .proto-switch{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 18px;}
+  .proto-switch .lbl{font-family:var(--font-mono); font-size:.62rem; letter-spacing:.06em; text-transform:uppercase; color:var(--paper-500); margin-right:4px;}
+  .proto-switch button{font-family:var(--font-mono); font-size:.74rem; color:var(--paper-500); background:none; border:1px solid var(--line-strong); border-radius:var(--radius-sm); padding:7px 14px; cursor:pointer;}
+  .proto-switch button:hover{color:var(--paper-100);}
+  .proto-switch button.active{color:var(--signal-300); border-color:var(--signal-500); background:var(--signal-wash);}
+  .v4s-pill{display:inline-block; font-family:var(--font-mono); font-size:.62rem; font-weight:600; letter-spacing:.04em; padding:2px 7px; border-radius:3px; border:1px solid var(--line-strong); color:var(--paper-500); margin:0 4px 3px 0; white-space:nowrap;}
+  .v4s-pill.ok{border-color:var(--signal-500); color:var(--signal-300); background:var(--signal-wash);}
+  .v4s-pill.warn{border-color:#c9a227; color:#c9a227;}
+  .v4s-pill.bad{border-color:var(--critical-500); color:var(--critical-500);}
+  .dc-table td.v4s-cell{white-space:normal;}
   .curve-card .name{font-family:var(--font-mono); font-size:.74rem; font-weight:600;}
   .curve-card .desc{font-family:var(--font-mono); font-size:.62rem; color:var(--paper-700); margin-top:3px;}
   .range-row{display:flex; align-items:center; gap:14px;}
@@ -1337,8 +1366,8 @@
   // same already-tracked gap as bondingCurveFactory/customBondingCurveFactory
   // above; "Save (this browser)" and manually editing config.json both work
   // in the meantime.
-  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl", "platformTaxDistributor", "feeWalletDistributor"];
-  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "platformTaxDistributor", "feeWalletDistributor"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
+  const CONFIG_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "relayerApiUrl", "platformTaxDistributor", "feeWalletDistributor", "v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter"];
+  const CONFIG_ADDRESS_KEYS = ["tokenFactory", "customTokenFactory", "bondingCurveFactory", "customBondingCurveFactory", "rewardsDistributor", "creatorRewardsDistributor", "priceFeed", "platformTaxDistributor", "feeWalletDistributor", "v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter"]; // validated as 0x addresses on save; relayerApiUrl is validated as a URL instead
 
   // Must produce byte-identical output to relayer.js's own
   // canonicalizePlatformConfig for the same input, or a signature made here
@@ -1386,6 +1415,10 @@
     relayerApiUrl: "Gasless relayer API",
     platformTaxDistributor: "PlatformTaxDistributor (0.30% trade tax)",
     feeWalletDistributor: "FeeWalletDistributor",
+    v4TokenFactory: "V4TokenFactory (Uniswap V4, admin-only)",
+    v4TaxHook: "V4TaxHook (Uniswap V4)",
+    v4LiquidityLocker: "V4LiquidityLocker (Uniswap V4)",
+    v4SwapRouter: "V4SwapRouter (Uniswap V4 trading)",
   };
   const CONFIG_HELP = {
     tokenFactory: "TokenFactory address — fill in once scripts/deploy.js has run against this network. Left unset, the wizard falls back to a fully local, simulated launch instead of calling a contract that doesn't exist.",
@@ -1398,6 +1431,10 @@
     relayerApiUrl: "Base URL of a running scripts/relayer.js instance (see the contracts repo's README) — e.g. https://relayer.yourdomain.com. When set, the wizard offers a gasless launch: the creator signs a free EIP-712 voucher and sends one cheap ETH deposit, and the relayer submits the real deploy transaction and pays its own gas. Left unset, launches always fall back to the creator's wallet submitting (and paying gas for) the deploy transaction directly, exactly as before this feature existed. This same relayer instance, when given CREATOR_REWARDS_DISTRIBUTOR_ADDRESS in its own environment, also auto-sweeps creator rewards into ETH in the background — see scripts/relayer.js.",
     platformTaxDistributor: "PlatformTaxDistributor address — a fully standalone contract (its own deployment, its own owner, not part of scripts/deploy.js's own pipeline or controlled by TokenFactory/relayer.js) that every buy/sell/curve-buy/curve-sell on this page sends a flat 0.30% trade tax to, as a plain extra ETH transfer alongside the trade itself (see PLATFORM_TRADE_TAX_BPS). Deploy PlatformTaxDistributor.sol separately, then set its address here per network. Left unset (or set to the zero address), trades on that network simply skip the fee entirely — never blocks or breaks a trade over a missing address.",
     feeWalletDistributor: "FeeWalletDistributor address — the platform's own fee-wallet-remainder contract (see scripts/deployFeeWalletDistributor.js), converting each taxed token's accumulated fee-wallet cut to ETH automatically instead of letting it sit as whatever token it was taxed in. Stays unset until deployed; until then both factories keep feeWalletDistributor unset on-chain regardless of what's entered here. This field only tracks the contract's own address for the page's reference (e.g. the relayer keeper panel above, and any future claim UI) — actually wiring a deployed FeeWalletDistributor into a factory is still done per-factory, via that factory's own admin panel below.",
+    v4TokenFactory: "V4TokenFactory address (contracts/V4TokenFactory.sol) — the Uniswap V4 version of TokenFactory. Admin-only while V4 is under development: the Deploy mode step lets the admin wallet pick V4, but Launch stays disabled until this is set, and nobody else can select V4 at all. Same null-until-deployed convention as every other contract here.",
+    v4TaxHook: "V4TaxHook address (contracts/V4TaxHook.sol) — the Uniswap V4 hook that collects the trading tax at the pool, deployed via CREATE2 at a flag-encoded address. Reference only; listed in Admin → Deployed contracts.",
+    v4LiquidityLocker: "V4LiquidityLocker address (contracts/V4LiquidityLocker.sol) — holds each creator's locked V4 liquidity position. Reference only; listed in Admin → Deployed contracts.",
+    v4SwapRouter: "V4SwapRouter address (contracts/V4SwapRouter.sol) — the small stateless router the token page sends V4 buys and sells through (a wallet can't call a V4 pool directly). Left unset, V4 token pages show the pool but no buy/sell widget.",
   };
   const DEFAULT_CONFIG = {
     // Testnet (demo) values below are the actual TokenFactory/
@@ -1447,6 +1484,12 @@
     // deployed somewhere — same null-until-deployed convention as every
     // other factory/distributor above. See CONFIG_HELP.feeWalletDistributor.
     feeWalletDistributor: { demo: null, live: null },
+    // Uniswap V4 contract set (admin-only, under development). Unset until
+    // the V4 contracts are deployed — see CONFIG_HELP.v4TokenFactory.
+    v4TokenFactory: { demo: null, live: null },
+    v4TaxHook: { demo: null, live: null },
+    v4LiquidityLocker: { demo: null, live: null },
+    v4SwapRouter: { demo: null, live: null },
   };
   const PLATFORM_CONFIG_STORAGE_KEY = "hoodlaunch_platform_config";
 
@@ -1566,6 +1609,27 @@
   setInterval(fetchServerPlatformConfig, 60000);
 
   function tokenFactoryAddress(mode){ return platformConfig.tokenFactory[mode || appMode] || null; }
+  // ---- Uniswap V4 (admin-only, under development) ----
+  // V4 contracts live beside the V2 set and nothing about V2 changes. Only
+  // the admin wallet can pick V4 in the wizard (UI gate only — see the
+  // ADMIN_WALLET comment: the real authorization is on-chain), everyone else
+  // sees it greyed out as "Under development". V4 launches are additionally
+  // blocked outright for now: the V4 transaction flow isn't wired in yet.
+  const V4_MODES = ["just", "liquidity"]; // only the TokenFactory pilot modes exist on V4
+  function v4TokenFactoryAddress(mode){ return (platformConfig.v4TokenFactory && platformConfig.v4TokenFactory[mode || appMode]) || null; }
+  function v4SwapRouterAddress(mode){ return (platformConfig.v4SwapRouter && platformConfig.v4SwapRouter[mode || appMode]) || null; }
+  function v4Selectable(){ return isAdminWallet(wallet); }
+  function draftProtocol(){ return (draft && draft.protocol==="v4" && v4Selectable()) ? "v4" : "v2"; }
+  // Which protocol a token was launched on. Anything without an explicit
+  // protocol (every token launched before V4 existed) is V2.
+  function tokenProtocol(t){ return (t && String(t.protocol||"").toLowerCase()==="v4") ? "v4" : "v2"; }
+  // Everything the shared TokenFactory launch code needs to know about which
+  // factory family it's talking to.
+  function launchProtocolOpts(){
+    return draftProtocol()==="v4"
+      ? { v4:true, domainName: V4_EIP712_DOMAIN_NAME, tokenCreatedTopic0: V4_TOKEN_CREATED_TOPIC0, liquidityAddedTopic0: V4_LIQUIDITY_ADDED_TOPIC0, voucherPath: "/vouchers/v4token", factoryName: "V4TokenFactory" }
+      : { v4:false, domainName: "HoodLaunchTokenFactory", tokenCreatedTopic0: TOKEN_CREATED_TOPIC0, liquidityAddedTopic0: LIQUIDITY_ADDED_TOPIC0, voucherPath: "/vouchers/token", factoryName: "TokenFactory" };
+  }
   function customTokenFactoryAddress(mode){ return platformConfig.customTokenFactory[mode || appMode] || null; }
   function bondingCurveFactoryAddress(mode){ return platformConfig.bondingCurveFactory[mode || appMode] || null; }
   function customBondingCurveFactoryAddress(mode){ return platformConfig.customBondingCurveFactory[mode || appMode] || null; }
@@ -1642,7 +1706,7 @@
     // reset the live feed to that network's own activity — both are plain
     // function declarations defined further down, safe to call here since
     // this only ever runs well after the whole script has run once.
-    refreshRemoteLaunches(appMode);
+    refreshRemoteLaunches(appMode).finally(()=>verifyV4Protocol(appMode));
     if(typeof seedFeed==="function") seedFeed();
     // Platform token spotlight reads platformConfig.rewardsDistributor[mode]
     // (via rewardsDistributorAddress()) and fetches price history scoped to
@@ -2037,6 +2101,33 @@
   const WITHDRAW_SELECTOR = "2e1a7d4d";          // withdraw(uint256) on LiquidityLocker
   const TOKEN_CREATED_TOPIC0 = "0x7dd5f7a98375377b61006035d0d191d7566a4be5624c498fb887a72aa47905c5";
   const LIQUIDITY_ADDED_TOPIC0 = "0x2a1ccf027a21278fdbb45e4944200aa24eb7f7492d1a99646a59baae99be6a9c";
+  // Uniswap V4 factory (V4TokenFactory). createToken/launchFee/deployFee/
+  // lpLockDuration/tokenImplementation/predictTokenAddress/depositForRelayedLaunch/
+  // hashLaunchVoucher and the CreatorBought event are byte-for-byte the same
+  // as V2's, so every encoder above is reused as-is. Only these differ:
+  // TokenCreated carries a bytes32 poolId where V2 has the pair address, and
+  // LiquidityAdded has (liquidity) instead of (lpAmount) and no pair.
+  const V4_TOKEN_CREATED_TOPIC0 = "0xb362f464db42281cb9a4ea0aab2aa9572865bef014c3a23375eefe891505fc0a"; // TokenCreated(address,address,string,string,uint256,bool,bytes32)
+  const V4_LIQUIDITY_ADDED_TOPIC0 = "0xea3191ffbe2f62bfd724ee8d971b15ff9b7994e3a9169dc4c60443be3e4a43c4"; // LiquidityAdded(address,address,uint256,uint256,uint256,uint256,uint256)
+  const POOL_ID_OF_SELECTOR = "30040054"; // poolIdOf(address) -> bytes32
+  const V4_EIP712_DOMAIN_NAME = "HoodLaunchV4TokenFactory";
+  const V4_CONFIG_KEYS = ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter"];
+  // Admin V4 panels (selectors computed with keccak256 of the canonical signatures)
+  const V4_BUY_IN_SLIPPAGE_BPS_SELECTOR = "6593b2db";      // buyInSlippageBps()
+  const V4_SET_BUY_IN_SLIPPAGE_BPS_SELECTOR = "9e385c58";  // setBuyInSlippageBps(uint256)
+  const V4_HOOK_SELECTOR = "7f5a7c7b";                     // hook()
+  const V4_LOCKER_SELECTOR = "d7b96d4e";                   // locker()
+  const V4_POOL_MANAGER_SELECTOR = "dc4c90d3";             // poolManager()
+  const V4_FACTORY_SELECTOR = "c45a0155";                  // factory() — hook & locker
+  const V4_DEPLOYER_SELECTOR = "d5f39488";                 // deployer() — hook
+  const V4_LOCK_COUNT_SELECTOR = "9b10b6f5";               // lockCount() — locker
+  // V4 distributors + hook tax-exempt list
+  const V4_SET_TAX_EXEMPT_SELECTOR = "1dc61040";           // setTaxExempt(address,bool) — on the V4TokenFactory
+  const V4_TAX_EXEMPT_SELECTOR = "d1ecfc68";               // taxExempt(address) — on the hook
+  const V4_PLATFORM_TOKEN_SELECTOR = "d1b812cd";           // platformToken()
+  const V4_PENDING_AIRDROP_SELECTOR = "36a8bb1f";          // pendingAirdropTokens()
+  const V4_FEE_WALLET_SELECTOR = "f25f4b56";               // feeWallet() — V4FeeWalletDistributor
+  const V4_BUYBACK_ROUTER_SELECTOR = "9e03349a";           // buybackRouter()
   const CREATOR_BOUGHT_TOPIC0 = "0x5772767e7b2a80bb7caf31ec477440a12dec4d0c71f0388af6dd6ec5234a0f38";
   // ERC20 read selectors — used by the launch progress dialog's "Verifying"
   // step to read the freshly deployed clone back and confirm it actually
@@ -3490,6 +3581,8 @@
     return `${Math.round(mins/60)}h ago`;
   }
   function lpIsUnlockable(t){
+    // V4 positions live in V4LiquidityLocker; unlockLiquidity() below reads
+    // the right struct layout per protocol. Same maturity rule for both.
     return t.mode==="liquidity" && !t.lpWithdrawn && t.unlockAt!=null && Date.now()>=t.unlockAt;
   }
 
@@ -3704,9 +3797,10 @@
       throw new Error("The transaction reverted on-chain — nothing was launched.");
     }
 
+    const protoOpts = launchProtocolOpts();
     const createdLog = (receipt.logs||[]).find(l =>
       l.address && l.address.toLowerCase()===factoryAddress.toLowerCase() &&
-      l.topics && l.topics[0] && l.topics[0].toLowerCase()===TOKEN_CREATED_TOPIC0.toLowerCase()
+      l.topics && l.topics[0] && l.topics[0].toLowerCase()===protoOpts.tokenCreatedTopic0.toLowerCase()
     );
     if(!createdLog){
       onStep("deploy", "error", "Transaction confirmed, but no TokenCreated event was found — check the explorer.");
@@ -3715,12 +3809,12 @@
     const tokenAddress = decodeAddress(createdLog.topics[1]);
     onStep("deploy", "done", `Contract deployed at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · tx <span class="num">${fmtAddrSafe(txHash)}</span>`);
 
-    const { pairAddress, lockId, unlockAt } = await finishTokenFactoryVerification({
+    const { pairAddress, poolId, lockId, unlockAt } = await finishTokenFactoryVerification({
       factoryAddress, tokenAddress, receipt, isLiquidity, buyInWei, lpLockDurationSeconds, onStep,
     });
 
     return {
-      txHash, tokenAddress, pairAddress, lockId, unlockAt,
+      txHash, tokenAddress, pairAddress, poolId, lockId, unlockAt,
       lpLockDurationDays: Math.round(Number(lpLockDurationSeconds) / 86400),
       liquidityEth: Number(draft.liquidityEth), buyInEth: Number(draft.buyInEth),
     };
@@ -3763,7 +3857,9 @@
       if(nameSymbolMatch && supplyMatch){
         onStep("verify", "done", `Confirmed on-chain: name, symbol, and total supply all match what you launched.`);
       }else if(nameSymbolMatch && onChainSupply < expectedSupply){
-        onStep("verify", "done", `Confirmed on-chain: name and symbol match what you launched. Total supply reads slightly under the initial mint — expected when a buy-in tax burns tokens in the same transaction.`);
+        onStep("verify", "done", launchProtocolOpts().v4
+          ? `Confirmed on-chain: name and symbol match what you launched. Total supply reads a hair under the initial mint — expected: a few wei of rounding dust left over from seeding the V4 pool is burned.`
+          : `Confirmed on-chain: name and symbol match what you launched. Total supply reads slightly under the initial mint — expected when a buy-in tax burns tokens in the same transaction.`);
       }else{
         onStep("verify", "error", `On-chain contract reports "${escapeHtml(onChainName)}" ($${escapeHtml(onChainSymbol)}) — doesn't match what you launched. The token exists, but double-check it before trusting it.`);
       }
@@ -3783,20 +3879,29 @@
       }
     }
 
+    const protoOpts = launchProtocolOpts();
     let pairAddress = null;
+    let poolId = null;
     let lockId = null;
     let unlockAt = null;
     if(isLiquidity){
       onStep("liquidity", "active", "Confirming the pool on-chain…");
-      const pairData = "0x"+PAIR_OF_SELECTOR+encodeAddressParam(tokenAddress);
-      pairAddress = decodeAddress(await ethCall(factoryAddress, pairData));
+      if(protoOpts.v4){
+        // V4 has no pair contract — the pool is identified by a bytes32
+        // poolId inside the PoolManager. Read it back from the factory.
+        const poolIdHex = await ethCall(factoryAddress, "0x"+POOL_ID_OF_SELECTOR+encodeAddressParam(tokenAddress));
+        poolId = /^0x[0-9a-fA-F]{64}$/.test(poolIdHex) && !/^0x0{64}$/.test(poolIdHex) ? poolIdHex.toLowerCase() : null;
+      } else {
+        const pairData = "0x"+PAIR_OF_SELECTOR+encodeAddressParam(tokenAddress);
+        pairAddress = decodeAddress(await ethCall(factoryAddress, pairData));
+      }
 
       // LiquidityAdded(token indexed, creator indexed, ethAmount, tokenAmount,
       // lpAmount, unlockTime, lockId indexed, pair) — lockId is the third
       // indexed topic; unlockTime is the 4th non-indexed data word.
       const liquidityLog = (receipt.logs||[]).find(l =>
         l.address && l.address.toLowerCase()===factoryAddress.toLowerCase() &&
-        l.topics && l.topics[0] && l.topics[0].toLowerCase()===LIQUIDITY_ADDED_TOPIC0.toLowerCase()
+        l.topics && l.topics[0] && l.topics[0].toLowerCase()===protoOpts.liquidityAddedTopic0.toLowerCase()
       );
       if(liquidityLog){
         lockId = decodeUint256(liquidityLog.topics[3]).toString();
@@ -3807,7 +3912,9 @@
         // (most real timestamps do) or silently misreads an all-digit word
         // as decimal instead of hex.
         unlockAt = Number(decodeUint256("0x"+words[3])) * 1000; // seconds -> ms
-        onStep("liquidity", "done", `Pool live at <span class="num">${fmtAddrSafe(pairAddress)}</span> · LP locked to you for ${Math.round(Number(lpLockDurationSeconds)/86400)} days.`);
+        onStep("liquidity", "done", protoOpts.v4
+          ? `V4 pool live · pool ID <span class="num">${fmtAddrSafe(poolId||"")}</span> · position locked to you for ${Math.round(Number(lpLockDurationSeconds)/86400)} days.`
+          : `Pool live at <span class="num">${fmtAddrSafe(pairAddress)}</span> · LP locked to you for ${Math.round(Number(lpLockDurationSeconds)/86400)} days.`);
       }else{
         onStep("liquidity", "error", "Transaction confirmed, but no LiquidityAdded event was found — check the explorer.");
       }
@@ -3828,9 +3935,25 @@
       }
     }
 
-    return { pairAddress, lockId, unlockAt };
+    return { pairAddress, poolId, lockId, unlockAt };
   }
 
+  // True only when the relayer at `relayerUrl` reports it is watching THIS
+  // V4TokenFactory (GET /health -> v4TokenFactoryAddress) and that same relayer
+  // wallet is the factory's on-chain relayer() — the two conditions that make
+  // a V4 gasless deposit actually get relayed. Any failure reads as "not
+  // ready", never as an error.
+  async function v4RelayerReady(relayerUrl, factoryAddress){
+    try{
+      const res = await fetch(`${relayerUrl}/health`);
+      if(!res.ok) return false;
+      const h = await res.json();
+      if(!h || !h.v4TokenFactoryAddress || !h.relayer) return false;
+      if(h.v4TokenFactoryAddress.toLowerCase() !== factoryAddress.toLowerCase()) return false;
+      const onChain = decodeAddress(await ethCall(factoryAddress, "0x"+RELAYER_SELECTOR));
+      return onChain.toLowerCase() === String(h.relayer).toLowerCase();
+    }catch(e){ return false; }
+  }
   // Gasless relayed launch: the creator signs a LaunchVoucher off-chain
   // (free), sends one cheap ETH deposit into escrow (a plain transfer, not
   // the deploy transaction), and the configured relayer (see
@@ -3897,7 +4020,7 @@
 
     onStep("deploy", "active", "Waiting for your signature — this is free, no gas, and no transaction yet…");
     const domain = {
-      name: "HoodLaunchTokenFactory", version: "1",
+      name: launchProtocolOpts().domainName, version: "1",
       chainId: parseInt(NETWORKS[appMode].chainIdHex, 16), verifyingContract: factoryAddress,
     };
     const signature = await window.ethereum.request({
@@ -3925,7 +4048,7 @@
     }
 
     onStep("deploy", "active", "Deposit confirmed — handing your signed voucher to the relayer…");
-    const submitRes = await fetch(`${relayerUrl}/vouchers/token`, {
+    const submitRes = await fetch(`${relayerUrl}${launchProtocolOpts().voucherPath}`, {
       method:"POST", headers:{ "Content-Type":"application/json" },
       body: JSON.stringify({ voucher: voucherForSigning, signature }),
     }).catch(()=>null);
@@ -3958,12 +4081,12 @@
     onStep("deploy", "done", `Contract deployed (gasless) at <span class="num">${fmtAddrSafe(tokenAddress)}</span> · relay tx <span class="num">${fmtAddrSafe(relayedTxHash)}</span>`);
 
     const receipt = await waitForReceipt(relayedTxHash);
-    const { pairAddress, lockId, unlockAt } = await finishTokenFactoryVerification({
+    const { pairAddress, poolId, lockId, unlockAt } = await finishTokenFactoryVerification({
       factoryAddress, tokenAddress, receipt, isLiquidity, buyInWei, lpLockDurationSeconds, onStep,
     });
 
     return {
-      txHash: relayedTxHash, tokenAddress, pairAddress, lockId, unlockAt,
+      txHash: relayedTxHash, tokenAddress, pairAddress, poolId, lockId, unlockAt,
       lpLockDurationDays: Math.round(Number(lpLockDurationSeconds) / 86400),
       liquidityEth: Number(draft.liquidityEth), buyInEth: Number(draft.buyInEth),
     };
@@ -3981,7 +4104,7 @@
     };
   }
   function resetLaunchDraft(){
-    draft = { name:"", ticker:"", desc:"", supply:1000000000, mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
+    draft = { name:"", ticker:"", desc:"", supply:1000000000, protocol:"v2", mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
     wizStep = 1;
   }
   // Every contract address actually touched by this launch, in one place —
@@ -3999,10 +4122,13 @@
       rows.push(["Pool contract", newToken.pairAddress]);
     }
     if(newToken.factoryAddress) rows.push(["Deployed via", newToken.factoryAddress]);
+    const poolIdRow = (newToken.protocol==="v4" && newToken.poolId)
+      ? `<div class="review-row"><span class="k">V4 pool ID</span><span class="v num" style="word-break:break-all;">${escapeHtml(newToken.poolId)}</span></div>` : "";
     return `
       <div class="eyebrow" style="margin:16px 0 8px;">Deployment summary</div>
       <div class="review-list">
         ${rows.map(([k,addr])=>`<div class="review-row"><span class="k">${escapeHtml(k)}</span><span class="v">${link(addr)}</span></div>`).join("")}
+        ${poolIdRow}
       </div>
     `;
   }
@@ -4047,10 +4173,22 @@
     startLaunchProgress(steps);
 
     try{
-      const relayerUrl = relayerApiUrl();
+      let relayerUrl = relayerApiUrl();
+      const isV4Launch = draftProtocol()==="v4";
+      // The V2 gasless route is always on whenever a relayer is configured.
+      // For V4 the relayer must separately be running with this exact
+      // V4TokenFactory AND be the factory's on-chain relayer — otherwise the
+      // creator's deposit would sit in escrow with nobody to relay it — so
+      // check both up front and quietly fall back to a direct, self-paid
+      // launch if either is missing.
+      if(isV4Launch && relayerUrl && !(await v4RelayerReady(relayerUrl, factoryAddress))){
+        toast("The relayer isn't set up for V4 yet — launching directly from your wallet instead (you pay gas).");
+        relayerUrl = null;
+      }
       const result = relayerUrl
         ? await performRelayedLaunch(factoryAddress, relayerUrl, setLaunchStep)
         : await performOnChainLaunch(factoryAddress, setLaunchStep);
+      const v4Fields = isV4Launch ? { protocol:"v4", poolId: result.poolId || null } : {};
       const newToken = isLiquidity ? {
         id: result.tokenAddress, name: draft.name, ticker: draft.ticker,
         desc: draft.desc || "A freshly launched community token.",
@@ -4062,7 +4200,7 @@
         lockId: result.lockId, unlockAt: result.unlockAt, lpLockDurationDays: result.lpLockDurationDays,
         lpWithdrawn:false, factoryAddress,
         networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
-        createdAtMs: Date.now(),
+        createdAtMs: Date.now(), ...v4Fields,
       } : {
         id: result.tokenAddress, name: draft.name, ticker: draft.ticker,
         desc: draft.desc || "A freshly launched community token.",
@@ -4071,12 +4209,13 @@
         catColor:"var(--signal-500)", mode:"just", status:"creator-held", createdCustom:true,
         onChain:true, tokenAddress: result.tokenAddress, txHash: result.txHash,
         networkMode: appMode, creatorWallet: wallet, socials: {...draft.socials}, logo: draft.logo, banner: draft.banner,
-        createdAtMs: Date.now(),
+        createdAtMs: Date.now(), ...v4Fields,
+        ...(isV4Launch ? { factoryAddress } : {}),
       };
       tokens.unshift(newToken);
       saveCustomTokens();
       syncTokenMetadataToServer(newToken).catch(()=>{});
-      if(isLiquidity) refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real price
+      if(isLiquidity && !isV4Launch) refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real price
       if(isLiquidity){
         setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on ${escapeHtml(NETWORKS[appMode].chainName)}.`);
         toast(`🚀 $${newToken.ticker} launched on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
@@ -5300,6 +5439,8 @@
     // branch — so GET /price-history/:tokenAddress already has real points
     // to fetch for it, same as any other launched token.
     if(t.status==="curve-trading" && (t.mode==="curve"||t.mode==="customCurve")) return true;
+    // V4: no pair contract — the relayer samples the pool by poolId.
+    if(tokenProtocol(t)==="v4") return !!(t.poolId && (t.status==="taxed"||t.status==="graduated"));
     return !!((t.status==="taxed"||t.status==="graduated")
       && t.pairAddress && t.pairAddress.toLowerCase()!==ZERO_ADDRESS);
   }
@@ -5452,7 +5593,10 @@
       saveCustomTokens();
       renderGrid();
       if(views.portfolio.classList.contains("active")) renderPortfolio();
-      if(views.detail.classList.contains("active") && currentDetailTokenId && liveTokens.some(t=>t.id===currentDetailTokenId)){
+      // Don't rebuild the detail view out from under someone mid-trade (it
+      // would wipe the amount they're typing and flip a Sell tab back to
+      // Buy) — the fresh price lands on the next sample or when they leave.
+      if(views.detail.classList.contains("active") && currentDetailTokenId && !tradeInProgress() && liveTokens.some(t=>t.id===currentDetailTokenId)){
         openDetail(currentDetailTokenId);
       }
     }
@@ -5516,7 +5660,12 @@
     return "creator-held";
   }
   function remoteLaunchToTokenObject(entry, mode){
-    const isLiquidity = !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS);
+    // A V4 launch has no pair contract — its pool is the bytes32 poolId — so
+    // "has a pool" means a poolId for V4 and a pairAddress for everything else.
+    const isV4Entry = entry.protocol==="v4";
+    const isLiquidity = isV4Entry
+      ? !!entry.poolId
+      : !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS);
     const createdAtMs = entry.createdAt ? Date.parse(entry.createdAt) : Date.now();
     const unlockAtMs = entry.liquidityUnlockTime ? Date.parse(entry.liquidityUnlockTime) : null;
     // The ledger only records an absolute unlock timestamp, not the lock
@@ -5561,7 +5710,8 @@
       remoteSource: true,   // came from GET /launches, not launched in this browser
       onChain: true,
       tokenAddress: entry.tokenAddress,
-      pairAddress: isLiquidity ? entry.pairAddress : null,
+      pairAddress: (isLiquidity && !isV4Entry) ? entry.pairAddress : null,
+      ...(isV4Entry ? { protocol:"v4", poolId: entry.poolId || null } : {}),
       // The ledger has no per-token factoryAddress column at all (every
       // other factory call this page makes for a remote token goes through
       // a DEX router instead, which needs no factory address) — but Quick
@@ -5572,7 +5722,7 @@
       // straight from platformConfig instead of the ledger.
       factoryAddress: isCurveEntry
         ? (isCustomCurveEntry ? customBondingCurveFactoryAddress(mode) : bondingCurveFactoryAddress(mode))
-        : null,
+        : (isV4Entry ? v4TokenFactoryAddress(mode) : null),
       txHash: entry.deploymentTxHash || null,
       lockId: entry.liquidityLockId!=null ? String(entry.liquidityLockId) : null,
       unlockAt: isLiquidity ? unlockAtMs : null,
@@ -5607,6 +5757,56 @@
   // mode) and merges in anything this browser hasn't seen yet. Silent no-op
   // when no relayer is configured for that mode, or it's unreachable —
   // same "just try again next time" posture as refreshLiveTokenPrices.
+  // ---- protocol safety net ----
+  // A token's V2/V4 label normally travels with it (set at launch; reported
+  // by the relayer per factory). This catches a V4 token that lost it — local
+  // storage cleared, a copy from a browser that predates the field, a relayer
+  // that wasn't watching the V4 factory — by asking the V4 factory itself:
+  // creatorOf(token) is non-zero only for tokens that factory created. Only
+  // tokens that could be an unlabelled V4 launch are checked: on-chain, no
+  // protocol, no V2 pair address (a V2 pool token always has one), and not a
+  // bonding-curve token. Needs a configured V4 factory for the network; a
+  // network read, so a failure just retries next time.
+  const V4_CREATOR_OF_SELECTOR = "dea5c2e0"; // V4TokenFactory.creatorOf(address)
+  const v4ProtocolChecked = new Set();
+  async function verifyV4Protocol(mode){
+    mode = mode || appMode;
+    const factory = v4TokenFactoryAddress(mode);
+    if(!factory) return;
+    const candidates = tokens.filter(t=>
+      t.onChain && t.tokenAddress && (t.networkMode||"demo")===mode && tokenProtocol(t)!=="v4"
+      && !t.pairAddress && t.mode!=="curve" && t.mode!=="customCurve"
+      && !v4ProtocolChecked.has(remoteLaunchKey(t.tokenAddress, mode))
+    ).slice(0, 25); // bounded per run; the rest are picked up on the next one
+    let fixed = [];
+    for(const t of candidates){
+      const key = remoteLaunchKey(t.tokenAddress, mode);
+      try{
+        const creatorWord = await publicEthCall(mode, factory, "0x"+V4_CREATOR_OF_SELECTOR+encodeAddressParam(t.tokenAddress));
+        v4ProtocolChecked.add(key); // got a definite answer either way
+        if(!/^0x0*$/.test(creatorWord||"0x0")){
+          let poolId = null;
+          try{
+            const w = await publicEthCall(mode, factory, "0x"+POOL_ID_OF_SELECTOR+encodeAddressParam(t.tokenAddress));
+            poolId = /^0x[0-9a-fA-F]{64}$/.test(w) && !/^0x0{64}$/.test(w) ? w.toLowerCase() : null;
+          }catch(e){ /* label is still right without it */ }
+          t.protocol = "v4";
+          t.poolId = poolId;
+          t.factoryAddress = t.factoryAddress || factory;
+          if(poolId && t.mode!=="liquidity"){ t.mode = "liquidity"; t.status = t.status==="graduated" ? "graduated" : "taxed"; }
+          fixed.push(t);
+        }
+      }catch(e){ /* RPC hiccup — retried on the next run */ }
+    }
+    if(fixed.length){
+      saveCustomTokens();
+      renderGrid();
+      if(views.detail.classList.contains("active") && currentDetailTokenId && !tradeInProgress() && fixed.some(t=>t.id===currentDetailTokenId)){
+        openDetail(currentDetailTokenId);
+      }
+    }
+  }
+
   async function refreshRemoteLaunches(mode){
     mode = mode || appMode;
     const url = relayerApiUrl(mode);
@@ -5661,6 +5861,15 @@
       // that rank-gate. Compared before assigning so a no-op poll (the
       // overwhelmingly common case) doesn't spuriously flip `updated` and
       // trigger a re-render for nothing.
+      // The relayer knows which factory produced this launch; if this
+      // browser's copy lacks (or has the wrong) protocol label, take the
+      // relayer's.
+      if(entry.protocol==="v4" && tokenProtocol(existing)!=="v4"){
+        existing.protocol = "v4";
+        existing.poolId = entry.poolId || existing.poolId || null;
+        existing.factoryAddress = existing.factoryAddress || v4TokenFactoryAddress(mode);
+        updated = true;
+      }
       const nextLogo = entry.logo ?? null;
       const nextBanner = entry.banner ?? null;
       const nextSocials = entry.socials || {};
@@ -6141,6 +6350,14 @@
 
   /* ---------------- detail view ---------------- */
   let tradeSide = "buy";
+  // True while someone is mid-trade on the open detail view (an amount typed
+  // or focused, or the Sell tab selected). Background refreshes that would
+  // call openDetail() skip their redraw in that case — rebuilding the panel
+  // would wipe the amount and flip Sell back to Buy.
+  function tradeInProgress(){
+    const a = document.getElementById("tradeAmt");
+    return !!(a && (a.value || document.activeElement===a || tradeSide!=="buy"));
+  }
   let currentDetailTokenId = null;
   // Set by wireRealTradePanel() while a real-trade panel is open, so the
   // Buy/Sell tab-switch handler below can recompute the live quote from
@@ -6251,7 +6468,10 @@
     // token gets its own trade panel branch (isCurveToken below) rather
     // than either the real-pool or fully-simulated ones this flag chooses
     // between.
-    const noSimulatedMarket = isCreatorHeld || isPoolDetected || isLivePool;
+    // A V4 token has no V2 pair, and the router-based/simulated panels below
+    // would be wrong for it either way — it gets its own panel instead.
+    const isV4Token = tokenProtocol(t)==="v4";
+    const noSimulatedMarket = isCreatorHeld || isPoolDetected || isLivePool || isV4Token;
     // A curve token viewed on the network it actually lives on, with a
     // known factory address to call back into — same on-chain/networkMode
     // gating as isRealLiquidityToken below, just against the curve factory
@@ -6269,7 +6489,10 @@
     // viewed on the wrong network — genuinely nothing to fetch) keeps the
     // old "no chart, no on-chain source" treatment: showing a chart there
     // would render a permanent, meaningless "$0.00".
-    const noPriceChart = noSimulatedMarket || (isCurveTrading && !isCurveToken);
+    // A V4 token with a pool now has relayer-sampled price/market-cap/
+    // activity (poll by poolId), so it gets the chart like any pool token.
+    const v4HasPool = isV4Token && !!t.poolId;
+    const noPriceChart = (noSimulatedMarket && !v4HasPool) || (isCurveTrading && !isCurveToken);
     // Real buy/sell turns on for a token that (a) was actually deployed
     // on-chain through Hood Launch's own "Deploy and Add Liquidity" flow,
     // with a real recorded pair, and (b) is being viewed on whichever
@@ -6405,7 +6628,63 @@
     // Note: isCurveTrading has no branch here — a Quick Launch token in
     // this status is always caught by the isCurveModeToken branch above.
 
-    const tradePanelHTML = isCurveTrading ? (isCurveToken ? `
+    const v4Explorer = (tokenNetwork.blockExplorerUrls && tokenNetwork.blockExplorerUrls[0]) || "";
+    const v4Router = isV4Token ? v4SwapRouterAddress(t.networkMode) : null;
+    const v4Tradable = v4HasPool && t.onChain && t.networkMode===appMode && !!v4Router;
+    // Lock status for the creator's seeded position (V4LiquidityLocker).
+    const v4LockMsLeft = (t.unlockAt!=null) ? (t.unlockAt - Date.now()) : null;
+    const v4LockLine = !v4HasPool ? "" : t.lpWithdrawn
+      ? `<span style="color:var(--good-500);">🔓 Position withdrawn — the pool's seeded liquidity has been removed.</span>`
+      : (v4LockMsLeft==null)
+        ? `The creator's liquidity position is locked in V4LiquidityLocker (lock ID ${escapeHtml(String(t.lockId==null?"—":t.lockId))}).`
+        : (v4LockMsLeft>0)
+          ? `🔒 The creator's liquidity position is locked in V4LiquidityLocker · ${fmtTimeLeft(v4LockMsLeft)} (unlocks ${escapeHtml(new Date(t.unlockAt).toISOString().slice(0,10))}).`
+          : `🔓 The lock has matured${isOwner ? " — you can withdraw the position below." : "."}`;
+    const v4UnlockCta = (isOwner && lpIsUnlockable(t))
+      ? `<button class="btn btn-primary btn-sm" id="detailUnlockBtn" style="margin-top:8px;">🔓 Withdraw position</button>
+         <p style="margin:6px 0 0; font-size:.78rem; color:var(--paper-500); line-height:1.5;">Removes the entire seeded position — ETH, tokens and accrued trading fees go to your wallet, and the pool stops having that liquidity (trading will be thin or stop).</p>`
+      : "";
+    const v4InfoHTML = `
+        ${t.poolId ? `<div class="review-list" style="margin:14px 0 10px;"><div class="review-row"><span class="k">Pool ID</span><span class="v num" style="word-break:break-all;">${escapeHtml(t.poolId)}</span></div></div>` : ""}
+        ${t.factoryAddress && v4Explorer ? `<p style="margin:0 0 6px; font-size:.78rem; color:var(--paper-500); line-height:1.5;">Launched via <a href="${escapeHtml(v4Explorer.replace(/\/+$/,""))}/address/${escapeHtml(t.factoryAddress)}" target="_blank" rel="noopener noreferrer">${fmtAddrSafe(t.factoryAddress)}</a>.</p>` : ""}
+        ${v4LockLine ? `<p style="margin:0 0 6px; font-size:.78rem; color:var(--paper-500); line-height:1.5;">${v4LockLine}</p>` : ""}
+        ${v4UnlockCta}`;
+    const v4PanelHTML = v4Tradable ? `
+      <div class="panel">
+        <div class="trade-tabs">
+          <button class="trade-tab" aria-selected="true" data-side="buy">Buy</button>
+          <button class="trade-tab" aria-selected="false" data-side="sell">Sell</button>
+        </div>
+        <div class="field">
+          <label for="tradeAmt" id="tradeAmtLabel">Amount (ETH)</label>
+          <input id="tradeAmt" type="number" min="0" step="any" placeholder="0.00" ${wallet ? "" : "disabled"}>
+          <div id="v4TradeBalance" style="margin-top:4px; font-size:.78rem; color:var(--paper-500); line-height:1.5;"></div>
+        </div>
+        <div class="trade-out">
+          <span id="tradeOutLabel">Est. $${escapeHtml(t.ticker)} received</span>
+          <span class="num" id="tradeOut">0</span>
+        </div>
+        <div id="v4TradeInfo" style="margin-top:6px; min-height:1.2em; font-size:.78rem; color:var(--paper-500); line-height:1.5;"></div>
+        <div class="field" style="margin-top:10px;">
+          <label for="tradeSlippage">Slippage tolerance (%)</label>
+          <input id="tradeSlippage" type="number" min="0.1" max="49" step="0.1" value="2" ${wallet ? "" : "disabled"}>
+        </div>
+        <button class="btn btn-primary btn-block" id="tradeSubmit">${wallet ? "Buy" : "Connect wallet to trade"}</button>
+        <p class="disclaimer-line">Live trade on ${escapeHtml(tokenNetwork.chainName)} through the Uniswap V4 pool, via the platform's V4SwapRouter. The estimate is computed from the pool's current price and liquidity plus the hook's trading tax; the minimum you'll accept is enforced on-chain, so a trade that would fill worse than your slippage setting reverts. Like every other trade on this page, it also carries the platform's flat 0.30% trade fee, sent as a separate ETH transfer (before a buy, after a sell) when a PlatformTaxDistributor is configured. Sell needs one approval the first time. Admin-only while V4 is under development.</p>
+        ${v4InfoHTML}
+      </div>` : `
+      <div class="panel">
+        <div class="eyebrow" style="margin-bottom:10px;">Uniswap V4 token</div>
+        <p style="color:var(--paper-500); font-size:.88rem; margin:0 0 12px;">${!t.poolId
+          ? "This token was deployed on V4 with no pool — 100% of supply is with the creator."
+          : !v4Router
+            ? "This token launched with a Uniswap V4 pool, but the V4SwapRouter address isn't set, so the buy/sell widget is off. Set it in Admin → Overview → Platform contracts."
+            : "This token launched with a Uniswap V4 pool on a different network — switch the Demo/Live toggle above to trade it."}</p>
+        ${v4InfoHTML}
+        <p class="disclaimer-line" style="text-align:left; margin-top:8px;">Admin-only while V4 is under development.</p>
+      </div>`;
+    if(isV4Token) progressHTML = ""; // the $50,000 tax-progress bar is V2-pair based; V4 progress isn't tracked yet
+    const tradePanelHTML = isV4Token ? v4PanelHTML : isCurveTrading ? (isCurveToken ? `
       <div class="panel">
         <div class="trade-tabs">
           <button class="trade-tab" aria-selected="true" data-side="buy">Buy</button>
@@ -6505,7 +6784,7 @@
           ${safeImageSrc(t.banner) ? `<div class="detail-banner"><img src="${safeImageSrc(t.banner)}" alt=""></div>` : ""}
           <div class="detail-head">
             ${tcMarkHTML(t)}
-            <div style="flex:1;"><h2>${escapeHtml(t.name)}</h2><div class="tc-ticker">$${escapeHtml(t.ticker)} · ${statusBadgeHTML(t.mode, t.status, "display:inline-block; margin-left:4px;")}</div></div>
+            <div style="flex:1;"><h2>${escapeHtml(t.name)}</h2><div class="tc-ticker">$${escapeHtml(t.ticker)} · ${statusBadgeHTML(t.mode, t.status, "display:inline-block; margin-left:4px;")} <span class="proto-badge ${tokenProtocol(t)}" id="detailProtocolBadge" title="${tokenProtocol(t)==='v4' ? 'Launched on Uniswap V4' : 'Launched on Uniswap V2'}">${tokenProtocol(t).toUpperCase()}</span></div></div>
             ${isOwner ? `<button class="btn btn-ghost" id="detailEditBtn" style="padding:8px 14px; font-size:.8rem;">Edit token</button>` : ""}
           </div>
           ${isCreatorHeld ? `<p style="color:var(--paper-500); margin:18px 0 0;">No pool — 100% of the supply is in the creator's wallet. Hood Launch has no further role here: if this creator adds liquidity, it happens off-platform, on their own terms.</p>` : ""}
@@ -6565,6 +6844,11 @@
 
     if(!noPriceChart && t.onChain && t.tokenAddress) fetchAndRenderHolderDistribution(t);
 
+    if(isV4Token && v4Tradable){
+      tradeSide = "buy";
+      wireV4TradePanel(t, v4Router);
+    }
+    if(isV4Token && !noPriceChart) wireChartHover(t, hist);
     if(!noSimulatedMarket){
       tradeSide = "buy";
       document.querySelectorAll(".trade-tab").forEach(tb=>{
@@ -6616,6 +6900,307 @@
         feeEl.textContent = fmtUSD(feeUsd);
       }
     }
+  }
+
+  /* ---------------- V4 buy/sell (V4SwapRouter) ----------------
+     Wired by openDetail() for a V4 token that has a pool, on the network it
+     lives on, once the V4SwapRouter address is set. A wallet can't call a V4
+     pool directly (swaps run inside PoolManager.unlock), so buy/sell go
+     through V4SwapRouter.buy(token, minTokensOut, deadline) payable /
+     sell(token, amountIn, minEthOut, deadline).
+     Quote: every launch pool is one full-range position, so the pool behaves
+     as constant product with virtual reserves  ethR = L / sqrtP,
+     tokR = L * sqrtP  (Q96). The estimate applies the 0.30% pool fee and the
+     hook's tax the same way the contracts do (buy: tax on the token output;
+     sell: tax off the tokens before they reach the pool), read live from
+     V4SwapRouter.poolState(token) and V4TaxHook.poolTax(poolId). It can drift
+     slightly from the fill (integer rounding, another trade landing first) —
+     which is what the on-chain minimum-out guard is for. */
+  const V4_ROUTER_BUY_SELECTOR = "a59ac6dd";        // V4SwapRouter.buy(address,uint256,uint256)
+  const V4_ROUTER_SELL_SELECTOR = "92cdbac5";       // V4SwapRouter.sell(address,uint256,uint256,uint256)
+  const V4_ROUTER_POOL_STATE_SELECTOR = "99cd120f"; // V4SwapRouter.poolState(address) -> (sqrtPriceX96, tick, liquidity)
+  const V4_POOL_TAX_SELECTOR = "c2898f5e";          // V4TaxHook.poolTax(bytes32)
+  const V4_FACTORY_HOOK_SELECTOR = "7f5a7c7b";      // V4TokenFactory.hook()
+  const V4_POOL_LP_FEE_PPM = 3000n;                 // 0.30%, must match V4TokenFactory
+  const ERC20_BALANCE_OF_SELECTOR_V4 = "70a08231";
+
+  function v4PoolReserves(st){
+    return { eth: (st.liquidity << 96n) / st.sqrtPriceX96, tok: (st.liquidity * st.sqrtPriceX96) >> 96n };
+  }
+  // Net tokens the buyer receives for `ethIn` wei.
+  function v4QuoteBuy(ethIn, st, tax){
+    if(!st || st.sqrtPriceX96<=0n || st.liquidity<=0n || ethIn<=0n) return 0n;
+    const r = v4PoolReserves(st);
+    const eff = ethIn * (1000000n - V4_POOL_LP_FEE_PPM) / 1000000n;
+    const gross = r.tok * eff / (r.eth + eff);
+    return tax.active ? gross * (10000n - tax.bps) / 10000n : gross;
+  }
+  // Net wei the seller receives for `tokIn` tokens.
+  function v4QuoteSell(tokIn, st, tax){
+    if(!st || st.sqrtPriceX96<=0n || st.liquidity<=0n || tokIn<=0n) return 0n;
+    const r = v4PoolReserves(st);
+    const afterTax = tax.active ? tokIn * (10000n - tax.bps) / 10000n : tokIn;
+    const eff = afterTax * (1000000n - V4_POOL_LP_FEE_PPM) / 1000000n;
+    return r.eth * eff / (r.tok + eff);
+  }
+  async function readV4PoolState(router, token){
+    const w = splitWords(await ethCall(router, "0x"+V4_ROUTER_POOL_STATE_SELECTOR+encodeAddressParam(token)));
+    return { sqrtPriceX96: BigInt("0x"+w[0]), liquidity: BigInt("0x"+w[2]) };
+  }
+  async function readV4Tax(t){
+    const factory = t.factoryAddress || v4TokenFactoryAddress(t.networkMode);
+    let hook = null;
+    if(factory){
+      try{ hook = decodeAddress(await ethCall(factory, "0x"+V4_FACTORY_HOOK_SELECTOR)); }catch(e){ hook = null; }
+    }
+    if(!hook || /^0x0{40}$/.test(hook)) hook = (platformConfig.v4TaxHook && platformConfig.v4TaxHook[t.networkMode]) || null;
+    if(!hook || !t.poolId) return { active:false, bps:0n };
+    try{
+      const w = splitWords(await ethCall(hook, "0x"+V4_POOL_TAX_SELECTOR+t.poolId.replace(/^0x/i,"")));
+      return { active: BigInt("0x"+w[1])===1n, bps: BigInt("0x"+w[4]) };
+    }catch(e){ return { active:false, bps:0n }; }
+  }
+
+  async function wireV4TradePanel(t, routerAddress){
+    const amtInput = document.getElementById("tradeAmt");
+    const outEl = document.getElementById("tradeOut");
+    const slippageInput = document.getElementById("tradeSlippage");
+    const submitBtn = document.getElementById("tradeSubmit");
+    const infoEl = document.getElementById("v4TradeInfo");
+    const balEl = document.getElementById("v4TradeBalance");
+    if(!amtInput || !outEl || !slippageInput || !submitBtn) return;
+    const panelAlive = ()=> document.body.contains(amtInput);
+
+    let state = null;
+    let tax = { active:false, bps:0n };
+    let ethBal = null, tokBal = null;
+    let busy = false;
+
+    async function refreshBalances(){
+      if(!wallet || !window.ethereum || !balEl) return;
+      try{
+        ethBal = BigInt(await window.ethereum.request({ method:"eth_getBalance", params:[wallet, "latest"] }));
+        tokBal = decodeUint256(await ethCall(t.tokenAddress, "0x"+ERC20_BALANCE_OF_SELECTOR_V4+encodeAddressParam(wallet)));
+      }catch(e){ return; }
+      if(!panelAlive()) return;
+      balEl.innerHTML = tradeSide==="buy"
+        ? `Balance: ${escapeHtml(weiToEtherString(ethBal,4))} ETH`
+        : `Balance: ${escapeHtml(weiToEtherString(tokBal,4))} $${escapeHtml(t.ticker)} · <a href="#" id="v4MaxLink">Max</a>`;
+      const max = document.getElementById("v4MaxLink");
+      if(max) max.addEventListener("click", (ev)=>{ ev.preventDefault(); amtInput.value = weiToEtherString(tokBal, 18); renderQuote(); });
+    }
+    async function refreshPool(){
+      try{
+        state = await readV4PoolState(routerAddress, t.tokenAddress);
+        tax = await readV4Tax(t);
+      }catch(e){
+        console.error(e);
+        state = null;
+        if(panelAlive() && infoEl) infoEl.textContent = "Couldn't read this pool's live state — check your wallet's network.";
+      }
+      if(panelAlive()) renderQuote();
+    }
+
+    function currentQuote(){
+      const amtStr = amtInput.value;
+      const amt = parseFloat(amtStr);
+      if(!state || !amtStr || isNaN(amt) || amt<=0) return null;
+      let wei; try{ wei = parseEtherToWei(amtStr); }catch(e){ return null; }
+      if(wei<=0n) return null;
+      // Same 0.30% platform trade tax the V2 widgets take (see
+      // PLATFORM_TRADE_TAX_BPS): on a buy it comes off the ETH before the
+      // swap; on a sell it comes off the ETH proceeds right after. Skipped
+      // when no PlatformTaxDistributor is configured for this network.
+      const hasPlatformTax = platformTaxDistributorAddress(t.networkMode)!==ZERO_ADDRESS;
+      if(tradeSide==="buy"){
+        const platformTax = hasPlatformTax ? (wei*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
+        const swapWei = wei - platformTax;
+        return { out: v4QuoteBuy(swapWei, state, tax), wei: swapWei, platformTax };
+      }
+      const gross = v4QuoteSell(wei, state, tax);
+      const platformTax = hasPlatformTax ? (gross*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
+      return { out: gross - platformTax, gross, wei, platformTax };
+    }
+    function renderQuote(){
+      if(!panelAlive()) return;
+      const q = currentQuote();
+      const platformNote = platformTaxDistributorAddress(t.networkMode)!==ZERO_ADDRESS ? " + platform fee 0.30%" : "";
+      const taxLine = (tax.active ? `Pool fee 0.30% + trading tax ${(Number(tax.bps)/100).toFixed(2)}%` : "Pool fee 0.30% · trading tax off") + platformNote;
+      if(!q){ outEl.textContent = "0"; if(infoEl) infoEl.textContent = state ? taxLine : ""; return; }
+      outEl.textContent = tradeSide==="buy"
+        ? fmtInt(Number(weiToEtherString(q.out,6))) + " " + t.ticker
+        : weiToEtherString(q.out,6) + " ETH";
+      // Price impact: execution price vs the pool's pre-trade spot price,
+      // ignoring the flat fees (those are shown separately above).
+      let impact = "";
+      if(state && q.out>0n){
+        const r = v4PoolReserves(state);
+        const spotOut = tradeSide==="buy" ? (q.wei * r.tok / r.eth) : (q.wei * r.eth / r.tok);
+        const swapOut = tradeSide==="buy" ? q.out : q.gross; // pre-platform-fee amount the pool actually paid
+        if(spotOut>0n){
+          const feeFactor = tax.active ? (1000000n - V4_POOL_LP_FEE_PPM) * (10000n - tax.bps) : (1000000n - V4_POOL_LP_FEE_PPM) * 10000n;
+          const ideal = spotOut * feeFactor / (1000000n * 10000n);
+          if(ideal>swapOut){
+            const pct = Number((ideal - swapOut) * 100000n / ideal) / 1000;
+            impact = ` · price impact ~${pct.toFixed(pct<1?2:1)}%`;
+          } else impact = " · price impact <0.01%";
+        }
+      }
+      if(infoEl) infoEl.textContent = taxLine + impact;
+    }
+
+    // Tabs (the shared tab handler in openDetail is skipped for V4).
+    document.querySelectorAll(".trade-tab").forEach(tb=>{
+      tb.addEventListener("click", ()=>{
+        document.querySelectorAll(".trade-tab").forEach(x=>x.setAttribute("aria-selected","false"));
+        tb.setAttribute("aria-selected","true");
+        tradeSide = tb.dataset.side;
+        const amtLabel = document.getElementById("tradeAmtLabel");
+        const outLabel = document.getElementById("tradeOutLabel");
+        if(amtLabel) amtLabel.textContent = tradeSide==="buy" ? "Amount (ETH)" : `Amount ($${t.ticker})`;
+        if(outLabel) outLabel.textContent = tradeSide==="buy" ? `Est. $${t.ticker} received` : "Est. ETH received";
+        if(wallet) submitBtn.textContent = tradeSide==="buy" ? "Buy" : "Sell";
+        amtInput.value = "";
+        renderQuote();
+        refreshBalances();
+      });
+    });
+    amtInput.addEventListener("input", renderQuote);
+    realTradeQuoteRefresh = renderQuote;
+
+    async function submitTrade(){
+      if(busy) return;
+      if(!window.ethereum){ toast("No browser wallet detected."); return; }
+      if(!wallet){ connectWallet(); return; }
+      const amtStr = amtInput.value;
+      const amt = parseFloat(amtStr);
+      if(!amtStr || isNaN(amt) || amt<=0){ toast("Enter an amount greater than 0."); return; }
+      const slippagePct = parseFloat(slippageInput.value);
+      if(isNaN(slippagePct) || slippagePct<0.1 || slippagePct>49){ toast("Slippage tolerance must be between 0.1% and 49%."); return; }
+      const slippageBps = BigInt(Math.round(slippagePct*100));
+
+      busy = true;
+      const originalLabel = submitBtn.textContent;
+      submitBtn.disabled = true;
+      try{
+        const net = NETWORKS[t.networkMode] || NETWORKS[appMode];
+        if(net.chainIdHex){
+          let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+          if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
+            await ensureNetwork(t.networkMode);
+            currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+            if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
+              throw new Error(`Switch your wallet to ${net.chainName} and try again.`);
+            }
+          }
+        }
+        // Fresh pool read right before building the transaction.
+        state = await readV4PoolState(routerAddress, t.tokenAddress);
+        tax = await readV4Tax(t);
+        if(!state || state.sqrtPriceX96<=0n) throw new Error("This token's pool isn't initialized yet.");
+        const deadline = BigInt(Math.floor(Date.now()/1000) + 15*60);
+        const wei = parseEtherToWei(amtStr);
+        if(wei<=0n) throw new Error("Enter an amount greater than 0.");
+
+        const taxDistributor = platformTaxDistributorAddress(t.networkMode);
+        if(tradeSide==="buy"){
+          // Platform trade tax first (one extra wallet transaction), exactly
+          // as the V2 buy does: 0.30% of the ETH entered, the rest swaps.
+          const taxWei = taxDistributor!==ZERO_ADDRESS ? (wei*PLATFORM_TRADE_TAX_BPS)/10000n : 0n;
+          const swapWei = wei - taxWei;
+          const out = v4QuoteBuy(swapWei, state, tax);
+          if(out<=0n) throw new Error("This pool can't quote that amount right now — try a smaller amount.");
+          const minOut = out * (10000n - slippageBps) / 10000n;
+          if(taxWei>0n){
+            submitBtn.textContent = "Sending platform fee…";
+            toast("Sending the 0.30% platform fee — confirm in your wallet…");
+            const taxTxHash = await window.ethereum.request({
+              method:"eth_sendTransaction",
+              params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
+            });
+            const taxReceipt = await waitForReceipt(taxTxHash);
+            if(taxReceipt.status !== "0x1") throw new Error("The platform fee transfer reverted on-chain — nothing was bought.");
+          }
+          submitBtn.textContent = "Confirm in your wallet…";
+          toast("Confirm the buy in your wallet…");
+          const data = "0x"+V4_ROUTER_BUY_SELECTOR+encodeAddressParam(t.tokenAddress)+toHex32(minOut)+toHex32(deadline);
+          const txHash = await window.ethereum.request({
+            method:"eth_sendTransaction",
+            params:[{ from: wallet, to: routerAddress, value: "0x"+swapWei.toString(16), data }],
+          });
+          submitBtn.textContent = "Waiting for confirmation…";
+          toast("Transaction sent — waiting for confirmation…");
+          const receipt = await waitForReceipt(txHash);
+          if(receipt.status !== "0x1") throw new Error("The buy reverted on-chain — try a smaller amount or a higher slippage tolerance.");
+          toast(`✅ Bought $${t.ticker} — check your wallet or the explorer for the exact amount received.`);
+        } else {
+          const out = v4QuoteSell(wei, state, tax);
+          if(out<=0n) throw new Error("This pool can't quote that amount right now — try a smaller amount.");
+          const minOut = out * (10000n - slippageBps) / 10000n;
+          const allowance = decodeUint256(await ethCall(t.tokenAddress, encodeAllowanceCalldata(wallet, routerAddress)));
+          if(allowance < wei){
+            submitBtn.textContent = "Approve in your wallet…";
+            toast(`Approve $${t.ticker} for trading — confirm in your wallet…`);
+            const approveTx = await window.ethereum.request({
+              method:"eth_sendTransaction",
+              params:[{ from: wallet, to: t.tokenAddress, data: encodeApproveCalldata(routerAddress, wei) }],
+            });
+            toast("Approval sent — waiting for confirmation…");
+            const approveReceipt = await waitForReceipt(approveTx);
+            if(approveReceipt.status !== "0x1") throw new Error("The approval reverted on-chain — nothing was sold.");
+          }
+          submitBtn.textContent = "Confirm in your wallet…";
+          toast("Confirm the sell in your wallet…");
+          const data = "0x"+V4_ROUTER_SELL_SELECTOR+encodeAddressParam(t.tokenAddress)+toHex32(wei)+toHex32(minOut)+toHex32(deadline);
+          const txHash = await window.ethereum.request({
+            method:"eth_sendTransaction",
+            params:[{ from: wallet, to: routerAddress, data }],
+          });
+          submitBtn.textContent = "Waiting for confirmation…";
+          toast("Transaction sent — waiting for confirmation…");
+          const receipt = await waitForReceipt(txHash);
+          if(receipt.status !== "0x1") throw new Error("The sell reverted on-chain — try a smaller amount or a higher slippage tolerance.");
+          // Platform trade tax on the sell side: 0.30% of the quoted ETH
+          // proceeds, sent right after the sell confirms (same as V2). If
+          // this transfer fails or is rejected the sale is NOT undone.
+          if(taxDistributor!==ZERO_ADDRESS){
+            const taxWei = (out*PLATFORM_TRADE_TAX_BPS)/10000n;
+            if(taxWei>0n){
+              try{
+                submitBtn.textContent = "Sending platform fee…";
+                toast("Sale complete — sending the 0.30% platform fee…");
+                const taxTxHash = await window.ethereum.request({
+                  method:"eth_sendTransaction",
+                  params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
+                });
+                await waitForReceipt(taxTxHash);
+              }catch(taxErr){
+                console.error(taxErr);
+                toast("Sold, but the platform fee transfer failed — the sale itself still went through.");
+              }
+            }
+          }
+          toast(`✅ Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
+        }
+        amtInput.value = "";
+        refreshPool();
+        refreshBalances();
+      }catch(err){
+        console.error(err);
+        if(err && err.code===4001) toast("Transaction was rejected in your wallet.");
+        else toast("Trade failed: " + ((err && err.message) ? err.message : String(err)));
+      }finally{
+        busy = false;
+        submitBtn.disabled = false;
+        submitBtn.textContent = wallet ? originalLabel : "Connect wallet to trade";
+      }
+    }
+    submitBtn.addEventListener("click", submitTrade);
+
+    await refreshPool();
+    refreshBalances();
+    // Keep the quote fresh while the page is open; stops once the panel is gone.
+    const timer = setInterval(()=>{ if(!panelAlive()){ clearInterval(timer); return; } if(!busy) refreshPool(); }, 15000);
   }
 
   /* ---------------- real buy/sell (Demo/testnet and Live/mainnet) ----------------
@@ -7477,7 +8062,7 @@
 
   /* ---------------- create wizard ---------------- */
   let wizStep = 1;
-  let draft = { name:"", ticker:"", desc:"", supply:1000000000, mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
+  let draft = { name:"", ticker:"", desc:"", supply:1000000000, protocol:"v2", mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
 
   // ---- Custom Tax Token fee configuration (step 3 when draft.mode==="custom") ----
   const FEE_ROWS = [["reflectionBps","Reflections"],["marketingBps","Marketing"],["liquidityBps","Liquidity"],["burnBps","Burn"]];
@@ -7653,6 +8238,7 @@
   }
 
   function wizardStepHTML(){
+    if(draft.protocol==="v4" && !v4Selectable()) draft.protocol = "v2"; // wallet switched away from the admin mid-wizard
     if(wizStep===1){
       return `
         <h3 style="margin-bottom:18px;">Identity</h3>
@@ -7689,37 +8275,52 @@
       `;
     }
     if(wizStep===2){
+      if(draft.protocol==="v4" && !v4Selectable()) draft.protocol = "v2"; // wallet changed away from the admin
+      const protoV4 = draftProtocol()==="v4";
+      const canV4 = v4Selectable();
+      const lockCls = (m)=> (protoV4 && !V4_MODES.includes(m)) ? "locked" : "";
       return `
         <h3 style="margin-bottom:6px;">Deploy mode</h3>
+        <div class="proto-row" role="radiogroup" aria-label="Protocol">
+          <div class="proto-card ${!protoV4?'selected':''}" data-proto="v2" role="radio" aria-checked="${!protoV4}" tabindex="0">
+            <div class="name">Uniswap V2 <span class="proto-badge">LIVE</span></div>
+            <div class="desc">The current launch contracts.</div>
+          </div>
+          <div class="proto-card ${protoV4?'selected':''} ${canV4?'':'disabled'}" data-proto="v4" role="radio" aria-checked="${protoV4}" aria-disabled="${!canV4}" tabindex="${canV4?0:-1}" ${canV4?'':'title="Under development"'}>
+            <div class="name">Uniswap V4 <span class="proto-badge v4">${canV4 ? "ADMIN ONLY" : "UNDER DEVELOPMENT"}</span></div>
+            <div class="desc">${canV4 ? "Hook-based tax. Deploy &amp; Launch 0% Tax modes only for now." : "Not available yet."}</div>
+          </div>
+        </div>
+        ${protoV4 ? `<div class="hint" style="margin:-6px 0 14px; border-left:2px solid var(--signal-500); padding-left:10px;">V4 is selected. Only <strong>Deploy 0% Tax Token Only</strong> and <strong>Launch 0% Tax Token</strong> exist on V4 so far; the other modes are greyed out.</div>` : ""}
         <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 6px;">Every launch is verified before anything else happens. What comes next — and what it costs — depends on which mode you pick; nothing here is reversible after you launch.</p>
         <p class="hint" style="margin:0 0 18px;">${ethPriceNote()}</p>
         <div class="curve-options">
-          <div class="curve-card ${draft.mode==='just'?'selected':''}" data-mode="just" style="text-align:left; padding:16px;">
+          <div class="curve-card ${draft.mode==='just'?'selected':''} ${lockCls('just')}" data-mode="just" style="text-align:left; padding:16px;">
             <div class="name" style="margin-bottom:6px;">🚀 Deploy 0% Tax Token Only</div>
             <div class="desc">Create and verify — nothing else. 100% of supply goes straight to your wallet. No pool, no tax, no further involvement from Hood Launch. Adding liquidity anywhere, any time, is entirely on you.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("just")}</div>
           </div>
-          <div class="curve-card ${draft.mode==='customDeploy'?'selected':''}" data-mode="customDeploy" style="text-align:left; padding:16px;">
+          <div class="curve-card ${draft.mode==='customDeploy'?'selected':''} ${lockCls('customDeploy')}" data-mode="customDeploy" style="text-align:left; padding:16px;">
             <div class="name" style="margin-bottom:6px;">🎯 Deploy Custom Tax Token</div>
             <div class="desc">Create and verify only — same as Deploy Token, but through the Custom Tax Token contract, so your reflections/marketing/liquidity/burn configuration is recorded on-chain for later. 100% of supply goes straight to your wallet. No pool, so no tax of any kind is active — not your own, not the platform's.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("customDeploy")}</div>
           </div>
-          <div class="curve-card ${draft.mode==='liquidity'?'selected':''}" data-mode="liquidity" style="text-align:left; padding:16px;">
+          <div class="curve-card ${draft.mode==='liquidity'?'selected':''} ${lockCls('liquidity')}" data-mode="liquidity" style="text-align:left; padding:16px;">
             <div class="name" style="margin-bottom:6px;">🔒 Launch 0% Tax Token</div>
             <div class="desc">Creation and liquidity happen atomically, in one transaction. A live pool exists immediately, taxed 1.00% on buys &amp; sells until market cap hits $50,000 — then the tax shuts off for good. LP locked to you for 15 days. 0% creator tax — you don't configure a rate here.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("liquidity")}</div>
           </div>
-          <div class="curve-card ${draft.mode==='custom'?'selected':''}" data-mode="custom" style="text-align:left; padding:16px;">
+          <div class="curve-card ${draft.mode==='custom'?'selected':''} ${lockCls('custom')}" data-mode="custom" style="text-align:left; padding:16px;">
             <div class="name" style="margin-bottom:6px;">🎛️ Launch Custom Tax Token</div>
             <div class="desc">Custom Tax Token: you choose the tax — reflections, marketing wallet, auto-liquidity, true burn — up to 5% total per side, buy and sell configured independently. Creation and liquidity happen atomically; a live pool exists immediately, LP locked to you for ${LP_LOCK_DAYS} days. Same platform 1.00%-until-$50,000 tax applies on top, same as every launch with a pool.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("custom")}</div>
           </div>
-          <div class="curve-card ${draft.mode==='curve'?'selected':''}" data-mode="curve" style="text-align:left; padding:16px;">
+          <div class="curve-card ${draft.mode==='curve'?'selected':''} ${lockCls('curve')}" data-mode="curve" style="text-align:left; padding:16px;">
             <div class="name" style="margin-bottom:6px;">⚡ Quick Launch (0% tax)</div>
             <div class="desc">Pump.fun-style: no liquidity to provide. Your token trades immediately against an on-chain bonding curve, then goes live on its own on a real, LP-locked DEX pool once the curve holds ${curvePoolSeedEthDisplay("curve")} ETH. 0% creator tax — you don't configure a rate here.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("curve")}</div>
           </div>
-          <div class="curve-card ${draft.mode==='customCurve'?'selected':''}" data-mode="customCurve" style="text-align:left; padding:16px;">
+          <div class="curve-card ${draft.mode==='customCurve'?'selected':''} ${lockCls('customCurve')}" data-mode="customCurve" style="text-align:left; padding:16px;">
             <div class="name" style="margin-bottom:6px;">⚡ Quick Launch (custom tax)</div>
             <div class="desc">Same Quick Launch mechanics — no liquidity to provide, live on a bonding curve immediately — plus your own configured buy/sell tax, up to 5% total per side. Your tax activates once this curve goes live on a real DEX pool at ${curvePoolSeedEthDisplay("customCurve")} ETH; it stays recorded but inactive until then.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("customCurve")}</div>
@@ -7856,24 +8457,33 @@
     const factoryLabel = usesCurveFactory
       ? (draft.mode==="customCurve" ? "CustomBondingCurveFactory" : "BondingCurveFactory")
       : usesCustomFactory ? "CustomTokenFactory" : "TokenFactory";
-    const agreeLabel = isRealLaunch
+    const protoV4 = draftProtocol()==="v4";
+    const v4Ready = protoV4 && !!v4TokenFactoryAddress();
+    const v4Block = "V4 factory not configured for this network. Save a V4TokenFactory address in Admin first.";
+    const agreeLabel = protoV4
+      ? `<span><strong>This sends a real transaction on Uniswap V4</strong> from your connected wallet on ${escapeHtml(NETWORKS[appMode].chainName)}, spending the ${totalEth} ETH above (plus gas). I understand the V4 contracts are new, unaudited and admin-only while under development, and I want to launch.</span>`
+      : isRealLaunch
       ? `<span><strong>This sends a real transaction</strong> from your connected wallet on ${escapeHtml(NETWORKS[appMode].chainName)}, spending the ${totalEth} ETH above (plus gas). I've reviewed the details and want to launch.</span>`
       : `<span>I understand Hood Launch is a demo interface — this will not deploy a real token or move real funds.</span>`;
     return `
       <h3 style="margin-bottom:18px;">Review &amp; launch</h3>
-      ${isRealLaunch ? `<div class="hint" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:16px;">This network has a live ${factoryLabel} configured — launching here calls the real contract and spends real ETH from your wallet, not a simulation.</div>` : ""}
+      ${isRealLaunch && !protoV4 ? `<div class="hint" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:16px;">This network has a live ${factoryLabel} configured — launching here calls the real contract and spends real ETH from your wallet, not a simulation.</div>` : ""}
       <div class="review-list">
         <div class="review-row"><span class="k">Name</span><span class="v">${escapeHtml(draft.name)||"—"}</span></div>
         <div class="review-row"><span class="k">Ticker</span><span class="v">$${escapeHtml(draft.ticker)||"—"}</span></div>
         <div class="review-row"><span class="k">Total supply</span><span class="v num">${fmtInt(draft.supply)}</span></div>
+        <div class="review-row"><span class="k">Protocol</span><span class="v">${protoV4 ? "Uniswap V4 (admin only)" : "Uniswap V2"}</span></div>
         ${modeRows}
         <div class="review-row"><span class="k">${(draft.mode==="just"||draft.mode==="customDeploy")?"Deploy":"Launch"} fee</span><span class="v num">$${feeUsdForMode(draft.mode)} ≈ ${fmtEthAmt(depFeeEth())} ETH</span></div>
         <div class="review-row"><span class="k">Network</span><span class="v">${escapeHtml(NETWORKS[appMode].label)}</span></div>
         <div class="review-row" style="background:var(--ink-850);"><span class="k" style="color:var(--paper-100); font-weight:600;">Total to send</span><span class="v num" style="color:var(--signal-300);">${totalEth} ETH</span></div>
       </div>
       <div class="hint" style="margin:-4px 0 14px;">${ethPriceNote()}.</div>
-      <label class="agree-row"><input type="checkbox" id="fAgree">${agreeLabel}</label>
-      <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizLaunch">${isRealLaunch ? "🚀 Launch (real transaction)" : "🚀 Launch token"}</button></div>
+      ${protoV4 && !v4Ready
+        ? `<div class="hint" role="alert" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:14px;"><strong>Launch is disabled.</strong> ${v4Block}</div>
+      <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizLaunch" disabled>🚀 Launch (V4 unavailable)</button></div>`
+        : `${protoV4 ? `<div class="hint" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:14px;">V4 launch via <strong>V4TokenFactory</strong> — a real transaction with real ETH. V4 tokens aren't tradeable from this site yet; the pool is live on Uniswap V4 and its pool ID is shown after launch.</div>` : ""}<label class="agree-row"><input type="checkbox" id="fAgree">${agreeLabel}</label>
+      <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizLaunch">${(isRealLaunch || protoV4) ? "🚀 Launch (real transaction)" : "🚀 Launch token"}</button></div>`}
     `;
   }
 
@@ -7913,7 +8523,21 @@
     if(byId("fTwitter")) byId("fTwitter").addEventListener("blur", e=>{ draft.socials.twitter = normalizeUrl(e.target.value); e.target.value = draft.socials.twitter; });
     if(byId("fTelegram")) byId("fTelegram").addEventListener("blur", e=>{ draft.socials.telegram = normalizeUrl(e.target.value); e.target.value = draft.socials.telegram; });
     if(byId("fDiscord")) byId("fDiscord").addEventListener("blur", e=>{ draft.socials.discord = normalizeUrl(e.target.value); e.target.value = draft.socials.discord; });
-    document.querySelectorAll(".curve-card[data-mode]").forEach(c=> c.addEventListener("click", ()=>{ draft.mode=c.dataset.mode; renderWizardStepOnly(); renderPreview(); }) );
+    document.querySelectorAll(".curve-card[data-mode]").forEach(c=> c.addEventListener("click", ()=>{
+      if(c.classList.contains("locked")){ toast("That mode isn't available on V4 yet."); return; }
+      draft.mode=c.dataset.mode; renderWizardStepOnly(); renderPreview();
+    }) );
+    document.querySelectorAll(".proto-card[data-proto]").forEach(c=>{
+      const pick = ()=>{
+        const want = c.dataset.proto;
+        if(want==="v4" && !v4Selectable()){ toast("V4 is under development."); return; }
+        draft.protocol = want;
+        if(want==="v4" && !V4_MODES.includes(draft.mode)) draft.mode = "liquidity";
+        renderWizardStepOnly(); renderPreview();
+      };
+      c.addEventListener("click", pick);
+      c.addEventListener("keydown", e=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); pick(); } });
+    });
     if(byId("fLiqEth")) byId("fLiqEth").addEventListener("input", e=>{
       draft.liquidityEth=parseFloat(e.target.value);
       byId("liqEthVal").textContent=draft.liquidityEth+" ETH";
@@ -8285,6 +8909,18 @@
 
   async function launchDraftToken(){
     if(!draft.name || !draft.ticker){ toast("Add a name and ticker before launching."); wizStep=1; renderWizard(); return; }
+    if(draft.protocol==="v4"){
+      // V4 is admin-only (draftProtocol() is "v2" for anyone else, and the
+      // check below refuses before anything else can run) and never falls
+      // through to a V2 flow — that would silently launch the wrong
+      // protocol. Only the two TokenFactory-pilot modes exist on V4.
+      if(!v4Selectable()){ toast("V4 is under development."); return; }
+      if(!V4_MODES.includes(draft.mode)){ toast("That mode isn't available on V4 yet."); return; }
+      const v4Address = v4TokenFactoryAddress();
+      if(!v4Address){ toast("V4 factory not configured — save its address in Admin first."); return; }
+      launchOnChainFlow(v4Address);
+      return;
+    }
 
     if(draft.mode==="curve" || draft.mode==="customCurve"){
       if(draft.mode==="customCurve" && !validateCustomFeesOrToast()) return;
@@ -8614,10 +9250,14 @@
         // other way (e.g. directly against the contract).
         const lockData = "0x"+LOCKS_SELECTOR+toHex32(BigInt(t.lockId));
         const lockWords = splitWords(await ethCall(lockerAddress, lockData));
-        const lockOwner = decodeAddress(lockWords[1]);
+        // V2 LiquidityLocker.locks() -> (lpToken, owner, amount, unlockTime,
+        // withdrawn); V4LiquidityLocker.locks() -> (token, hooks, fee,
+        // tickSpacing, owner, liquidity, unlockTime, withdrawn).
+        const isV4Lock = tokenProtocol(t)==="v4";
+        const lockOwner = decodeAddress(lockWords[isV4Lock ? 4 : 1]);
         // Same "0x"-prefix requirement as the unlockAt decode above.
-        const lockUnlockTime = decodeUint256("0x"+lockWords[3]);
-        const lockWithdrawn = decodeUint256("0x"+lockWords[4]) === 1n;
+        const lockUnlockTime = decodeUint256("0x"+lockWords[isV4Lock ? 6 : 3]);
+        const lockWithdrawn = decodeUint256("0x"+lockWords[isV4Lock ? 7 : 4]) === 1n;
         if(lockWithdrawn){
           t.lpWithdrawn = true;
           saveCustomTokens();
@@ -8639,7 +9279,9 @@
 
           t.lpWithdrawn = true;
           saveCustomTokens();
-          toast(`🔓 $${t.ticker}'s LP tokens are back in your wallet.`);
+          toast(tokenProtocol(t)==="v4"
+            ? `🔓 $${t.ticker}'s V4 position was withdrawn — the ETH and tokens (plus accrued fees) are in your wallet.`
+            : `🔓 $${t.ticker}'s LP tokens are back in your wallet.`);
         }
       }
     }catch(err){
@@ -9288,6 +9930,8 @@
     if(key==="ctf") return customTokenFactoryAddress();
     if(key==="bcf") return bondingCurveFactoryAddress();
     if(key==="cbcf") return customBondingCurveFactoryAddress();
+    if(key==="v4") return v4TokenFactoryAddress();
+    if(key==="v4locker") return (platformConfig.v4LiquidityLocker && platformConfig.v4LiquidityLocker[appMode]) || null;
     return customTokenFactoryAddress(); // legacy fallback for any stray caller not yet updated to pass one of the four keys above
   }
 
@@ -9341,13 +9985,51 @@
     };
   }
 
-  function adminFactoryPanelHTML(key, label, address, state){
+  // The three distributor-slot sections (rewards / creator rewards / fee wallet),
+  // shared by every factory's admin panel and the V4 Rewards tab so the field ids
+  // and data-admin-action wiring can't drift.
+  function factoryRewardSlotsHTML(key, state){
+    return `
+        <div class="admin-section-label">${key==="v4" ? "Rewards distributor · 50% of fees in ETH + a tax cut in the token" : "Rewards distributor · buyback/burn/holder-airdrop"}</div>
+        <p class="admin-empty" style="margin-bottom:10px;">${key==="v4" ? "Receives 50% of every deploy/launch fee in ETH (the factory sends it with a plain ETH transfer, so this address must accept ETH — if it doesn't, every paid launch reverts), plus its reward-diversion cut of the trading tax in the launched token itself. Use a V4PlatformRewardsDistributor: it turns the ETH into the platform token and sells the in-kind token cut in each token's V4 pool, then burns half and airdrops half. Leaving this unset keeps 100% of every fee with the fee treasury." : "Splits 50% of every deployFee/launchFee, plus the reward-diversion bps above out of the ongoing trading tax, to a PlatformRewardsDistributor contract instead of feeTreasury/the platform fee wallet. Leaving this unset (the default) keeps 100% of every fee exactly where it's always gone — see scripts/deploy.js's DEPLOY_PLATFORM_TOKEN flag for how one gets deployed."}</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Rewards distributor (address)</label><input type="text" id="admin_${key}_rewardsDistributor" placeholder="${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.rewardsDistributor}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="rewardsDistributor" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
+        </div>
+
+        <div class="admin-section-label">${key==="v4" ? "Creator rewards distributor · tax cut in the token" : "Creator rewards distributor · per-token ETH, claimable by each token\'s own creator"}</div>
+        <p class="admin-empty" style="margin-bottom:10px;">${key==="v4" ? "Receives its creator-reward-diversion cut of the trading tax, in the launched token itself, sent straight to this address. Use a V4CreatorRewardsDistributor: it sells each token's cut in that token's V4 pool and lets its creator claim the ETH. Leaving this unset keeps creator reward diversion inactive." : "Splits the creator-reward-diversion bps above out of the ongoing trading tax to a CreatorRewardsDistributor contract, in the launched token's own units. Unlike the rewards distributor above, nothing here pools across holders or across a creator's other launches — every token gets its own independently claimable ETH balance, visible to its creator from their Portfolio. Leaving this unset (the default) keeps creator reward diversion inactive — see scripts/deployCreatorRewards.js for how one gets deployed."}</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Creator rewards distributor (address)</label><input type="text" id="admin_${key}_creatorRewardsDistributor" placeholder="${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.creatorRewardsDistributor}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="creatorRewardsDistributor" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
+        </div>
+
+        <div class="admin-section-label">${key==="v4" ? "Fee wallet distributor · tax remainder in the token" : "Fee wallet distributor · the platform\'s own trading-tax remainder, converted to ETH"}</div>
+        <p class="admin-empty" style="margin-bottom:10px;">${key==="v4" ? "Receives whatever's left of the trading tax after the cuts above, in the launched token itself, instead of the plain platform fee wallet. Use a V4FeeWalletDistributor: it sells the remainder in each token's V4 pool and pays the ETH to its fee wallet (optionally with a platform-token buyback). Leaving this unset sends the remainder to the platform fee wallet." : "Redirects whatever's left of the platform tax after the reward/creator-reward diversion above — the fee-wallet slice that would otherwise sit at \"Platform fee wallet\" as whatever token it was taxed in — to a FeeWalletDistributor contract instead, which converts it to ETH automatically and pays out to one address it controls (owner-changeable independently of this panel). Leaving this unset (the default) keeps the fee-wallet slice going straight to the plain wallet above, exactly as it's always worked — see scripts/deployFeeWalletDistributor.js for how one gets deployed."}</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Fee wallet distributor (address)</label><input type="text" id="admin_${key}_feeWalletDistributor" placeholder="${state.feeWalletDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.feeWalletDistributor}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="feeWalletDistributor" data-factory-key="${key}">Update</button>
+        </div>
+        <div class="admin-action-row">
+          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
+        </div>
+    `;
+  }
+
+  function adminFactoryPanelHTML(key, label, address, state, opts){
+    opts = opts || {};
     if(!address){
       return `
         <div class="panel admin-panel">
           <div class="admin-panel-head"><h3>${escapeHtml(label)}</h3></div>
           <div class="admin-addr-line">Not deployed on ${escapeHtml(NETWORKS[appMode].label)}</div>
-          <p class="admin-empty">Set this contract's address in the "Platform Contracts" section below (${key==="tf" ? "TokenFactory" : "CustomTokenFactory"}) once it's actually deployed on this network — there's nothing to administer here yet.</p>
+          <p class="admin-empty">Set this contract's address in the "Platform Contracts" section ${opts.proto==="v4" ? "on the Overview tab" : "below"} (${key==="v4" ? "V4TokenFactory" : key==="tf" ? "TokenFactory" : "CustomTokenFactory"}) once it's actually deployed on this network — there's nothing to administer here yet.</p>
         </div>`;
     }
     if(!state){
@@ -9374,6 +10056,7 @@
           <div class="admin-readout"><div class="l">Fee treasury</div><div class="v">${escapeHtml(state.feeTreasury)}</div></div>
           <div class="admin-readout"><div class="l">LP lock duration</div><div class="v">${fmtInt(Number(state.lpLockDurationSeconds)/86400)} days</div></div>
           <div class="admin-readout"><div class="l">Max creator buy-in</div><div class="v">${(Number(state.maxCreatorBuyBps)/100).toFixed(2)}%</div></div>
+          ${state.buyInSlippageBps!==undefined ? `<div class="admin-readout"><div class="l">Buy-in slippage</div><div class="v">${(Number(state.buyInSlippageBps)/100).toFixed(2)}%</div></div>` : ""}
           <div class="admin-readout"><div class="l">Gasless relayer</div><div class="v">${state.relayer.toLowerCase()===ZERO_ADDRESS ? "Unset — gasless relayed launches disabled" : escapeHtml(state.relayer)}</div></div>
           <div class="admin-readout"><div class="l">Max relayer gas reimbursement</div><div class="v">${weiToEtherString(state.maxRelayerGasReimbursementWei,6)} ETH</div></div>
           <div class="admin-readout"><div class="l">Platform fee wallet</div><div class="v">${state.platformFeeWallet.toLowerCase()===ZERO_ADDRESS ? "Unset" : escapeHtml(state.platformFeeWallet)}</div></div>
@@ -9409,6 +10092,11 @@
           <div class="field"><label>Max creator buy-in (bps, 10000 = 100%)</label><input type="number" step="1" min="0" max="10000" id="admin_${key}_maxBuyBps" placeholder="${state.maxCreatorBuyBps}"></div>
           <button class="btn btn-primary btn-sm" data-admin-action="maxCreatorBuyBps" data-factory-key="${key}">Update</button>
         </div>
+        ${state.buyInSlippageBps!==undefined ? `
+        <div class="admin-action-row">
+          <div class="field"><label>Creator buy-in slippage (bps, 500–800)</label><input type="number" step="1" min="500" max="800" id="admin_${key}_buyInSlippage" placeholder="${state.buyInSlippageBps}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="buyInSlippage" data-factory-key="${key}">Update</button>
+        </div>` : ""}
 
         <div class="admin-section-label">Gasless relay · powers this factory's "Skip gas" Quick Launch flow</div>
         <p class="admin-empty" style="margin-bottom:10px;">Points relayedCreateToken's onlyRelayer gate at the platform's relayer hot wallet (see scripts/relayer.js/scripts/setRelayer.js). The zero address (the default) disables gasless relayed launches entirely — depositForRelayedLaunch/reclaimDeposit still work either way, and a creator can always fall back to paying their own gas.</p>
@@ -9439,35 +10127,7 @@
           <button class="btn btn-primary btn-sm" data-admin-action="taxDefaults" data-factory-key="${key}">Update tax defaults</button>
         </div>
 
-        <div class="admin-section-label">Rewards distributor · buyback/burn/holder-airdrop</div>
-        <p class="admin-empty" style="margin-bottom:10px;">Splits 50% of every deployFee/launchFee, plus the reward-diversion bps above out of the ongoing trading tax, to a PlatformRewardsDistributor contract instead of feeTreasury/the platform fee wallet. Leaving this unset (the default) keeps 100% of every fee exactly where it's always gone — see scripts/deploy.js's DEPLOY_PLATFORM_TOKEN flag for how one gets deployed.</p>
-        <div class="admin-action-row">
-          <div class="field"><label>Rewards distributor (address)</label><input type="text" id="admin_${key}_rewardsDistributor" placeholder="${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.rewardsDistributor}"></div>
-          <button class="btn btn-primary btn-sm" data-admin-action="rewardsDistributor" data-factory-key="${key}">Update</button>
-        </div>
-        <div class="admin-action-row">
-          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
-        </div>
-
-        <div class="admin-section-label">Creator rewards distributor · per-token ETH, claimable by each token's own creator</div>
-        <p class="admin-empty" style="margin-bottom:10px;">Splits the creator-reward-diversion bps above out of the ongoing trading tax to a CreatorRewardsDistributor contract, in the launched token's own units. Unlike the rewards distributor above, nothing here pools across holders or across a creator's other launches — every token gets its own independently claimable ETH balance, visible to its creator from their Portfolio. Leaving this unset (the default) keeps creator reward diversion inactive — see scripts/deployCreatorRewards.js for how one gets deployed.</p>
-        <div class="admin-action-row">
-          <div class="field"><label>Creator rewards distributor (address)</label><input type="text" id="admin_${key}_creatorRewardsDistributor" placeholder="${state.creatorRewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.creatorRewardsDistributor}"></div>
-          <button class="btn btn-primary btn-sm" data-admin-action="creatorRewardsDistributor" data-factory-key="${key}">Update</button>
-        </div>
-        <div class="admin-action-row">
-          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
-        </div>
-
-        <div class="admin-section-label">Fee wallet distributor · the platform's own trading-tax remainder, converted to ETH</div>
-        <p class="admin-empty" style="margin-bottom:10px;">Redirects whatever's left of the platform tax after the reward/creator-reward diversion above — the fee-wallet slice that would otherwise sit at "Platform fee wallet" as whatever token it was taxed in — to a FeeWalletDistributor contract instead, which converts it to ETH automatically and pays out to one address it controls (owner-changeable independently of this panel). Leaving this unset (the default) keeps the fee-wallet slice going straight to the plain wallet above, exactly as it's always worked — see scripts/deployFeeWalletDistributor.js for how one gets deployed.</p>
-        <div class="admin-action-row">
-          <div class="field"><label>Fee wallet distributor (address)</label><input type="text" id="admin_${key}_feeWalletDistributor" placeholder="${state.feeWalletDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.feeWalletDistributor}"></div>
-          <button class="btn btn-primary btn-sm" data-admin-action="feeWalletDistributor" data-factory-key="${key}">Update</button>
-        </div>
-        <div class="admin-action-row">
-          <span class="hint" style="flex-basis:100%;">Leave blank to set it back to address(0) and disable this feature entirely — fully reversible, and never touches a token or launch that already happened.</span>
-        </div>
+        ${opts.omitRewardSlots ? "" : factoryRewardSlotsHTML(key, state)}
 
         <div class="admin-section-label">Ownership · Ownable2Step</div>
         <p class="admin-empty" style="margin-bottom:10px;">Transferring ownership doesn't take effect until the new address itself calls acceptOwnership() — the current owner keeps full control until then, so a mistyped address can't lock this contract out.</p>
@@ -10529,7 +11189,7 @@
       const liveLabel = isUrlField ? "Mainnet URL" : "Mainnet address";
       const help = escapeHtml(CONFIG_HELP[k]);
       return `
-        <div class="admin-cfg-row">
+        <div class="admin-cfg-row"${V4_CONFIG_KEYS.includes(k) ? ' data-admin-proto="v4"' : (k==="relayerApiUrl" || k==="priceFeed") ? "" : ' data-admin-proto="v2"'}>
           <div class="admin-cfg-label">${escapeHtml(CONFIG_LABELS[k])}<span class="info-dot" title="${help}" tabindex="0">?</span></div>
           <div class="field"><input type="text" id="${configFieldId(k,'demo')}" aria-label="${escapeHtml(CONFIG_LABELS[k])} — ${escapeHtml(demoLabel)}" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(platformConfig[k].demo || "")}" title="${help}"></div>
           <div class="field"><input type="text" id="${configFieldId(k,'live')}" aria-label="${escapeHtml(CONFIG_LABELS[k])} — ${escapeHtml(liveLabel)}" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(platformConfig[k].live || "")}" title="${help}"></div>
@@ -10993,6 +11653,7 @@
   const ADMIN_TABS = [
     { key: "overview", label: "Overview" },
     { key: "contracts", label: "Contracts" },
+    { key: "deployed", label: "Deployed contracts" },
     { key: "rewards", label: "Rewards" },
     { key: "relayer", label: "Relayer settings" },
     { key: "deploy", label: "Deploy" },
@@ -11606,6 +12267,542 @@
       </div>`;
   }
 
+  // ---- Admin → V4 sections (Overview / Contracts / Rewards for Uniswap V4) ----
+  // The admin header has a V2/V4 switch. Both protocols' panels are rendered
+  // into the same tabs and CSS (#adminWrap[data-proto]) shows one set, so
+  // switching is instant and every V2 element id/handler is untouched. V4
+  // panels reuse the V2 factory panel and runAdminAction (the V4TokenFactory
+  // has the same owner setters — same selectors), keyed "v4"/"v4locker".
+  // Everything V4-specific here is read from the chain or the relayer; nothing
+  // is assumed about a contract that isn't configured.
+  let adminProtocol = "v2";
+  let v4AdminRenderToken = 0;
+
+  function sameAddr(a, b){ return !!a && !!b && String(a).toLowerCase()===String(b).toLowerCase(); }
+  function isZeroAddr(a){ return !a || String(a).toLowerCase()===ZERO_ADDRESS; }
+  function explorerAddrHTML(addr){
+    if(!addr) return `<span class="dc-none">Not set</span>`;
+    const net = NETWORKS[appMode];
+    const base = (net && net.blockExplorerUrls && net.blockExplorerUrls[0]) || "";
+    return (base && /^0x[0-9a-fA-F]{40}$/.test(addr))
+      ? `<a href="${escapeHtml(base.replace(/\/+$/,""))}/address/${escapeHtml(addr)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(addr)}">${fmtAddrSafe(addr)}</a>`
+      : `<span title="${escapeHtml(addr)}">${fmtAddrSafe(addr)}</span>`;
+  }
+  function v4Pill(kind, text){ return `<span class="v4s-pill ${kind}">${escapeHtml(text)}</span>`; }
+  async function v4HasCode(addr){
+    if(!addr) return null;
+    try{
+      const c = await window.ethereum.request({ method:"eth_getCode", params:[addr, "latest"] });
+      return !!c && c!=="0x" && c!=="0x0";
+    }catch(e){ return null; }
+  }
+  async function v4Read(to, selector){
+    if(!to) return null;
+    try{ const h = await ethCall(to, "0x"+selector); return (h && h.length>=66) ? h : null; }catch(e){ return null; }
+  }
+  const v4Addr = (h) => h ? decodeAddress(h) : null;
+
+  async function loadV4FactoryAdminState(address){
+    const st = await loadFactoryAdminState(address);
+    const h = await v4Read(address, V4_BUY_IN_SLIPPAGE_BPS_SELECTOR);
+    st.buyInSlippageBps = h ? decodeUint256(h) : undefined;
+    return st;
+  }
+
+  // One read pass shared by the three V4 tabs.
+  async function loadV4Snapshot(){
+    const factory = adminFactoryAddress("v4");
+    const hook = (platformConfig.v4TaxHook && platformConfig.v4TaxHook[appMode]) || null;
+    const locker = adminFactoryAddress("v4locker");
+    const fState = factory ? await loadV4FactoryAdminState(factory).catch(()=>null) : null;
+    const [fHookH, fLockerH, fPmH, hFactoryH, hPmH, hDeployerH, lOwnerH, lPendingH, lFactoryH, lPmH, lCountH] = await Promise.all([
+      fState ? v4Read(factory, V4_HOOK_SELECTOR) : null,
+      fState ? v4Read(factory, V4_LOCKER_SELECTOR) : null,
+      fState ? v4Read(factory, V4_POOL_MANAGER_SELECTOR) : null,
+      v4Read(hook, V4_FACTORY_SELECTOR),
+      v4Read(hook, V4_POOL_MANAGER_SELECTOR),
+      v4Read(hook, V4_DEPLOYER_SELECTOR),
+      v4Read(locker, OWNER_SELECTOR),
+      v4Read(locker, PENDING_OWNER_SELECTOR),
+      v4Read(locker, V4_FACTORY_SELECTOR),
+      v4Read(locker, V4_POOL_MANAGER_SELECTOR),
+      v4Read(locker, V4_LOCK_COUNT_SELECTOR),
+    ]);
+    const onchain = { hook: v4Addr(fHookH), locker: v4Addr(fLockerH), poolManager: v4Addr(fPmH) };
+    const hookState = hFactoryH ? { factory: v4Addr(hFactoryH), poolManager: v4Addr(hPmH), deployer: v4Addr(hDeployerH) } : null;
+    const lockerState = lOwnerH ? {
+      owner: v4Addr(lOwnerH), pendingOwner: v4Addr(lPendingH), factory: v4Addr(lFactoryH),
+      poolManager: v4Addr(lPmH), lockCount: lCountH ? decodeUint256(lCountH) : null,
+    } : null;
+    const poolManager = onchain.poolManager || (hookState && hookState.poolManager) || (lockerState && lockerState.poolManager) || null;
+    const codeTargets = {
+      factory, hook, locker, poolManager,
+      priceFeed: fState && !isZeroAddr(fState.priceFeed) ? fState.priceFeed : null,
+      rd: fState && !isZeroAddr(fState.rewardsDistributor) ? fState.rewardsDistributor : null,
+      crd: fState && !isZeroAddr(fState.creatorRewardsDistributor) ? fState.creatorRewardsDistributor : null,
+      fwd: fState && !isZeroAddr(fState.feeWalletDistributor) ? fState.feeWalletDistributor : null,
+    };
+    const keys = Object.keys(codeTargets);
+    const codes = await Promise.all(keys.map(k => v4HasCode(codeTargets[k])));
+    const code = {}; keys.forEach((k,i)=>{ code[k] = codes[i]; });
+
+    // Each distributor slot: is it one of the V4 distributor contracts (they
+    // expose hook()), is it exempt from the hook's tax, and a few live numbers.
+    const slotAddrs = { rd: codeTargets.rd, crd: codeTargets.crd, fwd: codeTargets.fwd };
+    const slots = {};
+    await Promise.all(Object.keys(slotAddrs).map(async (k) => {
+      const addr = slotAddrs[k];
+      if(!addr){ slots[k] = null; return; }
+      const [hookH, exemptH, ptH, pendH, routerH, fwH, bal] = await Promise.all([
+        code[k] ? v4Read(addr, V4_HOOK_SELECTOR) : null,
+        hook ? v4Read(hook, V4_TAX_EXEMPT_SELECTOR + encodeAddressParam(addr)) : null,
+        code[k] ? v4Read(addr, V4_PLATFORM_TOKEN_SELECTOR) : null,
+        code[k] ? v4Read(addr, V4_PENDING_AIRDROP_SELECTOR) : null,
+        code[k] ? v4Read(addr, V4_BUYBACK_ROUTER_SELECTOR) : null,
+        code[k] ? v4Read(addr, V4_FEE_WALLET_SELECTOR) : null,
+        window.ethereum.request({ method:"eth_getBalance", params:[addr, "latest"] }).catch(()=>null),
+      ]);
+      slots[k] = {
+        addr,
+        hasCode: code[k],
+        isV4: !!hookH && !!hook && sameAddr(v4Addr(hookH), hook),
+        exempt: exemptH ? decodeUint256(exemptH) !== 0n : null,
+        platformToken: ptH ? v4Addr(ptH) : null,
+        pending: pendH ? decodeUint256(pendH) : null,
+        router: routerH ? v4Addr(routerH) : null,
+        feeWallet: fwH ? v4Addr(fwH) : null,
+        ethBalance: bal ? BigInt(bal) : null,
+      };
+    }));
+    return { factory, hook, locker, poolManager, fState, onchain, hookState, lockerState, code, slots };
+  }
+
+  function v4CodePill(has, addr){
+    if(!addr) return "";
+    if(has===null) return v4Pill("warn", "Couldn't check");
+    return has ? v4Pill("ok", "Contract found") : v4Pill("bad", "No contract here");
+  }
+
+  function v4OverviewPanelHTML(snap){
+    const { factory, hook, locker, poolManager, fState, onchain, hookState, lockerState, code } = snap;
+    const rows = [];
+    const row = (label, addr, pills, note) => rows.push(
+      `<tr><td>${escapeHtml(label)}${note ? `<div class="hint" style="margin:2px 0 0;">${escapeHtml(note)}</div>` : ""}</td><td>${addr ? explorerAddrHTML(addr) : `<span class="dc-none">Not set</span>`}</td><td class="v4s-cell">${pills.join("")}</td></tr>`
+    );
+
+    // V4TokenFactory
+    {
+      const p = [];
+      if(!factory) p.push(v4Pill("warn","Not configured"));
+      else {
+        p.push(v4CodePill(code.factory, factory));
+        if(!fState) p.push(v4Pill("bad","State unreadable"));
+        else {
+          p.push(wallet && sameAddr(fState.owner, wallet) ? v4Pill("ok","You are owner") : v4Pill("warn","Owner: "+fmtAddr(fState.owner)));
+          if(!isZeroAddr(fState.pendingOwner)) p.push(v4Pill("warn","Pending owner set"));
+          if(hook && onchain.hook) p.push(sameAddr(onchain.hook, hook) ? v4Pill("ok","Hook matches") : v4Pill("bad","Factory's hook is "+fmtAddr(onchain.hook)));
+          if(locker && onchain.locker) p.push(sameAddr(onchain.locker, locker) ? v4Pill("ok","Locker matches") : v4Pill("bad","Factory's locker is "+fmtAddr(onchain.locker)));
+        }
+      }
+      row("V4TokenFactory", factory, p, "Creates tokens and V4 pools");
+    }
+    // V4TaxHook
+    {
+      const p = [];
+      if(!hook) p.push(v4Pill("warn","Not configured"));
+      else {
+        p.push(v4CodePill(code.hook, hook));
+        if(/^0x[0-9a-fA-F]{40}$/.test(hook)){
+          p.push((BigInt(hook) & 0x3FFFn) === 0x20CCn ? v4Pill("ok","Hook flags OK") : v4Pill("bad","Address lacks hook flags"));
+        }
+        if(hookState){
+          if(factory) p.push(sameAddr(hookState.factory, factory) ? v4Pill("ok","Wired to factory") : (isZeroAddr(hookState.factory) ? v4Pill("warn","Factory not set yet") : v4Pill("bad","Wired to "+fmtAddr(hookState.factory))));
+          if(poolManager) p.push(sameAddr(hookState.poolManager, poolManager) ? v4Pill("ok","PoolManager matches") : v4Pill("bad","Different PoolManager"));
+        } else if(code.hook) p.push(v4Pill("bad","State unreadable"));
+      }
+      row("V4TaxHook", hook, p, "Collects the trading tax at the pool, in the token");
+    }
+    // V4LiquidityLocker
+    {
+      const p = [];
+      if(!locker) p.push(v4Pill("warn","Not configured"));
+      else {
+        p.push(v4CodePill(code.locker, locker));
+        if(lockerState){
+          if(factory) p.push(sameAddr(lockerState.factory, factory) ? v4Pill("ok","Wired to factory") : (isZeroAddr(lockerState.factory) ? v4Pill("warn","Factory not set yet") : v4Pill("bad","Wired to "+fmtAddr(lockerState.factory))));
+          p.push(wallet && sameAddr(lockerState.owner, wallet) ? v4Pill("ok","You are owner") : v4Pill("warn","Owner: "+fmtAddr(lockerState.owner)));
+          if(lockerState.lockCount!==null) p.push(v4Pill("", `${lockerState.lockCount} lock${lockerState.lockCount===1n?"":"s"}`));
+          if(poolManager) p.push(sameAddr(lockerState.poolManager, poolManager) ? v4Pill("ok","PoolManager matches") : v4Pill("bad","Different PoolManager"));
+        } else if(code.locker) p.push(v4Pill("bad","State unreadable"));
+      }
+      row("V4LiquidityLocker", locker, p, "Holds each creator's locked V4 position");
+    }
+    // Uniswap V4 PoolManager
+    row("Uniswap V4 PoolManager", poolManager, poolManager ? [v4CodePill(code.poolManager, poolManager)] : [v4Pill("warn","Read from the factory once it's configured")], "Uniswap's contract — not ours");
+    // Things the factory points at
+    if(fState){
+      const unsetPill = (t) => [v4Pill("", t)];
+      const walletOrContract = (has, addr, slot) => {
+        if(has===null) return [v4Pill("warn","Couldn't check")];
+        if(!has) return [v4Pill("", "Wallet (no contract)"), ...(slot && slot.exempt===false ? [] : [])];
+        if(slot && slot.isV4) return [v4Pill("ok","V4 distributor"), slot.exempt ? v4Pill("ok","Tax-exempt") : v4Pill("warn","Not tax-exempt — its sales are taxed again")];
+        return [v4Pill("warn","Contract, not a V4 distributor")];
+      };
+      row("Price feed", isZeroAddr(fState.priceFeed) ? null : fState.priceFeed, isZeroAddr(fState.priceFeed) ? [v4Pill("warn","Unset — graduation check inactive")] : [v4CodePill(code.priceFeed, fState.priceFeed)], "ETH/USD feed used by the graduation check");
+      row("Rewards distributor", isZeroAddr(fState.rewardsDistributor) ? null : fState.rewardsDistributor, isZeroAddr(fState.rewardsDistributor) ? unsetPill("Unset") : walletOrContract(code.rd, fState.rewardsDistributor, snap.slots.rd), "Receives its share of the tax in the token itself, plus 50% of launch fees in ETH");
+      row("Creator rewards distributor", isZeroAddr(fState.creatorRewardsDistributor) ? null : fState.creatorRewardsDistributor, isZeroAddr(fState.creatorRewardsDistributor) ? unsetPill("Unset") : walletOrContract(code.crd, fState.creatorRewardsDistributor, snap.slots.crd), "Receives its share of the tax in the token itself");
+      row("Fee wallet distributor", isZeroAddr(fState.feeWalletDistributor) ? null : fState.feeWalletDistributor, isZeroAddr(fState.feeWalletDistributor) ? unsetPill("Unset — remainder goes to the fee wallet") : walletOrContract(code.fwd, fState.feeWalletDistributor, snap.slots.fwd), "Receives the remainder of the tax in the token itself");
+      row("Platform fee wallet", isZeroAddr(fState.platformFeeWallet) ? null : fState.platformFeeWallet, [], "Where the tax remainder goes when no fee wallet distributor is set");
+      row("Fee treasury", isZeroAddr(fState.feeTreasury) ? null : fState.feeTreasury, [], "Receives deploy/launch fees");
+      row("Gasless relayer", isZeroAddr(fState.relayer) ? null : fState.relayer, isZeroAddr(fState.relayer) ? [v4Pill("warn","Unset — gasless V4 launches off")] : [], "Allowed to call relayedCreateToken");
+    }
+
+    return `
+      <div class="panel admin-panel" style="grid-column:1 / -1; margin-bottom:14px;">
+        <div class="admin-panel-head"><h3><span class="proto-badge v4">V4</span> V4 contracts</h3></div>
+        <p class="admin-empty" style="margin:0 0 12px;">Live status on ${escapeHtml(NETWORKS[appMode].label)}. Addresses for the first three come from Platform contracts above; everything below them is read from the V4TokenFactory itself, so a mismatch shows up here as a red or amber tag.</p>
+        <div class="dc-wrap"><table class="dc-table"><thead><tr><th>Contract</th><th>Address</th><th>Status</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>
+      </div>`;
+  }
+
+  // Fetches the relayer's /health + /launches once; used by the V4 activity
+  // panel and the V4 rewards balances.
+  async function fetchV4RelayerData(){
+    const url = relayerApiUrl(appMode);
+    if(!url) return { url:null, reached:false, health:null, launches:[] };
+    let health = null, launches = [], reached = false;
+    try{ const r = await fetch(`${url}/health`); if(r.ok){ health = await r.json(); reached = true; } }catch(e){}
+    try{ const r = await fetch(`${url}/launches`); if(r.ok){ const j = await r.json(); reached = true; launches = (Array.isArray(j.launches) ? j.launches : []).filter(l => l && l.protocol==="v4"); } }catch(e){}
+    launches.sort((a,b)=> (Date.parse(b.createdAt)||0) - (Date.parse(a.createdAt)||0));
+    return { url, reached, health, launches };
+  }
+
+  function v4ActivityPanelHTML(snap, rd){
+    const { factory, fState } = snap;
+    const checks = [];
+    if(!rd.url) checks.push(v4Pill("warn","No relayer URL configured"));
+    else if(!rd.reached) checks.push(v4Pill("bad","Relayer unreachable"));
+    else {
+      const h = rd.health;
+      checks.push(v4Pill("ok","Relayer reachable"));
+      if(h){
+        if(!h.v4TokenFactoryAddress) checks.push(v4Pill("warn","Relayer has no V4_TOKEN_FACTORY_ADDRESS"));
+        else if(factory && !sameAddr(h.v4TokenFactoryAddress, factory)) checks.push(v4Pill("bad","Relayer watches "+fmtAddr(h.v4TokenFactoryAddress)));
+        else checks.push(v4Pill("ok","Relayer watches this factory"));
+        if(fState && h.relayer){
+          if(isZeroAddr(fState.relayer)) checks.push(v4Pill("warn","Factory relayer unset — gasless off"));
+          else if(sameAddr(fState.relayer, h.relayer)) checks.push(v4Pill("ok","Factory relayer = relayer wallet"));
+          else checks.push(v4Pill("bad","Factory relayer is a different wallet"));
+          if(!isZeroAddr(fState.relayer) && fState.maxRelayerGasReimbursementWei === 0n) checks.push(v4Pill("warn","Gas reimbursement cap is 0"));
+        }
+      }
+    }
+    const rows = rd.launches.slice(0, 20).map(l => {
+      const when = fmtDeployedDate(l.createdAt) || "—";
+      const poolId = l.poolId ? `${l.poolId.slice(0,10)}…${l.poolId.slice(-6)}` : "—";
+      return `<tr><td>${escapeHtml(l.name || l.symbol || "(unnamed)")}${l.symbol ? ` <span class="dc-none">$${escapeHtml(l.symbol)}</span>` : ""}</td><td>${explorerAddrHTML(l.tokenAddress)}</td><td title="${escapeHtml(l.poolId || "")}">${escapeHtml(poolId)}</td><td>${l.creator ? fmtAddrSafe(l.creator) : "—"}</td><td>${escapeHtml(when)}</td></tr>`;
+    }).join("");
+    return `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3><span class="proto-badge v4">V4</span> Relayer &amp; launches</h3></div>
+        <p class="admin-empty" style="margin:0 0 12px;">Gasless V4 launches only work when the relayer watches this V4 factory <em>and</em> the factory's relayer is the relayer's wallet; otherwise launches fall back to the creator paying gas.</p>
+        <div style="margin-bottom:14px;">${checks.join("")}</div>
+        ${rows
+          ? `<div class="dc-wrap"><table class="dc-table"><thead><tr><th>Token</th><th>Address</th><th>Pool ID</th><th>Creator</th><th>Created</th></tr></thead><tbody>${rows}</tbody></table></div>`
+          : `<p class="admin-empty">No V4 launches recorded on ${escapeHtml(NETWORKS[appMode].label)} yet.</p>`}
+      </div>`;
+  }
+
+  function v4HookPanelHTML(snap){
+    const { hook, hookState, factory, poolManager, code } = snap;
+    const label = "V4TaxHook";
+    if(!hook) return `<div class="panel admin-panel"><div class="admin-panel-head"><h3>${label}</h3></div><div class="admin-addr-line">Not deployed on ${escapeHtml(NETWORKS[appMode].label)}</div><p class="admin-empty">Set its address in Platform contracts on the Overview tab once it's deployed.</p></div>`;
+    if(!hookState) return `<div class="panel admin-panel"><div class="admin-panel-head"><h3>${label}</h3></div><div class="admin-addr-line">${escapeHtml(hook)}</div><p class="admin-empty">Couldn't read this contract's on-chain state — check your wallet's network and that the address is the hook.</p></div>`;
+    const flagsOk = /^0x[0-9a-fA-F]{40}$/.test(hook) && (BigInt(hook) & 0x3FFFn) === 0x20CCn;
+    return `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>${label}</h3></div>
+        <div class="admin-addr-line">${escapeHtml(hook)}</div>
+        <div class="admin-section-label">Current state</div>
+        <div class="admin-readout-grid">
+          <div class="admin-readout"><div class="l">Factory</div><div class="v">${isZeroAddr(hookState.factory) ? "Not set yet" : escapeHtml(hookState.factory)}${factory && !isZeroAddr(hookState.factory) ? (sameAddr(hookState.factory, factory) ? " ✓" : " ✗ differs from the configured V4TokenFactory") : ""}</div></div>
+          <div class="admin-readout"><div class="l">PoolManager</div><div class="v">${escapeHtml(hookState.poolManager)}${poolManager ? (sameAddr(hookState.poolManager, poolManager) ? " ✓" : " ✗ differs from the factory's") : ""}</div></div>
+          <div class="admin-readout"><div class="l">Deployer</div><div class="v">${escapeHtml(hookState.deployer)}</div></div>
+          <div class="admin-readout"><div class="l">Hook flags in address</div><div class="v">${flagsOk ? "Correct (0x20CC)" : "Wrong — Uniswap would reject this hook"}</div></div>
+        </div>
+        <p class="admin-empty">The hook has no owner and no settings of its own. Each pool's tax rate, reward splits and price feed are copied from the V4TokenFactory's tax defaults when that pool is created, so change those on the V4TokenFactory panel and they apply to launches from then on.</p>
+      </div>`;
+  }
+
+  function v4LockerPanelHTML(snap){
+    const { locker, lockerState, factory, poolManager } = snap;
+    const label = "V4LiquidityLocker";
+    if(!locker) return `<div class="panel admin-panel"><div class="admin-panel-head"><h3>${label}</h3></div><div class="admin-addr-line">Not deployed on ${escapeHtml(NETWORKS[appMode].label)}</div><p class="admin-empty">Set its address in Platform contracts on the Overview tab once it's deployed.</p></div>`;
+    if(!lockerState) return `<div class="panel admin-panel"><div class="admin-panel-head"><h3>${label}</h3></div><div class="admin-addr-line">${escapeHtml(locker)}</div><p class="admin-empty">Couldn't read this contract's on-chain state — check your wallet's network and try again.</p></div>`;
+    const pendingIsZero = isZeroAddr(lockerState.pendingOwner);
+    const walletIsPending = wallet && !pendingIsZero && sameAddr(wallet, lockerState.pendingOwner);
+    return `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>${label}</h3></div>
+        <div class="admin-addr-line">${escapeHtml(locker)}</div>
+        <div class="admin-section-label">Current state</div>
+        <div class="admin-readout-grid">
+          <div class="admin-readout"><div class="l">Owner</div><div class="v">${escapeHtml(lockerState.owner)}</div></div>
+          <div class="admin-readout"><div class="l">Pending owner</div><div class="v">${pendingIsZero ? "None" : escapeHtml(lockerState.pendingOwner)}</div></div>
+          <div class="admin-readout"><div class="l">Factory</div><div class="v">${isZeroAddr(lockerState.factory) ? "Not set yet" : escapeHtml(lockerState.factory)}${factory && !isZeroAddr(lockerState.factory) ? (sameAddr(lockerState.factory, factory) ? " ✓" : " ✗ differs from the configured V4TokenFactory") : ""}</div></div>
+          <div class="admin-readout"><div class="l">PoolManager</div><div class="v">${escapeHtml(lockerState.poolManager)}${poolManager ? (sameAddr(lockerState.poolManager, poolManager) ? " ✓" : " ✗ differs from the factory's") : ""}</div></div>
+          <div class="admin-readout"><div class="l">Locks created</div><div class="v">${lockerState.lockCount===null ? "—" : String(lockerState.lockCount)}</div></div>
+        </div>
+        <p class="admin-empty">The locker owns every creator's V4 position until their lock expires; creators withdraw their own position and fees themselves. Its only admin controls are ownership transfer and token/ETH rescue, and rescue is intentionally not exposed on this page.</p>
+        <div class="admin-section-label">Ownership · Ownable2Step</div>
+        <div class="admin-action-row">
+          <div class="field"><label>Transfer ownership to</label><input type="text" id="admin_v4locker_newOwner" placeholder="0x…"></div>
+          <button class="btn btn-ghost btn-sm" data-admin-action="transferOwnership" data-factory-key="v4locker">Propose</button>
+        </div>
+        ${walletIsPending ? `
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">This connected wallet is the pending owner — accept to complete the transfer.</p>
+          <button class="btn btn-primary btn-sm" data-admin-action="acceptOwnership" data-factory-key="v4locker">Accept ownership</button>
+        </div>` : ""}
+      </div>`;
+  }
+
+  function v4ContractsPanelsHTML(snap){
+    return adminFactoryPanelHTML("v4", "V4TokenFactory", snap.factory, snap.fState, { proto:"v4", omitRewardSlots:true })
+      + v4HookPanelHTML(snap)
+      + v4LockerPanelHTML(snap);
+  }
+
+  // Rewards: where the V4 tax goes. On V4 every cut is paid in the token itself
+  // by the hook (no ETH conversion), straight to the addresses below.
+  function v4RewardsPanelsHTML(snap, rd){
+    const { factory, fState } = snap;
+    if(!factory || !fState){
+      return `<div class="panel admin-panel" style="grid-column:1 / -1;"><div class="admin-panel-head"><h3>V4 rewards</h3></div><p class="admin-empty">${factory ? "Couldn't read the V4TokenFactory's on-chain state — check your wallet's network and try again." : "Set the V4TokenFactory address in Platform contracts on the Overview tab first — there's nothing to read until then."}</p></div>`;
+    }
+    const feeBps = Number(fState.feeBps);
+    const rUnset = isZeroAddr(fState.rewardsDistributor), cUnset = isZeroAddr(fState.creatorRewardsDistributor);
+    const rBps = rUnset ? 0 : Number(fState.rewardBps), cBps = cUnset ? 0 : Number(fState.creatorRewardBps);
+    const restBps = Math.max(0, feeBps - rBps - cBps);
+    const restDest = !isZeroAddr(fState.feeWalletDistributor) ? fState.feeWalletDistributor : (!isZeroAddr(fState.platformFeeWallet) ? fState.platformFeeWallet : null);
+    const pct = (bps) => feeBps > 0 ? `${(bps/feeBps*100).toFixed(1)}% of the tax` : "—";
+    const splitRow = (label, bps, dest, extra) => `<tr><td>${escapeHtml(label)}</td><td>${(bps/100).toFixed(2)}% <span class="dc-none">(${escapeHtml(pct(bps))})</span></td><td>${dest ? explorerAddrHTML(dest) : `<span class="dc-none">${escapeHtml(extra || "Unset")}</span>`}</td></tr>`;
+    const splitPanel = `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3><span class="proto-badge v4">V4</span> Tax split</h3></div>
+        <p class="admin-empty" style="margin-bottom:12px;">On every taxed swap the hook takes ${(feeBps/100).toFixed(2)}% of the trade <strong>in the launched token</strong> and sends each cut straight to the addresses below. Nothing is converted to ETH on V4. The split is copied into each pool when it is created, so changes here (and in Tax defaults on the Contracts tab) apply to launches from now on and never to existing pools.</p>
+        <div class="dc-wrap"><table class="dc-table"><thead><tr><th>Cut</th><th>Share</th><th>Paid to</th></tr></thead><tbody>
+          ${splitRow("Rewards distributor", rBps, rUnset ? null : fState.rewardsDistributor, "Unset — inactive")}
+          ${splitRow("Creator rewards distributor", cBps, cUnset ? null : fState.creatorRewardsDistributor, "Unset — inactive")}
+          ${splitRow(!isZeroAddr(fState.feeWalletDistributor) ? "Remainder → fee wallet distributor" : "Remainder → platform fee wallet", restBps, restDest, "Unset — the pool would not be taxed")}
+        </tbody></table></div>
+        <p class="admin-empty" style="margin-top:12px;">Point each slot at its <strong>V4 distributor</strong> (V4PlatformRewardsDistributor, V4CreatorRewardsDistributor, V4FeeWalletDistributor): they sell the in-kind tokens for ETH in each token's own V4 pool, then pay out, claim or buy back exactly like the V2 ones. A V2 distributor can't convert V4 tokens, and a plain wallet just holds them. Every V4 distributor must also be <strong>tax-exempt</strong> (below), or its sales are taxed a second time.</p>
+      </div>`;
+    const slotsPanel = `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>Distributor slots</h3></div>
+        <div class="admin-addr-line">${escapeHtml(factory)}</div>
+        ${factoryRewardSlotsHTML("v4", fState)}
+        <div class="admin-section-label">Tax exemption · for V4 distributors</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Exempts an address from the hook's trading tax, so a V4 distributor selling its in-kind tax isn't taxed again. Do this for each V4 distributor after you deploy it. Only exempt contracts you control.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Address</label><input type="text" id="admin_v4_exemptAddr" placeholder="0x… (a V4 distributor)"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="taxExemptOn" data-factory-key="v4">Exempt</button>
+          <button class="btn btn-ghost btn-sm" data-admin-action="taxExemptOff" data-factory-key="v4">Remove</button>
+        </div>
+      </div>`;
+    return splitPanel + v4DistributorStatusPanelHTML(snap) + `<div class="admin-grid" id="v4RewardsGrid" style="grid-column:1 / -1;">${slotsPanel}<div id="v4TaxHeldWrap">${v4TaxHeldPanelHTML(snap, rd, null)}</div></div>`;
+  }
+
+  function v4DistributorStatusPanelHTML(snap){
+    const { slots, fState } = snap;
+    const defs = [["rd","Rewards distributor"],["crd","Creator rewards distributor"],["fwd","Fee wallet distributor"]];
+    const trs = defs.map(([k,label])=>{
+      const sl = slots && slots[k];
+      if(!sl) return `<tr><td>${escapeHtml(label)}</td><td><span class="dc-none">Not set</span></td><td colspan="2" class="dc-none">—</td></tr>`;
+      let kind, details = [];
+      if(sl.hasCode===false){ kind = v4Pill("", "Wallet"); }
+      else if(sl.isV4){
+        kind = v4Pill("ok","V4 distributor") + (sl.exempt ? v4Pill("ok","Tax-exempt") : v4Pill("warn","Not tax-exempt"));
+        if(sl.platformToken !== null) details.push(isZeroAddr(sl.platformToken) ? "Platform token: unset" : "Platform token: "+fmtAddr(sl.platformToken));
+        if(sl.router !== null) details.push(isZeroAddr(sl.router) ? "No buyback router" : "Buyback router: "+fmtAddr(sl.router));
+        if(sl.pending !== null) details.push("Queued for airdrop: "+weiToEtherString(sl.pending,4));
+        if(sl.feeWallet !== null) details.push("Pays out to: "+(isZeroAddr(sl.feeWallet) ? "not set" : fmtAddr(sl.feeWallet)));
+        if(sl.ethBalance !== null) details.push("ETH held: "+weiToEtherString(sl.ethBalance,4));
+      }
+      else kind = v4Pill("warn","Contract, not a V4 distributor");
+      return `<tr><td>${escapeHtml(label)}</td><td>${explorerAddrHTML(sl.addr)}</td><td class="v4s-cell">${kind}</td><td class="v4s-cell dc-none">${details.map(escapeHtml).join("<br>")}</td></tr>`;
+    }).join("");
+    return `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3><span class="proto-badge v4">V4</span> Distributor status</h3></div>
+        <div class="dc-wrap"><table class="dc-table"><thead><tr><th>Slot</th><th>Address</th><th>Kind</th><th>Details</th></tr></thead><tbody>${trs}</tbody></table></div>
+      </div>`;
+  }
+
+  // In-kind tax sitting at each destination, per V4 token: balanceOf(dest).
+  function v4TaxHeldPanelHTML(snap, rd, balances){
+    const { fState } = snap;
+    const dests = [
+      ["Rewards", fState && !isZeroAddr(fState.rewardsDistributor) ? fState.rewardsDistributor : null],
+      ["Creator rewards", fState && !isZeroAddr(fState.creatorRewardsDistributor) ? fState.creatorRewardsDistributor : null],
+      ["Remainder", fState ? (!isZeroAddr(fState.feeWalletDistributor) ? fState.feeWalletDistributor : (!isZeroAddr(fState.platformFeeWallet) ? fState.platformFeeWallet : null)) : null],
+    ];
+    const toks = rd ? rd.launches.slice(0, 15) : [];
+    let body;
+    if(!rd || !rd.url) body = `<p class="admin-empty">No relayer configured for ${escapeHtml(NETWORKS[appMode].label)}, so there's no list of V4 tokens to check.</p>`;
+    else if(!toks.length) body = `<p class="admin-empty">${rd.reached ? "No V4 launches yet — nothing to hold." : "Couldn't reach the relayer to list V4 tokens."}</p>`;
+    else {
+      const trs = toks.map((l, i) => {
+        const cells = dests.map((d, j) => {
+          if(!d[1]) return `<td class="dc-none">—</td>`;
+          if(!balances) return `<td class="dc-none">…</td>`;
+          const b = balances[i] && balances[i][j];
+          return b===null || b===undefined ? `<td class="dc-none">?</td>` : `<td>${escapeHtml(weiToEtherString(b, 4))}</td>`;
+        }).join("");
+        return `<tr><td>${escapeHtml(l.symbol ? "$"+l.symbol : fmtAddr(l.tokenAddress))}</td>${cells}</tr>`;
+      }).join("");
+      body = `<div class="dc-wrap"><table class="dc-table"><thead><tr><th>Token</th>${dests.map(d=>`<th>${escapeHtml(d[0])}</th>`).join("")}</tr></thead><tbody>${trs}</tbody></table></div>
+        <p class="admin-empty" style="margin:10px 0 0;">Each cell is that token's balance currently sitting at the destination (whole tokens). It includes anything else of that token the address holds, and covers the 15 most recent V4 launches.</p>`;
+    }
+    return `<div class="panel admin-panel"><div class="admin-panel-head"><h3>Tax held in kind</h3></div>${body}</div>`;
+  }
+
+  async function loadV4TaxBalances(snap, rd){
+    const { fState } = snap;
+    const dests = [fState.rewardsDistributor, fState.creatorRewardsDistributor, !isZeroAddr(fState.feeWalletDistributor) ? fState.feeWalletDistributor : fState.platformFeeWallet].map(a => isZeroAddr(a) ? null : a);
+    const toks = rd.launches.slice(0, 15);
+    return Promise.all(toks.map(l => Promise.all(dests.map(async d => {
+      if(!d || !l.tokenAddress) return null;
+      try{
+        const h = await ethCall(l.tokenAddress, "0x"+BALANCE_OF_SELECTOR+encodeAddressParam(d));
+        return h && h.length>=66 ? decodeUint256(h) : null;
+      }catch(e){ return null; }
+    }))));
+  }
+
+  function v4AdminMessagePanel(msg){ return `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">${escapeHtml(msg)}</p></div>`; }
+
+  async function renderV4AdminSections(){
+    const ov = document.getElementById("v4OverviewWrap");
+    if(!ov) return;
+    const act = document.getElementById("v4ActivityWrap");
+    const ct = document.getElementById("v4ContractsWrap");
+    const rw = document.getElementById("v4RewardsWrap");
+    const dp = document.getElementById("v4DeployWrap");
+    if(dp) dp.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><div class="admin-panel-head"><h3><span class="proto-badge v4">V4</span> Deploy</h3></div><p class="admin-empty">V4 contracts aren't deployed from this page yet — the deploy script is on hold until the V4 contracts are final. Once they're deployed, paste their addresses into Overview → Platform contracts and everything on the V4 tabs lights up.</p></div>`;
+    if(!window.ethereum){
+      const m = v4AdminMessagePanel("No browser wallet detected — connect one to read V4 contract state.");
+      ov.innerHTML = m; if(ct) ct.innerHTML = m; if(rw) rw.innerHTML = m; if(act) act.innerHTML = "";
+      return;
+    }
+    const myToken = ++v4AdminRenderToken;
+    const stale = () => myToken !== v4AdminRenderToken || !isAdminWallet(wallet) || !views.admin.classList.contains("active");
+    const loading = v4AdminMessagePanel("Loading…");
+    ov.innerHTML = loading; if(ct) ct.innerHTML = loading; if(rw) rw.innerHTML = loading; if(act) act.innerHTML = loading;
+
+    const [snap, rd] = await Promise.all([ loadV4Snapshot().catch(()=>null), fetchV4RelayerData() ]);
+    if(stale()) return;
+    if(!snap){
+      const m = v4AdminMessagePanel("Couldn't read V4 contract state — check your wallet's network and try again.");
+      ov.innerHTML = m; if(ct) ct.innerHTML = m; if(rw) rw.innerHTML = m; if(act) act.innerHTML = "";
+      return;
+    }
+    const bind = (root) => root.querySelectorAll("[data-admin-action]").forEach(btn=>{
+      btn.addEventListener("click", ()=> runAdminAction(btn.dataset.adminAction, btn.dataset.factoryKey, btn));
+    });
+    ov.innerHTML = v4OverviewPanelHTML(snap);
+    if(act) act.innerHTML = v4ActivityPanelHTML(snap, rd);
+    if(ct){ ct.innerHTML = v4ContractsPanelsHTML(snap); bind(ct); }
+    if(rw){ rw.innerHTML = v4RewardsPanelsHTML(snap, rd); bind(rw); }
+    if(snap.fState && rd.launches.length){
+      const balances = await loadV4TaxBalances(snap, rd);
+      if(stale()) return;
+      const held = document.getElementById("v4TaxHeldWrap");
+      if(held) held.innerHTML = v4TaxHeldPanelHTML(snap, rd, balances);
+    }
+  }
+
+  function setAdminProtocol(proto){
+    adminProtocol = proto==="v4" ? "v4" : "v2";
+    const wrap = document.getElementById("adminWrap");
+    if(wrap) wrap.dataset.proto = adminProtocol;
+    document.querySelectorAll("[data-admin-proto-btn]").forEach(b=>{
+      const active = b.dataset.adminProtoBtn === adminProtocol;
+      b.classList.toggle("active", active);
+      b.setAttribute("aria-pressed", String(active));
+    });
+  }
+
+  // ---- Admin → Deployed contracts: platform contracts grouped by protocol ----
+  // Pure read-out of the platform config (the same addresses Overview →
+  // Platform contracts edits), grouped V2 vs V4, one row per contract per
+  // network. "Deployed" dates come from the relayer's own deployment record
+  // (GET /deploy/current), and only for the network this page is currently
+  // pointed at — and only when that record's address for the contract is the
+  // very address configured here, so a stale record can't stamp a date onto
+  // a different contract. Contracts that weren't deployed through the
+  // relayer's Deploy tab (the V4 set, for now) show "—" rather than a guess.
+  const DEPLOYED_CONTRACT_GROUPS = [
+    { proto: "v2", title: "Uniswap V2", note: "The live launch contracts.", rows: [
+      { key: "tokenFactory", label: "TokenFactory" },
+      { key: "customTokenFactory", label: "CustomTokenFactory" },
+      { key: "bondingCurveFactory", label: "BondingCurveFactory" },
+      { key: "customBondingCurveFactory", label: "CustomBondingCurveFactory" },
+    ]},
+    { proto: "v4", title: "Uniswap V4", note: "Admin-only, under development. Launching on V4 is disabled until the V4 transaction flow is wired in.", rows: [
+      { key: "v4TokenFactory", label: "V4TokenFactory" },
+      { key: "v4TaxHook", label: "V4TaxHook" },
+      { key: "v4LiquidityLocker", label: "V4LiquidityLocker" },
+      { key: "v4SwapRouter", label: "V4SwapRouter" },
+    ]},
+  ];
+  function fmtDeployedDate(iso){
+    const d = iso ? new Date(iso) : null;
+    return (d && !isNaN(d.getTime())) ? d.toISOString().slice(0,10) : null;
+  }
+  function deployedContractsPanelHTML(deploymentByMode){
+    const nets = [["demo","Testnet"],["live","Mainnet"]];
+    return DEPLOYED_CONTRACT_GROUPS.map(g=>{
+      const body = g.rows.map(r=> nets.map(([mode, netLabel])=>{
+        const addr = (platformConfig[r.key] && platformConfig[r.key][mode]) || null;
+        const net = NETWORKS[mode];
+        const base = (net && net.blockExplorerUrls && net.blockExplorerUrls[0]) || "";
+        const dep = deploymentByMode[mode];
+        const date = (addr && dep && dep[r.key] && String(dep[r.key]).toLowerCase()===addr.toLowerCase()) ? fmtDeployedDate(dep.deployedAt) : null;
+        const addrCell = addr
+          ? (base && /^0x[0-9a-fA-F]{40}$/.test(addr)
+              ? `<a href="${escapeHtml(base.replace(/\/+$/,""))}/address/${escapeHtml(addr)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(addr)}">${fmtAddrSafe(addr)}</a>`
+              : `<span title="${escapeHtml(addr)}">${fmtAddrSafe(addr)}</span>`)
+          : `<span class="dc-none">Not deployed</span>`;
+        return `<tr><td>${escapeHtml(r.label)}</td><td>${addrCell}</td><td>${escapeHtml(netLabel)}</td><td class="${date?"":"dc-none"}">${date ? escapeHtml(date) : "—"}</td></tr>`;
+      }).join("")).join("");
+      return `
+        <div class="panel admin-panel" style="grid-column:1 / -1; margin-bottom:14px;">
+          <h3 style="margin-bottom:4px;"><span class="proto-badge ${g.proto}">${g.proto.toUpperCase()}</span> ${escapeHtml(g.title)}</h3>
+          <p class="hint" style="margin:0 0 10px;">${escapeHtml(g.note)}</p>
+          <div class="dc-wrap"><table class="dc-table"><thead><tr><th>Contract</th><th>Address</th><th>Network</th><th>Deployed</th></tr></thead><tbody>${body}</tbody></table></div>
+        </div>`;
+    }).join("");
+  }
+  async function renderDeployedContractsPanel(){
+    const wrap = document.getElementById("deployedContractsWrap");
+    if(!wrap) return;
+    const deploymentByMode = { demo: null, live: null };
+    // Render immediately from config alone, then upgrade with dates if the
+    // relayer answers — the table is useful without them.
+    wrap.innerHTML = deployedContractsPanelHTML(deploymentByMode);
+    const url = relayerApiUrl(appMode);
+    if(!url) return;
+    try{
+      const res = await fetch(`${url}/deploy/current`);
+      const data = await res.json().catch(()=>({}));
+      deploymentByMode[appMode] = data.deployment || null;
+    }catch(err){ return; }
+    if(!isAdminWallet(wallet) || !views.admin.classList.contains("active")) return;
+    wrap.innerHTML = deployedContractsPanelHTML(deploymentByMode);
+  }
+
   async function renderDeployPanel(){
     const wrap = document.getElementById("deployWrap");
     if(!wrap) return;
@@ -11727,6 +12924,11 @@
         <span class="icon">⚠️</span>
         <p><strong>This tab is a UI convenience, not the security boundary.</strong> Every action below is an ordinary transaction — TokenFactory and CustomTokenFactory each enforce <code>onlyOwner</code> on-chain (Ownable2Step, hardened this session), so any call here still reverts unless the connected wallet is the real contract owner, regardless of what this page shows or hides. Anyone who reads this file's source can see the ${escapeHtml(ADMIN_WALLET)} check and knows it's only gating this tab's visibility, not gating anything on-chain.</p>
       </div>
+      <div class="proto-switch" id="adminProtoSwitch" role="group" aria-label="Protocol">
+        <span class="lbl">Protocol</span>
+        <button type="button" data-admin-proto-btn="v2" aria-pressed="${adminProtocol==="v2"}" class="${adminProtocol==="v2"?"active":""}">V2 · live</button>
+        <button type="button" data-admin-proto-btn="v4" aria-pressed="${adminProtocol==="v4"}" class="${adminProtocol==="v4"?"active":""}">V4 · under development</button>
+      </div>
       <div class="admin-tabbar" id="adminTabbar" role="tablist" aria-label="Admin sections">
         ${ADMIN_TABS.map(t => `<button type="button" class="admin-tab-btn${t.key===adminTab?" active":""}" role="tab" aria-selected="${t.key===adminTab}" data-admin-tab="${t.key}">${escapeHtml(t.label)}</button>`).join("")}
       </div>
@@ -11734,6 +12936,13 @@
       <div class="admin-tab-panel" data-admin-panel="overview" ${adminTab==="overview"?"":"hidden"}>
         <div class="section-head"><h2>Platform admin</h2></div>
         <div id="platformContractsWrap"></div>
+        <div data-admin-proto="v4">
+          <div class="section-head" style="margin-top:28px;"><h2>V4 contracts</h2></div>
+          <div id="v4OverviewWrap"></div>
+          <div class="section-head" style="margin-top:28px;"><h2>V4 relayer &amp; launches</h2></div>
+          <div id="v4ActivityWrap"></div>
+        </div>
+        <div data-admin-proto="v2">
         <div class="section-head" style="margin-top:28px;"><h2>Automation status</h2></div>
         <div id="automationStatusWrap">
           <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
@@ -11742,9 +12951,11 @@
         <div id="launchActivityWrap">
           <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
         </div>
+        </div>
       </div>
 
       <div class="admin-tab-panel" data-admin-panel="contracts" ${adminTab==="contracts"?"":"hidden"}>
+        <div data-admin-proto="v2">
         <div class="section-head"><h2>Contract admin</h2></div>
         <div class="admin-grid" id="adminGrid">
           <div class="panel admin-panel"><p class="admin-empty">Loading TokenFactory…</p></div>
@@ -11752,9 +12963,24 @@
           <div class="panel admin-panel"><p class="admin-empty">Loading BondingCurveFactory…</p></div>
           <div class="panel admin-panel"><p class="admin-empty">Loading CustomBondingCurveFactory…</p></div>
         </div>
+        </div>
+        <div data-admin-proto="v4">
+          <div class="section-head"><h2>V4 contract admin</h2></div>
+          <div class="admin-grid" id="v4ContractsWrap">
+            <div class="panel admin-panel"><p class="admin-empty">Loading…</p></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="admin-tab-panel" data-admin-panel="deployed" ${adminTab==="deployed"?"":"hidden"}>
+        <div class="section-head"><h2>Deployed contracts</h2></div>
+        <div id="deployedContractsWrap">
+          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+        </div>
       </div>
 
       <div class="admin-tab-panel" data-admin-panel="rewards" ${adminTab==="rewards"?"":"hidden"}>
+        <div data-admin-proto="v2">
         <div class="section-head"><h2>Platform rewards</h2></div>
         <div id="platformRewardsWrap">
           <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
@@ -11764,6 +12990,13 @@
           <div class="panel admin-panel"><p class="admin-empty">Loading PlatformRewardsDistributor…</p></div>
           <div class="panel admin-panel"><p class="admin-empty">Loading CreatorRewardsDistributor…</p></div>
           <div class="panel admin-panel"><p class="admin-empty">Loading FeeWalletDistributor…</p></div>
+        </div>
+        </div>
+        <div data-admin-proto="v4">
+          <div class="section-head"><h2>V4 rewards</h2></div>
+          <div class="admin-grid" id="v4RewardsWrap">
+            <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+          </div>
         </div>
       </div>
 
@@ -11775,11 +13008,22 @@
       </div>
 
       <div class="admin-tab-panel" data-admin-panel="deploy" ${adminTab==="deploy"?"":"hidden"}>
+        <div data-admin-proto="v2">
         <div class="section-head"><h2>Deploy contracts</h2></div>
         <div id="deployWrap">
           <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
         </div>
+        </div>
+        <div data-admin-proto="v4">
+          <div class="section-head"><h2>Deploy V4 contracts</h2></div>
+          <div id="v4DeployWrap"></div>
+        </div>
       </div>`;
+
+    wrap.dataset.proto = adminProtocol;
+    wrap.querySelectorAll("[data-admin-proto-btn]").forEach(btn=>{
+      btn.addEventListener("click", ()=> setAdminProtocol(btn.dataset.adminProtoBtn));
+    });
 
     wrap.querySelectorAll("[data-admin-tab]").forEach(btn=>{
       btn.addEventListener("click", ()=> switchAdminTab(btn.dataset.adminTab));
@@ -11808,6 +13052,8 @@
     // connected at all (same reasoning as "Platform contracts" above).
     renderRelayerSettingsPanel();
     renderDeployPanel();
+    renderDeployedContractsPanel();
+    renderV4AdminSections();
 
     if(!window.ethereum){
       document.getElementById("platformRewardsWrap").innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No browser wallet detected — connect one to manage platform rewards.</p></div>`;
@@ -11932,6 +13178,17 @@
         if(isNaN(n) || n<0 || n>10000) throw new Error("Enter a bps value between 0 and 10000.");
         data = encodeUint256Calldata(SET_MAX_CREATOR_BUY_BPS_SELECTOR, BigInt(n));
         successMsg = "Max creator buy-in cap updated.";
+      } else if(action==="buyInSlippage"){
+        const n = parseInt(field("buyInSlippage").value, 10);
+        if(isNaN(n) || n<500 || n>800) throw new Error("Enter a bps value between 500 and 800 (the V4 factory's fixed 5%-8% band).");
+        data = encodeUint256Calldata(V4_SET_BUY_IN_SLIPPAGE_BPS_SELECTOR, BigInt(n));
+        successMsg = "Creator buy-in slippage updated.";
+      } else if(action==="taxExemptOn" || action==="taxExemptOff"){
+        const v = field("exemptAddr").value.trim();
+        if(!isAddressLike(v)) throw new Error("Enter the distributor's address.");
+        const on = action==="taxExemptOn";
+        data = "0x"+V4_SET_TAX_EXEMPT_SELECTOR+encodeAddressParam(v)+(on ? "1" : "0").padStart(64, "0");
+        successMsg = on ? "Address is now exempt from the V4 trading tax." : "Tax exemption removed.";
       } else if(action==="curveLaunchFee"){
         const v = field("curveLaunchFee").value;
         if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid ETH amount.");
@@ -12445,7 +13702,7 @@
       renderGrid();
       if(views.detail.classList.contains("active") && currentDetailTokenId){
         const dt = tokens.find(x=>x.id===currentDetailTokenId);
-        if(dt && dt.tokenAddress) openDetail(currentDetailTokenId);
+        if(dt && dt.tokenAddress && !tradeInProgress()) openDetail(currentDetailTokenId);
       }
     }
   }
@@ -12518,14 +13775,14 @@
   // network (see refreshRemoteLaunches' own comment), not just ones this
   // browser has seen. Polled far less often than price, since which
   // launches exist changes much less frequently than one's price.
-  setInterval(()=>refreshRemoteLaunches(appMode), REMOTE_LAUNCHES_POLL_MS);
-  refreshRemoteLaunches(appMode);
+  setInterval(()=>refreshRemoteLaunches(appMode).finally(()=>verifyV4Protocol(appMode)), REMOTE_LAUNCHES_POLL_MS);
+  refreshRemoteLaunches(appMode).finally(()=>verifyV4Protocol(appMode));
   // Keeps the "My Tokens" and detail-page LP countdowns ticking (and flips
   // on the "Unlock LP" button the moment a lock matures) without needing
   // any on-chain call — it's just comparing unlockAt to the clock.
   setInterval(()=>{
     if(views.portfolio.classList.contains("active")) renderPortfolio();
-    if(views.detail.classList.contains("active") && currentDetailTokenId) openDetail(currentDetailTokenId);
+    if(views.detail.classList.contains("active") && currentDetailTokenId && !tradeInProgress()) openDetail(currentDetailTokenId);
   }, 30000);
 })();
 </script>
