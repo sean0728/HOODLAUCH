@@ -1,6 +1,5 @@
 node_modules
 cache/
-artifacts/
 .env
 coverage
 cache-v4test/
