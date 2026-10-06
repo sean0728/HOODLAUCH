@@ -1,0 +1,16 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "Position",
+  "sourceName": "@uniswap/v4-core/src/libraries/Position.sol",
+  "abi": [
+    {
+      "inputs": [],
+      "name": "CannotUpdateEmptyPosition",
+      "type": "error"
+    }
+  ],
+  "bytecode": "0x6080806040523460175760399081601c823930815050f35b5f80fdfe5f80fdfea26469706673582212206508a7a3c0669deffe42d4583ae594d2ebb92ada91ab1e9e3911aef2a3a4262e64736f6c63430008180033",
+  "deployedBytecode": "0x5f80fdfea26469706673582212206508a7a3c0669deffe42d4583ae594d2ebb92ada91ab1e9e3911aef2a3a4262e64736f6c63430008180033",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}
