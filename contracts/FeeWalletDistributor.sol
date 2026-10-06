@@ -339,6 +339,37 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
     /// scripts/relayer.js's feeWalletPollLoop). Callers that also want to
     /// supply a floor for the buyback leg should use the 3-argument
     /// overload below instead — see Finding FWD-1.
+    /// @dev Stack-pressure fix only (no behavior change): groups each
+    /// private helper's loose uint256 locals into a single memory struct.
+    /// A struct local is one memory-pointer stack slot regardless of how
+    /// many fields it carries, whereas N loose uint256 locals are N stack
+    /// slots — under viaIR, solc's Yul optimizer can inline a private
+    /// function back into its single call site regardless of `runs`, which
+    /// re-merges every inlined function's locals onto one combined stack
+    /// frame. _executeFeeWalletLeg and _executePlatformTokenBuyback are
+    /// each called from exactly one place (inside _triggerFeeWalletSwap),
+    /// so without this they're exactly the shape the compiler is free to
+    /// re-merge, which is what kept tripping HH600 ("stack too deep") here
+    /// even after splitting the logic into separate functions.
+    struct SplitPlan {
+        uint256 amountIn;
+        uint256 buybackAmount;
+        uint256 ethLegAmount;
+    }
+
+    struct SwapPlan {
+        uint256 protectiveFloor;
+        uint256 effectiveMinOut;
+        uint256 before;
+    }
+
+    struct BuybackPlan {
+        uint256 protectiveFloor;
+        uint256 effectiveMinOut;
+        uint256 before;
+        uint256 tokensOut;
+    }
+
     function triggerFeeWalletSwap(address token, uint256 minEthOut) external nonReentrant returns (uint256 ethOut) {
         return _triggerFeeWalletSwap(token, minEthOut, 0);
     }
@@ -378,16 +409,17 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
         uint256 balance = IERC20(token).balanceOf(address(this));
         require(balance > 0 && balance >= swapThreshold[token], "FeeWalletDistributor: below threshold");
         uint256 cap = maxSwapAmount[token];
-        uint256 amountIn = (cap > 0 && balance > cap) ? cap : balance;
 
-        uint256 buybackAmount = address(platformToken) != address(0) ? amountIn / 2 : 0;
-        uint256 ethLegAmount = amountIn - buybackAmount;
+        SplitPlan memory split;
+        split.amountIn = (cap > 0 && balance > cap) ? cap : balance;
+        split.buybackAmount = address(platformToken) != address(0) ? split.amountIn / 2 : 0;
+        split.ethLegAmount = split.amountIn - split.buybackAmount;
 
-        if (ethLegAmount > 0) {
-            ethOut = _executeFeeWalletLeg(token, ethLegAmount, minEthOut);
+        if (split.ethLegAmount > 0) {
+            ethOut = _executeFeeWalletLeg(token, split.ethLegAmount, minEthOut);
         }
-        if (buybackAmount > 0) {
-            _executePlatformTokenBuyback(token, buybackAmount, minPlatformTokensOut);
+        if (split.buybackAmount > 0) {
+            _executePlatformTokenBuyback(token, split.buybackAmount, minPlatformTokensOut);
         }
     }
 
@@ -412,20 +444,21 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
         // whichever is stricter of the caller's own minEthOut and a floor
         // computed from the pool's own live reserves, against this leg's
         // actual amountIn.
-        uint256 protectiveFloor = _protectiveMinOut(token, amountIn);
-        uint256 effectiveMinOut = minEthOut > protectiveFloor ? minEthOut : protectiveFloor;
+        SwapPlan memory plan;
+        plan.protectiveFloor = _protectiveMinOut(token, amountIn);
+        plan.effectiveMinOut = minEthOut > plan.protectiveFloor ? minEthOut : plan.protectiveFloor;
 
-        uint256 before = address(this).balance;
+        plan.before = address(this).balance;
         IERC20(token).approve(address(router), 0);
         IERC20(token).approve(address(router), amountIn);
         router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             amountIn,
-            effectiveMinOut,
+            plan.effectiveMinOut,
             path,
             address(this),
             block.timestamp + 15 minutes
         );
-        ethOut = address(this).balance - before;
+        ethOut = address(this).balance - plan.before;
 
         claimableEth[token] += ethOut;
         emit FeeWalletSwapTriggered(token, amountIn, ethOut);
@@ -466,8 +499,9 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
         // reserve-derived floor — same combination already used for the ETH
         // leg's minEthOut and for every buyback trigger in
         // PlatformRewardsDistributor.
-        uint256 protectiveFloor = _protectiveMinOut(path, amountIn);
-        uint256 effectiveMinOut = minPlatformTokensOut > protectiveFloor ? minPlatformTokensOut : protectiveFloor;
+        BuybackPlan memory plan;
+        plan.protectiveFloor = _protectiveMinOut(path, amountIn);
+        plan.effectiveMinOut = minPlatformTokensOut > plan.protectiveFloor ? minPlatformTokensOut : plan.protectiveFloor;
 
         // Finding PR-3 (ported): approving `amountIn` directly on top of any
         // existing allowance breaks against ERC20s (e.g. USDT and tokens
@@ -477,18 +511,18 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
         // outstanding.
         IERC20(token).approve(address(router), 0);
         IERC20(token).approve(address(router), amountIn);
-        uint256 before = platformToken.balanceOf(address(this));
+        plan.before = platformToken.balanceOf(address(this));
         router.swapExactTokensForTokensSupportingFeeOnTransferTokens(
             amountIn,
-            effectiveMinOut,
+            plan.effectiveMinOut,
             path,
             address(this),
             block.timestamp + 15 minutes
         );
-        uint256 tokensOut = platformToken.balanceOf(address(this)) - before;
+        plan.tokensOut = platformToken.balanceOf(address(this)) - plan.before;
 
-        (uint256 burned, uint256 toAirdrop) = _splitAndProcess(tokensOut);
-        emit PlatformTokenBuybackTriggered(token, amountIn, tokensOut, burned, toAirdrop);
+        (uint256 burned, uint256 toAirdrop) = _splitAndProcess(plan.tokensOut);
+        emit PlatformTokenBuybackTriggered(token, amountIn, plan.tokensOut, burned, toAirdrop);
     }
 
     /// @dev Fixed 50/50 split, shared by every path that produces fresh

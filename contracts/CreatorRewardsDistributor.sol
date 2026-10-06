@@ -180,12 +180,29 @@ contract CreatorRewardsDistributor is Ownable2Step, ReentrancyGuard {
     /// so a creator transfer on CustomToken (transferCreator/acceptCreator)
     /// is always reflected in whatever swap happens after it goes through,
     /// never a stale snapshot taken here.
+    /// @dev Stack-pressure fix only (no behavior change): groups the loose
+    /// uint256 locals this function used to carry (amountIn, protectiveFloor,
+    /// effectiveMinOut, before) into a single memory struct. A struct local
+    /// is one memory-pointer stack slot regardless of how many fields it
+    /// carries, whereas N loose uint256 locals are N separate stack slots —
+    /// this function never had a helper split at all, so unlike the other
+    /// distributor contracts it was tripping HH600 ("stack too deep") purely
+    /// from its own flat local count, not from any later re-inlining.
+    struct SwapPlan {
+        uint256 amountIn;
+        uint256 protectiveFloor;
+        uint256 effectiveMinOut;
+        uint256 before;
+    }
+
     function triggerCreatorSwap(address token, uint256 minEthOut) external nonReentrant returns (uint256 ethOut) {
         require(token != address(0), "CreatorRewardsDistributor: invalid token");
         uint256 balance = IERC20(token).balanceOf(address(this));
         require(balance > 0 && balance >= swapThreshold[token], "CreatorRewardsDistributor: below threshold");
         uint256 cap = maxSwapAmount[token];
-        uint256 amountIn = (cap > 0 && balance > cap) ? cap : balance;
+
+        SwapPlan memory plan;
+        plan.amountIn = (cap > 0 && balance > cap) ? cap : balance;
 
         address creator = ICreatorAware(token).creator();
         require(creator != address(0), "CreatorRewardsDistributor: token has no creator");
@@ -202,22 +219,22 @@ contract CreatorRewardsDistributor is Ownable2Step, ReentrancyGuard {
         // minEthOut and a floor computed from the pool's own live reserves,
         // same "whichever is stricter" combination CustomTokenFactory uses
         // for its own creator buy-in.
-        uint256 protectiveFloor = _protectiveMinOut(token, amountIn);
-        uint256 effectiveMinOut = minEthOut > protectiveFloor ? minEthOut : protectiveFloor;
+        plan.protectiveFloor = _protectiveMinOut(token, plan.amountIn);
+        plan.effectiveMinOut = minEthOut > plan.protectiveFloor ? minEthOut : plan.protectiveFloor;
 
-        uint256 before = address(this).balance;
-        IERC20(token).approve(address(router), amountIn);
+        plan.before = address(this).balance;
+        IERC20(token).approve(address(router), plan.amountIn);
         router.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            amountIn,
-            effectiveMinOut,
+            plan.amountIn,
+            plan.effectiveMinOut,
             path,
             address(this),
             block.timestamp + 15 minutes
         );
-        ethOut = address(this).balance - before;
+        ethOut = address(this).balance - plan.before;
 
         claimableEth[token] += ethOut;
-        emit CreatorSwapTriggered(token, creator, amountIn, ethOut);
+        emit CreatorSwapTriggered(token, creator, plan.amountIn, ethOut);
     }
 
     /// @notice Pays out claimableEth[token] to that token's own creator().

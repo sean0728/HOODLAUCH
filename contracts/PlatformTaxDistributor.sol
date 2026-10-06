@@ -71,6 +71,17 @@ interface IPlatformTokenMinimal {
 /// be set to 0 to disable this piggybacking, falling back to
 /// processDisburseRound() only ever being called manually or by an
 /// external script the owner runs entirely outside this contract.
+///
+/// --- Security review (this file) ---
+/// Finding PTD-4 (Informational, fixed at the deploying owner's explicit
+/// request): this contract originally had no rescue path for a stray ETH
+/// or token balance — the same gap disclosed and, at the time, left
+/// unfixed on PlatformRewardsDistributor.sol's own Finding PR-4, for the
+/// same centralization-risk reasoning. rescueEth()/rescueToken() below
+/// close it using the identical scoping PR-4's own fix uses: rescueToken()
+/// can never touch platformToken's own pendingDisburseTokens or an active
+/// round's roundAmount, so holder funds already earmarked for a
+/// disbursement can never be diverted by this.
 contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     IRouterMinimal public immutable router;
 
@@ -158,6 +169,9 @@ contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     event DisburseRoundFinished(uint256 totalAmount);
     event AutoProcessBatchSizeUpdated(uint256 newBatchSize);
     event DisbursePayoutSkipped(address indexed holder, uint256 amount);
+    /// @notice Finding PTD-4 fix -- see rescueEth/rescueToken below.
+    event EthRescued(address indexed to, uint256 amount);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     constructor(address router_, address platformToken_, address feeWallet_) Ownable(msg.sender) {
         require(router_ != address(0), "PlatformTaxDistributor: invalid router");
@@ -435,5 +449,57 @@ contract PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
         } catch {
             return false;
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Rescue — Finding PTD-4, fixed at the deploying owner's explicit
+    // request. See the contract-level "Security review" note above.
+    // ---------------------------------------------------------------
+
+    /// @notice Sweeps this contract's ETH balance to `to`. ETH here is
+    /// never earmarked for a specific holder — it's simply tax revenue
+    /// waiting for disburseThreshold to trigger a split — so this is a
+    /// plain, unrestricted sweep, gated only by onlyOwner. Closes the gap
+    /// Finding PTD-4 described: a balance that never reaches
+    /// disburseThreshold (or that accumulates before feeWallet/
+    /// platformToken are configured) previously had no way to move at all.
+    function rescueEth(address to) external onlyOwner nonReentrant returns (uint256 amount) {
+        require(to != address(0), "PlatformTaxDistributor: invalid recipient");
+        amount = address(this).balance;
+        require(amount > 0, "PlatformTaxDistributor: nothing to rescue");
+        (bool sent, ) = payable(to).call{value: amount}("");
+        require(sent, "PlatformTaxDistributor: ETH rescue failed");
+        emit EthRescued(to, amount);
+    }
+
+    /// @notice Sweeps an ERC20 balance this contract is holding to `to`.
+    ///
+    /// For any token OTHER than the currently-configured platformToken,
+    /// this is unrestricted — it carries no per-holder claim, exactly the
+    /// gap Finding PTD-4 described. This also reaches a PREVIOUS
+    /// platformToken instance's leftover balance after setPlatformToken()
+    /// has since moved on to a new one, for the identical reason
+    /// PlatformRewardsDistributor's own rescueToken() does.
+    ///
+    /// For platformToken itself, this is deliberately NOT unrestricted:
+    /// pendingDisburseTokens (and, while a round is active, roundAmount)
+    /// are holder funds already earmarked for a specific disbursement,
+    /// computed against a live balance the disburse machinery expects to
+    /// still be here. The rescuable amount is capped at whatever balance
+    /// remains ABOVE both commitments — e.g. a stray direct transfer of
+    /// platformToken to this address outside the buyback flow.
+    function rescueToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        require(to != address(0), "PlatformTaxDistributor: invalid recipient");
+        uint256 balance = IPlatformTokenMinimal(token).balanceOf(address(this));
+        if (token == address(platformToken)) {
+            uint256 committed = pendingDisburseTokens + (roundActive ? roundAmount : 0);
+            uint256 rescuable = balance > committed ? balance - committed : 0;
+            require(amount <= rescuable, "PlatformTaxDistributor: exceeds rescuable balance");
+        } else {
+            require(amount <= balance, "PlatformTaxDistributor: exceeds balance");
+        }
+        bool sent = IPlatformTokenMinimal(token).transfer(to, amount);
+        require(sent, "PlatformTaxDistributor: token rescue failed");
+        emit TokenRescued(token, to, amount);
     }
 }
