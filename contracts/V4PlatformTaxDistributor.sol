@@ -56,10 +56,18 @@ import "./interfaces/V4IUniswapV2Router.sol";
 /// maxBuybackPerDistribution (caps the ETH exposed per swap). The on-chain
 /// floor is kept as a sanity bound, not as sandwich protection.
 /// V4TD-4 (Low, fixed): rescueToken used a raw transfer; now SafeERC20.
+/// V4TD-5 (design change): works before a platform token exists. While
+/// platformToken is address(0), a distribution sends the WHOLE balance to
+/// feeWallet in ETH (no buyback, no holder round), so the tax is usable from
+/// day one. Once the owner calls setRouter + setPlatformToken, it switches to
+/// the normal 50/50 split. The router is therefore a normal setting here, not
+/// an immutable, and may be address(0) at construction.
 contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    V4IUniswapV2Router public immutable router;
+    /// @notice V2 router used for the buyback. address(0) is allowed while there
+    /// is no platform token (owner can set it later with setRouter).
+    V4IUniswapV2Router public router;
 
     /// @notice The token bought back and disbursed to holders. Can only change
     /// when no round is active and nothing is pending.
@@ -102,6 +110,7 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
 
     event TaxReceived(address indexed from, uint256 amount, uint256 totalEthCollected);
     event PlatformTokenUpdated(address indexed newPlatformToken);
+    event RouterUpdated(address indexed newRouter);
     event FeeWalletUpdated(address indexed newFeeWallet);
     event DisburseThresholdUpdated(uint256 newThreshold);
     event BuybackSlippageBpsUpdated(uint256 newBps);
@@ -118,7 +127,10 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     constructor(address router_, address platformToken_, address feeWallet_) Ownable(msg.sender) {
-        require(router_ != address(0), "V4PlatformTaxDistributor: invalid router");
+        require(
+            platformToken_ == address(0) || router_ != address(0),
+            "V4PlatformTaxDistributor: a platform token needs a router"
+        );
         router = V4IUniswapV2Router(router_);
         platformToken = V4IPlatformToken(platformToken_);
         feeWallet = feeWallet_;
@@ -144,7 +156,20 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     // Owner settings
     // ---------------------------------------------------------------
 
+    function setRouter(address newRouter) external onlyOwner {
+        require(
+            newRouter != address(0) || address(platformToken) == address(0),
+            "V4PlatformTaxDistributor: router needed while a platform token is set"
+        );
+        router = V4IUniswapV2Router(newRouter);
+        emit RouterUpdated(newRouter);
+    }
+
     function setPlatformToken(address newPlatformToken) external onlyOwner {
+        require(
+            newPlatformToken == address(0) || address(router) != address(0),
+            "V4PlatformTaxDistributor: set a router first"
+        );
         require(!roundActive, "V4PlatformTaxDistributor: a disburse round is active");
         require(pendingDisburseTokens == 0, "V4PlatformTaxDistributor: tokens pending under the current platform token");
         platformToken = V4IPlatformToken(newPlatformToken);
@@ -205,7 +230,16 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
         uint256 balance = address(this).balance;
         require(balance >= disburseThreshold, "V4PlatformTaxDistributor: balance below disburseThreshold");
         require(feeWallet != address(0), "V4PlatformTaxDistributor: feeWallet not set");
-        require(address(platformToken) != address(0), "V4PlatformTaxDistributor: platformToken not set");
+
+        // No platform token yet: everything goes to the fee wallet in ETH.
+        if (address(platformToken) == address(0)) {
+            (bool sentAll,) = feeWallet.call{value: balance}("");
+            require(sentAll, "V4PlatformTaxDistributor: feeWallet transfer failed");
+            totalDistributedToFeeWallet += balance;
+            emit DistributionTriggered(balance, balance, 0, 0);
+            return;
+        }
+        require(address(router) != address(0), "V4PlatformTaxDistributor: router not set");
 
         uint256 toFeeWallet = balance / 2;
         uint256 toBuyback = balance - toFeeWallet;
