@@ -257,7 +257,18 @@
 
   /* console panel */
   .hero-right{display:flex; flex-direction:column; gap:16px;}
+  /* "New launches" and "Live feed": newest on TOP, older rows scroll underneath.
+     (The shared .console-body is column-reverse + overflow:hidden, which clips
+     whatever overflows past the TOP, i.e. the NEWEST rows, once wrapped rows
+     stack taller than the window.) */
   .launch-console .console-body{height:200px;}
+  .launch-console .console-body, #feedBody{flex-direction:column; justify-content:flex-start; overflow-y:auto; overflow-x:hidden; padding-right:2px;}
+  /* Always-visible scroller (custom WebKit styling also stops macOS from auto-hiding it). */
+  .launch-console .console-body, #feedBody{scrollbar-width:thin; scrollbar-color:var(--signal-500) var(--ink-700);}
+  .launch-console .console-body::-webkit-scrollbar, #feedBody::-webkit-scrollbar{width:10px;}
+  .launch-console .console-body::-webkit-scrollbar-track, #feedBody::-webkit-scrollbar-track{background:var(--ink-700); border-radius:6px; margin:4px 0;}
+  .launch-console .console-body::-webkit-scrollbar-thumb, #feedBody::-webkit-scrollbar-thumb{background:var(--signal-500); border-radius:6px; border:2px solid var(--ink-700);}
+  .launch-console .console-body::-webkit-scrollbar-thumb:hover, #feedBody::-webkit-scrollbar-thumb:hover{background:var(--signal-300);}
   .console{
     position:relative; background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg);
     box-shadow:var(--shadow-panel), 0 0 26px -18px rgba(61,199,222,.12);
@@ -2234,7 +2245,7 @@
   const V4_LIQUIDITY_ADDED_TOPIC0 = "0xea3191ffbe2f62bfd724ee8d971b15ff9b7994e3a9169dc4c60443be3e4a43c4"; // LiquidityAdded(address,address,uint256,uint256,uint256,uint256,uint256)
   const POOL_ID_OF_SELECTOR = "30040054"; // poolIdOf(address) -> bytes32
   const V4_EIP712_DOMAIN_NAME = "HoodLaunchV4TokenFactory";
-  const ADMIN_UI_BUILD = "2026-10-07-v4-keeper-toggle"; // bump when the admin screens change, so you can tell which index.html is loaded
+  const ADMIN_UI_BUILD = "2026-10-07-live-feed-fix"; // bump when the admin screens change, so you can tell which index.html is loaded
   const V4_CONFIG_KEYS = ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"];
   // V4 custom-tax factory + V4 bonding-curve factory (V4CustomTokenFactory /
   // V4CurveFactory). Selectors/topics computed with ethers from the compiled
@@ -15487,7 +15498,8 @@
   // pools only" scope the price charts already use. Whichever network is
   // active (appMode) decides which relayer/ledger this reads, same as
   // refreshRemoteLaunches/refreshLiveTokenPrices.
-  const LIVE_FEED_POLL_MS = 20000;
+  const LIVE_FEED_POLL_MS = 10000;
+  const MAX_FEED_ITEMS = 40; // newest on top; the window scrolls
   let seenActivityKeys = new Set();
 
   function activityKey(entry){ return `${entry.txHash}:${entry.logIndex}`; }
@@ -15523,10 +15535,13 @@
   // persistent window with its own cap, so a new launch stays visible on
   // its own timeline instead of competing with every buy/sell for the same
   // 8 slots.
-  const MAX_LAUNCH_FEED_ITEMS = 6;
+  const MAX_LAUNCH_FEED_ITEMS = 20; // newest on top; the window scrolls
 
   function launchAnnouncementHTML(t){
-    const time = new Date(t.createdAtMs || Date.now()).toLocaleTimeString("en-US", {hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
+    const when = new Date(t.createdAtMs || Date.now());
+    const clock = when.toLocaleTimeString("en-US", {hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
+    // Clock time alone is ambiguous across midnight, so a launch from an earlier day carries its date.
+    const time = (when.toDateString() === new Date().toDateString()) ? clock : `${when.getMonth()+1}/${when.getDate()} ${clock}`;
     const badge = (t.mode==="curve"||t.mode==="customCurve") ? "⚡ Quick Launch" : "New launch";
     const div = document.createElement("div");
     div.className = "feed-line feed-announce";
@@ -15555,10 +15570,10 @@
       return;
     }
     body.innerHTML = "";
-    // Append oldest-of-the-slice first — .console-body's column-reverse
-    // flips the visual order, so the single newest launch still ends up on
-    // top, same orientation the trade feed already uses.
-    relevant.slice().reverse().forEach(t => body.appendChild(launchAnnouncementHTML(t)));
+    // Newest first, top to bottom (this window is a normal top-down column,
+    // not the trade feed's column-reverse — see the .launch-console CSS).
+    relevant.forEach(t => body.appendChild(launchAnnouncementHTML(t)));
+    body.scrollTop = 0;
   }
 
   // Appends exactly one more row once the window above already has its
@@ -15570,8 +15585,9 @@
     const body = document.getElementById("launchFeedBody");
     if(!body) return;
     if(body.querySelector(".empty")) body.innerHTML = "";
-    body.appendChild(launchAnnouncementHTML(t));
-    while(body.children.length > MAX_LAUNCH_FEED_ITEMS) body.removeChild(body.firstChild);
+    body.insertBefore(launchAnnouncementHTML(t), body.firstChild);
+    while(body.children.length > MAX_LAUNCH_FEED_ITEMS) body.removeChild(body.lastChild);
+    body.scrollTop = 0;
   }
 
   // How far back a trade still counts toward "24h volume" — see the
@@ -15649,11 +15665,15 @@
     const fresh = recent.filter(entry => !seenActivityKeys.has(activityKey(entry)));
     if(!fresh.length) return;
     if(body.querySelector(".empty")) body.innerHTML = "";
+    // `fresh` is oldest-first; put each one on TOP so the newest ends up first.
+    // Keep the reader's place if they've scrolled down to older rows.
+    const keepScroll = body.scrollTop > 4 ? body.scrollHeight : 0;
     for(const entry of fresh){
       seenActivityKeys.add(activityKey(entry));
-      body.appendChild(activityLineHTML(entry));
+      body.insertBefore(activityLineHTML(entry), body.firstChild);
     }
-    while(body.children.length>8) body.removeChild(body.firstChild);
+    while(body.children.length>MAX_FEED_ITEMS) body.removeChild(body.lastChild);
+    if(keepScroll) body.scrollTop += (body.scrollHeight - keepScroll);
   }
 
   function seedFeed(){
