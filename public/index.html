@@ -1201,6 +1201,8 @@
   function saveCustomTokens(){
     try{
       const custom = tokens.filter(t=>t.createdCustom);
+      // Every saved token carries an explicit protocol label (V2 unless it says V4).
+      custom.forEach(t=>{ if(!t.protocol) t.protocol = tokenProtocol(t); });
       localStorage.setItem("hoodlaunch_custom_tokens", JSON.stringify(custom));
     }catch(e){ /* ignore persistence errors */ }
   }
@@ -1648,6 +1650,11 @@
   // Which protocol a token was launched on. Anything without an explicit
   // protocol (every token launched before V4 existed) is V2.
   function tokenProtocol(t){ return (t && String(t.protocol||"").toLowerCase()==="v4") ? "v4" : "v2"; }
+  // The small V2 / V4 label shown next to a token's name everywhere tokens are listed.
+  function protoBadgeHTML(t, extraStyle){
+    const p = tokenProtocol(t);
+    return `<span class="proto-badge ${p}" title="${p==="v4" ? "Launched on Uniswap V4" : "Launched on Uniswap V2"}"${extraStyle ? ` style="${extraStyle}"` : ""}>${p.toUpperCase()}</span>`;
+  }
   // Everything the shared TokenFactory launch code needs to know about which
   // factory family it's talking to.
   function launchProtocolOpts(){
@@ -4283,7 +4290,7 @@
       const result = relayerUrl
         ? await performRelayedLaunch(factoryAddress, relayerUrl, setLaunchStep)
         : await performOnChainLaunch(factoryAddress, setLaunchStep);
-      const v4Fields = isV4Launch ? { protocol:"v4", poolId: result.poolId || null } : {};
+      const v4Fields = isV4Launch ? { protocol:"v4", poolId: result.poolId || null } : { protocol:"v2" };
       const newToken = isLiquidity ? {
         id: result.tokenAddress, name: draft.name, ticker: draft.ticker,
         desc: draft.desc || "A freshly launched community token.",
@@ -6070,7 +6077,8 @@
       onChain: true,
       tokenAddress: entry.tokenAddress,
       pairAddress: (isLiquidity && !isV4Entry) ? entry.pairAddress : null,
-      ...(isV4Entry ? { protocol:"v4", poolId: entry.poolId || null } : {}),
+      protocol: isV4Entry ? "v4" : "v2",
+      ...(isV4Entry ? { poolId: entry.poolId || null } : {}),
       // The ledger has no per-token factoryAddress column at all (every
       // other factory call this page makes for a remote token goes through
       // a DEX router instead, which needs no factory address) — but Quick
@@ -6166,21 +6174,57 @@
     }
   }
 
+  // Drops tokens that no longer exist on the relayer, so a deleted token
+  // disappears without a hard refresh. Two cases, both only for `mode`'s network:
+  //   1) the relayer's `deleted` list (addresses an admin removed): removed
+  //      everywhere, including a token this browser launched itself (those
+  //      live in localStorage and would otherwise stay forever);
+  //   2) a token that came from GET /launches (remoteSource) and is no longer
+  //      in it.
+  // A token this browser launched that the relayer simply hasn't seen yet is
+  // never removed by case 2. Returns true if anything was removed.
+  function removeTokensByIndex(indexes){
+    for(let i=indexes.length-1;i>=0;i--) tokens.splice(indexes[i],1);
+  }
+  function pruneSyncedTokens(mode, launches, deletedList){
+    const present = new Set(launches.filter(e=>e && e.tokenAddress).map(e=>String(e.tokenAddress).toLowerCase()));
+    const deleted = new Set((Array.isArray(deletedList) ? deletedList : []).map(a=>String(a).toLowerCase()));
+    const drop = [];
+    let localRemoved = false;
+    tokens.forEach((t, i)=>{
+      if(!t.tokenAddress || (t.networkMode||"demo")!==mode) return;
+      const addr = String(t.tokenAddress).toLowerCase();
+      if(deleted.has(addr)){ drop.push(i); if(t.createdCustom) localRemoved = true; }
+      else if(t.remoteSource && !present.has(addr)) drop.push(i);
+    });
+    if(!drop.length) return false;
+    const goneIds = new Set(drop.map(i=>tokens[i].id));
+    removeTokensByIndex(drop);
+    if(localRemoved) saveCustomTokens();
+    if(views.detail.classList.contains("active") && goneIds.has(currentDetailTokenId)){
+      toast("That token was removed.");
+      showView("explore");
+    }
+    return true;
+  }
+
   async function refreshRemoteLaunches(mode){
     mode = mode || appMode;
     const url = relayerApiUrl(mode);
     if(!url) return;
     let payload;
     try{
-      const res = await fetch(`${url}/launches`);
+      const res = await fetch(`${url}/launches`, { cache: "no-store" });
       if(!res.ok) return;
       payload = await res.json();
     }catch(e){ return; }
     const launches = Array.isArray(payload && payload.launches) ? payload.launches : [];
     const alreadySeeded = remoteLaunchesSeededModes.has(mode);
+    const pruned = pruneSyncedTokens(mode, launches, payload && payload.deleted);
     if(!launches.length){
       remoteLaunchesSeededModes.add(mode);
       if(!alreadySeeded && mode===appMode) renderLaunchFeedFromTokens();
+      if(pruned){ renderGrid(); renderStats(); if(views.portfolio.classList.contains("active")) renderPortfolio(); }
       return;
     }
 
@@ -6223,6 +6267,7 @@
       // The relayer knows which factory produced this launch; if this
       // browser's copy lacks (or has the wrong) protocol label, take the
       // relayer's.
+      if(!existing.protocol && entry.protocol==="v2"){ existing.protocol = "v2"; updated = true; }
       if(entry.protocol==="v4" && tokenProtocol(existing)!=="v4"){
         existing.protocol = "v4";
         existing.poolId = entry.poolId || existing.poolId || null;
@@ -6294,7 +6339,7 @@
     }
     remoteLaunchesSeededModes.add(mode);
     if(!alreadySeeded && mode===appMode) renderLaunchFeedFromTokens(); // first sync for this network — seed the "New launches" window's baseline now that it's actually known
-    if(added || updated){
+    if(added || updated || pruned){
       renderGrid();
       renderStats();
       if(views.portfolio.classList.contains("active")) renderPortfolio();
@@ -6655,7 +6700,7 @@
     return `
       <div class="tc-head">
         ${tcMarkHTML(t)}
-        <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)}</div></div>
+        <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)} ${protoBadgeHTML(t, "margin-left:4px;")}</div></div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px; margin-left:auto;">
           ${(!noSimulatedMarket && t.mcap>0) ? `<div class="tc-mcap"><span class="l">Mcap</span>${fmtUSD(t.mcap)}</div>` : ""}
           ${(t.mode==="curve"||t.mode==="customCurve") ? `<span class="tc-quicklaunch-badge">⚡ Quick Launch</span>` : ""}
@@ -9129,7 +9174,7 @@
       name: draft.name || "Untitled token", ticker: draft.ticker || "TICK",
       desc: draft.desc || "Your one-line description will appear here.",
       price: hist[hist.length-1], change24h: ((hist[hist.length-1]-hist[0])/hist[0])*100,
-      hist, catColor:"var(--signal-500)", logo: draft.logo
+      hist, catColor:"var(--signal-500)", logo: draft.logo, protocol: draftProtocol()
     };
     const previewToken = (draft.mode==="just" || draft.mode==="customDeploy")
       ? { ...base, mode:"just", status:"creator-held" }
@@ -9922,7 +9967,7 @@
           <div class="my-token-row">
             ${tcMarkHTML(t, "width:36px; height:36px; font-size:.85rem;")}
             <div>
-              <div class="mtr-name">${escapeHtml(t.name)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(t.ticker)}</span> ${statusBadgeHTML(t.mode, t.status, "display:inline-block; margin-left:6px; vertical-align:middle;")}</div>
+              <div class="mtr-name">${escapeHtml(t.name)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(t.ticker)}</span> ${protoBadgeHTML(t, "margin-left:4px;")} ${statusBadgeHTML(t.mode, t.status, "display:inline-block; margin-left:6px; vertical-align:middle;")}</div>
               <div class="mtr-meta">${t.onChain && t.tokenAddress ? fmtAddrSafe(t.tokenAddress) : "Simulated — not deployed on-chain"}</div>
               ${lpMeta}
               ${creatorRewardsRow}
@@ -12414,6 +12459,16 @@
         e => !(e.tokenAddress && e.tokenAddress.toLowerCase()===tokenAddress.toLowerCase())
       );
       renderLaunchActivityList();
+      // Also drop it from the main grid right now (this browser's copy), instead of
+      // waiting for the next sync.
+      const gone = [];
+      tokens.forEach((t,i)=>{ if(t.tokenAddress && t.tokenAddress.toLowerCase()===tokenAddress.toLowerCase() && (t.networkMode||"demo")===appMode) gone.push(i); });
+      if(gone.length){
+        const hadLocal = gone.some(i=>tokens[i].createdCustom);
+        removeTokensByIndex(gone);
+        if(hadLocal) saveCustomTokens();
+        renderGrid(); renderStats();
+      }
     } else {
       btnEl.disabled = false;
       btnEl.dataset.confirming = "";
