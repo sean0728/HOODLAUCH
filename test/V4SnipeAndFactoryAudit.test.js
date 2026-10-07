@@ -100,10 +100,11 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
       await expect(factory.setSnipeProtection(3000, 0)).to.be.revertedWith("V4TaxHook: snipe start and duration must both be set");
       await expect(factory.setSnipeProtection(0, 120)).to.be.revertedWith("V4TaxHook: snipe start and duration must both be set");
       await expect(factory.setSnipeProtection(7000, 3600)).to.emit(factory, "SnipeProtectionUpdated").withArgs(7000, 3600);
-      expect(await hook.snipeDefaultStartBps()).to.equal(7000n);
-      expect(await hook.snipeDefaultDuration()).to.equal(3600n);
+      const d = await hook.snipeDefaults(await A(factory));
+      expect(d.startBps).to.equal(7000n);
+      expect(d.duration).to.equal(3600n);
       await factory.setSnipeProtection(0, 0);
-      expect(await hook.snipeDefaultStartBps()).to.equal(0n);
+      expect((await hook.snipeDefaults(await A(factory))).startBps).to.equal(0n);
     });
 
     it("SP-3. the surcharge starts at the set value and falls in a straight line to exactly zero", async () => {
@@ -196,7 +197,7 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
 
     it("SP-8. the worst case still adds up: 70% snipe + 20% platform tax + 5% creator tax on one buy", async () => {
       await factory.setTaxDefaults(feeWallet.address, 2000, await A(feed), 50_000n, 3600, 0, 0);
-      await factory.setSnipeProtection(7000, 3600);
+      await customFactory.setSnipeProtection(7000, 3600);
       const { token, key } = await customLaunch({ buy: fs(0, 0, 0, 500), sell: fs(0, 0, 0, 0) });
       const b0 = await token.balanceOf(sniper.address);
       await swap(sniper, key, true, -ETH("1"), ETH("1")); // exact-in
@@ -250,7 +251,7 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
     });
 
     it("SP-12. custom-tax pools are covered, with the creator's own tax still taken on the remainder", async () => {
-      await factory.setSnipeProtection(5000, 600);
+      await customFactory.setSnipeProtection(5000, 600); // each launcher has its own setting (see V4CustomSnipeAudit)
       const { token, key, rc } = await customLaunch({ buy: fs(0, 0, 0, 200), sell: fs(0, 0, 0, 0), creatorBuy: ETH("0.4") });
       expect(events(rc, hook.interface, "SnipeFeeCollected").length).to.equal(0); // launcher buy-in is exempt
       const b0 = await token.balanceOf(sniper.address);
