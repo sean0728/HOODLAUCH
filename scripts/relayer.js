@@ -1251,6 +1251,27 @@ const V4_COMPOUND_MIN_SUPPLY_BPS = (() => {
   const n = Number(process.env.V4_COMPOUND_MIN_SUPPLY_BPS);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 1;
 })();
+// V4PlatformTaxDistributor (the 0.30% trade-tax collector) is standalone, so it is
+// not read from the factory: set V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS to its address
+// to have the relayer convert its tax and run its holder payouts. The audited
+// contract only lets its owner and approved keepers do either, so the relayer
+// wallet must be authorised with setKeeper(relayerWallet, true) (RELAYER_ADDRESS in
+// V4deploy.js does that when the deployer owns it).
+const V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS = (process.env.V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS || "").trim() || null;
+const V4_PLATFORM_TAX_DISTRIBUTOR_ABI = [
+  "function owner() view returns (address)",
+  "function keepers(address) view returns (bool)",
+  "function platformToken() view returns (address)",
+  "function router() view returns (address)",
+  "function feeWallet() view returns (address)",
+  "function disburseThreshold() view returns (uint256)",
+  "function maxBuybackPerDistribution() view returns (uint256)",
+  "function roundActive() view returns (bool)",
+  "function pendingDisburseTokens() view returns (uint256)",
+  "function triggerDistribution(uint256 minPlatformTokenOut)",
+  "function runDisburseRound(uint256 batchSize)",
+  "function processDisburseRound(uint256 batchSize)",
+];
 const V4_COMPOUNDER_ABI = [
   "function pending(address token) view returns (uint256)",
   "function compound(address token) returns (uint128 liquidity)",
@@ -6186,6 +6207,83 @@ async function main() {
     await v4KeeperAirdropRound("v4-platform-rewards", d.contract, relayerSettings.platformAirdropBatchSize, relayerSettings.platformAirdropMaxBatchesPerTick);
   }
 
+  async function sweepV4PlatformTaxOnce() {
+    if (!V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS) return;
+    const c = await hre.ethers.getContractAt(V4_PLATFORM_TAX_DISTRIBUTOR_ABI, V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS, relayerWallet);
+    // Owner and approved keepers only. If this relayer wallet is neither, say so once and skip.
+    try {
+      const isKeeper = await c.keepers(relayerWallet.address);
+      const ownerAddr = await c.owner();
+      if (!(isKeeper || String(ownerAddr).toLowerCase() === relayerWallet.address.toLowerCase())) {
+        v4KeeperWarnOnce(
+          `keeper:${V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS}`,
+          `[v4-platform-tax] relayer wallet ${relayerWallet.address} is not an approved keeper on the tax distributor ${V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS}, ` +
+            "so it can neither convert the tax nor pay holders. Owner: call setKeeper(relayerWallet, true) on it."
+        );
+        return;
+      }
+    } catch (err) {
+      // an older deployment without keepers(): everything is open, carry on
+    }
+
+    // 1. Convert once the balance reaches the threshold. The floor is quoted here, off-chain,
+    // so it is not the price an attacker has just pushed the pool to inside the same transaction.
+    try {
+      const balance = await hre.ethers.provider.getBalance(V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS);
+      const threshold = await c.disburseThreshold();
+      const feeWallet = await c.feeWallet();
+      if (balance > 0n && balance >= threshold && feeWallet !== hre.ethers.ZeroAddress) {
+        const platformTokenAddress = await c.platformToken();
+        let minOut = 0n;
+        let ok = true;
+        if (platformTokenAddress !== hre.ethers.ZeroAddress) {
+          let toBuyback = balance - balance / 2n; // same split as the contract
+          const cap = await c.maxBuybackPerDistribution();
+          if (cap > 0n && toBuyback > cap) toBuyback = cap;
+          const quoted = await quoteV4PlatformBuy(await c.router(), platformTokenAddress, toBuyback);
+          if (quoted === 0n) {
+            ok = false;
+            v4KeeperWarnOnce(
+              `taxquote:${V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS}`,
+              "[v4-platform-tax] cannot quote the platform-token buyback (no V2 pool or router?), so the tax waits in the contract."
+            );
+          } else {
+            minOut = (quoted * (10000n - platformBuybackSlippageBpsBig())) / 10000n;
+          }
+        }
+        if (ok) {
+          const tx = await sendRelayerTx(() => c.triggerDistribution(minOut));
+          const receipt = await tx.wait();
+          console.log(`[v4-platform-tax] distribution of ${balance} wei (floor ${minOut}) in tx ${receipt.hash}.`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[v4-platform-tax] distribution skip: ${err.message}`);
+    }
+
+    // 2. Pay holders. runDisburseRound starts a round and pays the first batch in one transaction.
+    try {
+      if ((await c.platformToken()) === hre.ethers.ZeroAddress) return;
+      const batch = relayerSettings.platformAirdropBatchSize;
+      let active = await c.roundActive();
+      if (!active) {
+        if ((await c.pendingDisburseTokens()) === 0n) return;
+        const tx = await sendRelayerTx(() => c.runDisburseRound(batch));
+        const receipt = await tx.wait();
+        console.log(`[v4-platform-tax] holder round started and first batch paid in tx ${receipt.hash}.`);
+        active = await c.roundActive();
+      }
+      for (let i = 0; i < relayerSettings.platformAirdropMaxBatchesPerTick && active; i++) {
+        const tx = await sendRelayerTx(() => c.processDisburseRound(batch));
+        const receipt = await tx.wait();
+        active = await c.roundActive();
+        console.log(`[v4-platform-tax] holder batch paid in tx ${receipt.hash}` + (active ? " (round continues next tick)." : " (round completed)."));
+      }
+    } catch (err) {
+      console.warn(`[v4-platform-tax] holder round skip: ${err.message}`);
+    }
+  }
+
   async function v4FeeWalletPollLoop() {
     if (v4KeeperOn()) await sweepV4FeeWalletOnce().catch((err) => console.error(`[v4-fee-wallet] sweep error: ${err.message}`));
     setTimeout(v4FeeWalletPollLoop, relayerSettings.feeWalletPollIntervalMs);
@@ -6197,6 +6295,11 @@ async function main() {
   async function v4PlatformRewardsPollLoop() {
     if (v4KeeperOn()) await sweepV4PlatformRewardsOnce().catch((err) => console.error(`[v4-platform-rewards] sweep error: ${err.message}`));
     setTimeout(v4PlatformRewardsPollLoop, relayerSettings.platformRewardsPollIntervalMs);
+  }
+
+  async function v4PlatformTaxPollLoop() {
+    if (v4KeeperOn()) await sweepV4PlatformTaxOnce().catch((err) => console.error(`[v4-platform-tax] sweep error: ${err.message}`));
+    setTimeout(v4PlatformTaxPollLoop, relayerSettings.platformRewardsPollIntervalMs);
   }
 
   // ---- V4 compounder keeper (optional; see V4_COMPOUNDER_ADDRESS above) ----
@@ -6271,6 +6374,16 @@ async function main() {
   if (platformRewardsDistributor) {
     console.log(`Sweeping platform rewards (buyback/burn/airdrop) every ${relayerSettings.platformRewardsPollIntervalMs}ms.`);
     platformRewardsPollLoop();
+  }
+
+  if (V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS) {
+    console.log(
+      `V4 tax distributor keeper loop started (${V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS}): every ${relayerSettings.platformRewardsPollIntervalMs}ms, ` +
+        "converting the 0.30% trade tax with an off-chain floor and paying holders. The relayer wallet must be an approved keeper on it."
+    );
+    v4PlatformTaxPollLoop();
+  } else {
+    console.log("V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS is not set: a V4PlatformTaxDistributor (if deployed) is not converted by the relayer; its owner can call triggerDistribution manually.");
   }
 
   {

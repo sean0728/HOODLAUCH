@@ -383,6 +383,19 @@ async function main() {
     }
   }
 
+  if (withTaxDistributor) {
+    // The tax collector is standalone and owned by the deployer. Only its owner and approved
+    // keepers may convert the tax or pay holders (audit TA-1/TA-2), and a fresh deployment is
+    // manual (autoDistribute false, no heartbeat), so the relayer wallet is its keeper.
+    const taxKeeper = envAddr("RELAYER_ADDRESS", null);
+    if (taxKeeper) {
+      if (!(await taxDist.keepers(taxKeeper)))
+        await send("platformTaxDistributor.setKeeper(relayer, true)", () => taxDist.setKeeper(taxKeeper, true));
+    } else {
+      console.log("  NOTE: set RELAYER_ADDRESS to authorise the relayer on the platformTaxDistributor, or call setKeeper(relayerWallet, true) on it as the owner. Also set V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS for the relayer.");
+    }
+  }
+
   // ---- ownership handoff ----------------------------------------------
   if (ownerAddress && ownerAddress.toLowerCase() !== deployer.address.toLowerCase()) {
     console.log("\nOwnership (proposed; the new owner must accept each one):");
