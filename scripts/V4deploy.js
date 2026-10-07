@@ -263,7 +263,15 @@ async function main() {
     const initCode = ethers.concat([HookF.bytecode, args]);
     const mined = mineHookSalt(await A(create2), initCode);
     console.log(`  . mined hook salt after ${mined.iterations} tries -> ${mined.address}`);
-    await (await create2.deploy(mined.salt, initCode)).wait();
+    // V4Create2Deployer is open to everyone and the address commits to the exact init code
+    // (constructor arguments, so the owner, included). If that address already has code, either a
+    // previous run got that far before saving state or someone deployed the identical hook first;
+    // either way it is byte-for-byte the hook we want, so reuse it instead of failing on the retry.
+    if (await hasCode(mined.address)) {
+      console.log(`  = hook already deployed at the mined address (same init code), reusing it`);
+    } else {
+      await (await create2.deploy(mined.salt, initCode)).wait();
+    }
     if (!(await hasCode(mined.address))) throw new Error("Hook was not created at the mined address.");
     state.hook = mined.address;
     save();
