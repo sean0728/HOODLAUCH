@@ -167,6 +167,7 @@ const profileStore = require("../lib/profileStore");
 const social = require("../lib/social");
 const commentStore = require("../lib/commentStore");
 const followStore = require("../lib/followStore");
+const calloutStore = require("../lib/calloutStore");
 const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
 const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/tokenMetadata");
 const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
@@ -2996,6 +2997,141 @@ async function main() {
     }
     const changed = await followStore.setFollow(follower, followee, follow);
     sendJson(res, 200, { follow, changed });
+  }));
+
+  // ---- callouts ----
+  // A member "calls" a token. The server records the token's price and market
+  // cap at that moment from this relayer's own price history (never from the
+  // caller), then GET /callouts reports how it is doing since: the current
+  // multiple and the peak multiple. Per network, like comments.
+  //   GET  /callouts?token=0x..          callouts on a token
+  //   GET  /callouts?caller=0x..         one member's callouts
+  //   GET  /callouts?callers=0x..,0x..   several members' (the "following" list)
+  //        optional: limit (<=100), before (createdAt cursor)
+  //   POST /callouts                     { token, caller, reason?, timestamp, signature }
+  //   POST /callouts/delete              { id, requester, timestamp, signature } — caller or admin
+  // Rules: a profile name is required; one live callout per member per token;
+  // after deleting one the same token can't be called again by that member for
+  // 24h; at most 10 callouts per member per 24h; the token must have a recent
+  // live price sample (so the snapshot is real).
+  const CALLOUT_LOCK_AFTER_DELETE_MS = 24 * 3600_000;
+  const CALLOUTS_PER_DAY = 10;
+  const CALLOUT_MAX_PRICE_AGE_MS = 15 * 60_000;
+  async function enrichCallouts(rows) {
+    const net = hre.network.name;
+    const tracked = (await readTrackedTokens(net)) || {};
+    const histories = new Map();
+    const histFor = async (token) => {
+      if (!histories.has(token)) histories.set(token, (await readPriceHistory(net, token).catch(() => [])) || []);
+      return histories.get(token);
+    };
+    const out = [];
+    for (const r of rows) {
+      const hist = await histFor(r.token);
+      const last = hist.length ? hist[hist.length - 1] : null;
+      let peak = null;
+      for (const pt of hist) {
+        if (pt && pt.t >= r.createdAt && pt.p > 0 && (peak === null || pt.p > peak)) peak = pt.p;
+      }
+      const cur = last && last.p > 0 ? last.p : null;
+      const multiple = cur && r.priceAtCall > 0 ? cur / r.priceAtCall : null;
+      const peakMultiple = peak && r.priceAtCall > 0 ? Math.max(peak / r.priceAtCall, multiple || 0) : multiple;
+      const tk = tracked[r.token] || {};
+      out.push({
+        id: r.id,
+        token: r.token,
+        symbol: tk.symbol || null,
+        name: tk.name || null,
+        caller: r.caller,
+        reason: r.reason,
+        priceAtCall: r.priceAtCall,
+        mcapAtCall: r.mcapAtCall,
+        createdAt: r.createdAt,
+        currentPrice: cur,
+        currentMcap: last && last.mcapUsd > 0 ? last.mcapUsd : null,
+        currentAt: last ? last.t : null,
+        multiple,
+        peakMultiple,
+      });
+    }
+    return out;
+  }
+
+  app.get("/callouts", asyncRoute(async (req, res) => {
+    const { token, caller, callers, limit, before } = req.query || {};
+    const filters = { limit, before };
+    if (token) {
+      if (!hre.ethers.isAddress(String(token))) return sendJson(res, 400, { error: "token must be a valid address" });
+      filters.token = String(token);
+    }
+    if (caller) {
+      if (!hre.ethers.isAddress(String(caller))) return sendJson(res, 400, { error: "caller must be a valid address" });
+      filters.caller = String(caller);
+    }
+    if (callers) {
+      const list = String(callers).split(",").map((a) => a.trim()).filter(Boolean).slice(0, 100);
+      if (!list.length || !list.every((a) => hre.ethers.isAddress(a))) return sendJson(res, 400, { error: "callers must be a comma-separated list of addresses" });
+      filters.callers = list;
+    }
+    if (!filters.token && !filters.caller && !filters.callers) return sendJson(res, 400, { error: "Pass token, caller or callers." });
+    const rows = await calloutStore.listCallouts(hre.network.name, filters);
+    sendJson(res, 200, { callouts: await enrichCallouts(rows) });
+  }));
+
+  app.post("/callouts", asyncRoute(async (req, res) => {
+    const { token, caller, reason: rawReason, timestamp, signature } = req.body || {};
+    if (!token || !hre.ethers.isAddress(token)) return sendJson(res, 400, { error: "token must be a valid address" });
+    if (!caller || !hre.ethers.isAddress(caller)) return sendJson(res, 400, { error: "caller must be a valid address" });
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    const reason = typeof rawReason === "string" ? rawReason : "";
+    const reasonError = social.validateReason(reason);
+    if (reasonError) return sendJson(res, 400, { error: reasonError });
+    const message = social.calloutMessage(token, caller, reason, timestamp);
+    if (!verifySignatureFrom(message, signature, caller)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    const net = hre.network.name;
+    const tokenKey = String(token).toLowerCase();
+    let known = !!((await readTrackedTokens(net)) || {})[tokenKey];
+    if (!known) known = (await readLedger(net)).some((e) => e.tokenAddress && e.tokenAddress.toLowerCase() === tokenKey);
+    if (!known) return sendJson(res, 404, { error: "Hood Launch has no record of this token." });
+    const prof = await profileStore.getProfile(caller);
+    if (!prof || !prof.name) return sendJson(res, 403, { error: "Set a display name in your Profile before making a callout." });
+    const existing = await calloutStore.getForPair(net, caller, token);
+    if (existing && !existing.deletedAt) return sendJson(res, 409, { error: "You've already called this token." });
+    if (existing && existing.deletedAt && Date.now() - existing.deletedAt < CALLOUT_LOCK_AFTER_DELETE_MS) {
+      return sendJson(res, 429, { error: "You deleted a callout on this token recently — you can call it again 24 hours after deleting." });
+    }
+    if ((await calloutStore.countSince(net, caller, Date.now() - 24 * 3600_000)) >= CALLOUTS_PER_DAY) {
+      return sendJson(res, 429, { error: `You can make up to ${CALLOUTS_PER_DAY} callouts per day.` });
+    }
+    // The snapshot: the most recent price sample this relayer recorded for the token.
+    const hist = (await readPriceHistory(net, token).catch(() => [])) || [];
+    const last = hist.length ? hist[hist.length - 1] : null;
+    if (!last || !(last.p > 0) || Date.now() - last.t > CALLOUT_MAX_PRICE_AGE_MS) {
+      return sendJson(res, 409, { error: "This token has no live price yet, so it can't be called out." });
+    }
+    const rec = await calloutStore.addCallout(net, {
+      token, caller, reason, priceAtCall: last.p, mcapAtCall: last.mcapUsd > 0 ? last.mcapUsd : null,
+    });
+    console.log(`[callout] ${caller} called ${token} at $${last.p}.`);
+    sendJson(res, 200, { callout: (await enrichCallouts([rec]))[0] });
+  }));
+
+  app.post("/callouts/delete", asyncRoute(async (req, res) => {
+    const { id, requester, timestamp, signature } = req.body || {};
+    if (typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) return sendJson(res, 400, { error: "invalid callout id" });
+    if (!requester || !hre.ethers.isAddress(requester)) return sendJson(res, 400, { error: "requester must be a valid address" });
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    const message = social.deleteCalloutMessage(id, requester, timestamp);
+    if (!verifySignatureFrom(message, signature, requester)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    const net = hre.network.name;
+    const c = await calloutStore.getCallout(net, id);
+    if (!c || c.deletedAt) return sendJson(res, 200, { deleted: false });
+    const isCaller = c.caller === String(requester).toLowerCase();
+    const isAdmin = String(requester).toLowerCase() === ADMIN_WALLET.toLowerCase();
+    if (!isCaller && !isAdmin) return sendJson(res, 403, { error: "Only the caller or the admin can delete a callout." });
+    const deleted = await calloutStore.softDeleteCallout(net, id);
+    console.log(`[callout] ${id} deleted by ${requester}${isAdmin && !isCaller ? " (admin)" : ""}.`);
+    sendJson(res, 200, { deleted });
   }));
 
   // ---- relayer runtime settings (admin-gated) ----
