@@ -1179,6 +1179,8 @@ const V4_PLATFORM_REWARDS_BASE_ABI = [
   "function roundUsed() view returns (uint256)",
   "function startAirdropRound()",
   "function processAirdropBatch(uint256 maxHolders)",
+  // Audited base: rounds are owner/keeper-only; runAirdropRound starts and pays in one tx.
+  "function runAirdropRound(uint256 maxHolders)",
 ];
 const V4_FEE_WALLET_DISTRIBUTOR_ABI = [
   ...V4_SELLER_ABI,
@@ -5934,10 +5936,24 @@ async function main() {
     if (!roundActive) {
       const pending = await distributor.pendingAirdropTokens();
       if (pending === 0n) return;
-      const tx = await sendRelayerTx(() => distributor.startAirdropRound());
-      const receipt = await tx.wait();
-      console.log(`[${label}] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
-      roundActive = true;
+      // Start and pay the first batch in ONE transaction where the contract supports
+      // it, so no balance can change between the snapshot and the payment.
+      let startedAtomically = false;
+      try {
+        const tx = await sendRelayerTx(() => distributor.runAirdropRound(batchSize));
+        const receipt = await tx.wait();
+        console.log(`[${label}] airdrop round started and first batch paid (${pending} platformToken pending) in tx ${receipt.hash}.`);
+        startedAtomically = true;
+      } catch (err) {
+        if (!(err && (err.code === "CALL_EXCEPTION" || err.code === "BAD_DATA" || /not a function|no matching fragment/i.test(String(err.message))))) throw err;
+        // an older distributor without runAirdropRound: fall back to start, then process
+      }
+      if (!startedAtomically) {
+        const tx = await sendRelayerTx(() => distributor.startAirdropRound());
+        const receipt = await tx.wait();
+        console.log(`[${label}] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
+      }
+      roundActive = await distributor.roundActive();
     }
     for (let i = 0; i < maxBatches && roundActive; i++) {
       const tx = await sendRelayerTx(() => distributor.processAirdropBatch(batchSize));
@@ -5966,7 +5982,7 @@ async function main() {
         v4KeeperWarnOnce(
           `keeper:${d.address}`,
           `[v4-fee-wallet] relayer wallet ${relayerWallet.address} is not an approved keeper on the fee-wallet distributor ${d.address}, ` +
-            "so it cannot convert the platform's tax. Owner: call setKeeper(relayerWallet, true) on the distributor. Claims still run."
+            "so it can neither convert the platform's tax nor run airdrop rounds. Owner: call setKeeper(relayerWallet, true) on the distributor. Claims still run."
         );
       }
     } catch (err) {
@@ -6027,7 +6043,8 @@ async function main() {
         console.warn(`[v4-fee-wallet] claim skip ${tokenAddress}: ${err.message}`);
       }
     }
-    await v4KeeperAirdropRound("v4-fee-wallet", d.contract, relayerSettings.feeWalletAirdropBatchSize, relayerSettings.feeWalletAirdropMaxBatchesPerTick);
+    // Airdrop rounds are owner/keeper-only on the audited distributor, like conversions.
+    if (canConvert) await v4KeeperAirdropRound("v4-fee-wallet", d.contract, relayerSettings.feeWalletAirdropBatchSize, relayerSettings.feeWalletAirdropMaxBatchesPerTick);
   }
 
   async function sweepV4CreatorRewardsOnce() {
@@ -6093,8 +6110,8 @@ async function main() {
     if (platformTokenAddress === hre.ethers.ZeroAddress || routerAddress === hre.ethers.ZeroAddress) return; // buyback not available yet
     const slipBps = platformBuybackSlippageBpsBig();
     // The audited distributor only lets its owner and approved keepers start a
-    // buyback (airdrop rounds stay open). If this relayer wallet is neither, say
-    // so once and run only the airdrop rounds.
+    // buyback or an airdrop round. If this relayer wallet is neither, say so once
+    // and skip the sweep.
     try {
       const isKeeper = await d.contract.keepers(relayerWallet.address);
       const ownerAddr = await d.contract.owner();
@@ -6102,9 +6119,8 @@ async function main() {
         v4KeeperWarnOnce(
           `keeper:${d.address}`,
           `[v4-platform-rewards] relayer wallet ${relayerWallet.address} is not an approved keeper on the platform-rewards distributor ${d.address}, ` +
-            "so it cannot start buybacks. Owner: call setKeeper(relayerWallet, true) on the distributor. Airdrop rounds still run."
+            "so it can neither start buybacks nor run airdrop rounds. Owner: call setKeeper(relayerWallet, true) on the distributor."
         );
-        await v4KeeperAirdropRound("v4-platform-rewards", d.contract, relayerSettings.platformAirdropBatchSize, relayerSettings.platformAirdropMaxBatchesPerTick);
         return;
       }
     } catch (err) {
