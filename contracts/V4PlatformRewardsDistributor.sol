@@ -21,6 +21,12 @@ import "./V4PlatformTokenRewards.sol";
 /// pool PlatformToken trades on). With no router (address(0)) nothing is
 /// bought back and funds simply accumulate.
 ///
+/// Audit changes: only the owner and approved keepers (the relayer) may start a
+/// buyback, so an outsider cannot bundle a price-manipulation sandwich around
+/// it (airdrop rounds stay permissionless); and a failed PlatformToken buy no
+/// longer blocks the conversion of a launched token (the ETH waits here for the
+/// next triggerEthBuyback) unless the caller asked for a minimum.
+///
 /// Wiring: set as the factory's rewardsDistributor, then exempt it from the hook
 /// tax with V4TokenFactory.setTaxExempt(this, true).
 contract V4PlatformRewardsDistributor is V4PlatformTokenRewards {
@@ -38,6 +44,7 @@ contract V4PlatformRewardsDistributor is V4PlatformTokenRewards {
     event EthBuybackTriggered(uint256 ethIn, uint256 tokensOut);
     event TokenBuybackTriggered(address indexed token, uint256 amountIn, uint256 ethOut, uint256 tokensOut);
     event EthRescued(address indexed to, uint256 amount);
+    event PlatformTokenBuybackFailed(address indexed token, uint256 ethKept);
 
     constructor(IPoolManager poolManager_, address hook_, address initialOwner_, address buybackRouter_)
         V4PlatformTokenRewards(poolManager_, hook_, initialOwner_, buybackRouter_)
@@ -64,8 +71,10 @@ contract V4PlatformRewardsDistributor is V4PlatformTokenRewards {
     }
 
     /// @notice Spends up to maxEthBuybackAmount of this contract's ETH on
-    /// PlatformToken and splits the result 50/50 burn / airdrop.
+    /// PlatformToken and splits the result 50/50 burn / airdrop. Owner and
+    /// approved keepers only.
     function triggerEthBuyback(uint256 minTokensOut) external nonReentrant returns (uint256 tokensOut) {
+        require(_isKeeper(msg.sender), "V4PlatformRewardsDistributor: not authorized to convert");
         require(_buybackEnabled(), "V4PlatformRewardsDistributor: buyback not available");
         uint256 balance = address(this).balance;
         require(balance > 0 && balance >= ethBuybackThreshold, "V4PlatformRewardsDistributor: below threshold");
@@ -79,8 +88,12 @@ contract V4PlatformRewardsDistributor is V4PlatformTokenRewards {
 
     /// @notice Sells up to maxTokenBuybackAmount[token] of `token` into its V4
     /// pool and spends the ETH on PlatformToken, split 50/50. If `token` is
-    /// PlatformToken itself it is processed directly (no swap, uncapped).
+    /// PlatformToken itself it is processed directly (no swap, uncapped). Owner
+    /// and approved keepers only. `minTokensOut` floors the PlatformToken received
+    /// for the whole sale-and-buy; if the buy fails and it is 0, the sale's ETH
+    /// stays here for the next triggerEthBuyback instead of reverting.
     function triggerTokenBuyback(address token, uint256 minTokensOut) external nonReentrant returns (uint256 tokensOut) {
+        require(_isKeeper(msg.sender), "V4PlatformRewardsDistributor: not authorized to convert");
         require(_buybackEnabled(), "V4PlatformRewardsDistributor: buyback not available");
         require(token != address(0), "V4PlatformRewardsDistributor: invalid token");
 
@@ -97,9 +110,18 @@ contract V4PlatformRewardsDistributor is V4PlatformTokenRewards {
         uint256 amountIn = (cap > 0 && balance > cap) ? cap : balance;
 
         (uint256 spent, uint256 ethOut) = _sellForEth(token, amountIn, 0);
-        tokensOut = _buyPlatformToken(ethOut, minTokensOut);
-        _splitAndProcess(tokensOut);
-        emit TokenBuybackTriggered(token, spent, ethOut, tokensOut);
+        bool ok = true;
+        if (minTokensOut > 0) {
+            tokensOut = _buyPlatformToken(ethOut, minTokensOut); // caller's floor: revert on failure
+        } else {
+            (ok, tokensOut) = _tryBuyPlatformToken(ethOut, 0);
+        }
+        if (ok) {
+            _splitAndProcess(tokensOut);
+            emit TokenBuybackTriggered(token, spent, ethOut, tokensOut);
+        } else {
+            emit PlatformTokenBuybackFailed(token, ethOut); // the ETH stays for triggerEthBuyback
+        }
     }
 
     /// @notice Sweeps ETH (always plain platform revenue here).
