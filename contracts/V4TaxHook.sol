@@ -79,6 +79,13 @@ contract V4TaxHook {
 
     uint256 public constant GRADUATION_CONFIRMATION_WINDOW = 30 minutes;
     uint256 public constant MAX_FEE_BPS = 2_000; // 20% ceiling, same as V2
+    /// @dev Gas forwarded to each price-feed call. A real Chainlink-style
+    /// aggregator proxy needs well under 50k; the cap stops a broken or hostile
+    /// feed from making every swap on the pool burn the whole block gas limit.
+    uint256 private constant FEED_CALL_GAS = 200_000;
+    /// @dev Largest feed `decimals()` accepted. Anything above is treated as a
+    /// dead feed (10**decimals would overflow long before 77).
+    uint256 private constant MAX_FEED_DECIMALS = 36;
 
     IPoolManager public immutable poolManager;
     /// @notice Deployer; may call setFactory exactly once.
@@ -256,6 +263,7 @@ contract V4TaxHook {
         require(feeBps_ <= MAX_FEE_BPS, "V4TaxHook: feeBps exceeds 20% ceiling");
         require(graduationTargetUsd_ > 0, "V4TaxHook: graduation target must be > 0");
         require(maxOracleStaleness_ > 0 && maxOracleStaleness_ <= type(uint32).max, "V4TaxHook: bad oracle staleness");
+        require(priceFeed_.code.length > 0, "V4TaxHook: price feed is not a contract");
         require(rewardBps_ + creatorRewardBps_ <= feeBps_, "V4TaxHook: reward bps exceed feeBps");
         require(rewardsDistributor_ != address(0) || rewardBps_ == 0, "V4TaxHook: rewardBps requires a distributor");
         require(
@@ -310,11 +318,18 @@ contract V4TaxHook {
         require(p.configured, "V4TaxHook: pool not configured");
         require(poolLauncher[id] == msg.sender, "V4TaxHook: not this pool's launcher");
         require(newPriceFeed_ != address(0), "V4TaxHook: invalid price feed");
+        require(newPriceFeed_.code.length > 0, "V4TaxHook: price feed is not a contract");
         require(newMaxOracleStaleness_ > 0 && newMaxOracleStaleness_ <= type(uint32).max, "V4TaxHook: bad oracle staleness");
         (, bool feedIsFresh) = currentMarketCapInFeedDecimals(id);
         require(!feedIsFresh, "V4TaxHook: current price feed is still fresh, cannot be repointed");
         p.priceFeed = V4IAggregatorV3(newPriceFeed_);
         p.maxOracleStaleness = uint32(newMaxOracleStaleness_);
+        // A candidacy observed through the old feed says nothing about the new
+        // one (different decimals / source): graduation must be re-observed.
+        if (p.graduationCandidateAt != 0) {
+            p.graduationCandidateAt = 0;
+            emit GraduationCandidateReset(id);
+        }
         emit PriceFeedUpdated(id, newPriceFeed_, newMaxOracleStaleness_);
     }
 
@@ -361,7 +376,7 @@ contract V4TaxHook {
         PoolTax storage p = poolTax[id];
         bool exactIn = params.amountSpecified < 0;
         // token is currency1: specified iff !(specifiedIsCurrency0)
-        bool tokenSpecified = (exactIn == params.zeroForOne) ? false : true;
+        bool tokenSpecified = exactIn != params.zeroForOne;
         if (tokenSpecified && !taxExempt[sender]) {
             (uint256 platformBps, uint256 customBps) = _bps(id, p, params.zeroForOne);
             uint256 bps = platformBps + customBps;
@@ -430,14 +445,16 @@ contract V4TaxHook {
     // Fee payout
     // ---------------------------------------------------------------
 
-    /// @dev The fee is paid from the PoolManager's own token balance, so it can
-    /// only be taken if the manager actually holds that much right now. On any
-    /// realistic pool it always does; this guards the absurd edge (a sell larger
-    /// than what is left in a nearly bought-out pool) by simply not taxing that
-    /// one swap rather than reverting it.
+    /// @dev The fee is paid from the PoolManager's own token balance, so no more
+    /// than that balance can be taken. On any realistic pool the balance is far
+    /// larger than the fee. In the absurd edge (a sell many times larger than
+    /// what is left in a nearly bought-out pool) the fee is CAPPED at what the
+    /// manager holds instead of being skipped, so the swap neither reverts nor
+    /// escapes the tax entirely.
     function _affordable(address token, uint256 fee) private view returns (uint256) {
         if (fee == 0) return 0;
-        return IERC20(token).balanceOf(address(poolManager)) >= fee ? fee : 0;
+        uint256 bal = IERC20(token).balanceOf(address(poolManager));
+        return fee <= bal ? fee : bal;
     }
 
     /// @dev Splits `fee` (a token amount) between the platform's part and the
@@ -522,28 +539,63 @@ contract V4TaxHook {
     // ---------------------------------------------------------------
 
     /// @notice Current market cap in the feed's own decimals, or (0, false) if
-    /// the pool/feed can't be read or the feed is stale. Never reverts.
+    /// the pool/feed can't be read or the feed is stale. Never reverts, whatever
+    /// the feed address is or returns (no code, empty / short / malformed data,
+    /// gas burning): the feed is read with bounded-gas raw staticcalls and the
+    /// reply is length-checked, because a Solidity try/catch does NOT catch a
+    /// failure to decode a malformed reply or a call to an address without code.
     function currentMarketCapInFeedDecimals(PoolId id) public view returns (uint256 marketCap, bool feedIsFresh) {
         PoolTax storage p = poolTax[id];
         if (!p.configured) return (0, false);
-        try p.priceFeed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
-            if (answer <= 0) return (0, false);
-            // Future-dated rounds are treated as stale (see V2 LaunchedToken
-            // for why the explicit check matters: an underflow here would not
-            // be caught by the try/catch and would brick trading).
-            if (updatedAt > block.timestamp || block.timestamp - updatedAt > p.maxOracleStaleness) return (0, false);
-            try this._computeMarketCap(id, uint256(answer)) returns (uint256 mc, bool ok) {
-                if (!ok) return (0, false);
-                return (mc, true);
-            } catch {
-                return (0, false);
-            }
+        (bool ok, int256 answer, uint256 updatedAt) = _readLatestRound(address(p.priceFeed));
+        if (!ok || answer <= 0) return (0, false);
+        // Future-dated rounds are treated as stale: an underflow below would
+        // revert and brick trading.
+        if (updatedAt > block.timestamp || block.timestamp - updatedAt > p.maxOracleStaleness) return (0, false);
+        try this._computeMarketCap(id, uint256(answer)) returns (uint256 mc, bool computed) {
+            if (!computed) return (0, false);
+            return (mc, true);
         } catch {
             return (0, false);
         }
     }
 
-    /// @dev External only so the caller can try/catch it. Reads the pool's live
+    /// @dev latestRoundData() via a raw staticcall: gas-capped, and only the
+    /// first 160 bytes of the reply are ever copied. ok=false on no code,
+    /// revert, or a reply shorter than five words.
+    function _readLatestRound(address feed) private view returns (bool ok, int256 answer, uint256 updatedAt) {
+        if (feed.code.length == 0) return (false, 0, 0);
+        bytes4 sel = V4IAggregatorV3.latestRoundData.selector;
+        uint256 callGas = FEED_CALL_GAS;
+        assembly ("memory-safe") {
+            let m := mload(0x40)
+            mstore(m, sel)
+            ok := staticcall(callGas, feed, m, 4, m, 160)
+            if lt(returndatasize(), 160) { ok := 0 }
+            if ok {
+                answer := mload(add(m, 32))
+                updatedAt := mload(add(m, 96))
+            }
+        }
+    }
+
+    /// @dev decimals() via a raw staticcall, same protections. Anything that is
+    /// not a clean small number (<= MAX_FEED_DECIMALS) counts as a dead feed.
+    function _readDecimals(address feed) private view returns (bool ok, uint256 decimals_) {
+        if (feed.code.length == 0) return (false, 0);
+        bytes4 sel = V4IAggregatorV3.decimals.selector;
+        uint256 callGas = FEED_CALL_GAS;
+        assembly ("memory-safe") {
+            let m := mload(0x40)
+            mstore(m, sel)
+            ok := staticcall(callGas, feed, m, 4, m, 32)
+            if lt(returndatasize(), 32) { ok := 0 }
+            if ok { decimals_ := mload(m) }
+        }
+        if (ok && decimals_ > MAX_FEED_DECIMALS) ok = false;
+    }
+
+    /// @dev External only so the caller can try/catch it (it is trusted code: pool manager and token reads). Reads the pool's live
     /// sqrt price and converts it to a USD market cap.
     function _computeMarketCap(PoolId id, uint256 ethUsd) external view returns (uint256 marketCap, bool ok) {
         require(msg.sender == address(this), "V4TaxHook: internal only");
@@ -563,25 +615,37 @@ contract V4TaxHook {
         (uint256 marketCap, bool feedIsFresh) = currentMarketCapInFeedDecimals(id);
         if (!feedIsFresh) return; // oracle hiccup: leave any in-progress candidacy as it was
 
-        try p.priceFeed.decimals() returns (uint8 feedDecimals) {
-            uint256 target = p.graduationTargetUsd * (10 ** feedDecimals);
-            if (marketCap < target) {
-                if (p.graduationCandidateAt != 0) {
-                    p.graduationCandidateAt = 0;
-                    emit GraduationCandidateReset(id);
-                }
-                return;
+        (bool decimalsOk, uint256 feedDecimals) = _readDecimals(address(p.priceFeed));
+        if (!decimalsOk) return;
+
+        // feedDecimals <= 36 and graduationTargetUsd is bounded by what a
+        // launcher configured; use checked math but in a form that cannot
+        // overflow for any sane target, and skip (never revert) if it would.
+        (bool mulOk, uint256 target) = _tryMul(p.graduationTargetUsd, 10 ** feedDecimals);
+        if (!mulOk) return;
+        if (marketCap < target) {
+            if (p.graduationCandidateAt != 0) {
+                p.graduationCandidateAt = 0;
+                emit GraduationCandidateReset(id);
             }
-            if (p.graduationCandidateAt == 0) {
-                p.graduationCandidateAt = uint64(block.timestamp);
-                emit GraduationCandidateObserved(id, marketCap, block.timestamp + GRADUATION_CONFIRMATION_WINDOW);
-                return;
-            }
-            if (block.timestamp < uint256(p.graduationCandidateAt) + GRADUATION_CONFIRMATION_WINDOW) return;
-            p.taxActive = false;
-            emit TaxDisabled(id, marketCap);
-        } catch {
             return;
+        }
+        if (p.graduationCandidateAt == 0) {
+            p.graduationCandidateAt = uint64(block.timestamp);
+            emit GraduationCandidateObserved(id, marketCap, block.timestamp + GRADUATION_CONFIRMATION_WINDOW);
+            return;
+        }
+        if (block.timestamp < uint256(p.graduationCandidateAt) + GRADUATION_CONFIRMATION_WINDOW) return;
+        p.taxActive = false;
+        emit TaxDisabled(id, marketCap);
+    }
+
+    function _tryMul(uint256 a, uint256 b) private pure returns (bool, uint256) {
+        unchecked {
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
         }
     }
 }
