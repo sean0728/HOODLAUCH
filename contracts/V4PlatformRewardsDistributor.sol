@@ -84,7 +84,8 @@ contract V4PlatformRewardsDistributor is V4PlatformTokenRewards {
         require(_buybackEnabled(), "V4PlatformRewardsDistributor: buyback not available");
         require(token != address(0), "V4PlatformRewardsDistributor: invalid token");
 
-        uint256 balance = IERC20(token).balanceOf(address(this));
+        // Platform tokens already earmarked for holders are not income.
+        uint256 balance = _availableBalance(token);
         require(balance > 0 && balance >= tokenBuybackThreshold[token], "V4PlatformRewardsDistributor: below threshold");
 
         if (token == address(platformToken)) {

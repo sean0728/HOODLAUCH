@@ -18,6 +18,16 @@ import "./interfaces/V4IUniswapV2Router.sol";
 /// PR-5 holder-generation guard). Same fixed split: every unit of PlatformToken
 /// bought back is 50% burned and 50% queued for the next airdrop round.
 ///
+/// Changes from the first V4 port (audit of V4FeeWalletDistributor):
+///  - PlatformToken that is already earmarked for holders (queued, or the
+///    unpaid rest of a running round) is never counted as fresh income by the
+///    distributors' trigger functions (_availableBalance).
+///  - A round can never pay out more than its own pot (roundUsed cap), so a
+///    holder moving tokens between wallets mid-round cannot reach into the
+///    next round's tokens.
+///  - The buyback router must be a contract, and _tryBuyPlatformToken lets a
+///    distributor degrade a failed buy instead of reverting its whole sale.
+///
 /// What changes on V4: launched tokens are converted to ETH in their own V4
 /// pool (V4TokenSeller). PlatformToken itself still trades wherever it trades,
 /// so ETH -> PlatformToken goes through a Uniswap V2 router that is passed in
@@ -38,6 +48,8 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
     uint256 public roundCursor;
     uint256 public roundHolderCountAtStart;
     uint256 public roundGenerationAtStart;
+    /// @notice Part of roundAmount already paid out or re-queued this round.
+    uint256 public roundUsed;
 
     event PlatformTokenSet(address indexed newToken);
     event PlatformTokensProcessed(uint256 tokensIn, uint256 burned, uint256 toAirdrop);
@@ -51,6 +63,9 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
     constructor(IPoolManager poolManager_, address hook_, address initialOwner_, address buybackRouter_)
         V4TokenSeller(poolManager_, hook_, initialOwner_)
     {
+        require(
+            buybackRouter_ == address(0) || buybackRouter_.code.length > 0, "V4PlatformTokenRewards: router is not a contract"
+        );
         buybackRouter = V4IUniswapV2Router(buybackRouter_);
     }
 
@@ -67,6 +82,20 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
     /// @dev True when buying back is actually possible.
     function _buybackEnabled() internal view returns (bool) {
         return address(platformToken) != address(0) && address(buybackRouter) != address(0);
+    }
+
+    /// @dev PlatformToken this contract holds that is NOT yet earmarked: the
+    /// balance minus what is queued for the next round and what is still owed
+    /// to the running one. For any other token it is just the balance.
+    function _availableBalance(address token) internal view returns (uint256) {
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        if (token != address(platformToken)) return bal;
+        uint256 committed = _committedPlatformTokens();
+        return bal > committed ? bal - committed : 0;
+    }
+
+    function _committedPlatformTokens() internal view returns (uint256) {
+        return pendingAirdropTokens + (roundActive ? roundAmount - roundUsed : 0);
     }
 
     /// @dev Spends `ethIn` buying PlatformToken on the V2 pool. The floor is
@@ -90,6 +119,23 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
             minOut, path, address(this), block.timestamp + 15 minutes
         );
         tokensOut = platformToken.balanceOf(address(this)) - before;
+    }
+
+    /// @notice Only callable by this contract itself (through try/catch in
+    /// _tryBuyPlatformToken, so a failed buy rolls back cleanly).
+    function selfBuyPlatformToken(uint256 ethIn, uint256 callerMinOut) external returns (uint256) {
+        require(msg.sender == address(this), "V4PlatformTokenRewards: self only");
+        return _buyPlatformToken(ethIn, callerMinOut);
+    }
+
+    /// @dev Same as _buyPlatformToken but a router/pool failure returns
+    /// (false, 0) with the ETH still held here, instead of reverting.
+    function _tryBuyPlatformToken(uint256 ethIn, uint256 callerMinOut) internal returns (bool ok, uint256 tokensOut) {
+        try this.selfBuyPlatformToken(ethIn, callerMinOut) returns (uint256 out) {
+            return (true, out);
+        } catch {
+            return (false, 0);
+        }
     }
 
     /// @dev Fixed 50/50: burn now, queue the rest for the next round.
@@ -120,6 +166,7 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         pendingAirdropTokens = 0;
         roundSupplySnapshot = supplySnapshot;
         roundCursor = 0;
+        roundUsed = 0;
         roundActive = true;
 
         uint256 holderCountAtStart = platformToken.holderCount();
@@ -148,6 +195,7 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         if (to > total) to = total;
 
         uint256 distributed;
+        uint256 remaining = roundAmount - roundUsed;
         for (uint256 i = from; i < to; i++) {
             address holder = platformToken.holderAt(i);
             if (holder == address(this)) continue;
@@ -157,7 +205,11 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
                 continue;
             }
             uint256 share = (roundAmount * platformToken.balanceOf(holder)) / roundSupplySnapshot;
+            // Never beyond the round's own pot, whatever balances did mid-round.
+            if (share > remaining) share = remaining;
             if (share == 0) continue;
+            remaining -= share;
+            roundUsed += share;
             if (_sendPlatformToken(holder, share)) {
                 distributed += share;
             } else {
@@ -183,7 +235,7 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         require(to != address(0), "V4PlatformTokenRewards: invalid recipient");
         uint256 balance = IERC20(token).balanceOf(address(this));
         if (token == address(platformToken)) {
-            uint256 committed = pendingAirdropTokens + (roundActive ? roundAmount : 0);
+            uint256 committed = _committedPlatformTokens();
             uint256 rescuable = balance > committed ? balance - committed : 0;
             require(amount <= rescuable, "V4PlatformTokenRewards: exceeds rescuable balance");
         } else {
