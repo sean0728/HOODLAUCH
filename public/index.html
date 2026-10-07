@@ -13647,7 +13647,7 @@
         ${v4NumField(key,"maxBuyBps","Max creator buy-in (bps, 10000 = 100%)", st.maxCreatorBuyBps, "maxCreatorBuyBps", {step:1, max:10000})}
         ${v4NumField(key,"lpLockDays","LP lock duration (days)", fmtInt(Number(st.lpLockSeconds)/86400), "lpLockDuration", {step:1})}
         <div class="admin-section-label">Emergency pause</div>
-        <p class="admin-empty" style="margin-bottom:10px;">Pausing blocks new curve buys only — sells and graduation keep working, so holders can always exit.</p>
+        <p class="admin-empty" style="margin-bottom:10px;">Pausing blocks new curve buys, new curve launches and creator buy-ins — sells and graduation keep working, so holders can always exit.</p>
         <div class="admin-action-row">
           <p class="admin-empty" style="margin:0; flex:1;">Currently ${st.paused ? "paused" : "open"}.</p>
           ${st.paused
