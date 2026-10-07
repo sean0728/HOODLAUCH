@@ -50,7 +50,9 @@
 //                              skipped with a warning if DEX_ROUTER_ADDRESS is not set).
 //   DEPLOY_FEE_WEI / LAUNCH_FEE_WEI / CURVE_LAUNCH_FEE_WEI   Fees in wei (default: $50 / $100 / $25 at a
 //                              live ETH price, or $3000 if no price can be fetched).
-//   LP_LOCK_DURATION_SECONDS   LP lock (default 15 days).
+//   LP_LOCK_DURATION_SECONDS   LP lock (default 15 days; 1 second to 10 years).
+//   SNIPE_START_BPS            anti-snipe surcharge on buys at launch (default 2500 = 25%, max 7000; 0 = off).
+//   SNIPE_DURATION_SECONDS     how long it takes to fall to zero (default 180, max 3600; 0 = off).
 //   OWNER_ADDRESS              If set, ownership of every owned contract is proposed to this wallet
 //                              at the end (Ownable2Step: that wallet must accept each one).
 //   DEPLOY_DISTRIBUTORS        "false" to skip both distributors.
@@ -333,6 +335,15 @@ async function main() {
     await send("hook.setLiquidityCompounder(compounder)", () => hook.setLiquidityCompounder(compounderA));
   if (!(await hook.taxExempt(compounderA)))
     await send("factory.setTaxExempt(compounder, true)", () => factory.setTaxExempt(compounderA, true));
+
+  // Snipe protection: the default every NEW pool copies at creation (pools already
+  // trading keep theirs). A re-run only changes it if the env values differ.
+  {
+    const snipeStart = BigInt(process.env.SNIPE_START_BPS ?? 2500);
+    const snipeDuration = BigInt(process.env.SNIPE_DURATION_SECONDS ?? 180);
+    if ((await hook.snipeDefaultStartBps()) !== snipeStart || (await hook.snipeDefaultDuration()) !== snipeDuration)
+      await send(`factory.setSnipeProtection(${snipeStart} bps, ${snipeDuration}s)`, () => factory.setSnipeProtection(snipeStart, snipeDuration));
+  }
 
   for (const [label, f] of [["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory]]) {
     const fa = await A(f);
