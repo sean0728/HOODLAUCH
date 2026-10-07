@@ -7591,9 +7591,8 @@
   const V4_ROUTER_POOL_STATE_SELECTOR = "99cd120f"; // V4SwapRouter.poolState(address) -> (sqrtPriceX96, tick, liquidity)
   const V4_POOL_TAX_SELECTOR = "c2898f5e";          // V4TaxHook.poolTax(bytes32)
   const V4_CURRENT_SNIPE_SELECTOR = "6aa5b8ce";     // V4TaxHook.currentSnipeBps(bytes32): early-buy surcharge right now
-  const V4_SNIPE_DEFAULT_START_SELECTOR = "13b2b0e3"; // V4TaxHook.snipeDefaultStartBps()
-  const V4_SNIPE_DEFAULT_DURATION_SELECTOR = "e58b26ac"; // V4TaxHook.snipeDefaultDuration()
-  const V4_SET_SNIPE_PROTECTION_SELECTOR = "de0cebe9"; // V4TokenFactory.setSnipeProtection(uint256,uint256)
+  const V4_SNIPE_DEFAULTS_SELECTOR = "d3886746";    // V4TaxHook.snipeDefaults(address launcher) -> (startBps, duration)
+  const V4_SET_SNIPE_PROTECTION_SELECTOR = "de0cebe9"; // setSnipeProtection(uint256,uint256) on V4TokenFactory, V4CustomTokenFactory and V4CurveFactory
   const V4_FACTORY_HOOK_SELECTOR = "7f5a7c7b";      // V4TokenFactory.hook()
   const V4_POOL_LP_FEE_PPM = 3000n;                 // 0.30%, must match V4TokenFactory
   const ERC20_BALANCE_OF_SELECTOR_V4 = "70a08231";
@@ -13121,17 +13120,35 @@
   }
   const v4Addr = (h) => h ? decodeAddress(h) : null;
 
+  // Snipe protection is stored on the hook per launcher: each of V4TokenFactory,
+  // V4CustomTokenFactory and V4CurveFactory has its own value for its next pools.
+  async function v4ReadSnipeDefaults(hookAddr, launcherAddr){
+    if(!hookAddr || !launcherAddr) return null;
+    const h = await v4Read(hookAddr, V4_SNIPE_DEFAULTS_SELECTOR + encodeAddressParam(launcherAddr));
+    if(!h || h.length < 130) return null; // hook from before the feature: no controls
+    const w = splitWords(h);
+    return { startBps: BigInt("0x"+w[0]), duration: BigInt("0x"+w[1]) };
+  }
+  function v4SnipeAdminHTML(key, st){
+    if(st.snipeStartBps===undefined || st.snipeStartBps===null) return "";
+    return `
+        <div class="admin-section-label">Snipe protection · applies to this factory's new launches</div>
+        <p class="admin-empty" style="margin-bottom:10px;">A surcharge on BUYS only, starting at the percentage below when a token's pool is created and falling in a straight line to zero over the duration. Taken in the token; goes to the platform fee wallet. Each pool keeps the values it was created with, so a change only affects launches from now on. This factory's setting is independent of the other launch modes. Both fields 0 turns it off. (For bonding-curve tokens the pool is created at graduation, so that is when the window starts.) Currently: <b>${st.snipeStartBps===0n ? "off" : `${(Number(st.snipeStartBps)/100).toFixed(2)}% falling to 0 over ${fmtInt(Number(st.snipeDurationSeconds))} s`}</b>.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Surcharge at launch (bps, max 7000 = 70%)</label><input type="number" step="1" min="0" max="7000" id="admin_${key}_snipeStartBps" placeholder="${st.snipeStartBps}"></div>
+          <div class="field"><label>Falls to zero over (seconds, max 3600)</label><input type="number" step="1" min="0" max="3600" id="admin_${key}_snipeDuration" placeholder="${st.snipeDurationSeconds}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="snipeProtection" data-factory-key="${key}">Update</button>
+        </div>`;
+  }
   async function loadV4FactoryAdminState(address){
     const st = await loadFactoryAdminState(address);
     const h = await v4Read(address, V4_BUY_IN_SLIPPAGE_BPS_SELECTOR);
     st.buyInSlippageBps = h ? decodeUint256(h) : undefined;
     // Snipe protection lives on the hook; its defaults are what the NEXT launch will copy.
     const hookH = await v4Read(address, V4_HOOK_SELECTOR);
-    const hookAddr = hookH ? decodeAddress(hookH) : null;
-    const sb = hookAddr ? await v4Read(hookAddr, V4_SNIPE_DEFAULT_START_SELECTOR) : null;
-    const sd = hookAddr ? await v4Read(hookAddr, V4_SNIPE_DEFAULT_DURATION_SELECTOR) : null;
-    st.snipeStartBps = sb ? decodeUint256(sb) : undefined;
-    st.snipeDurationSeconds = sd ? decodeUint256(sd) : undefined;
+    const sn = await v4ReadSnipeDefaults(hookH ? decodeAddress(hookH) : null, address);
+    st.snipeStartBps = sn ? sn.startBps : undefined;
+    st.snipeDurationSeconds = sn ? sn.duration : undefined;
     return st;
   }
 
@@ -13246,6 +13263,10 @@
           V4_TAX_SOURCE_SELECTOR, V4_HOOK_SELECTOR, V4_LOCKER_SELECTOR, V4_POOL_MANAGER_SELECTOR, V4_COMPOUNDER_GETTER_SELECTOR].map(sel=> v4Read(addr, sel)));
         extraAdmin.customFactory = r[0] ? { owner:rdA(r[0]), pendingOwner:rdA(r[1]), launchFeeWei:rdU(r[2]), buyInSlippageBps:rdU(r[3]), maxCreatorBuyBps:rdU(r[4]), lpLockSeconds:rdU(r[5]),
           taxSource:rdA(r[6]), hook:rdA(r[7]), locker:rdA(r[8]), poolManager:rdA(r[9]), compounder:rdA(r[10]) } : undefined;
+        if(extraAdmin.customFactory){
+          const sn = await v4ReadSnipeDefaults(extraAdmin.customFactory.hook, addr);
+          if(sn){ extraAdmin.customFactory.snipeStartBps = sn.startBps; extraAdmin.customFactory.snipeDurationSeconds = sn.duration; }
+        }
       })(),
       (async()=>{
         const addr = extraAddrs.curveFactory; if(!addr || !(extra.curveFactory && extra.curveFactory.hasCode)){ extraAdmin.curveFactory = null; return; }
@@ -13255,6 +13276,10 @@
         extraAdmin.curveFactory = r[0] ? { owner:rdA(r[0]), pendingOwner:rdA(r[1]), curveLaunchFeeWei:rdU(r[2]), curveFeeBps:rdU(r[3]), curveSupplyBps:rdU(r[4]), virtualEthReserveDefaultWei:rdU(r[5]),
           virtualTokenReserveBps:rdU(r[6]), poolSeedTargetWei:rdU(r[7]), maxCreatorBuyBps:rdU(r[8]), lpLockSeconds:rdU(r[9]), paused: r[10] ? rdU(r[10])!==0n : null, strandedFeesWei:rdU(r[11]), totalReserveWei:rdU(r[12]),
           taxSource:rdA(r[13]), hook:rdA(r[14]), locker:rdA(r[15]), poolManager:rdA(r[16]), compounder:rdA(r[17]) } : undefined;
+        if(extraAdmin.curveFactory){
+          const sn = await v4ReadSnipeDefaults(extraAdmin.curveFactory.hook, addr);
+          if(sn){ extraAdmin.curveFactory.snipeStartBps = sn.startBps; extraAdmin.curveFactory.snipeDurationSeconds = sn.duration; }
+        }
       })(),
       (async()=>{
         const addr = extraAddrs.compounder; if(!addr || !(extra.compounder && extra.compounder.hasCode)){ extraAdmin.compounder = null; return; }
@@ -13574,6 +13599,7 @@
         ${v4NumField(key,"maxBuyBps","Max creator buy-in (bps, 10000 = 100%)", st.maxCreatorBuyBps, "maxCreatorBuyBps", {step:1, max:10000})}
         ${v4NumField(key,"buyInSlippage","Creator buy-in slippage (bps, 500–800)", st.buyInSlippageBps===null ? "500–800" : st.buyInSlippageBps, "buyInSlippage", {step:1, min:500, max:800})}
         ${v4NumField(key,"lpLockDays","LP lock duration (days)", fmtInt(Number(st.lpLockSeconds)/86400), "lpLockDuration", {step:1})}
+        ${v4SnipeAdminHTML(key, st)}
         ${v4OwnershipBlock(key, st)}
       </div>`;
   }
@@ -13629,6 +13655,7 @@
             : `<button class="btn btn-ghost btn-sm" data-admin-action="pause" data-factory-key="${key}">Pause buying</button>`}
         </div>
         <p class="admin-empty">Fee and token rescue functions exist on this contract but are intentionally not exposed on this page.</p>
+        ${v4SnipeAdminHTML(key, st)}
         ${v4OwnershipBlock(key, st)}
       </div>`;
   }
