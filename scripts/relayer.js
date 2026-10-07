@@ -164,6 +164,9 @@ const { ADMIN_WALLET, verifyAdminSignature, isFreshTimestamp } = require("../lib
 const { verifySignatureFrom } = require("../lib/signedMessage");
 const profileLib = require("../lib/profile");
 const profileStore = require("../lib/profileStore");
+const social = require("../lib/social");
+const commentStore = require("../lib/commentStore");
+const followStore = require("../lib/followStore");
 const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
 const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/tokenMetadata");
 const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
@@ -2864,6 +2867,135 @@ async function main() {
     const removed = await profileStore.deleteProfile(address);
     console.log(`[admin] removed profile for ${address} (${removed ? "existed" : "none"}).`);
     sendJson(res, 200, { removed });
+  }));
+
+  // ---- token comments + follows ----
+  // Comments are per network (a token address only exists on its own network);
+  // follows are platform-wide. Reads are public. Every write carries a
+  // personal_sign signature from the acting wallet (lib/social.js has the
+  // signed messages). Posting a comment needs a profile name.
+  //   GET  /comments?token=0x..            comments on a token (newest first)
+  //   GET  /comments?author=0x..           comments one member posted
+  //   GET  /comments?authors=0x..,0x..     comments from several members (the "following" feed)
+  //        optional: limit (<=100), before (createdAt cursor)
+  //   POST /comments                       { token, author, text, timestamp, signature }
+  //   POST /comments/delete                { id, requester, timestamp, signature } — author or admin
+  //   GET  /follows/:address               { following: [..], followers: [..] }
+  //   POST /follow                         { follower, followee, follow: true|false, timestamp, signature }
+  const commentPosts = new Map(); // authorLower -> [timestamps]
+  const COMMENT_MIN_GAP_MS = 8000;
+  const COMMENTS_PER_HOUR = 20;
+  function commentPostAllowed(addr) {
+    const now = Date.now();
+    const recent = (commentPosts.get(addr) || []).filter((t) => now - t < 3600_000);
+    commentPosts.set(addr, recent);
+    if (recent.length && now - recent[recent.length - 1] < COMMENT_MIN_GAP_MS) return "Slow down — wait a few seconds between comments.";
+    if (recent.length >= COMMENTS_PER_HOUR) return "Too many comments — try again later.";
+    recent.push(now);
+    return null;
+  }
+  const followActions = new Map();
+  const FOLLOW_ACTIONS_PER_HOUR = 60;
+  function followActionAllowed(addr) {
+    const now = Date.now();
+    const recent = (followActions.get(addr) || []).filter((t) => now - t < 3600_000);
+    if (recent.length >= FOLLOW_ACTIONS_PER_HOUR) { followActions.set(addr, recent); return false; }
+    recent.push(now);
+    followActions.set(addr, recent);
+    return true;
+  }
+  const publicComment = (c) => ({ id: c.id, token: c.token, author: c.author, text: c.text, createdAt: c.createdAt });
+
+  app.get("/comments", asyncRoute(async (req, res) => {
+    const { token, author, authors, limit, before } = req.query || {};
+    const filters = { limit, before };
+    if (token) {
+      if (!hre.ethers.isAddress(String(token))) return sendJson(res, 400, { error: "token must be a valid address" });
+      filters.token = String(token);
+    }
+    if (author) {
+      if (!hre.ethers.isAddress(String(author))) return sendJson(res, 400, { error: "author must be a valid address" });
+      filters.author = String(author);
+    }
+    if (authors) {
+      const list = String(authors).split(",").map((a) => a.trim()).filter(Boolean).slice(0, 100);
+      if (!list.length || !list.every((a) => hre.ethers.isAddress(a))) return sendJson(res, 400, { error: "authors must be a comma-separated list of addresses" });
+      filters.authors = list;
+    }
+    if (!filters.token && !filters.author && !filters.authors) return sendJson(res, 400, { error: "Pass token, author or authors." });
+    const rows = await commentStore.listComments(hre.network.name, filters);
+    sendJson(res, 200, { comments: rows.map(publicComment) });
+  }));
+
+  app.post("/comments", asyncRoute(async (req, res) => {
+    const { token, author, text, timestamp, signature } = req.body || {};
+    if (!token || !hre.ethers.isAddress(token)) return sendJson(res, 400, { error: "token must be a valid address" });
+    if (!author || !hre.ethers.isAddress(author)) return sendJson(res, 400, { error: "author must be a valid address" });
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    const textError = social.validateComment(text);
+    if (textError) return sendJson(res, 400, { error: textError });
+    const message = social.commentMessage(token, author, text, timestamp);
+    if (!verifySignatureFrom(message, signature, author)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    const net = hre.network.name;
+    // Only tokens this relayer knows about, so nobody can park comments on arbitrary addresses.
+    const tokenKey = String(token).toLowerCase();
+    let known = !!((await readTrackedTokens(net)) || {})[tokenKey];
+    if (!known) known = (await readLedger(net)).some((e) => e.tokenAddress && e.tokenAddress.toLowerCase() === tokenKey);
+    if (!known) return sendJson(res, 404, { error: "Hood Launch has no record of this token." });
+    const prof = await profileStore.getProfile(author);
+    if (!prof || !prof.name) return sendJson(res, 403, { error: "Set a display name in your Profile before commenting." });
+    // Same text from the same wallet on the same token in the last day = a duplicate.
+    const mine = await commentStore.listComments(net, { token, author, limit: 20 });
+    if (mine.some((c) => c.text === text && Date.now() - c.createdAt < 86400_000)) return sendJson(res, 409, { error: "You already posted that on this token." });
+    const gate = commentPostAllowed(String(author).toLowerCase());
+    if (gate) return sendJson(res, 429, { error: gate });
+    const rec = await commentStore.addComment(net, { token, author, text });
+    console.log(`[comment] ${author} on ${token}.`);
+    sendJson(res, 200, { comment: publicComment(rec) });
+  }));
+
+  app.post("/comments/delete", asyncRoute(async (req, res) => {
+    const { id, requester, timestamp, signature } = req.body || {};
+    if (typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) return sendJson(res, 400, { error: "invalid comment id" });
+    if (!requester || !hre.ethers.isAddress(requester)) return sendJson(res, 400, { error: "requester must be a valid address" });
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    const message = social.deleteCommentMessage(id, requester, timestamp);
+    if (!verifySignatureFrom(message, signature, requester)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    const net = hre.network.name;
+    const c = await commentStore.getComment(net, id);
+    if (!c) return sendJson(res, 200, { deleted: false });
+    const isAuthor = c.author === String(requester).toLowerCase();
+    const isAdmin = String(requester).toLowerCase() === ADMIN_WALLET.toLowerCase();
+    if (!isAuthor && !isAdmin) return sendJson(res, 403, { error: "Only the author or the admin can delete a comment." });
+    const deleted = await commentStore.deleteComment(net, id);
+    console.log(`[comment] ${id} deleted by ${requester}${isAdmin && !isAuthor ? " (admin)" : ""}.`);
+    sendJson(res, 200, { deleted });
+  }));
+
+  app.get("/follows/:address", asyncRoute(async (req, res) => {
+    if (!hre.ethers.isAddress(req.params.address)) return sendJson(res, 400, { error: "address must be a valid address" });
+    const [following, followers] = await Promise.all([followStore.getFollowing(req.params.address), followStore.getFollowers(req.params.address)]);
+    sendJson(res, 200, { following, followers });
+  }));
+
+  app.post("/follow", asyncRoute(async (req, res) => {
+    const { follower, followee, follow, timestamp, signature } = req.body || {};
+    if (!follower || !hre.ethers.isAddress(follower)) return sendJson(res, 400, { error: "follower must be a valid address" });
+    if (!followee || !hre.ethers.isAddress(followee)) return sendJson(res, 400, { error: "followee must be a valid address" });
+    if (typeof follow !== "boolean") return sendJson(res, 400, { error: "follow must be true or false" });
+    if (String(follower).toLowerCase() === String(followee).toLowerCase()) return sendJson(res, 400, { error: "You can't follow yourself." });
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    const message = social.followMessage(follow, followee, follower, timestamp);
+    if (!verifySignatureFrom(message, signature, follower)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    if (!followActionAllowed(String(follower).toLowerCase())) return sendJson(res, 429, { error: "Too many follow changes — try again later." });
+    if (follow) {
+      const current = await followStore.getFollowing(follower);
+      if (current.length >= social.MAX_FOLLOWING && !current.includes(String(followee).toLowerCase())) {
+        return sendJson(res, 400, { error: `You can follow up to ${social.MAX_FOLLOWING} members.` });
+      }
+    }
+    const changed = await followStore.setFollow(follower, followee, follow);
+    sendJson(res, 200, { follow, changed });
   }));
 
   // ---- relayer runtime settings (admin-gated) ----
