@@ -39,8 +39,10 @@ import {V4LiquidityCompounder} from "./V4LiquidityCompounder.sol";
 /// Curve-phase fees (curveFeeBps of the ETH on every buy and sell, and the flat
 /// launch fee) split 50/50 between the treasury and the platform rewards
 /// distributor, both read from V4TokenFactory (the tax source). A recipient that
-/// rejects ETH never blocks a trade: the amount is parked in strandedFees for the
-/// owner to recover. sell() is never pausable; only buy() is.
+/// rejects ETH, or burns gas, never blocks a trade: each fee transfer is
+/// gas-capped and a failed one is parked in strandedFees for the owner to
+/// recover. Pausing stops everything that puts new ETH on a curve (buy, launching
+/// a curve, the creator buy-in); sell() is never pausable and graduate() stays open.
 ///
 /// Not included (compared with V2): gasless relayed curve launches.
 contract V4CurveFactory is V4PoolLauncher, Pausable {
@@ -57,6 +59,10 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     uint256 public virtualTokenReserveBps = 8_000;
     uint256 public poolSeedTargetWei = 1.5 ether;
     uint256 public constant MAX_CURVE_FEE_BPS = 2_000;
+    /// @dev Gas given to a fee recipient. Enough for a Safe, a splitter or the
+    /// platform distributor's receive(); bounded so a recipient that burns gas
+    /// cannot turn every curve trade (sell included) into a gas-limit-sized one.
+    uint256 public constant FEE_CALL_GAS = 300_000;
 
     struct Curve {
         address creator;
@@ -191,7 +197,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     }
 
     function _sendOrStrand(address to, uint256 amount) private {
-        (bool ok,) = to.call{value: amount}("");
+        (bool ok,) = to.call{value: amount, gas: FEE_CALL_GAS}("");
         if (!ok) {
             strandedFees += amount;
             emit FeeTransferFailed(to, amount);
@@ -233,7 +239,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         uint256 creatorBuyEthAmount,
         uint256 minCreatorTokensOut,
         uint256 salt
-    ) external payable nonReentrant returns (address token, uint256 creatorTokensBought) {
+    ) external payable nonReentrant whenNotPaused returns (address token, uint256 creatorTokensBought) {
         _checkLaunch(name_, symbol_, totalSupply_, creatorBuyEthAmount);
         token = Clones.cloneDeterministic(plainTokenImplementation, _deriveTokenSalt(msg.sender, salt));
         V4LaunchedToken(token).initialize(name_, symbol_, totalSupply_, msg.sender, address(this), address(this));
@@ -255,7 +261,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         uint256 creatorBuyEthAmount,
         uint256 minCreatorTokensOut,
         uint256 salt
-    ) external payable nonReentrant returns (address token, uint256 creatorTokensBought) {
+    ) external payable nonReentrant whenNotPaused returns (address token, uint256 creatorTokensBought) {
         _checkLaunch(name_, symbol_, totalSupply_, creatorBuyEthAmount);
         token = Clones.cloneDeterministic(customTokenImplementation, _deriveTokenSalt(msg.sender, salt));
         V4CustomToken(token).initialize(
@@ -292,6 +298,21 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         require(totalSupply_ > 0, "V4CurveFactory: supply must be > 0");
         require(msg.value == curveLaunchFee + creatorBuyEthAmount, "V4CurveFactory: incorrect ETH sent");
         _requireTermsReady(_currentTerms());
+        _requireReachableTarget(totalSupply_);
+    }
+
+    /// @dev A curve can take at most virtualEth * curveSupply / virtualToken of
+    /// real ETH (the amount that sells every curve token). A graduation target at
+    /// or above that can never be met: the curve would sit open forever and
+    /// buyers could only leave by selling back at a loss to the fees. Refuse such
+    /// a launch instead of creating it.
+    function _requireReachableTarget(uint256 totalSupply_) private view {
+        uint256 curveSupply = (totalSupply_ * curveSupplyBps) / 10_000;
+        uint256 virtualToken = (totalSupply_ * virtualTokenReserveBps) / 10_000;
+        require(
+            poolSeedTargetWei * virtualToken < virtualEthReserveDefault * curveSupply,
+            "V4CurveFactory: graduation target unreachable with the current curve settings"
+        );
     }
 
     /// @dev Everything that never earns reflections on a custom token from day one.
@@ -656,7 +677,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         emit CurveLaunchFeeUpdated(newFee);
     }
 
-    function rescueStrandedFees(address to, uint256 amount) external onlyOwner {
+    function rescueStrandedFees(address to, uint256 amount) external onlyOwner nonReentrant {
         require(to != address(0), "V4CurveFactory: invalid recipient");
         require(amount <= strandedFees, "V4CurveFactory: exceeds stranded fees");
         strandedFees -= amount;
@@ -667,7 +688,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
 
     /// @notice Sweeps ETH that is neither a tracked stranded fee nor any live
     /// curve's reserve.
-    function rescueStrayEth(address to) external onlyOwner returns (uint256 amount) {
+    function rescueStrayEth(address to) external onlyOwner nonReentrant returns (uint256 amount) {
         require(to != address(0), "V4CurveFactory: invalid recipient");
         uint256 accountedFor = totalCurveReserveEth + strandedFees;
         require(address(this).balance > accountedFor, "V4CurveFactory: no stray ETH to rescue");
@@ -678,7 +699,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     }
 
     /// @notice Cannot reach any token this factory created as a curve.
-    function rescueToken(address token, address to, uint256 amount) external onlyOwner {
+    function rescueToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
         require(to != address(0), "V4CurveFactory: invalid recipient");
         require(creatorOf[token] == address(0), "V4CurveFactory: cannot rescue a curve's own token");
         IERC20(token).safeTransfer(to, amount);
