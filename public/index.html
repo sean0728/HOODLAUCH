@@ -2234,7 +2234,7 @@
   const V4_LIQUIDITY_ADDED_TOPIC0 = "0xea3191ffbe2f62bfd724ee8d971b15ff9b7994e3a9169dc4c60443be3e4a43c4"; // LiquidityAdded(address,address,uint256,uint256,uint256,uint256,uint256)
   const POOL_ID_OF_SELECTOR = "30040054"; // poolIdOf(address) -> bytes32
   const V4_EIP712_DOMAIN_NAME = "HoodLaunchV4TokenFactory";
-  const ADMIN_UI_BUILD = "2026-10-07-v4-all-contracts"; // bump when the admin screens change, so you can tell which index.html is loaded
+  const ADMIN_UI_BUILD = "2026-10-07-v4-contract-cards"; // bump when the admin screens change, so you can tell which index.html is loaded
   const V4_CONFIG_KEYS = ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"];
   // V4 custom-tax factory + V4 bonding-curve factory (V4CustomTokenFactory /
   // V4CurveFactory). Selectors/topics computed with ethers from the compiled
@@ -2256,6 +2256,13 @@
   // Admin V4 panels (selectors computed with keccak256 of the canonical signatures)
   const V4_BUY_IN_SLIPPAGE_BPS_SELECTOR = "6593b2db";      // buyInSlippageBps()
   const V4_SET_BUY_IN_SLIPPAGE_BPS_SELECTOR = "9e385c58";  // setBuyInSlippageBps(uint256)
+  const V4_TAX_SOURCE_SELECTOR = "68e37d61";               // taxSource() — on V4CustomTokenFactory / V4CurveFactory
+  const V4_COMPOUNDER_GETTER_SELECTOR = "fa2cc3c0";        // compounder() — on V4CustomTokenFactory / V4CurveFactory
+  const V4_PAUSED_SELECTOR = "5c975abb";                   // paused() — V4CurveFactory (OZ Pausable)
+  const V4_PAUSE_SELECTOR = "8456cb59";                    // pause()
+  const V4_UNPAUSE_SELECTOR = "3f4ba83a";                  // unpause()
+  const V4_STRANDED_FEES_SELECTOR = "30a5dab7";            // strandedFees() — V4CurveFactory
+  const V4_TOTAL_CURVE_RESERVE_SELECTOR = "118ad8ed";      // totalCurveReserveEth() — V4CurveFactory
   const V4_HOOK_SELECTOR = "7f5a7c7b";                     // hook()
   const V4_LOCKER_SELECTOR = "d7b96d4e";                   // locker()
   const V4_POOL_MANAGER_SELECTOR = "dc4c90d3";             // poolManager()
@@ -10584,6 +10591,8 @@
     if(key==="cbcf") return customBondingCurveFactoryAddress();
     if(key==="v4") return v4TokenFactoryAddress();
     if(key==="v4locker") return (platformConfig.v4LiquidityLocker && platformConfig.v4LiquidityLocker[appMode]) || null;
+    if(key==="v4ctf") return v4CustomTokenFactoryAddress();
+    if(key==="v4cf") return v4CurveFactoryAddress();
     return customTokenFactoryAddress(); // legacy fallback for any stray caller not yet updated to pass one of the four keys above
   }
 
@@ -13070,7 +13079,35 @@
         setOnHook: k==="compounder" ? (hookCompounder ? sameAddr(hookCompounder, addr) : null) : null,
       };
     }));
-    return { factory, hook, locker, poolManager, fState, onchain, hookState, lockerState, code, slots, extra };
+    // Live admin state for the custom-tax factory, curve factory and compounder (own owner,
+    // settings and links), read once alongside the rest of the snapshot.
+    const extraAdmin = {};
+    const rdU = (h) => h ? decodeUint256(h) : null;
+    const rdA = (h) => h ? v4Addr(h) : null;
+    await Promise.all([
+      (async()=>{
+        const addr = extraAddrs.customFactory; if(!addr || !(extra.customFactory && extra.customFactory.hasCode)){ extraAdmin.customFactory = null; return; }
+        const r = await Promise.all([OWNER_SELECTOR, PENDING_OWNER_SELECTOR, LAUNCH_FEE_SELECTOR, V4_BUY_IN_SLIPPAGE_BPS_SELECTOR, MAX_CREATOR_BUY_BPS_SELECTOR, LP_LOCK_DURATION_SELECTOR,
+          V4_TAX_SOURCE_SELECTOR, V4_HOOK_SELECTOR, V4_LOCKER_SELECTOR, V4_POOL_MANAGER_SELECTOR, V4_COMPOUNDER_GETTER_SELECTOR].map(sel=> v4Read(addr, sel)));
+        extraAdmin.customFactory = r[0] ? { owner:rdA(r[0]), pendingOwner:rdA(r[1]), launchFeeWei:rdU(r[2]), buyInSlippageBps:rdU(r[3]), maxCreatorBuyBps:rdU(r[4]), lpLockSeconds:rdU(r[5]),
+          taxSource:rdA(r[6]), hook:rdA(r[7]), locker:rdA(r[8]), poolManager:rdA(r[9]), compounder:rdA(r[10]) } : undefined;
+      })(),
+      (async()=>{
+        const addr = extraAddrs.curveFactory; if(!addr || !(extra.curveFactory && extra.curveFactory.hasCode)){ extraAdmin.curveFactory = null; return; }
+        const r = await Promise.all([OWNER_SELECTOR, PENDING_OWNER_SELECTOR, CURVE_LAUNCH_FEE_SELECTOR, CURVE_FEE_BPS_SELECTOR, CURVE_SUPPLY_BPS_SELECTOR, VIRTUAL_ETH_RESERVE_DEFAULT_SELECTOR,
+          VIRTUAL_TOKEN_RESERVE_BPS_SELECTOR, POOL_SEED_TARGET_WEI_SELECTOR, MAX_CREATOR_BUY_BPS_SELECTOR, LP_LOCK_DURATION_SELECTOR, V4_PAUSED_SELECTOR, V4_STRANDED_FEES_SELECTOR, V4_TOTAL_CURVE_RESERVE_SELECTOR,
+          V4_TAX_SOURCE_SELECTOR, V4_HOOK_SELECTOR, V4_LOCKER_SELECTOR, V4_POOL_MANAGER_SELECTOR, V4_COMPOUNDER_GETTER_SELECTOR].map(sel=> v4Read(addr, sel)));
+        extraAdmin.curveFactory = r[0] ? { owner:rdA(r[0]), pendingOwner:rdA(r[1]), curveLaunchFeeWei:rdU(r[2]), curveFeeBps:rdU(r[3]), curveSupplyBps:rdU(r[4]), virtualEthReserveDefaultWei:rdU(r[5]),
+          virtualTokenReserveBps:rdU(r[6]), poolSeedTargetWei:rdU(r[7]), maxCreatorBuyBps:rdU(r[8]), lpLockSeconds:rdU(r[9]), paused: r[10] ? rdU(r[10])!==0n : null, strandedFeesWei:rdU(r[11]), totalReserveWei:rdU(r[12]),
+          taxSource:rdA(r[13]), hook:rdA(r[14]), locker:rdA(r[15]), poolManager:rdA(r[16]), compounder:rdA(r[17]) } : undefined;
+      })(),
+      (async()=>{
+        const addr = extraAddrs.compounder; if(!addr || !(extra.compounder && extra.compounder.hasCode)){ extraAdmin.compounder = null; return; }
+        const [h, pm] = await Promise.all([v4Read(addr, V4_HOOK_SELECTOR), v4Read(addr, V4_POOL_MANAGER_SELECTOR)]);
+        extraAdmin.compounder = h ? { hook: rdA(h), poolManager: rdA(pm) } : undefined;
+      })(),
+    ]);
+    return { factory, hook, locker, poolManager, fState, onchain, hookState, lockerState, code, slots, extra, extraAdmin };
   }
 
   function v4CodePill(has, addr){
@@ -13307,10 +13344,186 @@
       </div>`;
   }
 
+  // ---- admin cards for the other V4 contracts: custom-tax factory, curve factory, compounder, swap router ----
+  // Shared bits. Every setter reuses runAdminAction (field ids: admin_<key>_<field>, key "v4ctf"/"v4cf").
+  function v4NotReadyCard(label, address, notDeployedHint, snap, hasCode){
+    const net = escapeHtml(NETWORKS[appMode].label);
+    if(!address) return `<div class="panel admin-panel"><div class="admin-panel-head"><h3>${label}</h3></div><div class="admin-addr-line">Not deployed on ${net}</div><p class="admin-empty">${notDeployedHint}</p></div>`;
+    if(hasCode===false) return `<div class="panel admin-panel"><div class="admin-panel-head"><h3>${label}</h3></div><div class="admin-addr-line">${escapeHtml(address)}</div><p class="admin-empty">No contract found at this address on ${net} — check the address in Platform contracts on the Overview tab.</p></div>`;
+    return `<div class="panel admin-panel"><div class="admin-panel-head"><h3>${label}</h3></div><div class="admin-addr-line">${escapeHtml(address)}</div><p class="admin-empty">Couldn't read this contract's on-chain state — check your wallet's network and try again.</p></div>`;
+  }
+  const v4Ro = (l, v) => `<div class="admin-readout"><div class="l">${l}</div><div class="v">${v}</div></div>`;
+  function v4LinkRo(label, onchainAddr, expected, expectedName){
+    if(!onchainAddr) return v4Ro(label, "—");
+    const tick = expected ? (sameAddr(onchainAddr, expected) ? " ✓" : ` ✗ differs from the configured ${expectedName}`) : "";
+    return v4Ro(label, escapeHtml(onchainAddr) + tick);
+  }
+  function v4NumField(key, id, label, ph, action, opts){
+    opts = opts || {};
+    return `<div class="admin-action-row">
+          <div class="field"><label>${label}</label><input type="number" step="${opts.step || "any"}" min="${opts.min!==undefined ? opts.min : 0}"${opts.max!==undefined ? ` max="${opts.max}"` : ""} id="admin_${key}_${id}" placeholder="${escapeHtml(String(ph))}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="${action}" data-factory-key="${key}">Update</button>
+        </div>`;
+  }
+  function v4OwnershipBlock(key, st){
+    const pendingIsZero = isZeroAddr(st.pendingOwner);
+    const walletIsPending = wallet && !pendingIsZero && sameAddr(wallet, st.pendingOwner);
+    return `
+        <div class="admin-section-label">Ownership · Ownable2Step</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Transferring ownership doesn't take effect until the new address itself calls acceptOwnership() — the current owner keeps full control until then.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Transfer ownership to</label><input type="text" id="admin_${key}_newOwner" placeholder="0x…"></div>
+          <button class="btn btn-ghost btn-sm" data-admin-action="transferOwnership" data-factory-key="${key}">Propose</button>
+        </div>
+        ${walletIsPending ? `
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">This connected wallet is the pending owner — accept to complete the transfer.</p>
+          <button class="btn btn-primary btn-sm" data-admin-action="acceptOwnership" data-factory-key="${key}">Accept ownership</button>
+        </div>` : ""}`;
+  }
+  function v4AuthPills(e){
+    if(!e) return "";
+    const p = [];
+    p.push(e.isLauncher===null ? v4Pill("warn","Hook link unreadable") : e.isLauncher ? v4Pill("ok","Authorised on hook") : v4Pill("bad","Not authorised on hook — hook.setLauncher"));
+    p.push(e.isExtraFactory===null ? v4Pill("warn","Locker link unreadable") : e.isExtraFactory ? v4Pill("ok","Authorised on locker") : v4Pill("bad","Not authorised on locker — locker.setExtraFactory"));
+    return `<div class="admin-readout-grid" style="margin-bottom:10px;"><div class="admin-readout" style="grid-column:1 / -1;"><div class="l">Wiring</div><div class="v">${p.join(" ")}</div></div></div>`;
+  }
+
+  function v4CustomFactoryPanelHTML(snap){
+    const label = "V4CustomTokenFactory";
+    const addr = v4CustomTokenFactoryAddress(), e = snap.extra && snap.extra.customFactory, st = snap.extraAdmin && snap.extraAdmin.customFactory;
+    if(!addr || !st) return v4NotReadyCard(label, addr, "Set its address in Platform contracts on the Overview tab once it's deployed — V4 custom-tax launches stay off until then.", snap, e ? e.hasCode : null);
+    const key = "v4ctf";
+    return `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>${label}</h3></div>
+        <div class="admin-addr-line">${escapeHtml(addr)}</div>
+        ${v4AuthPills(e)}
+        <div class="admin-section-label">Current state</div>
+        <div class="admin-readout-grid">
+          ${v4Ro("Owner", escapeHtml(st.owner))}
+          ${v4Ro("Pending owner", isZeroAddr(st.pendingOwner) ? "None" : escapeHtml(st.pendingOwner))}
+          ${v4Ro("Launch fee", `${weiToEtherString(st.launchFeeWei,6)} ETH`)}
+          ${v4Ro("Creator buy-in slippage", st.buyInSlippageBps===null ? "—" : `${(Number(st.buyInSlippageBps)/100).toFixed(2)}%`)}
+          ${v4Ro("Max creator buy-in", `${(Number(st.maxCreatorBuyBps)/100).toFixed(2)}%`)}
+          ${v4Ro("LP lock duration", `${fmtInt(Number(st.lpLockSeconds)/86400)} days`)}
+          ${v4LinkRo("Tax source", st.taxSource, snap.factory, "V4TokenFactory")}
+          ${v4LinkRo("Hook", st.hook, snap.hook, "V4TaxHook")}
+          ${v4LinkRo("Locker", st.locker, snap.locker, "V4LiquidityLocker")}
+          ${v4LinkRo("PoolManager", st.poolManager, snap.poolManager, "PoolManager")}
+          ${v4LinkRo("Compounder", st.compounder, v4CompounderAddress(), "V4LiquidityCompounder")}
+        </div>
+        <p class="admin-empty">Tax terms (rate, reward splits, price feed, graduation target) are copied from the V4TokenFactory when each pool is created, so change those on the V4TokenFactory card. The settings below are this factory's own and apply to launches from now on.</p>
+        <div class="admin-section-label">Launch settings</div>
+        ${v4NumField(key,"launchFee","Launch fee (ETH)", weiToEtherString(st.launchFeeWei,6), "launchFee")}
+        ${v4NumField(key,"maxBuyBps","Max creator buy-in (bps, 10000 = 100%)", st.maxCreatorBuyBps, "maxCreatorBuyBps", {step:1, max:10000})}
+        ${v4NumField(key,"buyInSlippage","Creator buy-in slippage (bps, 500–800)", st.buyInSlippageBps===null ? "500–800" : st.buyInSlippageBps, "buyInSlippage", {step:1, min:500, max:800})}
+        ${v4NumField(key,"lpLockDays","LP lock duration (days)", fmtInt(Number(st.lpLockSeconds)/86400), "lpLockDuration", {step:1})}
+        ${v4OwnershipBlock(key, st)}
+      </div>`;
+  }
+
+  function v4CurveFactoryPanelHTML(snap){
+    const label = "V4CurveFactory";
+    const addr = v4CurveFactoryAddress(), e = snap.extra && snap.extra.curveFactory, st = snap.extraAdmin && snap.extraAdmin.curveFactory;
+    if(!addr || !st) return v4NotReadyCard(label, addr, "Set its address in Platform contracts on the Overview tab once it's deployed — V4 Quick Launch stays off until then.", snap, e ? e.hasCode : null);
+    const key = "v4cf";
+    return `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>${label}</h3></div>
+        <div class="admin-addr-line">${escapeHtml(addr)}</div>
+        ${v4AuthPills(e)}
+        <div class="admin-section-label">Current state</div>
+        <div class="admin-readout-grid">
+          ${v4Ro("Owner", escapeHtml(st.owner))}
+          ${v4Ro("Pending owner", isZeroAddr(st.pendingOwner) ? "None" : escapeHtml(st.pendingOwner))}
+          ${v4Ro("Curve buying", st.paused===null ? "—" : st.paused ? "PAUSED" : "Open")}
+          ${v4Ro("Curve launch fee", `${weiToEtherString(st.curveLaunchFeeWei,6)} ETH`)}
+          ${v4Ro("Curve fee (buy/sell)", `${(Number(st.curveFeeBps)/100).toFixed(2)}%`)}
+          ${v4Ro("Curve supply", `${(Number(st.curveSupplyBps)/100).toFixed(2)}% of totalSupply tradable on the curve`)}
+          ${v4Ro("Virtual ETH reserve default", `${weiToEtherString(st.virtualEthReserveDefaultWei,4)} ETH`)}
+          ${v4Ro("Virtual token reserve", `${(Number(st.virtualTokenReserveBps)/100).toFixed(2)}% of totalSupply`)}
+          ${v4Ro("Pool seed target", `${weiToEtherString(st.poolSeedTargetWei,4)} ETH`)}
+          ${v4Ro("Max creator buy-in", `${(Number(st.maxCreatorBuyBps)/100).toFixed(2)}%`)}
+          ${v4Ro("LP lock duration", `${fmtInt(Number(st.lpLockSeconds)/86400)} days`)}
+          ${v4Ro("ETH held in curves", st.totalReserveWei===null ? "—" : `${weiToEtherString(st.totalReserveWei,4)} ETH`)}
+          ${v4Ro("Stranded fees", st.strandedFeesWei===null ? "—" : `${weiToEtherString(st.strandedFeesWei,6)} ETH`)}
+          ${v4LinkRo("Tax source", st.taxSource, snap.factory, "V4TokenFactory")}
+          ${v4LinkRo("Hook", st.hook, snap.hook, "V4TaxHook")}
+          ${v4LinkRo("Locker", st.locker, snap.locker, "V4LiquidityLocker")}
+          ${v4LinkRo("PoolManager", st.poolManager, snap.poolManager, "PoolManager")}
+          ${v4LinkRo("Compounder", st.compounder, v4CompounderAddress(), "V4LiquidityCompounder")}
+        </div>
+        <p class="admin-empty">After graduation a curve token trades in a normal V4 pool taxed with the V4TokenFactory's terms (see that card). The values below are snapshotted onto each curve when it's created, so a live curve keeps the terms it launched with.</p>
+        <div class="admin-section-label">Curve mechanics · applies to curves created from now on</div>
+        ${v4NumField(key,"curveLaunchFee","Curve launch fee (ETH)", weiToEtherString(st.curveLaunchFeeWei,6), "curveLaunchFee")}
+        ${v4NumField(key,"curveFeeBps","Curve fee, buy/sell (bps, 10000 = 100%)", st.curveFeeBps, "curveFeeBps", {step:1, max:2000})}
+        ${v4NumField(key,"curveSupplyBps","Curve supply (bps of totalSupply)", st.curveSupplyBps, "curveSupplyBps", {step:1, min:1, max:10000})}
+        ${v4NumField(key,"virtualEthReserveDefault","Virtual ETH reserve default (ETH)", weiToEtherString(st.virtualEthReserveDefaultWei,4), "virtualEthReserveDefault")}
+        ${v4NumField(key,"virtualTokenReserveBps","Virtual token reserve (bps of totalSupply)", st.virtualTokenReserveBps, "virtualTokenReserveBps", {step:1, min:1})}
+        ${v4NumField(key,"poolSeedTargetWei","Pool seed target (ETH) — the graduation threshold", weiToEtherString(st.poolSeedTargetWei,4), "poolSeedTargetWei", {min:0.000001})}
+        <div class="admin-section-label">Launch settings</div>
+        ${v4NumField(key,"maxBuyBps","Max creator buy-in (bps, 10000 = 100%)", st.maxCreatorBuyBps, "maxCreatorBuyBps", {step:1, max:10000})}
+        ${v4NumField(key,"lpLockDays","LP lock duration (days)", fmtInt(Number(st.lpLockSeconds)/86400), "lpLockDuration", {step:1})}
+        <div class="admin-section-label">Emergency pause</div>
+        <p class="admin-empty" style="margin-bottom:10px;">Pausing blocks new curve buys only — sells and graduation keep working, so holders can always exit.</p>
+        <div class="admin-action-row">
+          <p class="admin-empty" style="margin:0; flex:1;">Currently ${st.paused ? "paused" : "open"}.</p>
+          ${st.paused
+            ? `<button class="btn btn-primary btn-sm" data-admin-action="unpause" data-factory-key="${key}">Unpause</button>`
+            : `<button class="btn btn-ghost btn-sm" data-admin-action="pause" data-factory-key="${key}">Pause buying</button>`}
+        </div>
+        <p class="admin-empty">Fee and token rescue functions exist on this contract but are intentionally not exposed on this page.</p>
+        ${v4OwnershipBlock(key, st)}
+      </div>`;
+  }
+
+  function v4CompounderPanelHTML(snap){
+    const label = "V4LiquidityCompounder";
+    const addr = v4CompounderAddress(), e = snap.extra && snap.extra.compounder, st = snap.extraAdmin && snap.extraAdmin.compounder;
+    if(!addr || !st) return v4NotReadyCard(label, addr, "Set its address in Platform contracts on the Overview tab once it's deployed — without it the custom tokens' liquidity share can't compound.", snap, e ? e.hasCode : null);
+    const pills = [];
+    pills.push(e.setOnHook===null ? v4Pill("warn","Hook link unreadable") : e.setOnHook ? v4Pill("ok","Set on hook") : v4Pill("bad","Not the hook's compounder — hook.setLiquidityCompounder"));
+    pills.push(e.exempt===null ? v4Pill("warn","Couldn't check exemption") : e.exempt ? v4Pill("ok","Tax-exempt") : v4Pill("bad","Not tax-exempt — hook.setTaxExempt(compounder, true)"));
+    return `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>${label}</h3></div>
+        <div class="admin-addr-line">${escapeHtml(addr)}</div>
+        <div class="admin-section-label">Current state</div>
+        <div class="admin-readout-grid">
+          <div class="admin-readout" style="grid-column:1 / -1;"><div class="l">Wiring</div><div class="v">${pills.join(" ")}</div></div>
+          ${v4LinkRo("Hook", st.hook, snap.hook, "V4TaxHook")}
+          ${v4LinkRo("PoolManager", st.poolManager, snap.poolManager, "PoolManager")}
+        </div>
+        <p class="admin-empty">The compounder has no owner and no settings. It turns the custom tokens' liquidity share into permanent pool liquidity, and anyone can trigger it (the relayer's keeper does so automatically). The only admin steps are the two on the hook: set it as the hook's compounder, and make it tax-exempt — both shown above.</p>
+      </div>`;
+  }
+
+  function v4SwapRouterPanelHTML(snap){
+    const label = "V4SwapRouter";
+    const addr = v4SwapRouterAddress(), e = snap.extra && snap.extra.swapRouter;
+    if(!addr || !e || !e.hasCode) return v4NotReadyCard(label, addr, "Set its address in Platform contracts on the Overview tab once it's deployed — the site can't buy or sell V4 tokens without it.", snap, e ? e.hasCode : null);
+    return `
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>${label}</h3></div>
+        <div class="admin-addr-line">${escapeHtml(addr)}</div>
+        <div class="admin-section-label">Current state</div>
+        <div class="admin-readout-grid">
+          ${v4LinkRo("Hook", e.routerHook, snap.hook, "V4TaxHook")}
+          ${v4LinkRo("PoolManager", e.routerPm, snap.poolManager, "PoolManager")}
+        </div>
+        <p class="admin-empty">The trading router the site uses for V4 buys and sells. It has no owner and no settings — to point the site at a different router, change its address in Platform contracts on the Overview tab.</p>
+      </div>`;
+  }
+
   function v4ContractsPanelsHTML(snap){
     return adminFactoryPanelHTML("v4", "V4TokenFactory", snap.factory, snap.fState, { proto:"v4", omitRewardSlots:true })
       + v4HookPanelHTML(snap)
-      + v4LockerPanelHTML(snap);
+      + v4LockerPanelHTML(snap)
+      + v4CustomFactoryPanelHTML(snap)
+      + v4CurveFactoryPanelHTML(snap)
+      + v4CompounderPanelHTML(snap)
+      + v4SwapRouterPanelHTML(snap);
   }
 
   // Rewards: where the V4 tax goes. On V4 every cut is paid in the token itself
@@ -14070,6 +14283,12 @@
         if(v && !isAddressLike(v)) throw new Error("Fee wallet distributor must be a valid address, or left blank to unset it.");
         data = encodeAddressCalldata(SET_FEE_WALLET_DISTRIBUTOR_SELECTOR, v || ZERO_ADDRESS);
         successMsg = v ? "Fee wallet distributor updated." : "Fee wallet distributor cleared — the fee-wallet remainder goes straight to the plain wallet again.";
+      } else if(action==="pause"){
+        data = "0x"+V4_PAUSE_SELECTOR;
+        successMsg = "Paused — new curve buys are blocked (sells and graduation still work).";
+      } else if(action==="unpause"){
+        data = "0x"+V4_UNPAUSE_SELECTOR;
+        successMsg = "Unpaused — curve buying is open again.";
       } else if(action==="transferOwnership"){
         const v = field("newOwner").value.trim();
         if(!isAddressLike(v)) throw new Error("Enter a valid address to propose as the new owner.");
