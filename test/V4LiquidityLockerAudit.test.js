@@ -79,19 +79,17 @@ describe("V4LiquidityLocker security audit", function () {
 
   // ------------------------------------------------------------ LK-1
   describe("LK-1. unlock time can never wrap into the past", () => {
-    it("a launcher with an absurd lock duration is refused instead of creating an expired lock", async () => {
-      await (await factory.setLpLockDuration(2n ** 64n - 100n)).wait(); // V4TokenFactory's setter has no bound
-      await expect(factory.connect(creator).createToken("T", "T", SUPPLY, true, ETH("10"), 0, 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
-        .to.be.revertedWith("V4LiquidityLocker: unlock time out of range");
+    it("the factory's setter now refuses an absurd lock duration at the source (the locker's own range check stays as a second line)", async () => {
+      await expect(factory.setLpLockDuration(2n ** 64n - 100n)).to.be.revertedWith("V4TokenFactory: lock duration above 10 year ceiling");
     });
 
-    it("the largest representable unlock time is accepted and stored exactly", async () => {
-      const max = 2n ** 64n - 1n;
-      await (await factory.setLpLockDuration(max - (await now()) - 1000n)).wait();
+    it("the longest duration the factory allows (10 years) is stored exactly", async () => {
+      await (await factory.setLpLockDuration(3650 * 24 * 3600)).wait();
       await launch();
       const lock = await locker.locks(await lastLockOf(creator.address));
-      expect(lock.unlockTime).to.be.gt(max - 2000n);
-      expect(lock.unlockTime).to.be.lte(max);
+      const t = await now();
+      expect(lock.unlockTime).to.be.gt(t + BigInt(3650 * 24 * 3600) - 2000n);
+      expect(lock.unlockTime).to.be.lte(t + BigInt(3650 * 24 * 3600));
     });
   });
 
