@@ -2234,6 +2234,7 @@
   const V4_LIQUIDITY_ADDED_TOPIC0 = "0xea3191ffbe2f62bfd724ee8d971b15ff9b7994e3a9169dc4c60443be3e4a43c4"; // LiquidityAdded(address,address,uint256,uint256,uint256,uint256,uint256)
   const POOL_ID_OF_SELECTOR = "30040054"; // poolIdOf(address) -> bytes32
   const V4_EIP712_DOMAIN_NAME = "HoodLaunchV4TokenFactory";
+  const ADMIN_UI_BUILD = "2026-10-07-v4-all-contracts"; // bump when the admin screens change, so you can tell which index.html is loaded
   const V4_CONFIG_KEYS = ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"];
   // V4 custom-tax factory + V4 bonding-curve factory (V4CustomTokenFactory /
   // V4CurveFactory). Selectors/topics computed with ethers from the compiled
@@ -13037,7 +13038,7 @@
     }));
     // The custom-tax factory, the curve factory and the liquidity compounder:
     // deployed? authorised on the hook/locker? compounder wired + exempt?
-    const extraAddrs = { customFactory: v4CustomTokenFactoryAddress(), curveFactory: v4CurveFactoryAddress(), compounder: v4CompounderAddress() };
+    const extraAddrs = { customFactory: v4CustomTokenFactoryAddress(), curveFactory: v4CurveFactoryAddress(), compounder: v4CompounderAddress(), swapRouter: v4SwapRouterAddress() };
     const extra = {};
     const hookCompH = await v4Read(hook, V4_HOOK_COMPOUNDER_SELECTOR);
     const hookCompounder = hookCompH ? v4Addr(hookCompH) : null;
@@ -13045,6 +13046,15 @@
       const addr = extraAddrs[k];
       if(!addr){ extra[k] = null; return; }
       const hasCode = await v4HasCode(addr);
+      if(k==="swapRouter"){
+        // The trading router: wired to our hook and to the same PoolManager?
+        const [rHookH, rPmH] = await Promise.all([
+          hasCode ? v4Read(addr, V4_HOOK_SELECTOR) : null,
+          hasCode ? v4Read(addr, V4_POOL_MANAGER_SELECTOR) : null,
+        ]);
+        extra[k] = { addr, hasCode, routerHook: rHookH ? v4Addr(rHookH) : null, routerPm: rPmH ? v4Addr(rPmH) : null };
+        return;
+      }
       const [launcherH, extraFH, exemptH, ownerH] = await Promise.all([
         hook && k!=="compounder" ? v4Read(hook, V4_HOOK_IS_LAUNCHER_SELECTOR + encodeAddressParam(addr)) : null,
         locker && k!=="compounder" ? v4Read(locker, V4_LOCKER_EXTRA_FACTORIES_SELECTOR + encodeAddressParam(addr)) : null,
@@ -13136,6 +13146,20 @@
         if(e.owner) p.push(wallet && sameAddr(e.owner, wallet) ? v4Pill("ok","You are owner") : v4Pill("warn","Owner: "+fmtAddr(e.owner)));
         return p;
       };
+      {
+        const e = ex.swapRouter;
+        const p = [];
+        if(!e) p.push(v4Pill("warn","Not configured — V4 buying and selling off"));
+        else {
+          p.push(v4CodePill(e.hasCode, e.addr));
+          if(e.hasCode){
+            if(e.routerHook===null) p.push(v4Pill("warn","Hook link unreadable"));
+            else if(hook) p.push(sameAddr(e.routerHook, hook) ? v4Pill("ok","Wired to hook") : v4Pill("bad","Router's hook is "+fmtAddr(e.routerHook)));
+            if(poolManager && e.routerPm) p.push(sameAddr(e.routerPm, poolManager) ? v4Pill("ok","PoolManager matches") : v4Pill("bad","Different PoolManager"));
+          }
+        }
+        row("V4SwapRouter", v4SwapRouterAddress(), p, "Trading router the site uses to buy and sell V4 tokens");
+      }
       row("V4CustomTokenFactory", v4CustomTokenFactoryAddress(), factoryPills(ex.customFactory, "Not configured — V4 custom tax launches disabled"), "Custom-tax launches (in-kind fees)");
       row("V4CurveFactory", v4CurveFactoryAddress(), factoryPills(ex.curveFactory, "Not configured — V4 Quick Launch disabled"), "Bonding curve, then a V4 pool at graduation");
       {
@@ -13173,7 +13197,7 @@
     return `
       <div class="panel admin-panel" style="grid-column:1 / -1; margin-bottom:14px;">
         <div class="admin-panel-head"><h3><span class="proto-badge v4">V4</span> V4 contracts</h3></div>
-        <p class="admin-empty" style="margin:0 0 12px;">Live status on ${escapeHtml(NETWORKS[appMode].label)}. Addresses for the first three come from Platform contracts above; everything below them is read from the V4TokenFactory itself, so a mismatch shows up here as a red or amber tag.</p>
+        <p class="admin-empty" style="margin:0 0 12px;">Live status on ${escapeHtml(NETWORKS[appMode].label)}. All seven V4 contracts below come from Platform contracts above; their links to each other, plus the distributors and wallets the V4TokenFactory points at, are read live from the chain, so a mismatch shows up as a red or amber tag. <span style="opacity:.6">Admin UI build: ${escapeHtml(ADMIN_UI_BUILD)}</span></p>
         <div class="dc-wrap"><table class="dc-table"><thead><tr><th>Contract</th><th>Address</th><th>Status</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>
       </div>`;
   }
