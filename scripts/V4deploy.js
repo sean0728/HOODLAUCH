@@ -53,6 +53,9 @@
 //   LP_LOCK_DURATION_SECONDS   LP lock (default 15 days; 1 second to 10 years).
 //   SNIPE_START_BPS            anti-snipe surcharge on buys at launch (default 2500 = 25%, max 7000; 0 = off).
 //   SNIPE_DURATION_SECONDS     how long it takes to fall to zero (default 180, max 3600; 0 = off).
+//                              Applied to V4TokenFactory, V4CustomTokenFactory and V4CurveFactory alike; each has
+//                              its own on-chain value, and PLAIN_/CUSTOM_/CURVE_ prefixed versions of both
+//                              variables (e.g. CURVE_SNIPE_START_BPS) override it for one mode.
 //   OWNER_ADDRESS              If set, ownership of every owned contract is proposed to this wallet
 //                              at the end (Ownable2Step: that wallet must accept each one).
 //   DEPLOY_DISTRIBUTORS        "false" to skip both distributors.
@@ -336,20 +339,22 @@ async function main() {
   if (!(await hook.taxExempt(compounderA)))
     await send("factory.setTaxExempt(compounder, true)", () => factory.setTaxExempt(compounderA, true));
 
-  // Snipe protection: the default every NEW pool copies at creation (pools already
-  // trading keep theirs). A re-run only changes it if the env values differ.
-  {
-    const snipeStart = BigInt(process.env.SNIPE_START_BPS ?? 2500);
-    const snipeDuration = BigInt(process.env.SNIPE_DURATION_SECONDS ?? 180);
-    if ((await hook.snipeDefaultStartBps()) !== snipeStart || (await hook.snipeDefaultDuration()) !== snipeDuration)
-      await send(`factory.setSnipeProtection(${snipeStart} bps, ${snipeDuration}s)`, () => factory.setSnipeProtection(snipeStart, snipeDuration));
-  }
-
   for (const [label, f] of [["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory]]) {
     const fa = await A(f);
     if (!(await hook.launchers(fa))) await send(`hook.setLauncher(${label}, true)`, () => hook.setLauncher(fa, true));
     if (!(await locker.extraFactories(fa)))
       await send(`locker.setExtraFactory(${label}, true)`, () => locker.setExtraFactory(fa, true));
+  }
+
+  // Snipe protection: the setting every NEW pool of each launch mode copies at creation
+  // (pools already trading keep theirs). Each launcher has its own value; a re-run only
+  // changes one if the env values differ. Needs the launchers registered above.
+  for (const [label, f, pre] of [["V4TokenFactory", factory, "PLAIN"], ["V4CustomTokenFactory", customFactory, "CUSTOM"], ["V4CurveFactory", curveFactory, "CURVE"]]) {
+    const snipeStart = BigInt(process.env[`${pre}_SNIPE_START_BPS`] ?? process.env.SNIPE_START_BPS ?? 2500);
+    const snipeDuration = BigInt(process.env[`${pre}_SNIPE_DURATION_SECONDS`] ?? process.env.SNIPE_DURATION_SECONDS ?? 180);
+    const cur = await hook.snipeDefaults(await A(f));
+    if (cur.startBps !== snipeStart || cur.duration !== snipeDuration)
+      await send(`${label}.setSnipeProtection(${snipeStart} bps, ${snipeDuration}s)`, () => f.setSnipeProtection(snipeStart, snipeDuration));
   }
 
   if (withDistributors) {
