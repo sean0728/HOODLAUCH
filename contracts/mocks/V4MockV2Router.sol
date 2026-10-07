@@ -19,6 +19,9 @@ contract V4MockV2Router {
 
     function setQuoteDiscountBps(uint256 b) external { quoteDiscountBps = b; }
 
+    /// @dev Test-only: moves the pool price (what a sandwich front-run does).
+    function setRate(uint256 r) external { rate = r; }
+
     function getAmountsOut(uint256 amountIn, address[] calldata path) external view returns (uint256[] memory amounts) {
         amounts = new uint256[](path.length);
         amounts[0] = amountIn;
