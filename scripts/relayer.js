@@ -1193,7 +1193,8 @@ const V4_TAX_SOURCE_ABI = ["function taxSource() view returns (address)"];
 // once pending(token) is worth it: at least V4_COMPOUND_MIN_SUPPLY_BPS of the
 // token's total supply (default 1 bp = 0.01%) and strictly more than 1 wei
 // (the contract itself reverts "nothing to compound" below 2 wei).
-const V4_COMPOUNDER_ADDRESS = process.env.V4_COMPOUNDER_ADDRESS || null;
+// `let`: main() fills it from the saved Admin config when the env var is unset.
+let V4_COMPOUNDER_ADDRESS = process.env.V4_COMPOUNDER_ADDRESS || null;
 const V4_COMPOUND_MIN_SUPPLY_BPS = (() => {
   const n = Number(process.env.V4_COMPOUND_MIN_SUPPLY_BPS);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 1;
@@ -1851,9 +1852,73 @@ async function loadRelayerSettingsFromStore() {
   console.log(`[relayer-settings] loaded persisted overrides: ${JSON.stringify(redactSecretSettings(patch))}`);
 }
 
+// ---------------------------------------------------------------------
+// Contract addresses from the Admin panel instead of host secrets.
+//
+// The factory (and compounder) addresses are not secrets, so they no longer
+// have to be host environment variables. For each one the relayer uses, in
+// this order, the first that has a value:
+//   1) the environment variable (e.g. V4_TOKEN_FACTORY_ADDRESS) — still works,
+//      and wins, so an existing setup behaves exactly as before;
+//   2) the platform config an admin saved with "Save (all visitors)" in the
+//      Admin panel (lib/relayerStore.js getPlatformConfig) — the same values the
+//      site itself uses, changed from the browser with no redeploy.
+// The {demo, live} pair is chosen from the network this process runs on:
+// robinhoodMainnet reads "live", anything else reads "demo". CONFIG_MODE=demo|live
+// overrides that.
+//
+// Addresses are read once at startup, so after saving new ones in Admin the
+// relayer needs a restart to pick them up.
+const CONFIG_ADDRESS_ENV = {
+  tokenFactory: "TOKEN_FACTORY_ADDRESS",
+  customTokenFactory: "CUSTOM_TOKEN_FACTORY_ADDRESS",
+  bondingCurveFactory: "BONDING_CURVE_FACTORY_ADDRESS",
+  customBondingCurveFactory: "CUSTOM_BONDING_CURVE_FACTORY_ADDRESS",
+  v4TokenFactory: "V4_TOKEN_FACTORY_ADDRESS",
+  v4CustomTokenFactory: "V4_CUSTOM_TOKEN_FACTORY_ADDRESS",
+  v4CurveFactory: "V4_CURVE_FACTORY_ADDRESS",
+  v4LiquidityCompounder: "V4_COMPOUNDER_ADDRESS",
+};
+
+async function loadConfigAddresses() {
+  const wanted = String(process.env.CONFIG_MODE || "").toLowerCase();
+  const mode =
+    wanted === "live" || wanted === "demo" ? wanted : hre.network.name === "robinhoodMainnet" ? "live" : "demo";
+
+  let savedCfg = null;
+  try {
+    savedCfg = await getPlatformConfig();
+  } catch (err) {
+    console.warn(`[config] saved admin config could not be read (${err.message}) — using env vars only.`);
+  }
+
+  const isAddr = (v) => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v.trim());
+  const out = {};
+  console.log(`[config] contract addresses for "${mode}" (network ${hre.network.name}); env var > saved Admin config`);
+  for (const [key, envName] of Object.entries(CONFIG_ADDRESS_ENV)) {
+    const fromEnv = process.env[envName];
+    const fromSaved = savedCfg && savedCfg[key] && savedCfg[key][mode];
+    let value = null;
+    let source = "";
+    if (fromEnv) {
+      value = fromEnv;
+      source = "env";
+    } else if (isAddr(fromSaved)) {
+      value = fromSaved.trim();
+      source = "Admin config";
+    }
+    out[key] = value;
+    if (value) console.log(`[config]   ${key.padEnd(26)} ${value}  (${source})`);
+  }
+  if (!savedCfg) console.log("[config] no Admin config saved yet — nothing to read from it.");
+  V4_COMPOUNDER_ADDRESS = out.v4LiquidityCompounder;
+  return out;
+}
+
 async function main() {
   await initStorageBackend();
   await loadRelayerSettingsFromStore();
+  const cfgAddr = await loadConfigAddresses();
   logEnvVarPresence();
   const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
   if (!relayerPrivateKey) {
@@ -1863,26 +1928,26 @@ async function main() {
         "cover gas for the launches you expect to relay, and never reuse it anywhere else."
     );
   }
-  const tokenFactoryAddress = process.env.TOKEN_FACTORY_ADDRESS || null;
-  const customTokenFactoryAddress = process.env.CUSTOM_TOKEN_FACTORY_ADDRESS || null;
+  const tokenFactoryAddress = cfgAddr.tokenFactory; // env var, else saved Admin config
+  const customTokenFactoryAddress = cfgAddr.customTokenFactory; // env var, else saved Admin config
   // Quick Launch's two bonding-curve factories — optional, same as the two
   // above. Gasless relaying for these only works once the deployed
   // contracts actually have this relay code (see BondingCurveFactory.sol /
   // CustomBondingCurveFactory.sol's own "gasless relayed launches" section)
   // and the factory owner has run scripts/setRelayer.js against them.
-  const bondingCurveFactoryAddress = process.env.BONDING_CURVE_FACTORY_ADDRESS || null;
-  const customBondingCurveFactoryAddress = process.env.CUSTOM_BONDING_CURVE_FACTORY_ADDRESS || null;
+  const bondingCurveFactoryAddress = cfgAddr.bondingCurveFactory; // env var, else saved Admin config
+  const customBondingCurveFactoryAddress = cfgAddr.customBondingCurveFactory; // env var, else saved Admin config
   // Uniswap V4 TokenFactory (admin-only, under development) — optional and
   // fully independent of the V2 factories above: its own watcher, its own
   // POST /vouchers/v4token route, its own cursor. Leaving it unset changes
   // nothing about V2.
-  const v4TokenFactoryAddress = process.env.V4_TOKEN_FACTORY_ADDRESS || null;
+  const v4TokenFactoryAddress = cfgAddr.v4TokenFactory; // env var, else saved Admin config
   // V4CustomTokenFactory / V4CurveFactory — optional, direct-launch only
   // (no voucher/relay path, so no POST /vouchers/... route and nothing for
   // the relaying loops to do). They exist here for discovery, price and
   // activity polling, and the compounder keeper.
-  const v4CustomTokenFactoryAddress = process.env.V4_CUSTOM_TOKEN_FACTORY_ADDRESS || null;
-  const v4CurveFactoryAddress = process.env.V4_CURVE_FACTORY_ADDRESS || null;
+  const v4CustomTokenFactoryAddress = cfgAddr.v4CustomTokenFactory; // env var, else saved Admin config
+  const v4CurveFactoryAddress = cfgAddr.v4CurveFactory; // env var, else saved Admin config
   if (
     !tokenFactoryAddress &&
     !customTokenFactoryAddress &&
@@ -1893,7 +1958,8 @@ async function main() {
     !v4CurveFactoryAddress
   ) {
     throw new Error(
-      "Set at least one of TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS / " +
+      "No factory address found. Save at least one in the Admin panel (then restart), or set one of " +
+        "TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS / " +
         "BONDING_CURVE_FACTORY_ADDRESS / CUSTOM_BONDING_CURVE_FACTORY_ADDRESS / V4_TOKEN_FACTORY_ADDRESS / " +
         "V4_CUSTOM_TOKEN_FACTORY_ADDRESS / V4_CURVE_FACTORY_ADDRESS."
     );
