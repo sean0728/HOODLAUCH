@@ -8,6 +8,11 @@ interface IV4CurveLaunch {
         returns (address, uint256);
 }
 
+interface IV4CrdLike {
+    function claimCreatorRewardsTo(address token, address to) external returns (uint256);
+    function triggerCreatorSwap(address token, uint256 minEthOut) external returns (uint256);
+}
+
 interface IV4LockerLike {
     function withdraw(uint256 lockId) external;
     function withdrawTo(uint256 lockId, address to) external;
@@ -37,6 +42,14 @@ contract V4MockCreator {
 
     function withdrawLockTo(address locker, uint256 lockId, address to) external {
         IV4LockerLike(locker).withdrawTo(lockId, to);
+    }
+
+    function claimRewardsTo(address distributor, address token, address to) external returns (uint256) {
+        return IV4CrdLike(distributor).claimCreatorRewardsTo(token, to);
+    }
+
+    function convertRewards(address distributor, address token, uint256 minOut) external returns (uint256) {
+        return IV4CrdLike(distributor).triggerCreatorSwap(token, minOut);
     }
 
     receive() external payable {
