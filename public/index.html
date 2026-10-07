@@ -2234,7 +2234,7 @@
   const V4_LIQUIDITY_ADDED_TOPIC0 = "0xea3191ffbe2f62bfd724ee8d971b15ff9b7994e3a9169dc4c60443be3e4a43c4"; // LiquidityAdded(address,address,uint256,uint256,uint256,uint256,uint256)
   const POOL_ID_OF_SELECTOR = "30040054"; // poolIdOf(address) -> bytes32
   const V4_EIP712_DOMAIN_NAME = "HoodLaunchV4TokenFactory";
-  const ADMIN_UI_BUILD = "2026-10-07-v4-creator-rewards"; // bump when the admin screens change, so you can tell which index.html is loaded
+  const ADMIN_UI_BUILD = "2026-10-07-v4-keeper-toggle"; // bump when the admin screens change, so you can tell which index.html is loaded
   const V4_CONFIG_KEYS = ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"];
   // V4 custom-tax factory + V4 bonding-curve factory (V4CustomTokenFactory /
   // V4CurveFactory). Selectors/topics computed with ethers from the compiled
@@ -12707,6 +12707,8 @@
     { key: "telegramBotToken", label: "Telegram bot token", help: "From @BotFather — shared by both channels below. Write-only: once saved, the real value is never sent back to this page, so this field always shows blank. Leave it blank to keep the currently-saved token unchanged; paste a new one only to replace it.", secret: true },
     { key: "telegramLaunchesChatId", label: "Telegram launches chat ID", help: "Public channel's chat ID — new-launch announcements post here. Leave blank to disable launch announcements." },
     { key: "telegramAlertsChatId", label: "Telegram alerts chat ID", help: "Private channel's chat ID — relayer-wallet-mismatch alerts post here. Leave blank to disable these alerts." },
+    // Always last: the signed message follows RELAYER_SETTINGS_BOUNDS' key order. Shown at the TOP of the panel (see relayerSettingsPanelHTML).
+    { key: "v4KeeperEnabled", label: "V4 keeper (automatic sweeps)", toggle: true, help: "Master switch for the relayer's V4 automation: converting each V4 token's collected tax to ETH, paying creators, fee-wallet and platform rewards, airdrop rounds, and compounding custom-tax liquidity. While Off, every V4 sweep is skipped (the relayer wallet spends no gas on them). Takes effect on the next tick; no restart." },
   ];
   const RELAYER_SETTINGS_KEYS = RELAYER_SETTINGS_FIELDS.map(f => f.key);
 
@@ -12722,7 +12724,20 @@
   }
 
   function relayerSettingsPanelHTML(settings, bounds){
-    const rows = RELAYER_SETTINGS_FIELDS.map((f, i)=>{
+    const keeperOn = settings.v4KeeperEnabled !== false && String(settings.v4KeeperEnabled) !== "false";
+    const keeperRow = `
+        <div class="admin-cfg-row">
+          <div class="admin-cfg-label">V4 keeper (automatic sweeps) <span class="info-dot" title="${escapeHtml(RELAYER_SETTINGS_FIELDS.find(f=>f.key==="v4KeeperEnabled").help)}">?</span></div>
+          <div class="field" style="grid-column:2 / -1;">
+            <select id="rs_v4KeeperEnabled" aria-label="V4 keeper">
+              <option value="true"${keeperOn ? " selected" : ""}>On: sweeps run automatically</option>
+              <option value="false"${keeperOn ? "" : " selected"}>Off: V4 sweeps paused</option>
+            </select>
+            <div class="help-text" style="margin-top:4px;">Currently <strong>${keeperOn ? "ON" : "OFF"}</strong>. Applies to V4 only (V2 sweeps are unaffected).</div>
+          </div>
+        </div>
+        <div class="admin-cfg-row admin-cfg-head" style="margin-top:10px;"><div class="admin-cfg-col-head" style="grid-column:1 / -1;">Sweep tuning (shared by V2 and V4)</div></div>`;
+    const rows = RELAYER_SETTINGS_FIELDS.filter(f=>!f.toggle).map((f, i)=>{
       // The three telegram* fields were appended after the reward-sweep
       // fields (see RELAYER_SETTINGS_FIELDS' own comment on key order
       // needing to match relayer.js byte-for-byte) — insert a section
@@ -12770,6 +12785,7 @@
             <div class="admin-cfg-col-head">Setting</div>
             <div class="admin-cfg-col-head" style="grid-column:2 / -1;">Value</div>
           </div>
+          ${keeperRow}
           ${rows}
         </div>
         <button class="btn btn-primary" id="relayerSettingsSaveBtn">Save relayer settings</button>
