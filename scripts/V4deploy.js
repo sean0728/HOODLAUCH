@@ -343,19 +343,22 @@ async function main() {
     for (const [label, a] of [["fee-wallet distributor", fwA], ["creator-rewards distributor", crA]]) {
       if (!(await hook.taxExempt(a))) await send(`factory.setTaxExempt(${label}, true)`, () => factory.setTaxExempt(a, true));
     }
-    // The creator-rewards distributor only lets its owner, approved keepers and a
-    // token's creator convert (claiming is open). The relayer must be a keeper.
+    // The creator-rewards and fee-wallet distributors only let their owner, approved
+    // keepers (and, for creator rewards, a token's creator) convert; claiming is
+    // open. The relayer must be a keeper on both.
     const relayerKeeper = envAddr("RELAYER_ADDRESS", null);
     if (relayerKeeper) {
       const deployerOwns = !ownerAddress || ownerAddress.toLowerCase() === deployer.address.toLowerCase();
-      if (deployerOwns) {
-        if (!(await creatorDist.keepers(relayerKeeper)))
-          await send("creatorRewardsDistributor.setKeeper(relayer, true)", () => creatorDist.setKeeper(relayerKeeper, true));
-      } else {
-        console.log(`  NOTE: ${ownerAddress} owns the creator-rewards distributor. It must call setKeeper(${relayerKeeper}, true) before the relayer can convert creator rewards.`);
+      for (const [label, dist] of [["creatorRewardsDistributor", creatorDist], ["feeWalletDistributor", feeWalletDist]]) {
+        if (deployerOwns) {
+          if (!(await dist.keepers(relayerKeeper)))
+            await send(`${label}.setKeeper(relayer, true)`, () => dist.setKeeper(relayerKeeper, true));
+        } else {
+          console.log(`  NOTE: ${ownerAddress} owns the ${label}. It must call setKeeper(${relayerKeeper}, true) before the relayer can convert.`);
+        }
       }
     } else {
-      console.log("  NOTE: set RELAYER_ADDRESS (the relayer wallet) to authorise it on the creator-rewards distributor, or call setKeeper(relayerWallet, true) on it as the owner.");
+      console.log("  NOTE: set RELAYER_ADDRESS (the relayer wallet) to authorise it on the creator-rewards and fee-wallet distributors, or call setKeeper(relayerWallet, true) on each as the owner.");
     }
   }
 

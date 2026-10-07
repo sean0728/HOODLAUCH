@@ -1175,6 +1175,8 @@ const V4_PLATFORM_REWARDS_BASE_ABI = [
   "function buybackRouter() view returns (address)",
   "function roundActive() view returns (bool)",
   "function pendingAirdropTokens() view returns (uint256)",
+  "function roundAmount() view returns (uint256)",
+  "function roundUsed() view returns (uint256)",
   "function startAirdropRound()",
   "function processAirdropBatch(uint256 maxHolders)",
 ];
@@ -1187,6 +1189,10 @@ const V4_FEE_WALLET_DISTRIBUTOR_ABI = [
   "function triggerFeeWalletSwap(address token, uint256 minEthOut) returns (uint256)",
   "function triggerFeeWalletSwap(address token, uint256 minEthOut, uint256 minPlatformTokensOut) returns (uint256)",
   "function claimFeeWalletRewards(address token) returns (uint256)",
+  // Present on the audited V4FeeWalletDistributor: only the owner and approved
+  // keepers may convert. Older deployments lack these.
+  "function keepers(address) view returns (bool)",
+  "function owner() view returns (address)",
 ];
 const V4_CREATOR_REWARDS_DISTRIBUTOR_ABI = [
   ...V4_SELLER_ABI,
@@ -5944,12 +5950,42 @@ async function main() {
     const routerAddress = await d.contract.buybackRouter();
     const buyback = platformTokenAddress !== hre.ethers.ZeroAddress && routerAddress !== hre.ethers.ZeroAddress;
     const slipBps = feeWalletSlippageBpsBig();
+    // The audited distributor only lets its owner and approved keepers convert
+    // (claiming stays open). If this relayer wallet is neither, say so once and
+    // skip conversions; claims and airdrop rounds still run.
+    let canConvert = true;
+    try {
+      const isKeeper = await d.contract.keepers(relayerWallet.address);
+      const ownerAddr = await d.contract.owner();
+      canConvert = isKeeper || String(ownerAddr).toLowerCase() === relayerWallet.address.toLowerCase();
+      if (!canConvert) {
+        v4KeeperWarnOnce(
+          `keeper:${d.address}`,
+          `[v4-fee-wallet] relayer wallet ${relayerWallet.address} is not an approved keeper on the fee-wallet distributor ${d.address}, ` +
+            "so it cannot convert the platform's tax. Owner: call setKeeper(relayerWallet, true) on the distributor. Claims still run."
+        );
+      }
+    } catch (err) {
+      // an older distributor without keepers(): conversions are open to everyone
+    }
 
     for (const entry of await v4KeeperTokens()) {
       const tokenAddress = entry.tokenAddress;
       try {
+        if (!canConvert) throw Object.assign(new Error("not a keeper"), { code: "BAD_DATA" });
         const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
-        const balance = await token.balanceOf(d.address);
+        let balance = await token.balanceOf(d.address);
+        // Platform tokens already earmarked for holders (queued or owed to a running
+        // round) are not income; the audited contract leaves them out, so do we.
+        if (buyback && tokenAddress.toLowerCase() === platformTokenAddress.toLowerCase()) {
+          try {
+            const committed = (await d.contract.pendingAirdropTokens()) +
+              ((await d.contract.roundActive()) ? (await d.contract.roundAmount()) - (await d.contract.roundUsed()) : 0n);
+            balance = balance > committed ? balance - committed : 0n;
+          } catch (err) {
+            // an older distributor: no earmark accounting, use the raw balance
+          }
+        }
         if (balance > 0n && balance >= (await d.contract.swapThreshold(tokenAddress))) {
           const cap = await d.contract.maxSwapAmount(tokenAddress);
           let amountIn = cap > 0n && balance > cap ? cap : balance;
