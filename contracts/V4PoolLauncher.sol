@@ -59,6 +59,13 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
 
     uint24 public constant LP_FEE = 3000;
     int24 public constant TICK_SPACING = 60;
+    /// @notice Longest LP lock the owner can configure. The locker stores the
+    /// unlock time as a uint64; an unbounded duration could wrap it into the
+    /// past and hand the creator an already-expired lock.
+    uint256 public constant MAX_LOCK_DURATION = 3650 days;
+    /// @dev Gas given to the creator when returning seed-rounding ETH dust. Enough
+    /// for a smart wallet's receive hook, not enough to be used to grief.
+    uint256 private constant DUST_CALL_GAS = 50_000;
 
     IPoolManager public immutable poolManager;
     V4LiquidityLocker public immutable locker;
@@ -97,11 +104,28 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
 
     constructor(address taxSource_, uint256 lpLockDuration_) Ownable(msg.sender) {
         require(taxSource_ != address(0), "V4PoolLauncher: invalid tax source");
+        _checkLockDuration(lpLockDuration_);
         taxSource = IV4TaxSource(taxSource_);
-        poolManager = IPoolManager(IV4TaxSource(taxSource_).poolManager());
-        locker = V4LiquidityLocker(IV4TaxSource(taxSource_).locker());
-        hook = V4TaxHook(IV4TaxSource(taxSource_).hook());
+        address pm_ = IV4TaxSource(taxSource_).poolManager();
+        address locker_ = IV4TaxSource(taxSource_).locker();
+        address hook_ = IV4TaxSource(taxSource_).hook();
+        require(pm_ != address(0) && locker_ != address(0) && hook_ != address(0), "V4PoolLauncher: tax source not fully wired");
+        poolManager = IPoolManager(pm_);
+        locker = V4LiquidityLocker(locker_);
+        hook = V4TaxHook(hook_);
         lpLockDuration = lpLockDuration_;
+    }
+
+    function _checkLockDuration(uint256 d) private pure {
+        require(d > 0, "V4PoolLauncher: lock duration must be > 0");
+        require(d <= MAX_LOCK_DURATION, "V4PoolLauncher: lock duration above 10 year ceiling");
+    }
+
+    /// @notice Ownership can never be renounced: the owner is the only caller of
+    /// the dead-oracle escape hatch and of every setting on the launch modes.
+    /// Hand it over with the (two-step) transferOwnership instead.
+    function renounceOwnership() public view override onlyOwner {
+        revert("V4PoolLauncher: ownership cannot be renounced");
     }
 
     // ---------------------------------------------------------------
@@ -118,9 +142,21 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
         t.creatorRewardBps = taxSource.creatorRewardBps();
     }
 
-    function _requireTermsReady(TaxTerms memory t) internal pure {
+    /// @dev Refuses a launch whose snapshotted terms the hook would later
+    /// reject. This matters most for the bonding curve, which only configures
+    /// the hook at GRADUATION: terms the hook refuses would otherwise be
+    /// accepted at creation and leave a curve that can never graduate. The
+    /// checks mirror V4TaxHook.configurePool.
+    function _requireTermsReady(TaxTerms memory t) internal view {
         require(t.feeWallet != address(0), "V4PoolLauncher: platform fee wallet not configured");
         require(t.priceFeed != address(0), "V4PoolLauncher: price feed not configured");
+        require(t.priceFeed.code.length > 0, "V4PoolLauncher: price feed is not a contract");
+        require(t.feeBps <= hook.MAX_FEE_BPS(), "V4PoolLauncher: platform fee above the hook ceiling");
+        require(t.graduationTargetUsd > 0, "V4PoolLauncher: graduation target must be > 0");
+        require(
+            t.maxOracleStaleness > 0 && t.maxOracleStaleness <= type(uint32).max, "V4PoolLauncher: oracle staleness out of range"
+        );
+        require(t.rewardBps + t.creatorRewardBps <= t.feeBps, "V4PoolLauncher: reward bps exceed fee bps");
     }
 
     /// @dev launch / deploy fee: 50/50 between treasury and the platform
@@ -218,8 +254,21 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
         uint256 tokenDust = IERC20(token).balanceOf(address(this));
         if (tokenDust > 0) IV4LaunchToken(token).burn(tokenDust);
         uint256 ethDust = ethAmount - ethUsed;
-        if (ethDust > 0) _sendEth(creator_, ethDust);
+        if (ethDust > 0) _sendDust(creator_, ethDust);
         emit LiquidityAdded(token, creator_, ethUsed, tokenUsed, liquidity, block.timestamp + lpLockDuration, lockId);
+    }
+
+    /// @dev Returns seed-rounding ETH to the creator without ever letting the
+    /// creator block the launch or graduation: the call is gas-capped, and if
+    /// the creator rejects it the (tiny) dust goes to the platform treasury
+    /// instead. Graduation is permissionless and must not depend on a token
+    /// creator's receive hook.
+    function _sendDust(address creator_, uint256 amount) internal {
+        (bool ok,) = payable(creator_).call{value: amount, gas: DUST_CALL_GAS}("");
+        if (!ok) {
+            (ok,) = payable(taxSource.feeTreasury()).call{value: amount}("");
+            require(ok, "V4PoolLauncher: dust transfer failed");
+        }
     }
 
     function _sendEth(address to, uint256 amount) internal {
@@ -232,7 +281,7 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
     // ---------------------------------------------------------------
 
     function setLpLockDuration(uint256 newDuration) external onlyOwner {
-        require(newDuration > 0, "V4PoolLauncher: lock duration must be > 0");
+        _checkLockDuration(newDuration);
         lpLockDuration = newDuration;
         emit LpLockDurationUpdated(newDuration);
     }
