@@ -601,6 +601,25 @@
   .co-perf{margin-top:6px; font-family:var(--font-mono); font-size:1.05rem; font-weight:700;}
   .co-mult.up, .co-pct.up{color:var(--good-500);}
   .co-mult.down, .co-pct.down{color:var(--critical-500);}
+  .pnl-up{color:var(--good-500);} .pnl-down{color:var(--critical-500);} .pnl-flat{color:var(--paper-500);}
+  .pnl-stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; margin-bottom:16px;}
+  .pnl-stat .k{font-family:var(--font-mono,monospace); font-size:.68rem; letter-spacing:.08em; text-transform:uppercase; color:var(--paper-500); margin-bottom:4px;}
+  .pnl-stat .v{font-size:1.15rem; font-weight:700; font-variant-numeric:tabular-nums;}
+  .pnl-stat.big .v{font-size:1.6rem;}
+  .pnl-tablewrap{overflow-x:auto;}
+  table.pnl-table{width:100%; border-collapse:collapse; font-size:.85rem; font-variant-numeric:tabular-nums;}
+  .pnl-table th{font-family:var(--font-mono,monospace); font-size:.66rem; letter-spacing:.08em; text-transform:uppercase; color:var(--paper-500); text-align:right; padding:6px 10px; font-weight:500; white-space:nowrap;}
+  .pnl-table td{padding:9px 10px; text-align:right; border-top:1px solid var(--line-strong); white-space:nowrap;}
+  .pnl-table th:first-child, .pnl-table td:first-child{text-align:left;}
+  .pnl-table.lb th:nth-child(2), .pnl-table.lb td:nth-child(2){text-align:left;}
+  .pnl-table tr.me td{background:rgba(255,160,40,.07);}
+  .pnl-rank{font-family:var(--font-mono,monospace); font-weight:700; color:var(--paper-500); width:2.2rem;}
+  .pnl-table tr.top1 .pnl-rank, .pnl-table tr.top2 .pnl-rank, .pnl-table tr.top3 .pnl-rank{color:var(--amber-400, #ffb347);}
+  .pnl-note{font-size:.75rem; color:var(--paper-500); margin-top:12px; line-height:1.5;}
+  .pnl-trades .tr{display:flex; gap:10px; align-items:center; padding:7px 0; border-top:1px solid var(--line-strong); font-size:.85rem; flex-wrap:wrap;}
+  .pnl-trades .side{font-family:var(--font-mono,monospace); font-size:.7rem; letter-spacing:.06em; text-transform:uppercase; padding:2px 8px; border-radius:99px; border:1px solid currentColor;}
+  .pnl-trades .side.buy{color:var(--good-500);} .pnl-trades .side.sell{color:var(--critical-500);}
+  .pnl-trades .when{margin-left:auto; color:var(--paper-500); font-size:.75rem;}
   .co-mult.flat{color:var(--paper-500); font-size:.8rem; font-weight:500;}
   .co-pct{font-size:.8rem; font-weight:600;}
   .co-peak{font-size:.72rem; font-weight:500; color:var(--paper-500); margin-left:6px;}
@@ -775,6 +794,7 @@
       <button class="tab" role="tab" aria-selected="true" data-view="explore">Explore</button>
       <button class="tab" role="tab" aria-selected="false" data-view="create">Launch</button>
       <button class="tab" role="tab" aria-selected="false" data-view="portfolio">Portfolio</button>
+      <button class="tab" role="tab" aria-selected="false" data-view="leaderboard">Leaderboard</button>
       <button class="tab" role="tab" aria-selected="false" data-view="profile">Profile</button>
       <button class="tab" role="tab" aria-selected="false" data-view="admin" id="adminTabBtn" hidden>Admin</button>
     </div>
@@ -952,6 +972,11 @@
     <!-- ===================== PORTFOLIO ===================== -->
     <section class="view" id="view-portfolio">
       <div class="portfolio-wrap" id="portfolioWrap"></div>
+    </section>
+
+    <!-- ===================== LEADERBOARD ===================== -->
+    <section class="view" id="view-leaderboard">
+      <div class="profile-wrap" id="leaderboardWrap"></div>
     </section>
 
     <!-- ===================== PROFILE ===================== -->
@@ -1296,7 +1321,7 @@
 
   /* ---------------- nav / views ---------------- */
   const tabs = document.querySelectorAll(".tab");
-  const views = { explore: document.getElementById("view-explore"), create: document.getElementById("view-create"), portfolio: document.getElementById("view-portfolio"), profile: document.getElementById("view-profile"), detail: document.getElementById("view-detail"), admin: document.getElementById("view-admin") };
+  const views = { explore: document.getElementById("view-explore"), create: document.getElementById("view-create"), portfolio: document.getElementById("view-portfolio"), leaderboard: document.getElementById("view-leaderboard"), profile: document.getElementById("view-profile"), detail: document.getElementById("view-detail"), admin: document.getElementById("view-admin") };
 
   function showView(name){
     // The admin tab is hidden (see refreshAdminTabVisibility) whenever the
@@ -1314,6 +1339,7 @@
     window.scrollTo({top:0, behavior: REDUCE_MOTION ? "auto" : "smooth"});
     if(name==="portfolio") renderPortfolio();
     if(name==="profile") renderProfile();
+    if(name==="leaderboard") renderLeaderboard();
     if(name==="create"){ renderWizard(); refreshOnChainDefaults(); refreshEthUsdPrice(); }
     if(name==="admin") renderAdmin();
   }
@@ -14492,12 +14518,13 @@
         </div>
       </div>
       <div class="panel">
-        <div class="eyebrow" style="margin-bottom:6px;">Trading activity</div>
-        <p class="pf-soon">Buys, sells and profit &amp; loss on Hood Launch will show up here soon.</p>
+        <div class="eyebrow" style="margin-bottom:10px;">Trading activity</div>
+        <div id="pfTrading"><p class="pf-soon">Loading…</p></div>
       </div>`;
 
     wrap.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
     fillProfileSocial(addr);
+    fillProfileTrading(addr);
     const rm = document.getElementById("pfAdminRemove");
     if(rm) rm.addEventListener("click", ()=> adminRemoveProfile(addr, rm));
     if(!own) return;
@@ -14970,6 +14997,110 @@
       }
     }
   }
+
+  // ---- trading activity (profile) and the Leaderboard tab ----
+  // Both read the relayer's trade ledger (GET /pnl/:address, GET /leaderboard).
+  // PNL is in USD: average-cost basis, realized (sells) + unrealized (still held, at the latest price).
+  function fmtPnl(n){
+    if(!isFinite(n)) return "$0.00";
+    const abs = Math.abs(n);
+    if(abs < 0.005) return "$0.00";
+    return (n<0 ? "−" : "+") + fmtUSD(abs);
+  }
+  function pnlClass(n){ return !isFinite(n) || Math.abs(n)<0.005 ? "pnl-flat" : (n>0 ? "pnl-up" : "pnl-down"); }
+  function pnlSpan(n){ return `<span class="${pnlClass(n)}">${escapeHtml(fmtPnl(n))}</span>`; }
+  function fmtQty(q){
+    if(!(q>0)) return "0";
+    if(q>=1e9) return (q/1e9).toFixed(2)+"B";
+    if(q>=1e6) return (q/1e6).toFixed(2)+"M";
+    if(q>=1e3) return (q/1e3).toFixed(1)+"K";
+    return q.toFixed(q>=10 ? 1 : 3);
+  }
+  function pnlTokenLabel(addr, symbol){
+    const t = tokenByAddress(addr);
+    const sym = t ? t.ticker : symbol;
+    if(!sym) return escapeHtml(fmtAddr(addr));
+    return t ? `<button type="button" class="pf-chip link" data-pf-token="${escapeHtml(t.id)}"><span class="pf-chip-name">$${escapeHtml(sym)}</span></button>` : `<span class="pf-chip-name">$${escapeHtml(sym)}</span>`;
+  }
+  async function fetchJsonFrom(path){
+    const api = relayerApiUrl(appMode);
+    if(!api) return null;
+    try{
+      const res = await fetch(`${api}${path}`, { cache:"no-store" });
+      return res.ok ? await res.json() : undefined;
+    }catch(e){ return undefined; }
+  }
+
+  async function fillProfileTrading(addr){
+    const box = document.getElementById("pfTrading");
+    if(!box) return;
+    const d = await fetchJsonFrom(`/pnl/${encodeURIComponent(addr)}`);
+    const again = document.getElementById("pfTrading");
+    if(!again) return;
+    if(d===null){ again.innerHTML = `<p class="pf-soon">Trading stats aren't available — no relayer is configured for this network.</p>`; return; }
+    if(d===undefined){ again.innerHTML = `<p class="pf-soon">Couldn't load trading stats right now.</p>`; return; }
+    if(!d.overall || !d.tokens.length){
+      again.innerHTML = `<p class="pf-soon">No trades recorded for this wallet yet. Buys and sells on Hood Launch tokens show up here with profit &amp; loss.</p>`;
+      return;
+    }
+    const o = d.overall;
+    const rows = d.tokens.map(r=>`<tr>
+      <td>${pnlTokenLabel(r.token, r.symbol)}</td>
+      <td>${r.buys} <span class="pf-soon">· ${escapeHtml(fmtUSD(r.buyUsd))}</span></td>
+      <td>${r.sells} <span class="pf-soon">· ${escapeHtml(fmtUSD(r.sellUsd))}</span></td>
+      <td>${r.qty>0 ? escapeHtml(fmtQty(r.qty)) + ` <span class="pf-soon">· ${escapeHtml(fmtUSD(r.valueUsd))}</span>` : "—"}</td>
+      <td>${pnlSpan(r.realizedUsd)}</td><td>${pnlSpan(r.unrealizedUsd)}</td><td><strong>${pnlSpan(r.totalUsd)}</strong></td></tr>`).join("");
+    const trades = (d.recent||[]).map(tr=>`<div class="tr"><span class="side ${tr.side==="sell"?"sell":"buy"}">${tr.side==="sell"?"Sell":"Buy"}</span>
+      ${pnlTokenLabel(tr.tokenAddress, tr.symbol)} <span>${escapeHtml(fmtUSD(tr.usdValue))}</span><span class="when">${escapeHtml(agoShort(tr.t))}</span></div>`).join("");
+    again.innerHTML = `
+      <div class="pnl-stats">
+        <div class="pnl-stat big"><div class="k">Overall PNL</div><div class="v">${pnlSpan(o.totalUsd)}</div></div>
+        <div class="pnl-stat"><div class="k">Realized</div><div class="v">${pnlSpan(o.realizedUsd)}</div></div>
+        <div class="pnl-stat"><div class="k">Unrealized</div><div class="v">${pnlSpan(o.unrealizedUsd)}</div></div>
+        <div class="pnl-stat"><div class="k">Buys</div><div class="v">${o.buys}</div></div>
+        <div class="pnl-stat"><div class="k">Sells</div><div class="v">${o.sells}</div></div>
+        <div class="pnl-stat"><div class="k">Tokens traded</div><div class="v">${o.tokens}</div></div>
+      </div>
+      <div class="pnl-tablewrap"><table class="pnl-table"><thead><tr><th>Token</th><th>Buys</th><th>Sells</th><th>Holding</th><th>Realized</th><th>Unrealized</th><th>Total PNL</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="eyebrow" style="margin:18px 0 4px;">Recent trades</div>
+      <div class="pnl-trades">${trades}</div>
+      <p class="pnl-note">All figures in USD. PNL uses each trade's USD value at the time and an average cost per token: realized = profit locked in by sells, unrealized = tokens still held at the latest price. Only trades made after tracking began are counted.</p>`;
+    again.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
+  }
+
+  async function renderLeaderboard(){
+    const wrap = document.getElementById("leaderboardWrap");
+    if(!wrap) return;
+    if(!wrap.dataset.ready){
+      wrap.dataset.ready = "1";
+      wrap.innerHTML = `<div class="panel">
+        <div class="eyebrow" style="margin-bottom:6px;">Leaderboard</div>
+        <h2 style="font-size:1.3rem; margin:0 0 4px;">Top 10 traders by overall PNL</h2>
+        <p class="pf-soon" style="margin:0 0 14px;">Live ranking of members with a profile name, by realized + unrealized profit &amp; loss in USD. Updates as trades happen.</p>
+        <div id="lbBody"><p class="pf-soon">Loading…</p></div>
+        <p class="pnl-note">Ranks named members only — set a name in your Profile to appear. Only trades made after tracking began are counted.</p></div>`;
+    }
+    const d = await fetchJsonFrom("/leaderboard");
+    const body = document.getElementById("lbBody");
+    if(!body) return;
+    if(d===null){ body.innerHTML = `<p class="pf-soon">The leaderboard isn't available — no relayer is configured for this network.</p>`; return; }
+    if(d===undefined){ body.innerHTML = `<p class="pf-soon">Couldn't load the leaderboard right now.</p>`; return; }
+    if(!d.entries.length){ body.innerHTML = `<p class="pf-soon">No ranked traders yet. Members who trade Hood Launch tokens will appear here.</p>`; return; }
+    const me = (wallet||"").toLowerCase();
+    body.innerHTML = `<div class="pnl-tablewrap"><table class="pnl-table lb"><thead><tr><th>#</th><th>Member</th><th>Overall PNL</th><th>Realized</th><th>Unrealized</th><th>Trades</th></tr></thead><tbody>${
+      d.entries.map(e=>`<tr class="${e.rank<=3?"top"+e.rank:""} ${e.address===me?"me":""}">
+        <td class="pnl-rank">${e.rank}</td><td>${profileChipHTML(e.address,{link:true,size:24})}</td>
+        <td><strong>${pnlSpan(e.totalUsd)}</strong></td><td>${pnlSpan(e.realizedUsd)}</td><td>${pnlSpan(e.unrealizedUsd)}</td><td>${e.trades}</td></tr>`).join("")
+    }</tbody></table></div>`;
+  }
+  // Keep whichever of these is on screen fresh.
+  setInterval(()=>{
+    if(document.hidden) return;
+    if(views.leaderboard && views.leaderboard.classList.contains("active")) renderLeaderboard();
+    if(views.profile && views.profile.classList.contains("active") && document.getElementById("pfTrading")){
+      const a = profileViewAddr || wallet; if(a) fillProfileTrading(a);
+    }
+  }, 30000);
 
   // ---- token page: the "Call out this token" box ----
   let calloutBoxToken = null;
