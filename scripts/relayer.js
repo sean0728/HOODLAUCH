@@ -1215,6 +1215,10 @@ const V4_PLATFORM_REWARDS_DISTRIBUTOR_ABI = [
   "function maxEthBuybackAmount() view returns (uint256)",
   "function triggerEthBuyback(uint256 minTokensOut) returns (uint256)",
   "function triggerTokenBuyback(address token, uint256 minTokensOut) returns (uint256)",
+  // Present on the audited V4PlatformRewardsDistributor: only the owner and approved
+  // keepers may start a buyback. Older deployments lack these.
+  "function keepers(address) view returns (bool)",
+  "function owner() view returns (address)",
 ];
 const V4_FACTORY_SLOTS_ABI = [
   "function feeWalletDistributor() view returns (address)",
@@ -6088,6 +6092,24 @@ async function main() {
     const routerAddress = await d.contract.buybackRouter();
     if (platformTokenAddress === hre.ethers.ZeroAddress || routerAddress === hre.ethers.ZeroAddress) return; // buyback not available yet
     const slipBps = platformBuybackSlippageBpsBig();
+    // The audited distributor only lets its owner and approved keepers start a
+    // buyback (airdrop rounds stay open). If this relayer wallet is neither, say
+    // so once and run only the airdrop rounds.
+    try {
+      const isKeeper = await d.contract.keepers(relayerWallet.address);
+      const ownerAddr = await d.contract.owner();
+      if (!(isKeeper || String(ownerAddr).toLowerCase() === relayerWallet.address.toLowerCase())) {
+        v4KeeperWarnOnce(
+          `keeper:${d.address}`,
+          `[v4-platform-rewards] relayer wallet ${relayerWallet.address} is not an approved keeper on the platform-rewards distributor ${d.address}, ` +
+            "so it cannot start buybacks. Owner: call setKeeper(relayerWallet, true) on the distributor. Airdrop rounds still run."
+        );
+        await v4KeeperAirdropRound("v4-platform-rewards", d.contract, relayerSettings.platformAirdropBatchSize, relayerSettings.platformAirdropMaxBatchesPerTick);
+        return;
+      }
+    } catch (err) {
+      // an older distributor without keepers(): buybacks are open to everyone
+    }
 
     // 1. The factory's 50% launch-fee share arrives as plain ETH.
     try {
@@ -6112,7 +6134,18 @@ async function main() {
       const tokenAddress = entry.tokenAddress;
       try {
         const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
-        const balance = await token.balanceOf(d.address);
+        let balance = await token.balanceOf(d.address);
+        // Platform tokens already earmarked for holders (queued or owed to a running
+        // round) are not income; the audited contract leaves them out, so do we.
+        if (tokenAddress.toLowerCase() === platformTokenAddress.toLowerCase()) {
+          try {
+            const committed = (await d.contract.pendingAirdropTokens()) +
+              ((await d.contract.roundActive()) ? (await d.contract.roundAmount()) - (await d.contract.roundUsed()) : 0n);
+            balance = balance > committed ? balance - committed : 0n;
+          } catch (err) {
+            // an older distributor: no earmark accounting, use the raw balance
+          }
+        }
         if (balance === 0n || balance < (await d.contract.tokenBuybackThreshold(tokenAddress))) continue;
         let minTokensOut = 0n; // unused by the contract when the token IS the platform token
         let amountIn = balance;

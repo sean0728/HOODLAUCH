@@ -368,6 +368,19 @@ async function main() {
       await send("factory.setRewardsDistributor", () => factory.setRewardsDistributor(prA));
     if (!(await hook.taxExempt(prA)))
       await send("factory.setTaxExempt(platform rewards distributor, true)", () => factory.setTaxExempt(prA, true));
+    // Only the owner and approved keepers may start a buyback (airdrop rounds stay open).
+    const prKeeper = envAddr("RELAYER_ADDRESS", null);
+    if (prKeeper) {
+      const deployerOwnsPr = !ownerAddress || ownerAddress.toLowerCase() === deployer.address.toLowerCase();
+      if (deployerOwnsPr) {
+        if (!(await rewardsDist.keepers(prKeeper)))
+          await send("platformRewardsDistributor.setKeeper(relayer, true)", () => rewardsDist.setKeeper(prKeeper, true));
+      } else {
+        console.log(`  NOTE: ${ownerAddress} owns the platformRewardsDistributor. It must call setKeeper(${prKeeper}, true) before the relayer can start buybacks.`);
+      }
+    } else {
+      console.log("  NOTE: set RELAYER_ADDRESS to authorise the relayer on the platform-rewards distributor, or call setKeeper(relayerWallet, true) on it as the owner.");
+    }
   }
 
   // ---- ownership handoff ----------------------------------------------
