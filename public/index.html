@@ -580,6 +580,24 @@
   .pf-token-row{display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); font-size:.9rem; cursor:pointer; background:none; border-left:0; border-right:0; border-top:0; width:100%; color:inherit; text-align:left;}
   .pf-token-row:last-child{border-bottom:none;}
   .pf-soon{color:var(--paper-500); font-size:.88rem; margin:6px 0 0;}
+  .pf-star{color:var(--signal-300); font-size:.8em; line-height:1; margin-right:-2px;}
+  .pf-counts{font-family:var(--font-mono); font-size:.74rem; color:var(--paper-500); margin-top:6px;}
+  .pf-chips{display:flex; flex-wrap:wrap; gap:8px 14px;}
+  .pf-two{display:grid; grid-template-columns:1fr 1fr; gap:22px;}
+  @media (max-width: 640px){ .pf-two{grid-template-columns:1fr;} }
+  .cm{padding:12px 0; border-bottom:1px solid var(--line);}
+  .cm:last-child{border-bottom:none;}
+  .cm-head{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+  .cm-time, .cm-on{font-family:var(--font-mono); font-size:.68rem; color:var(--paper-700);}
+  .cm-on{color:var(--paper-500);}
+  .cm-del{margin-left:auto; background:none; border:0; color:var(--paper-700); font-family:var(--font-mono); font-size:.68rem; cursor:pointer; padding:2px 4px;}
+  .cm-del:hover{color:var(--critical-500);}
+  .cm-text{margin-top:6px; font-size:.9rem; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--paper-100);}
+  #commentInput{width:100%; background:var(--ink-950, #05070b); border:1px solid var(--line-strong); border-radius:var(--radius-sm); color:var(--paper-100); font-family:inherit; font-size:.9rem; padding:10px 12px; resize:vertical; min-height:70px;}
+  .cm-bar{display:flex; align-items:center; gap:12px; margin-top:8px;}
+  .cm-bar .btn{margin-left:auto;}
+  .cm-count{font-family:var(--font-mono); font-size:.7rem; color:var(--paper-700);}
+  .cm-count.over{color:var(--critical-500);}
 
   /* ---------------- Portfolio ---------------- */
   .portfolio-wrap{padding:42px 0 70px;}
@@ -1183,6 +1201,8 @@
   // Wallet profiles (name + picture per wallet), fetched from the relayer — see the "Wallet profiles" section.
   const profileCache = { map: {}, loaded: false };
   let profileViewAddr = null; // null = the connected wallet's own profile
+  const followState = { forWallet: null, following: new Set() }; // who the connected wallet follows (lowercase addresses)
+  function isFollowing(addr){ return !!addr && followState.following.has(String(addr).toLowerCase()); }
   const LP_LOCK_DAYS = 15;
 
   // load any locally-created demo tokens
@@ -2031,6 +2051,7 @@
     if(wallet){ walletBtn.textContent = fmtAddr(wallet); walletBtn.classList.add("connected"); }
     else { walletBtn.textContent = "Connect Wallet"; walletBtn.classList.remove("connected"); }
     if(typeof renderProfileIfActive==="function") renderProfileIfActive();
+    if(typeof loadMyFollows==="function") loadMyFollows();
   }
 
   // ---- admin gate ----
@@ -6805,6 +6826,9 @@
   // call openDetail() skip their redraw in that case — rebuilding the panel
   // would wipe the amount and flip Sell back to Buy.
   function tradeInProgress(){
+    // Also true while a comment is being typed, so a background refresh can't wipe it.
+    const c = document.getElementById("commentInput");
+    if(c && (c.value || document.activeElement===c)) return true;
     const a = document.getElementById("tradeAmt");
     return !!(a && (a.value || document.activeElement===a || tradeSide!=="buy"));
   }
@@ -7347,10 +7371,17 @@
 
           ${socialLinksHTML(t)}
         </div>
+        ${t.onChain && t.tokenAddress ? `
+        <div class="panel" id="commentsPanel" style="margin-top:20px;">
+          <div class="eyebrow" style="margin-bottom:12px;">Comments <span id="commentCount"></span></div>
+          <div id="commentsMount"></div>
+        </div>` : ""}
       </div>
 
       ${tradePanelHTML}
     `;
+
+    initComments(t);
 
     const detailEditBtn = document.getElementById("detailEditBtn");
     if(detailEditBtn) detailEditBtn.addEventListener("click", ()=> openEditToken(t.id) );
@@ -14266,16 +14297,17 @@
     if(!addr) return "";
     const name = profileNameOf(addr);
     const label = name ? escapeHtml(name) : escapeHtml(fmtAddr(String(addr)));
-    const inner = `${profileAvatarHTML(addr,size)}<span class="${name?"pf-chip-name":""}">${label}</span>`;
+    const inner = `${isFollowing(addr) ? `<span class="pf-star" title="You follow this member">★</span>` : ""}${profileAvatarHTML(addr,size)}<span class="${name?"pf-chip-name":""}">${label}</span>`;
     return link ? `<button type="button" class="pf-chip link" data-open-profile="${escapeHtml(String(addr))}" title="View profile">${inner}</button>`
                 : `<span class="pf-chip">${inner}</span>`;
   }
   // The "who" part of a live-feed line: the profile name (with picture) or "Wallet 0xabcd…".
   function feedWhoHTML(addr){
     const name = profileNameOf(addr);
-    if(name) return `${profileAvatarHTML(addr,14)}<span class="tk">${escapeHtml(name)}</span>`;
+    const star = isFollowing(addr) ? `<span class="pf-star" title="You follow this member">★</span>` : "";
+    if(name) return `${star}${profileAvatarHTML(addr,14)}<span class="tk">${escapeHtml(name)}</span>`;
     const short = addr ? `${String(addr).slice(0,6)}…` : "0x????…";
-    return `Wallet <span class="tk">${escapeHtml(short)}</span>`;
+    return `${star}Wallet <span class="tk">${escapeHtml(short)}</span>`;
   }
   function refreshFeedNames(){
     document.querySelectorAll("#feedBody .feed-who[data-wallet]").forEach(el=>{ el.innerHTML = feedWhoHTML(el.dataset.wallet); });
@@ -14400,12 +14432,13 @@
           <div class="eyebrow" style="margin-bottom:6px;">${own ? "Your profile" : "Profile"}</div>
           <div class="pf-name ${shownName ? "" : "unset"}" id="pfNameShown">${shownName ? escapeHtml(shownName) : (own ? "No name set" : "No name set")}</div>
           <div class="pf-wallet">${walletHTML}</div>
+          <div class="pf-counts" id="pfCounts">&nbsp;</div>
           ${own ? `
           <div class="pf-actions">
             <input type="file" id="pfFile" accept="image/*" hidden>
             <button class="btn btn-ghost" id="pfPick">Upload picture</button>
             <button class="btn btn-ghost" id="pfRemovePic">Remove picture</button>
-          </div>` : (adminRemove ? `<div class="pf-actions">${adminRemove}</div>` : "")}
+          </div>` : `<div class="pf-actions">${followBtnHTML(addr)}${adminRemove}</div>`}
         </div>
       </div>
       ${own ? `
@@ -14419,9 +14452,24 @@
         <button class="btn btn-primary" id="pfSave" style="margin-top:12px;">Save profile</button>
         <p class="pf-soon" style="margin-top:12px;">Saving asks your wallet to sign a message. It's free and sends no transaction. Your name and picture are public.</p>
       </div>` : ""}
+      ${own ? `
+      <div class="panel" style="margin-bottom:20px;">
+        <div class="eyebrow" style="margin-bottom:6px;">From members you follow</div>
+        <div id="pfFollowFeed"><p class="pf-soon">Loading…</p></div>
+      </div>` : ""}
       <div class="panel" style="margin-bottom:20px;">
         <div class="eyebrow" style="margin-bottom:6px;">Tokens launched</div>
         ${tokensHTML}
+      </div>
+      <div class="panel" style="margin-bottom:20px;">
+        <div class="eyebrow" style="margin-bottom:6px;">Comments</div>
+        <div id="pfComments"><p class="pf-soon">Loading…</p></div>
+      </div>
+      <div class="panel" style="margin-bottom:20px;">
+        <div class="pf-two">
+          <div><div class="eyebrow" style="margin-bottom:8px;">Followers</div><div id="pfFollowers"><p class="pf-soon">Loading…</p></div></div>
+          <div><div class="eyebrow" style="margin-bottom:8px;">Following</div><div id="pfFollowing"><p class="pf-soon">Loading…</p></div></div>
+        </div>
       </div>
       <div class="panel">
         <div class="eyebrow" style="margin-bottom:6px;">Trading activity</div>
@@ -14429,6 +14477,7 @@
       </div>`;
 
     wrap.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
+    fillProfileSocial(addr);
     const rm = document.getElementById("pfAdminRemove");
     if(rm) rm.addEventListener("click", ()=> adminRemoveProfile(addr, rm));
     if(!own) return;
@@ -14527,6 +14576,274 @@
 
   fetchProfiles();
   setInterval(fetchProfiles, PROFILES_POLL_MS);
+
+  /* ---------------- Comments + follows ----------------
+     Comments: written on a token's page, listed on the author's profile too.
+     Posting needs a connected wallet with a profile name. Follows: a member
+     can follow other members; followed members are marked with a star in the
+     live feed and in comments, and their comments/launches make up the
+     "From members you follow" feed on your own profile. Every write asks the
+     wallet to sign a message (free, no transaction). See lib/social.js. */
+  const COMMENT_MAX = 280;
+  // Must match lib/social.js exactly.
+  function normalizeComment(raw){
+    if(typeof raw!=="string") return "";
+    return raw.normalize("NFC").replace(/\r\n?/g,"\n")
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F​-‏‪-‮⁦-⁩]/g,"")
+      .replace(/[ \t]+\n/g,"\n").replace(/\n{3,}/g,"\n\n").trim();
+  }
+  function validateComment(text){
+    const len = Array.from(text).length;
+    if(len<1) return "Write something first.";
+    if(len>COMMENT_MAX) return `Comments are limited to ${COMMENT_MAX} characters.`;
+    return null;
+  }
+  const commentMessage = (token, author, text, ts)=> `Hood Launch: comment on ${String(token).toLowerCase()} as ${String(author).toLowerCase()}: ${JSON.stringify(text)} at ${ts}`;
+  const deleteCommentMessage = (id, requester, ts)=> `Hood Launch: delete comment ${id} as ${String(requester).toLowerCase()} at ${ts}`;
+  const followMessage = (follow, followee, follower, ts)=> `Hood Launch: ${follow?"follow":"unfollow"} ${String(followee).toLowerCase()} as ${String(follower).toLowerCase()} at ${ts}`;
+
+  async function signWith(message){
+    if(!wallet){ toast("Connect your wallet first."); return null; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return null; }
+    try{ return await window.ethereum.request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] }); }
+    catch(e){ toast("Signature was rejected — nothing was changed."); return null; }
+  }
+  function agoShort(ms){
+    const s = Math.max(0, Math.round((Date.now()-ms)/1000));
+    if(s<60) return "just now";
+    const m = Math.round(s/60); if(m<60) return `${m}m ago`;
+    const h = Math.round(m/60); if(h<48) return `${h}h ago`;
+    return `${Math.round(h/24)}d ago`;
+  }
+  function tokenByAddress(addr){
+    const a = String(addr||"").toLowerCase();
+    return tokens.find(t=> t.tokenAddress && t.tokenAddress.toLowerCase()===a && (t.networkMode||"demo")===appMode) || null;
+  }
+
+  // ---- follows ----
+  async function loadMyFollows(){
+    if(!wallet){
+      if(followState.following.size){ followState.following = new Set(); followState.forWallet = null; onFollowsChanged(); }
+      return;
+    }
+    const w = wallet;
+    try{
+      const res = await fetch(`${location.origin}/follows/${w}`, { cache:"no-store" });
+      if(!res.ok) return;
+      const data = await res.json();
+      if(wallet!==w) return; // switched account while loading
+      followState.following = new Set((data.following||[]).map(a=>String(a).toLowerCase()));
+      followState.forWallet = w.toLowerCase();
+      onFollowsChanged();
+    }catch(e){ /* offline — no stars */ }
+  }
+  function onFollowsChanged(){
+    refreshFeedNames();
+    if(views.detail.classList.contains("active")) refreshCommentList();
+    renderProfileIfActive();
+  }
+  async function setFollowSigned(followee, on, btn){
+    if(!wallet){ walletBtn.click(); return; }
+    if(btn) btn.disabled = true;
+    try{
+      const ts = Date.now();
+      const signature = await signWith(followMessage(on, followee, wallet, ts));
+      if(!signature) return;
+      const res = await fetch(`${location.origin}/follow`, { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ follower: wallet, followee, follow: on, timestamp: ts, signature }) });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't update that follow."); return; }
+      const key = String(followee).toLowerCase();
+      if(on) followState.following.add(key); else followState.following.delete(key);
+      toast(on ? "Following." : "Unfollowed.");
+      onFollowsChanged();
+    }catch(e){ toast("Couldn't update that follow — check your connection."); }
+    finally{ if(btn) btn.disabled = false; }
+  }
+  document.addEventListener("click", (e)=>{
+    const el = e.target.closest && e.target.closest("[data-follow-toggle]");
+    if(el){ e.preventDefault(); setFollowSigned(el.dataset.followToggle, el.dataset.followTo==="1", el); }
+  });
+
+  // ---- comments on a token page ----
+  let currentCommentToken = null; // the token whose page is open
+  let commentRows = [];           // latest fetched comments for it
+  function commentApi(t){ const u = relayerApiUrl(t.networkMode); return u; }
+
+  function commentRowHTML(c){
+    const mine = wallet && c.author.toLowerCase()===wallet.toLowerCase();
+    const canDelete = mine || isAdminWallet(wallet);
+    return `<div class="cm" data-cm-id="${escapeHtml(c.id)}">
+      <div class="cm-head">${profileChipHTML(c.author, {link:true, size:22})}<span class="cm-time">${escapeHtml(agoShort(c.createdAt))}</span>
+        ${canDelete ? `<button type="button" class="cm-del" data-cm-delete="${escapeHtml(c.id)}">Delete</button>` : ""}</div>
+      <div class="cm-text">${escapeHtml(c.text)}</div></div>`;
+  }
+  function refreshCommentList(){
+    const list = document.getElementById("commentList");
+    if(!list || !currentCommentToken) return;
+    list.innerHTML = commentRows.length ? commentRows.map(commentRowHTML).join("") : `<p class="pf-soon">No comments yet — be the first.</p>`;
+    list.querySelectorAll("[data-cm-delete]").forEach(b=> b.addEventListener("click", ()=> deleteCommentSigned(b.dataset.cmDelete, b)));
+    const hdr = document.getElementById("commentCount");
+    if(hdr) hdr.textContent = commentRows.length ? `(${commentRows.length}${commentRows.length>=50?"+":""})` : "";
+  }
+  async function loadComments(t){
+    const api = commentApi(t);
+    if(!api){ const l = document.getElementById("commentList"); if(l) l.innerHTML = `<p class="pf-soon">Comments aren't available — no relayer is configured for this network.</p>`; return; }
+    try{
+      const res = await fetch(`${api}/comments?token=${encodeURIComponent(t.tokenAddress)}&limit=50`, { cache:"no-store" });
+      if(!res.ok) return;
+      const data = await res.json();
+      if(!currentCommentToken || currentCommentToken.id!==t.id) return; // navigated away
+      commentRows = Array.isArray(data.comments) ? data.comments : [];
+      refreshCommentList();
+    }catch(e){ /* try again on the next poll */ }
+  }
+  function renderCommentComposer(t){
+    const box = document.getElementById("commentComposer");
+    if(!box) return;
+    if(!wallet){
+      box.innerHTML = `<p class="pf-soon" style="margin:0 0 10px;">Connect your wallet to join the conversation.</p><button class="btn btn-ghost" id="cmConnect">Connect Wallet</button>`;
+      document.getElementById("cmConnect").addEventListener("click", ()=> walletBtn.click());
+      return;
+    }
+    if(!profileNameOf(wallet)){
+      box.innerHTML = `<p class="pf-soon" style="margin:0 0 10px;">Set a display name in your profile to comment.</p><button class="btn btn-ghost" id="cmGoProfile">Open Profile</button>`;
+      document.getElementById("cmGoProfile").addEventListener("click", ()=>{ profileViewAddr = null; showView("profile"); });
+      return;
+    }
+    box.innerHTML = `
+      <textarea id="commentInput" rows="3" maxlength="600" placeholder="Add a comment…" spellcheck="true"></textarea>
+      <div class="cm-bar"><span class="cm-count" id="cmCount">0/${COMMENT_MAX}</span><span class="pf-form-msg" id="cmMsg" style="margin:0;"></span>
+        <button class="btn btn-primary" id="cmPost" style="padding:9px 18px;" disabled>Post</button></div>`;
+    const input = document.getElementById("commentInput"), post = document.getElementById("cmPost"), msg = document.getElementById("cmMsg"), count = document.getElementById("cmCount");
+    const setMsg = (text, cls)=>{ msg.textContent = text||""; msg.className = "pf-form-msg"+(cls?" "+cls:""); };
+    input.addEventListener("input", ()=>{
+      const n = Array.from(normalizeComment(input.value)).length;
+      count.textContent = `${n}/${COMMENT_MAX}`;
+      count.classList.toggle("over", n>COMMENT_MAX);
+      post.disabled = n<1 || n>COMMENT_MAX;
+      setMsg("");
+    });
+    post.addEventListener("click", async ()=>{
+      const text = normalizeComment(input.value);
+      const err = validateComment(text);
+      if(err){ setMsg(err, "err"); return; }
+      const api = commentApi(t);
+      if(!api){ setMsg("No relayer is configured for this network.", "err"); return; }
+      post.disabled = true; setMsg("Waiting for your wallet to sign…");
+      const ts = Date.now();
+      const signature = await signWith(commentMessage(t.tokenAddress, wallet, text, ts));
+      if(!signature){ setMsg("Not posted.", "err"); post.disabled = false; return; }
+      setMsg("Posting…");
+      try{
+        const res = await fetch(`${api}/comments`, { method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ token: t.tokenAddress, author: wallet, text, timestamp: ts, signature }) });
+        const data = await res.json().catch(()=>({}));
+        if(!res.ok){ setMsg(data.error || "Couldn't post your comment.", "err"); post.disabled = false; return; }
+        input.value = ""; count.textContent = `0/${COMMENT_MAX}`; setMsg("");
+        await loadComments(t);
+      }catch(e){ setMsg("Couldn't post — check your connection.", "err"); post.disabled = false; }
+    });
+  }
+  async function deleteCommentSigned(id, btn){
+    if(btn.dataset.confirming!=="1"){
+      btn.dataset.confirming = "1"; btn.textContent = "Confirm?";
+      setTimeout(()=>{ if(btn.isConnected){ btn.dataset.confirming = ""; btn.textContent = "Delete"; } }, 4000);
+      return;
+    }
+    const t = currentCommentToken; const api = t && commentApi(t);
+    if(!api) return;
+    const ts = Date.now();
+    const signature = await signWith(deleteCommentMessage(id, wallet, ts));
+    if(!signature) return;
+    try{
+      const res = await fetch(`${api}/comments/delete`, { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ id, requester: wallet, timestamp: ts, signature }) });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't delete that comment."); return; }
+      commentRows = commentRows.filter(c=>c.id!==id);
+      refreshCommentList();
+      toast("Comment deleted.");
+    }catch(e){ toast("Couldn't delete that comment."); }
+  }
+  // Called by openDetail once the page is on screen.
+  function initComments(t){
+    currentCommentToken = (t && t.onChain && t.tokenAddress) ? t : null;
+    commentRows = [];
+    if(!currentCommentToken || !document.getElementById("commentsMount")) return;
+    document.getElementById("commentsMount").innerHTML = `<div id="commentComposer"></div><div id="commentList" style="margin-top:14px;"><p class="pf-soon">Loading comments…</p></div>`;
+    renderCommentComposer(t);
+    loadComments(t);
+  }
+  setInterval(()=>{
+    if(currentCommentToken && views.detail.classList.contains("active")) loadComments(currentCommentToken);
+  }, 30000);
+
+  // ---- profile page: follow button, follower lists, comments, "following" feed ----
+  let profileSocial = { addr: null, following: [], followers: [] };
+  function followBtnHTML(addr){
+    const on = isFollowing(addr);
+    return `<button class="btn ${on?"btn-ghost":"btn-primary"}" data-follow-toggle="${escapeHtml(addr)}" data-follow-to="${on?"0":"1"}" style="padding:9px 18px;">${on?"Following ✓ (unfollow)":"Follow"}</button>`;
+  }
+  function chipListHTML(list){
+    if(!list.length) return `<p class="pf-soon">Nobody yet.</p>`;
+    return `<div class="pf-chips">${list.slice(0,60).map(a=>profileChipHTML(a,{link:true,size:22})).join("")}</div>${list.length>60?`<p class="pf-soon">…and ${list.length-60} more.</p>`:""}`;
+  }
+  async function fillProfileSocial(addr){
+    const net = relayerApiUrl(appMode);
+    let following = [], followers = [];
+    try{
+      const res = await fetch(`${location.origin}/follows/${addr}`, { cache:"no-store" });
+      if(res.ok){ const d = await res.json(); following = d.following||[]; followers = d.followers||[]; }
+    }catch(e){}
+    if(profileViewAddr===null ? (wallet||"").toLowerCase()!==addr.toLowerCase() : profileViewAddr.toLowerCase()!==addr.toLowerCase()) return; // moved on
+    profileSocial = { addr, following, followers };
+    const counts = document.getElementById("pfCounts");
+    if(counts) counts.textContent = `${followers.length} follower${followers.length===1?"":"s"} · ${following.length} following`;
+    const fl = document.getElementById("pfFollowers"); if(fl) fl.innerHTML = chipListHTML(followers);
+    const fg = document.getElementById("pfFollowing"); if(fg) fg.innerHTML = chipListHTML(following);
+
+    // this member's comments
+    const cm = document.getElementById("pfComments");
+    if(cm){
+      if(!net){ cm.innerHTML = `<p class="pf-soon">Comments aren't available — no relayer is configured for this network.</p>`; }
+      else{
+        try{
+          const res = await fetch(`${net}/comments?author=${encodeURIComponent(addr)}&limit=30`, { cache:"no-store" });
+          const d = res.ok ? await res.json() : { comments: [] };
+          const rows = d.comments||[];
+          cm.innerHTML = rows.length ? rows.map(c=>{
+            const t = tokenByAddress(c.token);
+            return `<div class="cm"><div class="cm-head"><span class="cm-on">on ${t ? `<button type="button" class="pf-chip link" data-pf-token="${escapeHtml(t.id)}"><span class="pf-chip-name">$${escapeHtml(t.ticker)}</span></button>` : escapeHtml(fmtAddr(c.token))}</span><span class="cm-time">${escapeHtml(agoShort(c.createdAt))}</span></div><div class="cm-text">${escapeHtml(c.text)}</div></div>`;
+          }).join("") : `<p class="pf-soon">No comments yet.</p>`;
+          cm.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
+        }catch(e){ cm.innerHTML = `<p class="pf-soon">Couldn't load comments.</p>`; }
+      }
+    }
+
+    // own profile only: comments + launches from followed members
+    const feed = document.getElementById("pfFollowFeed");
+    if(feed){
+      if(!following.length){ feed.innerHTML = `<p class="pf-soon">You're not following anyone yet. Open a member's profile and hit Follow — their comments and launches will show up here.</p>`; return; }
+      const set = new Set(following.map(a=>a.toLowerCase()));
+      const items = [];
+      tokens.forEach(t=>{ if(t.creatorWallet && set.has(t.creatorWallet.toLowerCase()) && (t.networkMode||"demo")===appMode && typeof t.createdAtMs==="number") items.push({ kind:"launch", who:t.creatorWallet, t:t.createdAtMs, token:t }); });
+      if(net){
+        try{
+          const res = await fetch(`${net}/comments?authors=${following.slice(0,100).join(",")}&limit=30`, { cache:"no-store" });
+          if(res.ok){ const d = await res.json(); (d.comments||[]).forEach(c=> items.push({ kind:"comment", who:c.author, t:c.createdAt, c })); }
+        }catch(e){}
+      }
+      items.sort((a,b)=>b.t-a.t);
+      const top = items.slice(0,25);
+      feed.innerHTML = top.length ? top.map(it=>{
+        if(it.kind==="launch") return `<div class="cm"><div class="cm-head">${profileChipHTML(it.who,{link:true,size:22})}<span class="cm-on">launched <button type="button" class="pf-chip link" data-pf-token="${escapeHtml(it.token.id)}"><span class="pf-chip-name">$${escapeHtml(it.token.ticker)}</span></button></span><span class="cm-time">${escapeHtml(agoShort(it.t))}</span></div></div>`;
+        const t = tokenByAddress(it.c.token);
+        return `<div class="cm"><div class="cm-head">${profileChipHTML(it.who,{link:true,size:22})}<span class="cm-on">commented on ${t ? `<button type="button" class="pf-chip link" data-pf-token="${escapeHtml(t.id)}"><span class="pf-chip-name">$${escapeHtml(t.ticker)}</span></button>` : escapeHtml(fmtAddr(it.c.token))}</span><span class="cm-time">${escapeHtml(agoShort(it.t))}</span></div><div class="cm-text">${escapeHtml(it.c.text)}</div></div>`;
+      }).join("") : `<p class="pf-soon">Nothing yet from the members you follow.</p>`;
+      feed.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
+    }
+  }
 
   /* ---------------- live feed (real trade activity only) ---------------- */
   // Replaces what used to be a fully fabricated feed: a random token, a
