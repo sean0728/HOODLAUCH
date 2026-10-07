@@ -2245,7 +2245,7 @@
   const V4_LIQUIDITY_ADDED_TOPIC0 = "0xea3191ffbe2f62bfd724ee8d971b15ff9b7994e3a9169dc4c60443be3e4a43c4"; // LiquidityAdded(address,address,uint256,uint256,uint256,uint256,uint256)
   const POOL_ID_OF_SELECTOR = "30040054"; // poolIdOf(address) -> bytes32
   const V4_EIP712_DOMAIN_NAME = "HoodLaunchV4TokenFactory";
-  const ADMIN_UI_BUILD = "2026-10-07-platform-token-date"; // bump when the admin screens change, so you can tell which index.html is loaded
+  const ADMIN_UI_BUILD = "2026-10-07-fast-vanity-mining"; // bump when the admin screens change, so you can tell which index.html is loaded
   const V4_CONFIG_KEYS = ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"];
   // V4 custom-tax factory + V4 bonding-curve factory (V4CustomTokenFactory /
   // V4CurveFactory). Selectors/topics computed with ethers from the compiled
@@ -3188,73 +3188,70 @@
 
   // ---- Keccak-256 (the ORIGINAL Keccak padding Ethereum uses, 0x01/0x80 —
   // NOT NIST's later SHA3-256, which uses a different 0x06 padding byte and
-  // produces different hashes for the same input). Straight implementation
-  // of the Keccak-f[1600] permutation over 25 64-bit lanes, using BigInt
-  // throughout for simplicity over speed — mining a 4-hex-char vanity
-  // suffix only needs on the order of tens of thousands of hashes, well
-  // under a second even at pure-JS BigInt speed. ----
-  const _KECCAK_MASK64 = (1n << 64n) - 1n;
-  function _keccakRotl64(x, n){ x &= _KECCAK_MASK64; return ((x << BigInt(n)) | (x >> BigInt(64-n))) & _KECCAK_MASK64; }
-  const _KECCAK_RC = [
-    0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
-    0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
-    0x000000000000008an, 0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
-    0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
-    0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
-    0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n,
-  ];
-  const _KECCAK_R = [[0,36,3,41,18],[1,44,10,45,2],[62,6,43,15,61],[28,55,25,21,56],[27,20,39,8,14]];
-  function _keccakF1600(state){
-    for(let round=0; round<24; round++){
-      const C = new Array(5);
-      for(let x=0;x<5;x++) C[x] = state[x]^state[x+5]^state[x+10]^state[x+15]^state[x+20];
-      const D = new Array(5);
-      for(let x=0;x<5;x++) D[x] = C[(x+4)%5] ^ _keccakRotl64(C[(x+1)%5], 1);
-      for(let x=0;x<5;x++) for(let y=0;y<5;y++) state[x+5*y] ^= D[x];
-      const B = new Array(25).fill(0n);
-      for(let x=0;x<5;x++) for(let y=0;y<5;y++){
-        const newX=y, newY=(2*x+3*y)%5;
-        B[newX+5*newY] = _keccakRotl64(state[x+5*y], _KECCAK_R[x][y]);
+  // produces different hashes for the same input). Keccak-f[1600] over 25
+  // 64-bit lanes, each held as two 32-bit halves in a Uint32Array (no BigInt
+  // in the hot loop). The earlier BigInt version cost ~3 hashes per vanity
+  // attempt x ~65,000 attempts on the page's main thread, which froze the
+  // browser ("Page unresponsive - Wait") before every launch. Output is
+  // checked against ethers' keccak256 in testing. ----
+  const _KECCAK_RC_HI = new Uint32Array([0x00000000,0x00000000,0x80000000,0x80000000,0x00000000,0x00000000,0x80000000,0x80000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x80000000,0x80000000,0x80000000,0x80000000,0x80000000,0x00000000,0x80000000,0x80000000,0x80000000,0x00000000,0x80000000]);
+  const _KECCAK_RC_LO = new Uint32Array([0x00000001,0x00008082,0x0000808a,0x80008000,0x0000808b,0x80000001,0x80008081,0x00008009,0x0000008a,0x00000088,0x80008009,0x8000000a,0x8000808b,0x0000008b,0x00008089,0x00008003,0x00008002,0x00000080,0x0000800a,0x8000000a,0x80008081,0x00008080,0x80000001,0x80008008]);
+  const _KECCAK_ROTC = [1,3,6,10,15,21,28,36,45,55,2,14,27,41,56,8,25,43,62,18,39,61,20,44];
+  const _KECCAK_PILN = [10,7,11,17,18,3,5,16,8,21,24,4,15,23,19,13,12,2,20,14,22,9,6,1];
+  const _keccakBC = new Uint32Array(10);
+  function _keccakF1600(st){ // st: Uint32Array(50); lane i = (lo st[2i], hi st[2i+1])
+    const bc = _keccakBC;
+    for(let r=0; r<24; r++){
+      for(let i=0;i<5;i++){
+        bc[2*i]   = st[2*i]   ^ st[2*i+10] ^ st[2*i+20] ^ st[2*i+30] ^ st[2*i+40];
+        bc[2*i+1] = st[2*i+1] ^ st[2*i+11] ^ st[2*i+21] ^ st[2*i+31] ^ st[2*i+41];
       }
-      for(let x=0;x<5;x++) for(let y=0;y<5;y++){
-        state[x+5*y] = B[x+5*y] ^ (~B[((x+1)%5)+5*y] & B[((x+2)%5)+5*y]);
+      for(let i=0;i<5;i++){
+        const i1=(i+1)%5, i4=(i+4)%5;
+        const lo=bc[2*i1], hi=bc[2*i1+1];
+        const tl = bc[2*i4]   ^ ((lo<<1) | (hi>>>31));
+        const th = bc[2*i4+1] ^ ((hi<<1) | (lo>>>31));
+        for(let j=0;j<25;j+=5){ st[2*(j+i)] ^= tl; st[2*(j+i)+1] ^= th; }
       }
-      for(let i=0;i<25;i++) state[i] &= _KECCAK_MASK64;
-      state[0] ^= _KECCAK_RC[round];
-      state[0] &= _KECCAK_MASK64;
+      let tl = st[2], th = st[3];
+      for(let i=0;i<24;i++){
+        const j = _KECCAK_PILN[i], rc = _KECCAK_ROTC[i];
+        const bl = st[2*j], bh = st[2*j+1];
+        let nl, nh;
+        if(rc<32){ nl = (tl<<rc) | (th>>>(32-rc)); nh = (th<<rc) | (tl>>>(32-rc)); }
+        else { const sh = rc-32; nl = (th<<sh) | (tl>>>(32-sh)); nh = (tl<<sh) | (th>>>(32-sh)); }
+        st[2*j] = nl; st[2*j+1] = nh;
+        tl = bl; th = bh;
+      }
+      for(let j=0;j<25;j+=5){
+        for(let i=0;i<10;i++) bc[i] = st[2*j+i];
+        for(let i=0;i<5;i++){
+          st[2*(j+i)]   ^= ~bc[2*((i+1)%5)]   & bc[2*((i+2)%5)];
+          st[2*(j+i)+1] ^= ~bc[2*((i+1)%5)+1] & bc[2*((i+2)%5)+1];
+        }
+      }
+      st[0] ^= _KECCAK_RC_LO[r]; st[1] ^= _KECCAK_RC_HI[r];
     }
-    return state;
-  }
-  function _keccakBytesToLanes(block136){
-    const lanes = new Array(17);
-    for(let i=0;i<17;i++){
-      let lane = 0n;
-      for(let j=7;j>=0;j--) lane = (lane<<8n) | BigInt(block136[i*8+j]);
-      lanes[i] = lane;
-    }
-    return lanes;
+    return st;
   }
   function keccak256Bytes(message){
     const RATE_BYTES = 136; // 1088 bits, for Keccak-256 (capacity = 512 bits)
-    const state = new Array(25).fill(0n);
+    const st = new Uint32Array(50);
     const inputLen = message.length;
-    const numBlocks = Math.floor(inputLen/RATE_BYTES) + 1;
-    const paddedLen = numBlocks*RATE_BYTES;
+    const paddedLen = (Math.floor(inputLen/RATE_BYTES) + 1) * RATE_BYTES;
     const padded = new Uint8Array(paddedLen);
     padded.set(message, 0);
     padded[inputLen] ^= 0x01;
     padded[paddedLen-1] ^= 0x80;
     for(let offset=0; offset<paddedLen; offset+=RATE_BYTES){
-      const block = padded.subarray(offset, offset+RATE_BYTES);
-      const lanes = _keccakBytesToLanes(block);
-      for(let i=0;i<17;i++) state[i] ^= lanes[i];
-      _keccakF1600(state);
+      for(let i=0;i<RATE_BYTES/4;i++){
+        const o = offset + i*4;
+        st[i] ^= (padded[o] | (padded[o+1]<<8) | (padded[o+2]<<16) | (padded[o+3]<<24));
+      }
+      _keccakF1600(st);
     }
     const out = new Uint8Array(32);
-    for(let i=0;i<4;i++){
-      let lane = state[i];
-      for(let j=0;j<8;j++){ out[i*8+j] = Number(lane & 0xffn); lane >>= 8n; }
-    }
+    for(let i=0;i<8;i++){ const w = st[i]; out[i*4]=w&0xff; out[i*4+1]=(w>>>8)&0xff; out[i*4+2]=(w>>>16)&0xff; out[i*4+3]=(w>>>24)&0xff; }
     return out;
   }
 
@@ -3324,18 +3321,70 @@
   // to sign or submit the real transaction either way. A salt mined for one
   // creator address only produces the intended vanity address when
   // submitted by that exact address.
-  function mineVanitySalt(creatorAddress, deployerAddress, implementationAddress, suffix = VANITY_SUFFIX, maxAttempts = 5_000_000){
+  async function mineVanitySalt(creatorAddress, deployerAddress, implementationAddress, suffix = VANITY_SUFFIX, maxAttempts = 5_000_000){
     const suffixLower = suffix.toLowerCase();
     const cryptoObj = (window.crypto || window.msCrypto);
+    const littleEndian = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+    // Slow generic path only for the (practically nonexistent) big-endian case.
+    if(!littleEndian){
+      for(let attempt=0; attempt<maxAttempts; attempt++){
+        const saltBytes = new Uint8Array(32);
+        cryptoObj.getRandomValues(saltBytes);
+        const address = predictCloneAddress(deployerAddress, deriveTokenSaltBytes(creatorAddress, saltBytes), implementationAddress);
+        if(address.toLowerCase().endsWith(suffixLower)){
+          let salt = 0n; for(const b of saltBytes) salt = (salt << 8n) | BigInt(b);
+          return salt;
+        }
+        if(attempt % 500 === 499) await new Promise(r=>setTimeout(r,0));
+      }
+      throw new Error(`Could not mine a vanity address ending in "${suffix}" within ${maxAttempts} attempts — try again.`);
+    }
+    // Fast path: two single-block Keccak-256 hashes per attempt (derive the
+    // real salt, then the CREATE2 address), on reused buffers; the minimal-
+    // proxy init-code hash is computed once, not per attempt. Every ~30 ms it
+    // yields to the browser so the page never freezes.
+    const initCodeHash = keccak256Bytes(_minimalProxyInitCode(implementationAddress));
+    const creatorBytes = _vanityHexToBytes(creatorAddress);
+    const deployerBytes = _vanityHexToBytes(deployerAddress);
+    const blkA = new Uint8Array(136); // keccak256(creator word || raw salt), 64 bytes
+    blkA.set(creatorBytes, 32 - creatorBytes.length);
+    blkA[64] = 0x01; blkA[135] |= 0x80;
+    const blkB = new Uint8Array(136); // keccak256(0xff || deployer || actualSalt || initCodeHash), 85 bytes
+    blkB[0] = 0xff; blkB.set(deployerBytes, 1); blkB.set(initCodeHash, 53);
+    blkB[85] = 0x01; blkB[135] |= 0x80;
+    const wordsA = new Uint32Array(blkA.buffer), wordsB = new Uint32Array(blkB.buffer);
+    const st = new Uint32Array(50);
+    const tailBytes = Math.ceil(suffixLower.length / 2);
+    const RND_BATCH = 256;
+    const rndBuf = new Uint8Array(32 * RND_BATCH);
+    let rndPos = rndBuf.length;
+    const hexOf = (b)=> b.toString(16).padStart(2,"0");
+    let lastYield = Date.now();
     for(let attempt=0; attempt<maxAttempts; attempt++){
-      const saltBytes = new Uint8Array(32);
-      cryptoObj.getRandomValues(saltBytes);
-      const actualSaltBytes = deriveTokenSaltBytes(creatorAddress, saltBytes);
-      const address = predictCloneAddress(deployerAddress, actualSaltBytes, implementationAddress);
-      if(address.toLowerCase().endsWith(suffixLower)){
+      if(rndPos >= rndBuf.length){ cryptoObj.getRandomValues(rndBuf); rndPos = 0; }
+      blkA.set(rndBuf.subarray(rndPos, rndPos+32), 32);
+      // hash 1: derive the real CREATE2 salt
+      for(let i=0;i<34;i++) st[i] = wordsA[i];
+      for(let i=34;i<50;i++) st[i] = 0;
+      _keccakF1600(st);
+      // its 32-byte output becomes the salt inside hash 2's preimage (bytes 21..53)
+      for(let i=0;i<8;i++){ const w = st[i], o = 21 + i*4; blkB[o]=w&0xff; blkB[o+1]=(w>>>8)&0xff; blkB[o+2]=(w>>>16)&0xff; blkB[o+3]=(w>>>24)&0xff; }
+      // hash 2: the CREATE2 address (low 20 bytes of the result)
+      for(let i=0;i<34;i++) st[i] = wordsB[i];
+      for(let i=34;i<50;i++) st[i] = 0;
+      _keccakF1600(st);
+      // result bytes 12..31 are the address; only its tail is needed to test the suffix
+      let tail = "";
+      for(let k=tailBytes; k>=1; k--){ const idx = 32 - k; tail += hexOf((st[idx>>2] >>> ((idx&3)*8)) & 0xff); }
+      if(tail.endsWith(suffixLower)){
         let salt = 0n;
-        for(const b of saltBytes) salt = (salt << 8n) | BigInt(b);
+        for(let i=0;i<32;i++) salt = (salt << 8n) | BigInt(rndBuf[rndPos+i]);
         return salt;
+      }
+      rndPos += 32;
+      if((attempt & 255) === 255 && Date.now() - lastYield > 30){
+        await new Promise(r=>setTimeout(r,0));
+        lastYield = Date.now();
       }
     }
     throw new Error(`Could not mine a vanity address ending in "${suffix}" within ${maxAttempts} attempts — try again.`);
@@ -3978,7 +4027,7 @@
     const totalWei = feeWei + liquidityWei + buyInWei;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const salt = await mineVanitySalt(wallet, factoryAddress, implementationAddress);
     const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
@@ -4209,7 +4258,7 @@
     const depositWei = feeWei + (isLiquidity ? liquidityWei + buyInWei : 0n);
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const salt = await mineVanitySalt(wallet, factoryAddress, implementationAddress);
     const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
@@ -4509,7 +4558,7 @@
     const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const salt = await mineVanitySalt(wallet, factoryAddress, implementationAddress);
     const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
@@ -4706,7 +4755,7 @@
     const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const salt = await mineVanitySalt(wallet, factoryAddress, implementationAddress);
     const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
@@ -4952,7 +5001,7 @@
     const totalWei = feeWei + buyInWei;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const salt = await mineVanitySalt(wallet, factoryAddress, implementationAddress);
     const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
@@ -5036,7 +5085,7 @@
     const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const salt = await mineVanitySalt(wallet, factoryAddress, implementationAddress);
     const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
@@ -5190,7 +5239,7 @@
     const depositWei = feeWei + buyInWei;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const salt = await mineVanitySalt(wallet, factoryAddress, implementationAddress);
     const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
@@ -5316,7 +5365,7 @@
     const marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
 
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const salt = await mineVanitySalt(wallet, factoryAddress, implementationAddress);
     const predictedHex = await ethCall(factoryAddress, encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, salt));
     const predictedAddress = decodeAddress(predictedHex);
     if(!predictedAddress.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
@@ -5520,7 +5569,7 @@
   // returns the salt.
   async function mineAndCheckV4Salt(factoryAddress, implementationAddress, predictCalldataFor, onStep){
     onStep("deploy", "active", `Finding an address ending in "${VANITY_SUFFIX}"…`);
-    const salt = mineVanitySalt(wallet, factoryAddress, implementationAddress);
+    const salt = await mineVanitySalt(wallet, factoryAddress, implementationAddress);
     const predicted = decodeAddress(await ethCall(factoryAddress, predictCalldataFor(salt)));
     if(!predicted.toLowerCase().endsWith(VANITY_SUFFIX.toLowerCase())){
       throw new Error("Vanity address prediction didn't match on-chain — aborting before spending anything. Please try again.");
