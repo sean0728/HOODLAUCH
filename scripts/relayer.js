@@ -162,6 +162,8 @@ const {
 } = require("../lib/relayerStore");
 const { ADMIN_WALLET, verifyAdminSignature, isFreshTimestamp } = require("../lib/adminAuth");
 const { verifySignatureFrom } = require("../lib/signedMessage");
+const profileLib = require("../lib/profile");
+const profileStore = require("../lib/profileStore");
 const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
 const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/tokenMetadata");
 const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
@@ -2768,6 +2770,100 @@ async function main() {
     await setPlatformConfig(canonical);
     console.log("[admin] platform config saved.");
     sendJson(res, 200, { config: canonical });
+  }));
+
+  // ---- wallet profiles (a display name and a picture per wallet) ----
+  // Platform-wide (not per network). Reads are public; a write must carry a
+  // personal_sign signature from the wallet being edited (see lib/profile.js
+  // for the signed message). The live feed and token pages show the name in
+  // place of the wallet address when one is set.
+  //   GET  /profiles                 { profiles: { addressLower: { name, avatarV } } }
+  //   GET  /profile/:address         { profile: { address, name, avatarV, createdAt } | null }
+  //   GET  /profile-avatar/:address  the picture itself (cached by ?v=avatarV)
+  //   POST /profile                  { address, name, avatar?, timestamp, signature }
+  //   POST /profile/remove           admin-signed removal (offensive name/picture)
+  const profileWrites = new Map(); // addressLower -> [timestamps] — small in-memory throttle
+  const PROFILE_WRITES_PER_HOUR = 10;
+  function profileWriteAllowed(addr) {
+    const now = Date.now();
+    const recent = (profileWrites.get(addr) || []).filter((t) => now - t < 3600_000);
+    if (recent.length >= PROFILE_WRITES_PER_HOUR) {
+      profileWrites.set(addr, recent);
+      return false;
+    }
+    recent.push(now);
+    profileWrites.set(addr, recent);
+    return true;
+  }
+  const publicProfile = (r) => ({
+    address: r.address,
+    name: r.name || "",
+    avatarV: r.avatar ? r.avatarV || 1 : null,
+    createdAt: r.createdAt || null,
+  });
+
+  app.get("/profiles", asyncRoute(async (_req, res) => {
+    sendJson(res, 200, { profiles: await profileStore.listProfiles() });
+  }));
+
+  app.get("/profile/:address", asyncRoute(async (req, res) => {
+    if (!hre.ethers.isAddress(req.params.address)) return sendJson(res, 400, { error: "address must be a valid address" });
+    const rec = await profileStore.getProfile(req.params.address);
+    sendJson(res, 200, { profile: rec ? publicProfile(rec) : null });
+  }));
+
+  app.get("/profile-avatar/:address", asyncRoute(async (req, res) => {
+    if (!hre.ethers.isAddress(req.params.address)) return res.sendStatus(400);
+    const rec = await profileStore.getProfile(req.params.address);
+    const m = rec && rec.avatar && /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(rec.avatar);
+    if (!m) return res.sendStatus(404);
+    res.setHeader("Content-Type", m[1]);
+    // The page always asks with ?v=<avatarV>, which changes whenever the
+    // picture does, so a long cache is safe and a new picture shows at once.
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.end(Buffer.from(m[2], "base64"));
+  }));
+
+  app.post("/profile", asyncRoute(async (req, res) => {
+    const { address, name: rawName, avatar, timestamp, signature } = req.body || {};
+    if (!address || !hre.ethers.isAddress(address)) return sendJson(res, 400, { error: "address must be a valid address" });
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    const name = typeof rawName === "string" ? rawName : "";
+    const isAdmin = address.toLowerCase() === ADMIN_WALLET.toLowerCase();
+    const nameError = profileLib.validateName(name, { isAdmin });
+    if (nameError) return sendJson(res, 400, { error: nameError });
+    // avatar: undefined/absent = keep the saved picture, null = remove, string = new picture
+    const avatarField = avatar === undefined ? undefined : avatar;
+    const avatarError = profileLib.validateAvatar(avatarField);
+    if (avatarError) return sendJson(res, 400, { error: avatarError });
+    const avatarPart = avatarField === undefined ? "keep" : avatarField === null ? "none" : profileLib.avatarHash(avatarField);
+    const message = profileLib.profileMessage(address, name, avatarPart, timestamp);
+    if (!verifySignatureFrom(message, signature, address)) {
+      return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    }
+    if (!profileWriteAllowed(address.toLowerCase())) {
+      return sendJson(res, 429, { error: "Too many profile changes — try again later." });
+    }
+    try {
+      const rec = await profileStore.saveProfile(address, { name, nameKey: profileLib.nameKey(name), avatar: avatarField });
+      console.log(`[profile] saved for ${address}${name ? ` as "${name}"` : ""}.`);
+      sendJson(res, 200, { profile: rec ? publicProfile(rec) : null });
+    } catch (err) {
+      if (err && err.code === "NAME_TAKEN") return sendJson(res, 409, { error: "That name is already taken." });
+      throw err;
+    }
+  }));
+
+  app.post("/profile/remove", asyncRoute(async (req, res) => {
+    const { address, timestamp, signature } = req.body || {};
+    if (!address || !hre.ethers.isAddress(address)) return sendJson(res, 400, { error: "address must be a valid address" });
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    const message = `Hood Launch admin: remove profile ${String(address).toLowerCase()} at ${timestamp}`;
+    if (!verifyAdminSignature(message, signature)) return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    const removed = await profileStore.deleteProfile(address);
+    console.log(`[admin] removed profile for ${address} (${removed ? "existed" : "none"}).`);
+    sendJson(res, 200, { removed });
   }));
 
   // ---- relayer runtime settings (admin-gated) ----
