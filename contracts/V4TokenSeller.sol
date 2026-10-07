@@ -53,7 +53,12 @@ abstract contract V4TokenSeller is Ownable2Step, ReentrancyGuard, IUnlockCallbac
     uint256 public constant MIN_SWAP_SLIPPAGE_BPS = 500; // 5.00%
     uint256 public constant MAX_SWAP_SLIPPAGE_BPS = 800; // 8.00%
 
+    /// @notice Addresses (besides the owner) allowed to trigger sales on the
+    /// distributors that restrict who may convert. See V4CreatorRewardsDistributor.
+    mapping(address => bool) public keepers;
+
     event SwapSlippageBpsUpdated(uint256 newBps);
+    event KeeperSet(address indexed keeper, bool allowed);
 
     constructor(IPoolManager poolManager_, address hook_, address initialOwner_) Ownable(initialOwner_) {
         require(address(poolManager_) != address(0), "V4TokenSeller: invalid pool manager");
@@ -66,6 +71,29 @@ abstract contract V4TokenSeller is Ownable2Step, ReentrancyGuard, IUnlockCallbac
     /// V4 factory (its 50% fee share, for the rewards distributor) or, in
     /// the platform distributor's case, a plain transfer.
     receive() external payable {}
+
+    function setKeeper(address keeper, bool allowed) external onlyOwner {
+        require(keeper != address(0), "V4TokenSeller: invalid keeper");
+        keepers[keeper] = allowed;
+        emit KeeperSet(keeper, allowed);
+    }
+
+    function _isKeeper(address a) internal view returns (bool) {
+        return a == owner() || keepers[a];
+    }
+
+    /// @notice Ownership can never be renounced: the owner is the only caller of
+    /// every setting, keeper change and rescue on the distributors. Hand it over
+    /// with the (two-step) transferOwnership instead.
+    function renounceOwnership() public view override onlyOwner {
+        revert("V4TokenSeller: ownership cannot be renounced");
+    }
+
+    /// @dev True if the token has a pool on the hook (i.e. is a platform token).
+    function _hasPool(address token) internal view returns (bool) {
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(_poolKey(token).toId());
+        return sqrtPriceX96 != 0;
+    }
 
     function setSwapSlippageBps(uint256 newBps) external onlyOwner {
         require(newBps >= MIN_SWAP_SLIPPAGE_BPS, "V4TokenSeller: slippage below 5% floor");
