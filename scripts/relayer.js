@@ -1794,7 +1794,10 @@ function logEnvVarPresence() {
   console.log("Env var check (name: present/length only, never the value):");
   for (const name of names) {
     const value = process.env[name];
-    console.log(`  ${name}: ${value ? `present (${value.length} chars)` : "MISSING"}`);
+    // V4 addresses come from the Admin-saved config and Telegram settings from the
+    // saved relayer settings when the env var is unset, so "unset" there is normal.
+    const optional = /^(V4_|TELEGRAM_)/.test(name) ? "unset (fine — Admin config / saved settings are used if present)" : "MISSING";
+    console.log(`  ${name}: ${value ? `present (${value.length} chars)` : optional}`);
   }
 
   // Unlike the secrets above, these three are just filesystem paths (see
@@ -2473,9 +2476,25 @@ async function main() {
   // this endpoint answers "did my last restart actually take?" in one
   // request instead of guessing from a dashboard screen or a startup log
   // scrollback.
+  // Which public/index.html this process is actually serving. The page carries an
+  // ADMIN_UI_BUILD stamp (shown in Admin -> V4 contracts); logging it at startup and
+  // returning it from /health makes "is the host serving my latest page?" answerable
+  // without opening a browser.
+  const uiBuild = (() => {
+    try {
+      const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+      const m = html.match(/ADMIN_UI_BUILD\s*=\s*"([^"]+)"/);
+      return { build: m ? m[1] : "older than the build stamp", bytes: Buffer.byteLength(html) };
+    } catch (err) {
+      return { build: "index.html not found", bytes: 0 };
+    }
+  })();
+  console.log(`[ui] serving public/index.html — build "${uiBuild.build}", ${uiBuild.bytes} bytes`);
+
   app.get("/health", (_req, res) =>
     sendJson(res, 200, {
       ok: true,
+      uiBuild: uiBuild.build,
       relayer: relayerWallet.address,
       tokenFactoryAddress: tokenFactoryAddress || null,
       customTokenFactoryAddress: customTokenFactoryAddress || null,
