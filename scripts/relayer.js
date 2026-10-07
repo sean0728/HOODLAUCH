@@ -111,7 +111,7 @@
 // trades listed (pollTokenActivity). Any one of the V4 factory env vars
 // (V4_TOKEN_FACTORY_ADDRESS included) satisfies the "set at least one
 // factory" startup check. The compounder keeper only runs with
-// V4_KEEPER_ENABLED=true AND V4_COMPOUNDER_ADDRESS set.
+// the Admin "V4 keeper" switch (Relayer settings) AND V4_COMPOUNDER_ADDRESS set.
 //
 // GET /status/:voucherHash lets the front end poll a launch's progress
 // (received -> deposited -> relayed, or failed) — merged with a live
@@ -387,6 +387,12 @@ const RELAYER_SETTINGS_DEFAULTS = {
   telegramBotToken: String(process.env.TELEGRAM_BOT_TOKEN || ""),
   telegramLaunchesChatId: String(process.env.TELEGRAM_LAUNCHES_CHAT_ID || ""),
   telegramAlertsChatId: String(process.env.TELEGRAM_ALERTS_CHAT_ID || ""),
+  // Master switch for the V4 distributor + compounder keepers. ON by default;
+  // the V4_KEEPER_ENABLED env var only seeds the starting value (set it to
+  // false/0/off to start disabled), and the Admin toggle overrides it from
+  // then on. Always the last key: the signed settings message is built in
+  // RELAYER_SETTINGS_BOUNDS' key order on both sides.
+  v4KeeperEnabled: !/^(false|0|off|no)$/i.test(String(process.env.V4_KEEPER_ENABLED == null ? "true" : process.env.V4_KEEPER_ENABLED).trim()),
 };
 // Hard bounds enforced on every one of the fields above, both when loading a
 // persisted override at startup and on every POST /relayer-settings save —
@@ -416,6 +422,7 @@ const RELAYER_SETTINGS_BOUNDS = {
   telegramBotToken: { type: "secret", maxLength: 200 },
   telegramLaunchesChatId: { type: "string", maxLength: 64 },
   telegramAlertsChatId: { type: "string", maxLength: 64 },
+  v4KeeperEnabled: { type: "boolean" },
 };
 // The live, mutable object every poll loop actually reads — seeded from
 // defaults here; main() overlays any persisted override once the storage
@@ -440,6 +447,14 @@ function platformBuybackSlippageBpsBig() { return BigInt(relayerSettings.platfor
 function clampRelayerSetting(key, rawValue) {
   const bounds = RELAYER_SETTINGS_BOUNDS[key];
   if (!bounds) return null;
+  if (bounds.type === "boolean") {
+    if (rawValue === true || rawValue === 1) return true;
+    if (rawValue === false || rawValue === 0) return false;
+    const str = String(rawValue == null ? "" : rawValue).trim().toLowerCase();
+    if (["true", "1", "on", "yes"].includes(str)) return true;
+    if (["false", "0", "off", "no"].includes(str)) return false;
+    return null;
+  }
   if (bounds.type === "string" || bounds.type === "secret") {
     // Empty string is always valid here (it's the "unset"/"no change"
     // value, handled by the two call sites: validateRelayerSettingsPatch
@@ -1135,7 +1150,7 @@ const V4_HOOK_STATE_ABI = [
 const V4_POOLS_MAPPING_SLOT = 6n; // PoolManager.pools
 
 // ---- V4 distributor keeper (optional) ----
-// Opt-in: V4_KEEPER_ENABLED=true together with V4_TOKEN_FACTORY_ADDRESS. The
+// On by default (Admin → Relayer settings toggle) once a V4 factory is configured. The
 // keeper reads the three distributor slots (feeWalletDistributor,
 // creatorRewardsDistributor, rewardsDistributor) off the V4 factory on every
 // tick, so changing a slot in Admin takes effect on the next tick with no
@@ -1143,7 +1158,17 @@ const V4_POOLS_MAPPING_SLOT = 6n; // PoolManager.pools
 // keepers' tunable settings (poll interval / slippage / claim floor / airdrop
 // batch knobs in relayerSettings) rather than adding new signed settings, so
 // when both a V2 and a V4 distributor are running they share those knobs.
-const V4_KEEPER_ENABLED = String(process.env.V4_KEEPER_ENABLED || "").toLowerCase() === "true";
+// Live on/off switch (Admin → Relayer settings, seeded from V4_KEEPER_ENABLED,
+// default ON). Every keeper tick checks it, so toggling needs no restart.
+let v4KeeperLastState = null;
+const v4KeeperOn = () => {
+  const on = relayerSettings.v4KeeperEnabled !== false;
+  if (v4KeeperLastState !== null && v4KeeperLastState !== on) {
+    console.log(`[v4-keeper] switch turned ${on ? "ON: V4 sweeps resume" : "OFF: V4 sweeps paused"} (Admin → Relayer settings).`);
+  }
+  v4KeeperLastState = on;
+  return on;
+};
 const V4_SELLER_ABI = ["function swapSlippageBps() view returns (uint256)"];
 const V4_PLATFORM_REWARDS_BASE_ABI = [
   "function platformToken() view returns (address)",
@@ -1197,7 +1222,7 @@ const V4_LP_FEE_PPM = 3000n; // must match V4TokenFactory / V4TokenSeller
 const V4_TAX_SOURCE_ABI = ["function taxSource() view returns (address)"];
 
 // ---- V4 compounder keeper (optional) ----
-// Opt-in: V4_KEEPER_ENABLED=true together with V4_COMPOUNDER_ADDRESS. Custom
+// Same Admin toggle, plus V4_COMPOUNDER_ADDRESS (or the saved Admin config). Custom
 // tokens route the "liquidity" share of their fees, in tokens, to the
 // V4LiquidityCompounder; compound(token) is permissionless and turns whatever
 // waits there into permanent pool liquidity. The keeper only pays gas for it
@@ -5690,7 +5715,7 @@ async function main() {
     setTimeout(platformRewardsPollLoop, relayerSettings.platformRewardsPollIntervalMs);
   }
 
-  // ---- V4 distributor keeper (optional; see V4_KEEPER_ENABLED above) ----
+  // ---- V4 distributor keeper (optional; see the v4KeeperOn switch above) ----
   // The V4 counterpart of the three V2 reward sweeps. Same shape: walk every
   // token, convert whatever in-kind tax a distributor holds once it clears
   // that token's own threshold, claim the resulting ETH, and drive the
@@ -5969,15 +5994,15 @@ async function main() {
   }
 
   async function v4FeeWalletPollLoop() {
-    await sweepV4FeeWalletOnce().catch((err) => console.error(`[v4-fee-wallet] sweep error: ${err.message}`));
+    if (v4KeeperOn()) await sweepV4FeeWalletOnce().catch((err) => console.error(`[v4-fee-wallet] sweep error: ${err.message}`));
     setTimeout(v4FeeWalletPollLoop, relayerSettings.feeWalletPollIntervalMs);
   }
   async function v4CreatorRewardsPollLoop() {
-    await sweepV4CreatorRewardsOnce().catch((err) => console.error(`[v4-creator-rewards] sweep error: ${err.message}`));
+    if (v4KeeperOn()) await sweepV4CreatorRewardsOnce().catch((err) => console.error(`[v4-creator-rewards] sweep error: ${err.message}`));
     setTimeout(v4CreatorRewardsPollLoop, relayerSettings.creatorRewardsPollIntervalMs);
   }
   async function v4PlatformRewardsPollLoop() {
-    await sweepV4PlatformRewardsOnce().catch((err) => console.error(`[v4-platform-rewards] sweep error: ${err.message}`));
+    if (v4KeeperOn()) await sweepV4PlatformRewardsOnce().catch((err) => console.error(`[v4-platform-rewards] sweep error: ${err.message}`));
     setTimeout(v4PlatformRewardsPollLoop, relayerSettings.platformRewardsPollIntervalMs);
   }
 
@@ -6016,7 +6041,7 @@ async function main() {
       ? Number(process.env.V4_COMPOUND_POLL_INTERVAL_MS)
       : relayerSettings.feeWalletPollIntervalMs; // same cadence as the other V4 keeper loops by default
   async function v4CompoundPollLoop() {
-    await compoundV4TokensOnce().catch((err) => console.error(`[v4-compounder] sweep error: ${err.message}`));
+    if (v4KeeperOn()) await compoundV4TokensOnce().catch((err) => console.error(`[v4-compounder] sweep error: ${err.message}`));
     setTimeout(v4CompoundPollLoop, V4_COMPOUND_POLL_INTERVAL_MS());
   }
 
@@ -6055,26 +6080,26 @@ async function main() {
     platformRewardsPollLoop();
   }
 
-  if (V4_KEEPER_ENABLED) {
+  {
     if (!v4TokenFactoryAddress && !v4CustomTokenFactoryAddress && !v4CurveFactoryAddress) {
-      console.warn(
-        "V4_KEEPER_ENABLED=true but none of V4_TOKEN_FACTORY_ADDRESS / V4_CUSTOM_TOKEN_FACTORY_ADDRESS / V4_CURVE_FACTORY_ADDRESS " +
-          "is set — the V4 distributor and compounder keepers are OFF."
+      console.log(
+        "No V4 factory configured (V4_TOKEN_FACTORY_ADDRESS / V4_CUSTOM_TOKEN_FACTORY_ADDRESS / V4_CURVE_FACTORY_ADDRESS or saved Admin config) " +
+          "— the V4 distributor and compounder keepers are not started."
       );
     } else {
       console.log(
-        `V4 distributor keeper ON for factory ${v4TokenFactoryAddress || v4CustomTokenFactoryAddress || v4CurveFactoryAddress}: fee-wallet every ${relayerSettings.feeWalletPollIntervalMs}ms, ` +
+        `V4 keeper switch is ${v4KeeperOn() ? "ON" : "OFF"} (Admin → Relayer settings). Loops for factory ${v4TokenFactoryAddress || v4CustomTokenFactoryAddress || v4CurveFactoryAddress}: fee-wallet every ${relayerSettings.feeWalletPollIntervalMs}ms, ` +
           `creator rewards every ${relayerSettings.creatorRewardsPollIntervalMs}ms, platform rewards every ${relayerSettings.platformRewardsPollIntervalMs}ms ` +
-          "(distributor addresses are read from the factory each tick; a slot that's unset just idles)."
+          "(distributor addresses are read from the factory each tick; a slot that's unset just idles; while the switch is OFF every tick is skipped)."
       );
       v4FeeWalletPollLoop();
       v4CreatorRewardsPollLoop();
       v4PlatformRewardsPollLoop();
       if (!V4_COMPOUNDER_ADDRESS) {
-        console.warn("V4_KEEPER_ENABLED=true but V4_COMPOUNDER_ADDRESS is not set — the V4 compounder keeper is OFF.");
+        console.warn("V4_COMPOUNDER_ADDRESS is not set — the V4 compounder keeper is not started.");
       } else {
         console.log(
-          `V4 compounder keeper ON (${V4_COMPOUNDER_ADDRESS}): every ${V4_COMPOUND_POLL_INTERVAL_MS()}ms, compounding a custom-tax token ` +
+          `V4 compounder keeper loop started (${V4_COMPOUNDER_ADDRESS}): every ${V4_COMPOUND_POLL_INTERVAL_MS()}ms, compounding a custom-tax token ` +
             `once pending >= ${V4_COMPOUND_MIN_SUPPLY_BPS} bps of its supply.`
         );
         v4CompoundPollLoop();
