@@ -156,14 +156,16 @@ describe("V4PlatformRewardsDistributor security audit", function () {
       await expect(prd.setKeeper(ZERO, true)).to.be.revertedWith("V4TokenSeller: invalid keeper");
     });
 
-    it("airdrop rounds stay permissionless (they only pay holders from an existing pot)", async () => {
+    it("airdrop rounds are gated the same way (they pay from balances at the moment they run)", async () => {
       await owner.sendTransaction({ to: await A(prd), value: ETH("1") });
       await prd.setPlatformToken(await A(plat));
       await prd.triggerEthBuyback(0n);
       await plat.transfer(holderA.address, ETH("100"));
-      await prd.connect(attacker).startAirdropRound();
+      await expect(prd.connect(attacker).startAirdropRound()).to.be.revertedWith("V4PlatformTokenRewards: not authorized to run rounds");
+      await prd.setKeeper(keeper.address, true);
+      await prd.connect(keeper).startAirdropRound();
       let guard = 0;
-      while (await prd.roundActive()) { await prd.connect(attacker).processAirdropBatch(5); if (++guard > 20) throw new Error("never closed"); }
+      while (await prd.roundActive()) { await prd.connect(keeper).processAirdropBatch(5); if (++guard > 20) throw new Error("never closed"); }
     });
   });
 
