@@ -555,6 +555,32 @@
   .preview-sticky{position:sticky; top:88px;}
   .preview-label{font-family:var(--font-mono); font-size:.68rem; text-transform:uppercase; letter-spacing:.08em; color:var(--paper-700); margin-bottom:10px;}
 
+
+  /* ---------------- Wallet profiles ---------------- */
+  .pf-av{display:inline-flex; align-items:center; justify-content:center; border-radius:50%; overflow:hidden; flex:none; font-family:var(--font-mono); font-weight:700; color:#0c0f16; vertical-align:middle; object-fit:cover;}
+  img.pf-av{display:inline-block;}
+  .pf-chip{display:inline-flex; align-items:center; gap:6px; font-family:var(--font-mono); font-size:.76rem; color:var(--paper-300); text-decoration:none; background:none; border:0; padding:0; cursor:default;}
+  .pf-chip.link{cursor:pointer;}
+  .pf-chip.link:hover .pf-chip-name{text-decoration:underline;}
+  .pf-chip-name{color:var(--signal-300); font-weight:600;}
+  .feed-who{display:inline-flex; align-items:center; gap:5px; vertical-align:bottom;}
+  .tc-by{margin-left:6px; color:var(--paper-500); max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:bottom;}
+  .detail-by{display:flex; align-items:center; gap:8px; margin:10px 0 0; font-family:var(--font-mono); font-size:.72rem; color:var(--paper-500);}
+  .profile-wrap{max-width:760px; margin:0 auto; padding:42px 0 70px;}
+  .pf-card{display:flex; gap:22px; align-items:center; flex-wrap:wrap; margin-bottom:20px;}
+  .pf-card .pf-av{width:96px; height:96px; font-size:1.8rem;}
+  .pf-card-main{flex:1; min-width:220px;}
+  .pf-name{font-family:var(--font-display); font-size:1.5rem; font-weight:700; line-height:1.15; word-break:break-word;}
+  .pf-name.unset{color:var(--paper-500); font-weight:600; font-size:1.15rem;}
+  .pf-wallet{font-family:var(--font-mono); font-size:.78rem; color:var(--paper-500); margin-top:6px; word-break:break-all;}
+  .pf-actions{display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;}
+  .pf-form-msg{font-family:var(--font-mono); font-size:.72rem; margin-top:6px; min-height:1.1em; color:var(--paper-700);}
+  .pf-form-msg.err{color:var(--critical-500);}
+  .pf-form-msg.ok{color:var(--good-500);}
+  .pf-token-row{display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); font-size:.9rem; cursor:pointer; background:none; border-left:0; border-right:0; border-top:0; width:100%; color:inherit; text-align:left;}
+  .pf-token-row:last-child{border-bottom:none;}
+  .pf-soon{color:var(--paper-500); font-size:.88rem; margin:6px 0 0;}
+
   /* ---------------- Portfolio ---------------- */
   .portfolio-wrap{padding:42px 0 70px;}
   .wallet-card{display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap; padding:20px 22px; margin-bottom:26px;}
@@ -724,6 +750,7 @@
       <button class="tab" role="tab" aria-selected="true" data-view="explore">Explore</button>
       <button class="tab" role="tab" aria-selected="false" data-view="create">Launch</button>
       <button class="tab" role="tab" aria-selected="false" data-view="portfolio">Portfolio</button>
+      <button class="tab" role="tab" aria-selected="false" data-view="profile">Profile</button>
       <button class="tab" role="tab" aria-selected="false" data-view="admin" id="adminTabBtn" hidden>Admin</button>
     </div>
     <div class="hud-spacer"></div>
@@ -900,6 +927,11 @@
     <!-- ===================== PORTFOLIO ===================== -->
     <section class="view" id="view-portfolio">
       <div class="portfolio-wrap" id="portfolioWrap"></div>
+    </section>
+
+    <!-- ===================== PROFILE ===================== -->
+    <section class="view" id="view-profile">
+      <div class="profile-wrap" id="profileWrap"></div>
     </section>
 
     <!-- ===================== ADMIN ===================== -->
@@ -1148,6 +1180,9 @@
   // only by tokens launched locally through the wizard below (persisted to
   // localStorage so they survive a reload).
   const tokens = [];
+  // Wallet profiles (name + picture per wallet), fetched from the relayer — see the "Wallet profiles" section.
+  const profileCache = { map: {}, loaded: false };
+  let profileViewAddr = null; // null = the connected wallet's own profile
   const LP_LOCK_DAYS = 15;
 
   // load any locally-created demo tokens
@@ -1234,7 +1269,7 @@
 
   /* ---------------- nav / views ---------------- */
   const tabs = document.querySelectorAll(".tab");
-  const views = { explore: document.getElementById("view-explore"), create: document.getElementById("view-create"), portfolio: document.getElementById("view-portfolio"), detail: document.getElementById("view-detail"), admin: document.getElementById("view-admin") };
+  const views = { explore: document.getElementById("view-explore"), create: document.getElementById("view-create"), portfolio: document.getElementById("view-portfolio"), profile: document.getElementById("view-profile"), detail: document.getElementById("view-detail"), admin: document.getElementById("view-admin") };
 
   function showView(name){
     // The admin tab is hidden (see refreshAdminTabVisibility) whenever the
@@ -1251,10 +1286,11 @@
     tabs.forEach(t=> t.setAttribute("aria-selected", String(t.dataset.view===name)) );
     window.scrollTo({top:0, behavior: REDUCE_MOTION ? "auto" : "smooth"});
     if(name==="portfolio") renderPortfolio();
+    if(name==="profile") renderProfile();
     if(name==="create"){ renderWizard(); refreshOnChainDefaults(); refreshEthUsdPrice(); }
     if(name==="admin") renderAdmin();
   }
-  tabs.forEach(t=> t.addEventListener("click", ()=>showView(t.dataset.view)) );
+  tabs.forEach(t=> t.addEventListener("click", ()=>{ if(t.dataset.view==="profile") profileViewAddr = null; showView(t.dataset.view); }) );
   document.querySelectorAll("[data-goto]").forEach(b=> b.addEventListener("click", ()=>showView(b.dataset.goto)) );
   document.querySelector('[data-goto-scroll="market"]').addEventListener("click", ()=>{
     document.getElementById("market").scrollIntoView({behavior: REDUCE_MOTION?"auto":"smooth", block:"start"});
@@ -1994,6 +2030,7 @@
   function refreshWalletBtn(){
     if(wallet){ walletBtn.textContent = fmtAddr(wallet); walletBtn.classList.add("connected"); }
     else { walletBtn.textContent = "Connect Wallet"; walletBtn.classList.remove("connected"); }
+    if(typeof renderProfileIfActive==="function") renderProfileIfActive();
   }
 
   // ---- admin gate ----
@@ -6700,7 +6737,7 @@
     return `
       <div class="tc-head">
         ${tcMarkHTML(t)}
-        <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)} ${protoBadgeHTML(t, "margin-left:4px;")}</div></div>
+        <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)} ${protoBadgeHTML(t, "margin-left:4px;")}${profileNameOf(t.creatorWallet) ? `<span class="tc-by" title="Created by ${escapeHtml(profileNameOf(t.creatorWallet))}">by ${escapeHtml(profileNameOf(t.creatorWallet))}</span>` : ""}</div></div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px; margin-left:auto;">
           ${(!noSimulatedMarket && t.mcap>0) ? `<div class="tc-mcap"><span class="l">Mcap</span>${fmtUSD(t.mcap)}</div>` : ""}
           ${(t.mode==="curve"||t.mode==="customCurve") ? `<span class="tc-quicklaunch-badge">⚡ Quick Launch</span>` : ""}
@@ -7268,6 +7305,7 @@
             <div style="flex:1;"><h2>${escapeHtml(t.name)}</h2><div class="tc-ticker">$${escapeHtml(t.ticker)} · ${statusBadgeHTML(t.mode, t.status, "display:inline-block; margin-left:4px;")} <span class="proto-badge ${tokenProtocol(t)}" id="detailProtocolBadge" title="${tokenProtocol(t)==='v4' ? 'Launched on Uniswap V4' : 'Launched on Uniswap V2'}">${tokenProtocol(t).toUpperCase()}</span></div></div>
             ${isOwner ? `<button class="btn btn-ghost" id="detailEditBtn" style="padding:8px 14px; font-size:.8rem;">Edit token</button>` : ""}
           </div>
+          ${t.creatorWallet ? `<div class="detail-by">Created by ${profileChipHTML(t.creatorWallet, {link:true, size:20})}</div>` : ""}
           ${isCreatorHeld ? `<p style="color:var(--paper-500); margin:18px 0 0;">No pool — 100% of the supply is in the creator's wallet. Hood Launch has no further role here: if this creator adds liquidity, it happens off-platform, on their own terms.</p>` : ""}
           ${noPriceChart ? "" : `
           <div class="detail-price num">${fmtUSD(t.price)}</div>
@@ -14172,6 +14210,324 @@
     }
   });
 
+
+  /* ---------------- Wallet profiles ----------------
+     A wallet can set a display name and a picture. The name replaces the
+     wallet address in the live feed and shows as "created by" on tokens;
+     with no name set, the wallet address is shown as before. Profiles live on
+     the relayer (GET /profiles, POST /profile — see scripts/relayer.js and
+     lib/profile.js); saving needs a personal_sign signature from the wallet
+     itself. Buys/sells/PNL per wallet are planned for this page later. */
+  const PROFILE_NAME_MIN = 2, PROFILE_NAME_MAX = 24;
+  const PROFILE_RESERVED_KEYS = ["admin","administrator","hoodlaunch","hood","official","support","team","staff","moderator","mod","robinhood","system"];
+  const PROFILE_AVATAR_MAX_CHARS = 110000; // server limit is 120000
+  const PROFILES_POLL_MS = 60000;
+  // Must match lib/profile.js normalizeName / validateName / profileMessage exactly.
+  function normalizeProfileName(raw){ return typeof raw==="string" ? raw.normalize("NFKC").replace(/\s+/g," ").trim() : ""; }
+  function profileNameKey(name){ return normalizeProfileName(name).toLowerCase().replace(/[ ._-]/g,""); }
+  function validateProfileName(name){
+    if(name==="") return null;
+    const len = Array.from(name).length;
+    if(len<PROFILE_NAME_MIN || len>PROFILE_NAME_MAX) return `Name must be ${PROFILE_NAME_MIN}-${PROFILE_NAME_MAX} characters.`;
+    if(!/^[\p{L}\p{N}][\p{L}\p{N} ._-]*$/u.test(name)) return "Use letters, numbers, spaces, dots, dashes or underscores (start with a letter or number).";
+    const key = profileNameKey(name);
+    if(/^0x[0-9a-f]*$/.test(key)) return "A name can't look like a wallet address.";
+    if(!isAdminWallet(wallet) && PROFILE_RESERVED_KEYS.includes(key)) return "That name is reserved.";
+    return null;
+  }
+  function profileMessage(address, name, avatarPart, timestamp){
+    return `Hood Launch: update profile for ${String(address).toLowerCase()} name=${JSON.stringify(name)} avatar=${avatarPart} at ${timestamp}`;
+  }
+  async function sha256Hex(str){
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+  }
+  const isAddrLike = a => /^0x[0-9a-fA-F]{40}$/.test(String(a||""));
+
+  function profileOf(addr){ return isAddrLike(addr) ? (profileCache.map[String(addr).toLowerCase()] || null) : null; }
+  function profileNameOf(addr){ const p = profileOf(addr); return p && p.name ? p.name : null; }
+  function profileAvatarSrc(addr){
+    const p = profileOf(addr);
+    return (p && p.avatarV) ? `${location.origin}/profile-avatar/${String(addr).toLowerCase()}?v=${encodeURIComponent(p.avatarV)}` : "";
+  }
+  // Round avatar: the picture if there is one, else a coloured disc derived from the address.
+  function profileAvatarHTML(addr, size){
+    const px = size || 20;
+    const src = profileAvatarSrc(addr);
+    if(src) return `<img class="pf-av" src="${escapeHtml(src)}" alt="" width="${px}" height="${px}" style="width:${px}px;height:${px}px;" loading="lazy">`;
+    const a = isAddrLike(addr) ? String(addr).toLowerCase() : "0x00";
+    let h = 0; for(let i=2;i<a.length;i++) h = (h*31 + a.charCodeAt(i)) % 360;
+    const name = profileNameOf(addr);
+    const letter = name ? Array.from(name)[0].toUpperCase() : a.slice(2,4);
+    return `<span class="pf-av" style="width:${px}px;height:${px}px;font-size:${Math.max(8,Math.round(px*0.42))}px;background:hsl(${h} 55% 55%);">${escapeHtml(letter)}</span>`;
+  }
+  // Avatar + name (or short wallet) — a link to the profile page when {link:true}.
+  function profileChipHTML(addr, {link=false, size=20}={}){
+    if(!addr) return "";
+    const name = profileNameOf(addr);
+    const label = name ? escapeHtml(name) : escapeHtml(fmtAddr(String(addr)));
+    const inner = `${profileAvatarHTML(addr,size)}<span class="${name?"pf-chip-name":""}">${label}</span>`;
+    return link ? `<button type="button" class="pf-chip link" data-open-profile="${escapeHtml(String(addr))}" title="View profile">${inner}</button>`
+                : `<span class="pf-chip">${inner}</span>`;
+  }
+  // The "who" part of a live-feed line: the profile name (with picture) or "Wallet 0xabcd…".
+  function feedWhoHTML(addr){
+    const name = profileNameOf(addr);
+    if(name) return `${profileAvatarHTML(addr,14)}<span class="tk">${escapeHtml(name)}</span>`;
+    const short = addr ? `${String(addr).slice(0,6)}…` : "0x????…";
+    return `Wallet <span class="tk">${escapeHtml(short)}</span>`;
+  }
+  function refreshFeedNames(){
+    document.querySelectorAll("#feedBody .feed-who[data-wallet]").forEach(el=>{ el.innerHTML = feedWhoHTML(el.dataset.wallet); });
+  }
+
+  let profilesSig = "";
+  async function fetchProfiles(){
+    try{
+      const res = await fetch(`${location.origin}/profiles`, { cache:"no-store" });
+      if(!res.ok) return;
+      const data = await res.json();
+      const map = (data && data.profiles && typeof data.profiles==="object") ? data.profiles : {};
+      const sig = JSON.stringify(map);
+      profileCache.loaded = true;
+      if(sig===profilesSig) return;
+      profilesSig = sig;
+      profileCache.map = map;
+      onProfilesChanged();
+    }catch(e){ /* offline or relayer not reachable — names just stay as wallet addresses */ }
+  }
+  function onProfilesChanged(){
+    refreshFeedNames();
+    renderLaunchFeedFromTokens();
+    renderGrid();
+    if(views.detail.classList.contains("active") && currentDetailTokenId && !tradeInProgress()) openDetail(currentDetailTokenId);
+    renderProfileIfActive();
+  }
+  function renderProfileIfActive(){
+    if(!views.profile || !views.profile.classList.contains("active")) return;
+    const wrap = document.getElementById("profileWrap");
+    // Don't wipe a form someone is typing in.
+    if(wrap && wrap.contains(document.activeElement) && document.activeElement.tagName==="INPUT") return;
+    renderProfile();
+  }
+  function openProfile(addr){
+    if(!isAddrLike(addr)) return;
+    profileViewAddr = addr;
+    showView("profile");
+  }
+  document.addEventListener("click", (e)=>{
+    const el = e.target.closest && e.target.closest("[data-open-profile]");
+    if(el){ e.preventDefault(); openProfile(el.dataset.openProfile); }
+  });
+
+  // Center-crops to a 256x256 JPEG and tightens quality until it fits the server's limit.
+  function makeAvatarDataUrl(file){
+    return new Promise((resolve, reject)=>{
+      if(!file || !file.type || !file.type.startsWith("image/")){ reject(new Error("That file doesn't look like an image.")); return; }
+      const reader = new FileReader();
+      reader.onerror = ()=> reject(new Error("Couldn't read that file."));
+      reader.onload = ()=>{
+        const img = new Image();
+        img.onerror = ()=> reject(new Error("That doesn't look like a valid image."));
+        img.onload = ()=>{
+          const side = Math.min(img.width, img.height);
+          const sx = (img.width-side)/2, sy = (img.height-side)/2;
+          let size = 256, q = 0.88;
+          for(let i=0;i<8;i++){
+            const c = document.createElement("canvas"); c.width = size; c.height = size;
+            const ctx = c.getContext("2d");
+            ctx.fillStyle = "#0c0f16"; ctx.fillRect(0,0,size,size);
+            ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+            const url = c.toDataURL("image/jpeg", q);
+            if(url.length <= PROFILE_AVATAR_MAX_CHARS){ resolve(url); return; }
+            q = Math.max(0.4, q-0.12); size = Math.max(96, Math.round(size*0.85));
+          }
+          reject(new Error("That image is too large to use even after shrinking it. Try a simpler picture."));
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Edits in progress for the connected wallet's profile. avatar: undefined = unchanged, null = remove, string = new picture.
+  let profileDraft = { name: null, avatar: undefined };
+
+  function renderProfile(){
+    const wrap = document.getElementById("profileWrap");
+    if(!wrap) return;
+    const addr = profileViewAddr || wallet;
+    if(!addr){
+      wrap.innerHTML = `
+        <div class="panel empty" style="max-width:520px; margin:40px auto;">
+          <h3 style="margin-bottom:10px; font-size:1.1rem;">No wallet connected</h3>
+          <p style="color:var(--paper-500); font-size:.9rem; margin-bottom:20px;">Connect your wallet to set a name and picture. Your name shows up in the live feed and on tokens you launch.</p>
+          <button class="btn btn-primary" id="profConnect">Connect Wallet</button>
+        </div>`;
+      document.getElementById("profConnect").addEventListener("click", ()=> walletBtn.click());
+      return;
+    }
+    const own = !!wallet && addr.toLowerCase()===wallet.toLowerCase();
+    const saved = profileOf(addr);
+    const savedName = saved && saved.name ? saved.name : "";
+    const draftName = (own && profileDraft.name!==null) ? profileDraft.name : savedName;
+    const net = NETWORKS[appMode];
+    const explorer = net && net.blockExplorerUrls && net.blockExplorerUrls[0] ? net.blockExplorerUrls[0].replace(/\/+$/,"") : "";
+    const walletHTML = explorer
+      ? `<a href="${escapeHtml(explorer)}/address/${escapeHtml(addr)}" target="_blank" rel="noopener noreferrer" style="color:inherit;">${escapeHtml(addr)}</a>`
+      : escapeHtml(addr);
+    // avatar shown in the card: pending new picture > saved picture > placeholder
+    let avatarBlock;
+    if(own && typeof profileDraft.avatar==="string"){
+      avatarBlock = `<img class="pf-av" src="${escapeHtml(profileDraft.avatar)}" alt="" style="width:96px;height:96px;">`;
+    } else if(own && profileDraft.avatar===null){
+      avatarBlock = `<span class="pf-av" style="width:96px;height:96px;font-size:1.8rem;background:var(--ink-700, #2a3040);color:var(--paper-500);">?</span>`;
+    } else {
+      avatarBlock = profileAvatarHTML(addr, 96);
+    }
+    const shownName = own ? draftName : savedName;
+    const myTokens = tokens.filter(t=> t.creatorWallet && t.creatorWallet.toLowerCase()===addr.toLowerCase() && (t.networkMode||"demo")===appMode);
+    const tokensHTML = myTokens.length
+      ? myTokens.map(t=>`<button type="button" class="pf-token-row" data-pf-token="${escapeHtml(t.id)}"><span style="font-weight:600;">${escapeHtml(t.name)}</span><span class="tc-ticker">$${escapeHtml(t.ticker)}</span> ${protoBadgeHTML(t)}</button>`).join("")
+      : `<p class="pf-soon">No tokens launched from this wallet on ${escapeHtml(net.label)} yet.</p>`;
+    const adminRemove = (!own && isAdminWallet(wallet) && saved)
+      ? `<button class="btn btn-ghost" id="pfAdminRemove" style="color:var(--critical-500); border-color:rgba(240,64,95,.4);">Remove profile (admin)</button>` : "";
+
+    wrap.innerHTML = `
+      <div class="panel pf-card">
+        <div id="pfAvatarWrap">${avatarBlock}</div>
+        <div class="pf-card-main">
+          <div class="eyebrow" style="margin-bottom:6px;">${own ? "Your profile" : "Profile"}</div>
+          <div class="pf-name ${shownName ? "" : "unset"}" id="pfNameShown">${shownName ? escapeHtml(shownName) : (own ? "No name set" : "No name set")}</div>
+          <div class="pf-wallet">${walletHTML}</div>
+          ${own ? `
+          <div class="pf-actions">
+            <input type="file" id="pfFile" accept="image/*" hidden>
+            <button class="btn btn-ghost" id="pfPick">Upload picture</button>
+            <button class="btn btn-ghost" id="pfRemovePic">Remove picture</button>
+          </div>` : (adminRemove ? `<div class="pf-actions">${adminRemove}</div>` : "")}
+        </div>
+      </div>
+      ${own ? `
+      <div class="panel" style="margin-bottom:20px;">
+        <div class="field" style="margin-bottom:6px;">
+          <label for="pfName">Display name</label>
+          <input id="pfName" type="text" maxlength="${PROFILE_NAME_MAX*2}" autocomplete="off" spellcheck="false" placeholder="Leave empty to show your wallet address" value="${escapeHtml(draftName)}">
+          <div class="hint">${PROFILE_NAME_MIN}-${PROFILE_NAME_MAX} characters. Letters, numbers, spaces, dots, dashes, underscores. Names are unique — first come, first served.</div>
+        </div>
+        <div class="pf-form-msg" id="pfMsg"></div>
+        <button class="btn btn-primary" id="pfSave" style="margin-top:12px;">Save profile</button>
+        <p class="pf-soon" style="margin-top:12px;">Saving asks your wallet to sign a message. It's free and sends no transaction. Your name and picture are public.</p>
+      </div>` : ""}
+      <div class="panel" style="margin-bottom:20px;">
+        <div class="eyebrow" style="margin-bottom:6px;">Tokens launched</div>
+        ${tokensHTML}
+      </div>
+      <div class="panel">
+        <div class="eyebrow" style="margin-bottom:6px;">Trading activity</div>
+        <p class="pf-soon">Buys, sells and profit &amp; loss on Hood Launch will show up here soon.</p>
+      </div>`;
+
+    wrap.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
+    const rm = document.getElementById("pfAdminRemove");
+    if(rm) rm.addEventListener("click", ()=> adminRemoveProfile(addr, rm));
+    if(!own) return;
+
+    const msg = document.getElementById("pfMsg");
+    const setMsg = (text, cls)=>{ msg.textContent = text||""; msg.className = "pf-form-msg"+(cls?" "+cls:""); };
+    const nameInput = document.getElementById("pfName");
+    const saveBtn = document.getElementById("pfSave");
+    const dirty = ()=> normalizeProfileName(nameInput.value)!==savedName || profileDraft.avatar!==undefined;
+    const update = ()=>{
+      profileDraft.name = nameInput.value;
+      const err = validateProfileName(normalizeProfileName(nameInput.value));
+      if(err) setMsg(err, "err"); else setMsg(dirty() ? "Unsaved changes." : "");
+      saveBtn.disabled = !!err || !dirty();
+    };
+    nameInput.addEventListener("input", update);
+    update();
+    document.getElementById("pfPick").addEventListener("click", ()=> document.getElementById("pfFile").click());
+    document.getElementById("pfFile").addEventListener("change", async (ev)=>{
+      const f = ev.target.files && ev.target.files[0];
+      ev.target.value = "";
+      if(!f) return;
+      try{
+        profileDraft.avatar = await makeAvatarDataUrl(f);
+        profileDraft.name = nameInput.value;
+        renderProfile();
+      }catch(err){ setMsg(err.message || "Couldn't use that image.", "err"); }
+    });
+    document.getElementById("pfRemovePic").addEventListener("click", ()=>{
+      // Nothing to remove if there's no saved picture and no pending one.
+      if(!(saved && saved.avatarV) && typeof profileDraft.avatar!=="string") return;
+      profileDraft.avatar = (saved && saved.avatarV) ? null : undefined;
+      profileDraft.name = nameInput.value;
+      renderProfile();
+    });
+    saveBtn.addEventListener("click", ()=> saveMyProfile(nameInput, setMsg, saveBtn));
+  }
+
+  async function saveMyProfile(nameInput, setMsg, saveBtn){
+    if(!wallet){ toast("Connect your wallet first."); return; }
+    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    const name = normalizeProfileName(nameInput.value);
+    const err = validateProfileName(name);
+    if(err){ setMsg(err, "err"); return; }
+    const avatar = profileDraft.avatar; // undefined | null | data URL
+    const timestamp = Date.now();
+    saveBtn.disabled = true;
+    setMsg("Waiting for your wallet to sign…");
+    try{
+      const avatarPart = avatar===undefined ? "keep" : avatar===null ? "none" : await sha256Hex(avatar);
+      const message = profileMessage(wallet, name, avatarPart, timestamp);
+      let signature;
+      try{
+        signature = await window.ethereum.request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] });
+      }catch(e){ setMsg("Signature was rejected — nothing was saved.", "err"); saveBtn.disabled = false; return; }
+      setMsg("Saving…");
+      const body = { address: wallet, name, timestamp, signature };
+      if(avatar!==undefined) body.avatar = avatar;
+      const res = await fetch(`${location.origin}/profile`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){
+        setMsg(data.error || "Couldn't save your profile — try again.", "err");
+        saveBtn.disabled = false;
+        return;
+      }
+      profileDraft = { name: null, avatar: undefined };
+      toast("Profile saved.");
+      await fetchProfiles();
+      renderProfile();
+    }catch(e){
+      setMsg("Couldn't save your profile — check your connection and try again.", "err");
+      saveBtn.disabled = false;
+    }
+  }
+
+  async function adminRemoveProfile(addr, btn){
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+    if(btn.dataset.confirming!=="1"){
+      btn.dataset.confirming = "1"; btn.textContent = "Confirm remove?";
+      setTimeout(()=>{ if(btn.isConnected){ btn.dataset.confirming = ""; btn.textContent = "Remove profile (admin)"; } }, 4000);
+      return;
+    }
+    const timestamp = Date.now();
+    const message = `Hood Launch admin: remove profile ${String(addr).toLowerCase()} at ${timestamp}`;
+    let signature;
+    try{ signature = await window.ethereum.request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] }); }
+    catch(e){ toast("Signature was rejected — nothing was removed."); return; }
+    try{
+      const res = await fetch(`${location.origin}/profile/remove`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ address: addr, timestamp, signature }) });
+      if(!res.ok){ const d = await res.json().catch(()=>({})); toast(d.error || "Couldn't remove that profile."); return; }
+      toast("Profile removed.");
+      await fetchProfiles();
+      renderProfile();
+    }catch(e){ toast("Couldn't remove that profile."); }
+  }
+
+  fetchProfiles();
+  setInterval(fetchProfiles, PROFILES_POLL_MS);
+
   /* ---------------- live feed (real trade activity only) ---------------- */
   // Replaces what used to be a fully fabricated feed: a random token, a
   // random flavor-text verb, a random fake wallet address, on a fixed 4.2s
@@ -14190,7 +14546,6 @@
     const time = new Date(entry.t).toLocaleTimeString("en-US", {hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
     const verb = entry.side==="buy" ? "bought into" : "sold out of";
     const dotColor = entry.side==="buy" ? "var(--good-500)" : "var(--cyan-500)";
-    const shortWallet = entry.wallet ? `${entry.wallet.slice(0,6)}…` : "0x????…";
     const symbol = entry.symbol || "TOKEN";
     // Quick Launch (bonding-curve) buys/sells land in this exact same
     // /activity feed — pollTokenActivity in relayer.js reads them straight
@@ -14205,7 +14560,7 @@
     const isCurveTrade = !!knownToken && (knownToken.mode==="curve" || knownToken.mode==="customCurve");
     const div = document.createElement("div");
     div.className = "feed-line";
-    div.innerHTML = `<span class="t mono">${time}</span><span class="dot" style="background:${dotColor}"></span><span class="msg">${isCurveTrade ? `<span class="feed-curve-tag">⚡</span> ` : ""}Wallet <span class="tk">${escapeHtml(shortWallet)}</span> ${verb} <span class="tk">$${escapeHtml(symbol)}</span></span>`;
+    div.innerHTML = `<span class="t mono">${time}</span><span class="dot" style="background:${dotColor}"></span><span class="msg">${isCurveTrade ? `<span class="feed-curve-tag">⚡</span> ` : ""}<span class="feed-who" data-wallet="${escapeHtml(entry.wallet || "")}">${feedWhoHTML(entry.wallet)}</span> ${verb} <span class="tk">$${escapeHtml(symbol)}</span></span>`;
     return div;
   }
 
@@ -14225,7 +14580,7 @@
     const badge = (t.mode==="curve"||t.mode==="customCurve") ? "⚡ Quick Launch" : "New launch";
     const div = document.createElement("div");
     div.className = "feed-line feed-announce";
-    div.innerHTML = `<span class="t mono">${time}</span><span class="feed-announce-badge">${badge}</span><span class="msg">🚀 <span class="tk">$${escapeHtml(t.ticker)}</span> just launched on Hood Launch — ${escapeHtml(t.name)}</span>`;
+    div.innerHTML = `<span class="t mono">${time}</span><span class="feed-announce-badge">${badge}</span><span class="msg">🚀 <span class="tk">$${escapeHtml(t.ticker)}</span> just launched on Hood Launch — ${escapeHtml(t.name)}${profileNameOf(t.creatorWallet) ? ` · by ${escapeHtml(profileNameOf(t.creatorWallet))}` : ""}</span>`;
     return div;
   }
 
