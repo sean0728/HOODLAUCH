@@ -598,6 +598,13 @@
   .cm-bar .btn{margin-left:auto;}
   .cm-count{font-family:var(--font-mono); font-size:.7rem; color:var(--paper-700);}
   .cm-count.over{color:var(--critical-500);}
+  .co-perf{margin-top:6px; font-family:var(--font-mono); font-size:1.05rem; font-weight:700;}
+  .co-mult.up, .co-pct.up{color:var(--good-500);}
+  .co-mult.down, .co-pct.down{color:var(--critical-500);}
+  .co-mult.flat{color:var(--paper-500); font-size:.8rem; font-weight:500;}
+  .co-pct{font-size:.8rem; font-weight:600;}
+  .co-peak{font-size:.72rem; font-weight:500; color:var(--paper-500); margin-left:6px;}
+  .co-detail{font-family:var(--font-mono); font-size:.7rem; color:var(--paper-500); margin-top:4px;}
 
   /* ---------------- Portfolio ---------------- */
   .portfolio-wrap{padding:42px 0 70px;}
@@ -6829,6 +6836,8 @@
     // Also true while a comment is being typed, so a background refresh can't wipe it.
     const c = document.getElementById("commentInput");
     if(c && (c.value || document.activeElement===c)) return true;
+    const co = document.getElementById("calloutReason");
+    if(co && (co.value || document.activeElement===co)) return true;
     const a = document.getElementById("tradeAmt");
     return !!(a && (a.value || document.activeElement===a || tradeSide!=="buy"));
   }
@@ -7372,6 +7381,10 @@
           ${socialLinksHTML(t)}
         </div>
         ${t.onChain && t.tokenAddress ? `
+        <div class="panel" id="calloutPanel" style="margin-top:20px;">
+          <div class="eyebrow" style="margin-bottom:10px;">Callout</div>
+          <div id="calloutMount"></div>
+        </div>
         <div class="panel" id="commentsPanel" style="margin-top:20px;">
           <div class="eyebrow" style="margin-bottom:12px;">Comments <span id="commentCount"></span></div>
           <div id="commentsMount"></div>
@@ -7382,6 +7395,7 @@
     `;
 
     initComments(t);
+    initCalloutBox(t);
 
     const detailEditBtn = document.getElementById("detailEditBtn");
     if(detailEditBtn) detailEditBtn.addEventListener("click", ()=> openEditToken(t.id) );
@@ -14452,6 +14466,12 @@
         <button class="btn btn-primary" id="pfSave" style="margin-top:12px;">Save profile</button>
         <p class="pf-soon" style="margin-top:12px;">Saving asks your wallet to sign a message. It's free and sends no transaction. Your name and picture are public.</p>
       </div>` : ""}
+      <div class="panel" style="margin-bottom:20px;">
+        <div class="eyebrow" style="margin-bottom:6px;">${own ? "Your callouts" : "Callouts"}</div>
+        <div id="pfCallouts"><p class="pf-soon">Loading…</p></div>
+        ${own ? `<div class="eyebrow" style="margin:18px 0 6px;">Callouts from members you follow</div>
+        <div id="pfFollowCallouts"><p class="pf-soon">Loading…</p></div>` : ""}
+      </div>
       ${own ? `
       <div class="panel" style="margin-bottom:20px;">
         <div class="eyebrow" style="margin-bottom:6px;">From members you follow</div>
@@ -14802,6 +14822,7 @@
     if(counts) counts.textContent = `${followers.length} follower${followers.length===1?"":"s"} · ${following.length} following`;
     const fl = document.getElementById("pfFollowers"); if(fl) fl.innerHTML = chipListHTML(followers);
     const fg = document.getElementById("pfFollowing"); if(fg) fg.innerHTML = chipListHTML(following);
+    fillProfileCallouts(addr, following);
 
     // this member's comments
     const cm = document.getElementById("pfComments");
@@ -14843,6 +14864,178 @@
       }).join("") : `<p class="pf-soon">Nothing yet from the members you follow.</p>`;
       feed.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
     }
+  }
+
+  /* ---------------- Callouts ----------------
+     A member "calls" a token: the relayer records its price and market cap at
+     that moment, and everyone sees how it's doing since (current and peak
+     multiple). Rules: a profile name is needed, one callout per member per
+     token, 10 per day, and the token needs a live price. A member's callouts
+     are listed on their profile; your own profile also lists callouts from
+     the members you follow. See lib/social.js and scripts/relayer.js. */
+  const calloutMessage = (token, caller, reason, ts)=> `Hood Launch: call out ${String(token).toLowerCase()} as ${String(caller).toLowerCase()}: ${JSON.stringify(reason)} at ${ts}`;
+  const deleteCalloutMessage = (id, requester, ts)=> `Hood Launch: delete callout ${id} as ${String(requester).toLowerCase()} at ${ts}`;
+  function fmtMultiple(m){
+    if(!(m>0)) return "—";
+    return (m>=10 ? m.toFixed(1) : m.toFixed(2)) + "x";
+  }
+  function calloutPerfHTML(c){
+    if(!(c.multiple>0)) return `<span class="co-mult flat">no price yet</span>`;
+    const up = c.multiple>=1;
+    const pct = (c.multiple-1)*100;
+    const peak = c.peakMultiple>c.multiple*1.02 ? ` <span class="co-peak">peak ${escapeHtml(fmtMultiple(c.peakMultiple))}</span>` : "";
+    return `<span class="co-mult ${up?"up":"down"}">${escapeHtml(fmtMultiple(c.multiple))}</span> <span class="co-pct ${up?"up":"down"}">${up?"+":""}${pct.toFixed(0)}%</span>${peak}`;
+  }
+  function calloutRowHTML(c, {showCaller=false, canDelete=false}={}){
+    const t = tokenByAddress(c.token);
+    const sym = t ? t.ticker : (c.symbol || null);
+    const tokenLabel = sym
+      ? (t ? `<button type="button" class="pf-chip link" data-pf-token="${escapeHtml(t.id)}"><span class="pf-chip-name">$${escapeHtml(sym)}</span></button>` : `<span class="pf-chip-name">$${escapeHtml(sym)}</span>`)
+      : escapeHtml(fmtAddr(c.token));
+    return `<div class="cm co" data-co-id="${escapeHtml(c.id)}">
+      <div class="cm-head">${showCaller ? profileChipHTML(c.caller,{link:true,size:22}) + `<span class="cm-on">called</span>` : `<span class="cm-on">Called</span>`} ${tokenLabel}
+        <span class="cm-time">${escapeHtml(agoShort(c.createdAt))}</span>
+        ${canDelete ? `<button type="button" class="cm-del" data-co-delete="${escapeHtml(c.id)}">Delete</button>` : ""}</div>
+      <div class="co-perf">${calloutPerfHTML(c)}</div>
+      <div class="co-detail">at ${escapeHtml(fmtUSD(c.priceAtCall))}${c.mcapAtCall ? ` · ${escapeHtml(fmtUSD(c.mcapAtCall))} mcap` : ""}${c.currentPrice ? ` → now ${escapeHtml(fmtUSD(c.currentPrice))}${c.currentMcap ? ` · ${escapeHtml(fmtUSD(c.currentMcap))} mcap` : ""}` : ""}</div>
+      ${c.reason ? `<div class="cm-text">${escapeHtml(c.reason)}</div>` : ""}
+    </div>`;
+  }
+  async function fetchCallouts(query){
+    const api = relayerApiUrl(appMode);
+    if(!api) return null;
+    try{
+      const res = await fetch(`${api}/callouts?${query}`, { cache:"no-store" });
+      if(!res.ok) return [];
+      const d = await res.json();
+      return Array.isArray(d.callouts) ? d.callouts : [];
+    }catch(e){ return []; }
+  }
+  async function deleteCalloutSigned(id, btn, after){
+    if(btn.dataset.confirming!=="1"){
+      btn.dataset.confirming = "1"; btn.textContent = "Confirm?";
+      setTimeout(()=>{ if(btn.isConnected){ btn.dataset.confirming = ""; btn.textContent = "Delete"; } }, 4000);
+      return;
+    }
+    const api = relayerApiUrl(appMode); if(!api) return;
+    const ts = Date.now();
+    const signature = await signWith(deleteCalloutMessage(id, wallet, ts));
+    if(!signature) return;
+    try{
+      const res = await fetch(`${api}/callouts/delete`, { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ id, requester: wallet, timestamp: ts, signature }) });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't delete that callout."); return; }
+      toast("Callout deleted. You can call this token again after 24 hours.");
+      if(after) after();
+    }catch(e){ toast("Couldn't delete that callout."); }
+  }
+  function wireCalloutDeletes(root, after){
+    root.querySelectorAll("[data-co-delete]").forEach(b=> b.addEventListener("click", ()=> deleteCalloutSigned(b.dataset.coDelete, b, after)));
+    root.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
+  }
+
+  // ---- profile page: callouts by this member, and (own profile) by members you follow ----
+  async function fillProfileCallouts(addr, following){
+    const mine = document.getElementById("pfCallouts");
+    if(mine){
+      const rows = await fetchCallouts(`caller=${encodeURIComponent(addr)}&limit=50`);
+      if(!document.getElementById("pfCallouts")) return;
+      if(rows===null) mine.innerHTML = `<p class="pf-soon">Callouts aren't available — no relayer is configured for this network.</p>`;
+      else{
+        mine.innerHTML = rows.length
+          ? rows.map(c=> calloutRowHTML(c, { canDelete: !!wallet && (c.caller.toLowerCase()===wallet.toLowerCase() || isAdminWallet(wallet)) })).join("")
+          : `<p class="pf-soon">No callouts yet. Open a token and hit "Call out this token".</p>`;
+        wireCalloutDeletes(mine, ()=> fillProfileCallouts(addr, following));
+      }
+    }
+    const feed = document.getElementById("pfFollowCallouts");
+    if(feed){
+      if(!following.length){ feed.innerHTML = `<p class="pf-soon">You're not following anyone yet. Follow members from their profile to see their callouts here.</p>`; return; }
+      const rows = await fetchCallouts(`callers=${following.slice(0,100).map(encodeURIComponent).join(",")}&limit=40`);
+      if(!document.getElementById("pfFollowCallouts")) return;
+      if(rows===null) feed.innerHTML = `<p class="pf-soon">Callouts aren't available — no relayer is configured for this network.</p>`;
+      else{
+        feed.innerHTML = rows.length
+          ? rows.map(c=> calloutRowHTML(c, { showCaller:true, canDelete: isAdminWallet(wallet) })).join("")
+          : `<p class="pf-soon">No callouts yet from the members you follow.</p>`;
+        wireCalloutDeletes(feed, ()=> fillProfileCallouts(addr, following));
+      }
+    }
+  }
+
+  // ---- token page: the "Call out this token" box ----
+  let calloutBoxToken = null;
+  async function initCalloutBox(t){
+    calloutBoxToken = null;
+    const mount = document.getElementById("calloutMount");
+    if(!mount) return;
+    calloutBoxToken = t;
+    const render = (html)=>{ if(document.getElementById("calloutMount")) document.getElementById("calloutMount").innerHTML = html; };
+    const api = relayerApiUrl(t.networkMode);
+    if(!api){ render(`<p class="pf-soon" style="margin:0;">Callouts aren't available — no relayer is configured for this network.</p>`); return; }
+    if(!wallet){
+      render(`<p class="pf-soon" style="margin:0 0 10px;">Connect your wallet to call out this token.</p><button class="btn btn-ghost" id="coConnect">Connect Wallet</button>`);
+      document.getElementById("coConnect").addEventListener("click", ()=> walletBtn.click());
+      return;
+    }
+    if(!profileNameOf(wallet)){
+      render(`<p class="pf-soon" style="margin:0 0 10px;">Set a display name in your profile to make callouts.</p><button class="btn btn-ghost" id="coGoProfile">Open Profile</button>`);
+      document.getElementById("coGoProfile").addEventListener("click", ()=>{ profileViewAddr = null; showView("profile"); });
+      return;
+    }
+    render(`<p class="pf-soon" style="margin:0;">Checking…</p>`);
+    let rows;
+    try{
+      const res = await fetch(`${api}/callouts?token=${encodeURIComponent(t.tokenAddress)}&caller=${encodeURIComponent(wallet)}&limit=1`, { cache:"no-store" });
+      rows = res.ok ? ((await res.json()).callouts||[]) : [];
+    }catch(e){ rows = []; }
+    if(calloutBoxToken!==t) return;
+    if(rows.length){
+      const c = rows[0];
+      render(`<p class="pf-soon" style="margin:0 0 8px;">You called this token.</p>${calloutRowHTML(c,{canDelete:true})}`);
+      const root = document.getElementById("calloutMount");
+      wireCalloutDeletes(root, ()=> initCalloutBox(t));
+      return;
+    }
+    if(!(t.price>0)){
+      render(`<p class="pf-soon" style="margin:0;">Callouts open once this token has a live price.</p>`);
+      return;
+    }
+    render(`
+      <p class="pf-soon" style="margin:0 0 10px;">Call this token publicly. Hood Launch records its price and market cap at the moment you post, and your profile shows how it does from there. One callout per token; you can delete it, but not re-call it for 24 hours.</p>
+      <button class="btn btn-primary" id="coOpen" style="padding:9px 18px;">Call out this token</button>
+      <div id="coForm" hidden style="margin-top:12px;">
+        <textarea id="calloutReason" rows="2" maxlength="600" placeholder="Why are you calling it? (optional)" style="width:100%; background:var(--ink-950,#05070b); border:1px solid var(--line-strong); border-radius:var(--radius-sm); color:var(--paper-100); font-family:inherit; font-size:.9rem; padding:10px 12px; resize:vertical;"></textarea>
+        <div class="cm-bar"><span class="cm-count" id="coCount">0/${COMMENT_MAX}</span><span class="pf-form-msg" id="coMsg" style="margin:0;"></span>
+          <button class="btn btn-primary" id="coPost" style="padding:9px 18px;">Post callout</button></div>
+      </div>`);
+    const open = document.getElementById("coOpen"), form = document.getElementById("coForm");
+    open.addEventListener("click", ()=>{ form.hidden = false; open.hidden = true; document.getElementById("calloutReason").focus(); });
+    const reason = document.getElementById("calloutReason"), post = document.getElementById("coPost"), msg = document.getElementById("coMsg"), count = document.getElementById("coCount");
+    const setMsg = (text, cls)=>{ msg.textContent = text||""; msg.className = "pf-form-msg"+(cls?" "+cls:""); };
+    reason.addEventListener("input", ()=>{
+      const n = Array.from(normalizeComment(reason.value)).length;
+      count.textContent = `${n}/${COMMENT_MAX}`; count.classList.toggle("over", n>COMMENT_MAX);
+      post.disabled = n>COMMENT_MAX; setMsg("");
+    });
+    post.addEventListener("click", async ()=>{
+      const text = normalizeComment(reason.value);
+      if(Array.from(text).length>COMMENT_MAX){ setMsg(`Keep it under ${COMMENT_MAX} characters.`, "err"); return; }
+      post.disabled = true; setMsg("Waiting for your wallet to sign…");
+      const ts = Date.now();
+      const signature = await signWith(calloutMessage(t.tokenAddress, wallet, text, ts));
+      if(!signature){ setMsg("Not posted.", "err"); post.disabled = false; return; }
+      setMsg("Posting…");
+      try{
+        const res = await fetch(`${api}/callouts`, { method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ token: t.tokenAddress, caller: wallet, reason: text, timestamp: ts, signature }) });
+        const data = await res.json().catch(()=>({}));
+        if(!res.ok){ setMsg(data.error || "Couldn't post your callout.", "err"); post.disabled = false; return; }
+        toast("Callout posted.");
+        initCalloutBox(t);
+      }catch(e){ setMsg("Couldn't post — check your connection.", "err"); post.disabled = false; }
+    });
   }
 
   /* ---------------- live feed (real trade activity only) ---------------- */
