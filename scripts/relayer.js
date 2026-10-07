@@ -1585,7 +1585,11 @@ async function postLaunchPipeline({
     // contract). Both fields ride in the record's JSON like any other
     // extra field — pairAddress stays null for V4 so nothing V2-shaped ever
     // tries to read a pair that doesn't exist.
-    ...(isV4Kind(kind) ? { protocol: "v4", poolId: poolId && poolId !== hre.ethers.ZeroHash ? poolId : null } : {}),
+    // Every ledger row carries an explicit protocol label: "v4" (with its
+    // bytes32 poolId) for the V4 kinds, "v2" for everything else.
+    ...(isV4Kind(kind)
+      ? { protocol: "v4", poolId: poolId && poolId !== hre.ethers.ZeroHash ? poolId : null }
+      : { protocol: "v2" }),
     ...extra,
   };
 
@@ -1915,10 +1919,61 @@ async function loadConfigAddresses() {
   return out;
 }
 
+// One-time, idempotent labelling of tokens recorded before every row carried
+// an explicit protocol: any ledger row / tracked token with no "protocol"
+// gets "v4" if it is a V4 kind (or has a V4 poolId) and "v2" otherwise. Rows
+// that already have a label are never touched, so re-running is a no-op.
+async function backfillProtocolLabels() {
+  const network = hre.network.name;
+  let tracked = {};
+  try {
+    tracked = (await readTrackedTokens(network)) || {};
+  } catch (err) {
+    console.warn(`[protocol] could not read tracked tokens (${err.message}) — skipping backfill.`);
+    return;
+  }
+  const labelFor = (entry) =>
+    entry && (entry.protocol === "v4" || isV4Kind(entry.kind) || (entry.poolId && entry.poolId !== hre.ethers.ZeroHash))
+      ? "v4"
+      : "v2";
+  let trackedCount = 0;
+  for (const [addr, entry] of Object.entries(tracked)) {
+    if (entry && !entry.protocol) {
+      try {
+        await upsertTrackedToken(network, addr, { protocol: labelFor(entry) });
+        trackedCount++;
+      } catch (err) {
+        console.warn(`[protocol] could not label tracked token ${addr}: ${err.message}`);
+      }
+    }
+  }
+  let ledgerCount = 0;
+  try {
+    const ledger = await readLedger(network);
+    for (const row of ledger) {
+      if (!row.tokenAddress || row.protocol) continue;
+      const t = tracked[row.tokenAddress.toLowerCase()];
+      const label = t && t.protocol ? t.protocol : labelFor(row);
+      try {
+        await updateLaunch(network, row.tokenAddress, { protocol: label });
+        ledgerCount++;
+      } catch (err) {
+        console.warn(`[protocol] could not label ledger row ${row.tokenAddress}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[protocol] could not read the launch ledger (${err.message}) — skipped it.`);
+  }
+  if (trackedCount || ledgerCount) {
+    console.log(`[protocol] labelled ${trackedCount} tracked token(s) and ${ledgerCount} ledger row(s) that had no protocol.`);
+  }
+}
+
 async function main() {
   await initStorageBackend();
   await loadRelayerSettingsFromStore();
   const cfgAddr = await loadConfigAddresses();
+  await backfillProtocolLabels().catch((err) => console.warn(`[protocol] backfill failed: ${err.message}`));
   logEnvVarPresence();
   const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
   if (!relayerPrivateKey) {
@@ -3768,7 +3823,9 @@ async function main() {
         // pollTokenPrices/pollTokenActivity handle protocol "v4" entries via
         // their own PoolManager-based branches (pollV4TokenPrice /
         // pollV4Activity) instead of V2 pair reserves/Swap events.
-        ...(isV4 ? { protocol: "v4", poolId: v4PoolId } : {}),
+        // Explicit label for every tracked token: "v4" (+ poolId) or "v2".
+        protocol: isV4 ? "v4" : "v2",
+        ...(isV4 ? { poolId: v4PoolId } : {}),
         ...customPatch,
       });
       console.log(
