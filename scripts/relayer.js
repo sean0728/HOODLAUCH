@@ -173,6 +173,8 @@ const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/toke
 const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
 const { readTrackedTokens, upsertTrackedToken, deleteTrackedToken } = require("../lib/trackedTokensStore");
 const { readActivity, appendActivity } = require("../lib/activityStore");
+const tradeStore = require("../lib/tradeStore");
+const pnlLib = require("../lib/pnl");
 const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore");
 const { ROBINHOOD_NETWORKS } = require("../lib/networks");
 const { isDbConfigured, ensureSchema } = require("../lib/db");
@@ -3583,6 +3585,86 @@ async function main() {
     sendJson(res, 200, { network, activity: await readActivity(network) });
   }));
 
+  // ---- wallet trading stats + leaderboard ----
+  // Built from the permanent trade ledger (lib/tradeStore.js), USD throughout,
+  // average-cost PNL (lib/pnl.js): overall = realized (sells) + unrealized
+  // (tokens still held, at the latest recorded price).
+  //   GET /pnl/:address        one wallet: overall totals, a row per token, recent trades
+  //   GET /leaderboard         top 10 named members by overall PNL right now
+  // Per network. Only trades the relayer saw after this feature went live are
+  // counted. The leaderboard only lists wallets that have a profile name.
+  const LEADERBOARD_SIZE = 10;
+  const PNL_CACHE_MS = 30_000;
+  let pnlCache = { at: 0, version: -1, wallets: null, prices: null };
+
+  async function currentPriceMap(tokens) {
+    const prices = {};
+    for (const tok of tokens) {
+      try {
+        const hist = await readPriceHistory(network, tok);
+        const last = hist && hist.length ? hist[hist.length - 1] : null;
+        if (last && last.p > 0) prices[tok] = last.p;
+      } catch (err) { /* no price: PNL falls back to the last trade price */ }
+    }
+    return prices;
+  }
+  // All wallets' positions + each token's latest price, cached briefly so the
+  // leaderboard and profile pages can be hit often without re-reading the ledger.
+  async function pnlSnapshot() {
+    const now = Date.now();
+    if (pnlCache.wallets && pnlCache.version === tradeStore.ledgerVersion() && now - pnlCache.at < PNL_CACHE_MS) return pnlCache;
+    const trades = await tradeStore.readAllTrades(network);
+    const wallets = pnlLib.buildPositions(trades);
+    const tokenSet = new Set();
+    for (const w of wallets.values()) for (const tok of w.positions.keys()) tokenSet.add(tok);
+    const prices = await currentPriceMap([...tokenSet]);
+    pnlCache = { at: now, version: tradeStore.ledgerVersion(), wallets, prices };
+    return pnlCache;
+  }
+  const round = (n, d = 6) => (Number.isFinite(n) ? Math.round(n * 10 ** d) / 10 ** d : 0);
+  function cleanSummary(sum) {
+    const o = sum.overall;
+    return {
+      overall: Object.fromEntries(Object.entries(o).map(([k, v]) => [k, round(v)])),
+      tokens: sum.tokens.map((r) => ({
+        ...r,
+        qty: round(r.qty, 6), avgCostUsd: r.avgCostUsd === null ? null : round(r.avgCostUsd, 12), currentPriceUsd: r.currentPriceUsd === null ? null : round(r.currentPriceUsd, 12),
+        valueUsd: round(r.valueUsd), buyUsd: round(r.buyUsd), sellUsd: round(r.sellUsd),
+        realizedUsd: round(r.realizedUsd), unrealizedUsd: round(r.unrealizedUsd), totalUsd: round(r.totalUsd),
+      })),
+    };
+  }
+
+  app.get("/pnl/:address", asyncRoute(async (req, res) => {
+    const address = String(req.params.address || "").toLowerCase();
+    if (!hre.ethers.isAddress(address)) return sendJson(res, 400, { error: "address must be a valid address" });
+    const snap = await pnlSnapshot();
+    const entry = snap.wallets.get(address);
+    const recent = (await tradeStore.readWalletTrades(network, address)).slice(-25).reverse();
+    if (!entry) return sendJson(res, 200, { network, address, overall: null, tokens: [], recent: [] });
+    const sum = cleanSummary(pnlLib.summarizeWallet(entry, (tok) => snap.prices[tok]));
+    sendJson(res, 200, { network, address, ...sum, recent });
+  }));
+
+  app.get("/leaderboard", asyncRoute(async (_req, res) => {
+    const snap = await pnlSnapshot();
+    const profiles = await profileStore.listProfiles(); // { addressLower: { name, avatarV } }
+    const rows = [];
+    for (const entry of snap.wallets.values()) {
+      const prof = profiles[entry.wallet];
+      if (!prof || !prof.name) continue; // named members only
+      const sum = pnlLib.summarizeWallet(entry, (tok) => snap.prices[tok]);
+      rows.push({
+        address: entry.wallet, name: prof.name, avatarV: prof.avatarV || null,
+        totalUsd: round(sum.overall.totalUsd), realizedUsd: round(sum.overall.realizedUsd), unrealizedUsd: round(sum.overall.unrealizedUsd),
+        trades: sum.overall.buys + sum.overall.sells, tokens: sum.overall.tokens,
+      });
+    }
+    rows.sort((a, b) => b.totalUsd - a.totalUsd);
+    const entries = rows.slice(0, LEADERBOARD_SIZE).map((r, i) => ({ rank: i + 1, ...r }));
+    sendJson(res, 200, { network, updatedAt: snap.at, entries });
+  }));
+
   app.get("/price-history/:tokenAddress", asyncRoute(async (req, res) => {
     // Piggybacks the tracked-tokens record for this address onto the same
     // response (rather than a separate round trip) — the platform-token
@@ -4431,6 +4513,32 @@ async function main() {
     await appendPricePoint(network, entry.tokenAddress, point);
   }
 
+  // Every real trade goes to two places: the live feed's capped activity log,
+  // and the permanent trade ledger that wallet PNL and the leaderboard are
+  // built from. All four trade sources (V2 pair swaps, V2 curve, V4 pool, V4
+  // curve) funnel through here, so V2 and V4 tokens are both covered.
+  async function appendTradeActivity(entry) {
+    await appendActivity(network, entry);
+    try {
+      await tradeStore.recordTrade(network, entry);
+    } catch (err) {
+      console.warn(`[trades] could not record ${entry && entry.txHash}: ${err.message}`);
+    }
+  }
+
+  // The wallet that actually made a trade: the transaction's sender. A pair's
+  // Swap `to` is the router on sells (the router receives WETH and unwraps it
+  // for the user), so it can't be used to identify the trader.
+  async function traderWallet(event, fallback) {
+    try {
+      const tx = await hre.ethers.provider.getTransaction(event.transactionHash);
+      if (tx && tx.from) return tx.from;
+    } catch (err) {
+      // fall through to the fallback
+    }
+    return fallback;
+  }
+
   // Trades for every tracked V4 token, from the PoolManager's Swap events
   // filtered by poolId. Same conventions as the V2 loop: no history backfill
   // on a token's first tick, per-pool cursor, de-duplicated by tx:logIndex.
@@ -4468,7 +4576,7 @@ async function main() {
         } catch (err) {
           // keep the router address as a fallback
         }
-        await appendActivity(network, {
+        await appendTradeActivity({
           t: await blockTimestampMs(event.blockNumber),
           txHash: event.transactionHash,
           logIndex: event.index,
@@ -4590,7 +4698,7 @@ async function main() {
         if (seen.has(key)) continue;
         seen.add(key);
         const { buyer, ethIn, tokensOut } = event.args;
-        await appendActivity(network, {
+        await appendTradeActivity({
           t: await blockTimestampMs(event.blockNumber),
           txHash: event.transactionHash,
           logIndex: event.index,
@@ -4607,7 +4715,7 @@ async function main() {
         if (seen.has(key)) continue;
         seen.add(key);
         const { seller, tokensIn, ethOut } = event.args;
-        await appendActivity(network, {
+        await appendTradeActivity({
           t: await blockTimestampMs(event.blockNumber),
           txHash: event.transactionHash,
           logIndex: event.index,
@@ -4713,7 +4821,7 @@ async function main() {
             seen.add(key);
             const { buyer, ethIn, tokensOut } = event.args;
             const t = await blockTimestampMs(event.blockNumber);
-            await appendActivity(network, {
+            await appendTradeActivity({
               t,
               txHash: event.transactionHash,
               logIndex: event.index,
@@ -4731,7 +4839,7 @@ async function main() {
             seen.add(key);
             const { seller, tokensIn, ethOut } = event.args;
             const t = await blockTimestampMs(event.blockNumber);
-            await appendActivity(network, {
+            await appendTradeActivity({
               t,
               txHash: event.transactionHash,
               logIndex: event.index,
@@ -4785,14 +4893,14 @@ async function main() {
           const usdValue = (Number(ethAmount) / 1e18) * ethUsd;
           const t = await blockTimestampMs(event.blockNumber);
 
-          await appendActivity(network, {
+          await appendTradeActivity({
             t,
             txHash: event.transactionHash,
             logIndex: event.index,
             tokenAddress: entry.tokenAddress,
             symbol: entry.symbol || null,
             side,
-            wallet: to,
+            wallet: await traderWallet(event, to),
             tokenAmount: tokenAmount.toString(),
             usdValue,
           });
