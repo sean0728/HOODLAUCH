@@ -2234,7 +2234,7 @@
   const V4_LIQUIDITY_ADDED_TOPIC0 = "0xea3191ffbe2f62bfd724ee8d971b15ff9b7994e3a9169dc4c60443be3e4a43c4"; // LiquidityAdded(address,address,uint256,uint256,uint256,uint256,uint256)
   const POOL_ID_OF_SELECTOR = "30040054"; // poolIdOf(address) -> bytes32
   const V4_EIP712_DOMAIN_NAME = "HoodLaunchV4TokenFactory";
-  const ADMIN_UI_BUILD = "2026-10-07-v4-contract-cards"; // bump when the admin screens change, so you can tell which index.html is loaded
+  const ADMIN_UI_BUILD = "2026-10-07-v4-creator-rewards"; // bump when the admin screens change, so you can tell which index.html is loaded
   const V4_CONFIG_KEYS = ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"];
   // V4 custom-tax factory + V4 bonding-curve factory (V4CustomTokenFactory /
   // V4CurveFactory). Selectors/topics computed with ethers from the compiled
@@ -10369,6 +10369,48 @@
     }
   }
 
+  // Where a token's creator-rewards settings live depends on the protocol.
+  // V2 tokens carry creatorRewardsDistributor()/creatorRewardBps() on the
+  // token clone itself. V4 tokens do NOT: the V4TaxHook snapshots them per
+  // pool (poolTax(poolId)) at launch, so reading the token reverts. For V4 we
+  // read the hook's own record for that token's pool, and only fall back to
+  // the factory's current settings if the pool id can't be found.
+  async function readTokenCreatorRewardsConfig(t){
+    if(tokenProtocol(t)!=="v4"){
+      const [dHex, bHex] = await Promise.all([
+        ethCall(t.tokenAddress, "0x"+CREATOR_REWARDS_DISTRIBUTOR_SELECTOR),
+        ethCall(t.tokenAddress, "0x"+CREATOR_REWARD_BPS_SELECTOR),
+      ]);
+      return { distributor: decodeAddress(dHex), bps: decodeUint256(bHex) };
+    }
+    const factories = [v4TokenFactoryAddress(t.networkMode), v4CustomTokenFactoryAddress(t.networkMode), v4CurveFactoryAddress(t.networkMode)].filter(Boolean);
+    let hook = null;
+    for(const f of factories){
+      const h = await v4Read(f, V4_HOOK_SELECTOR);
+      if(h && !/^0x0{64}$/.test(h)){ hook = decodeAddress(h); break; }
+    }
+    let poolId = (t.poolId && /^0x[0-9a-fA-F]{64}$/.test(t.poolId)) ? t.poolId.toLowerCase() : null;
+    if(!poolId){
+      for(const f of factories){
+        try{
+          const h = await ethCall(f, "0x"+POOL_ID_OF_SELECTOR+encodeAddressParam(t.tokenAddress));
+          if(/^0x[0-9a-fA-F]{64}$/.test(h) && !/^0x0{64}$/.test(h)){ poolId = h.toLowerCase(); break; }
+        }catch(e){ /* this factory didn't launch it */ }
+      }
+    }
+    if(hook && poolId){
+      const w = splitWords(await ethCall(hook, "0x"+V4_POOL_TAX_SELECTOR+poolId.slice(2)));
+      // PoolTax: configured, taxActive, token, feeWallet, feeBps, rewardBps, creatorRewardBps, rewardsDistributor, creatorRewardsDistributor, ...
+      if(w.length>=9){
+        if(BigInt("0x"+w[0])===0n) return { pending:true };
+        return { distributor: decodeAddress("0x"+w[8]), bps: BigInt("0x"+w[6]) };
+      }
+    }
+    // Pool not found (e.g. a curve token that hasn't graduated yet).
+    if(!poolId) return { pending:true };
+    throw new Error("could not read the V4 hook's pool record");
+  }
+
   // Fills in the "Your launches" creator-rewards placeholder left by
   // renderPortfolio() above, one token at a time. Reads straight off each
   // token's OWN creatorRewardsDistributor()/creatorRewardBps() — the value
@@ -10386,14 +10428,15 @@
       const lineEl = document.querySelector(`[data-creator-rewards-for="${t.tokenAddress}"]`);
       if(!lineEl) continue;
       try{
-        const [distributorHex, bpsHex] = await Promise.all([
-          ethCall(t.tokenAddress, "0x"+CREATOR_REWARDS_DISTRIBUTOR_SELECTOR),
-          ethCall(t.tokenAddress, "0x"+CREATOR_REWARD_BPS_SELECTOR),
-        ]);
+        const cfg = await readTokenCreatorRewardsConfig(t);
         if(!stillCurrent()) return;
-        const distributorAddress = decodeAddress(distributorHex);
-        const bps = decodeUint256(bpsHex);
-        if(distributorAddress.toLowerCase()===ZERO_ADDRESS || bps===0n){
+        if(cfg.pending){
+          lineEl.textContent = "Creator rewards: none yet (no trading pool for this token).";
+          continue;
+        }
+        const distributorAddress = cfg.distributor;
+        const bps = cfg.bps;
+        if(!distributorAddress || distributorAddress.toLowerCase()===ZERO_ADDRESS || bps===0n){
           lineEl.textContent = "Creator rewards: not enabled for this token.";
           continue;
         }
