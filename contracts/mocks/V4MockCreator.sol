@@ -8,6 +8,11 @@ interface IV4CurveLaunch {
         returns (address, uint256);
 }
 
+interface IV4LockerLike {
+    function withdraw(uint256 lockId) external;
+    function withdrawTo(uint256 lockId, address to) external;
+}
+
 /// @notice Test-only: a smart-contract token creator whose ETH receive hook can
 /// be switched to accept (0), reject (1) or burn all gas (2). Used by the
 /// V4PoolLauncher audit tests.
@@ -24,6 +29,14 @@ contract V4MockCreator {
         returns (address t)
     {
         (t,) = IV4CurveLaunch(factory).createCurveToken{value: msg.value}(n, s, supply, 0, 0, salt);
+    }
+
+    function withdrawLock(address locker, uint256 lockId) external {
+        IV4LockerLike(locker).withdraw(lockId);
+    }
+
+    function withdrawLockTo(address locker, uint256 lockId, address to) external {
+        IV4LockerLike(locker).withdrawTo(lockId, to);
     }
 
     receive() external payable {
