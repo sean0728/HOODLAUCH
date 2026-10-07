@@ -14524,6 +14524,11 @@
         profileDraft.avatar = await makeAvatarDataUrl(f);
         profileDraft.name = nameInput.value;
         renderProfile();
+        // Picking a picture only fills in a draft, so a refresh used to throw it away.
+        // Save it straight away (the wallet asks for a free signature); if that fails or
+        // is cancelled the draft stays on screen with the Save button still enabled.
+        const sb = document.getElementById("pfSave");
+        if(sb && !sb.disabled) sb.click();
       }catch(err){ setMsg(err.message || "Couldn't use that image.", "err"); }
     });
     document.getElementById("pfRemovePic").addEventListener("click", ()=>{
@@ -14532,6 +14537,8 @@
       profileDraft.avatar = (saved && saved.avatarV) ? null : undefined;
       profileDraft.name = nameInput.value;
       renderProfile();
+      const sb = document.getElementById("pfSave");
+      if(sb && !sb.disabled) sb.click();
     });
     saveBtn.addEventListener("click", ()=> saveMyProfile(nameInput, setMsg, saveBtn));
   }
