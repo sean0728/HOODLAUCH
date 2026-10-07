@@ -343,6 +343,20 @@ async function main() {
     for (const [label, a] of [["fee-wallet distributor", fwA], ["creator-rewards distributor", crA]]) {
       if (!(await hook.taxExempt(a))) await send(`factory.setTaxExempt(${label}, true)`, () => factory.setTaxExempt(a, true));
     }
+    // The creator-rewards distributor only lets its owner, approved keepers and a
+    // token's creator convert (claiming is open). The relayer must be a keeper.
+    const relayerKeeper = envAddr("RELAYER_ADDRESS", null);
+    if (relayerKeeper) {
+      const deployerOwns = !ownerAddress || ownerAddress.toLowerCase() === deployer.address.toLowerCase();
+      if (deployerOwns) {
+        if (!(await creatorDist.keepers(relayerKeeper)))
+          await send("creatorRewardsDistributor.setKeeper(relayer, true)", () => creatorDist.setKeeper(relayerKeeper, true));
+      } else {
+        console.log(`  NOTE: ${ownerAddress} owns the creator-rewards distributor. It must call setKeeper(${relayerKeeper}, true) before the relayer can convert creator rewards.`);
+      }
+    } else {
+      console.log("  NOTE: set RELAYER_ADDRESS (the relayer wallet) to authorise it on the creator-rewards distributor, or call setKeeper(relayerWallet, true) on it as the owner.");
+    }
   }
 
   if (withPlatformRewards) {

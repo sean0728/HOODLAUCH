@@ -1195,6 +1195,10 @@ const V4_CREATOR_REWARDS_DISTRIBUTOR_ABI = [
   "function claimableEth(address) view returns (uint256)",
   "function triggerCreatorSwap(address token, uint256 minEthOut) returns (uint256)",
   "function claimCreatorRewards(address token) returns (uint256)",
+  // Present on the audited V4CreatorRewardsDistributor: only the owner, approved
+  // keepers and a token's creator may convert. Older deployments lack these.
+  "function keepers(address) view returns (bool)",
+  "function owner() view returns (address)",
 ];
 const V4_PLATFORM_REWARDS_DISTRIBUTOR_ABI = [
   ...V4_SELLER_ABI,
@@ -1778,6 +1782,14 @@ async function announceLaunchToTelegram(network, kind, { token, name, symbol, pa
   const explorerBrowserUrl = process.env.EXPLORER_BROWSER_URL || (ROBINHOOD_NETWORKS[network] || {}).explorerBrowserUrl || null;
   const link = explorerBrowserUrl ? `${explorerBrowserUrl.replace(/\/$/, "")}/address/${token}` : null;
   const kindNote = kind === "curve" || kind === "custom-curve" ? "⚡ Quick Launch" : pairAddress ? "Launch + liquidity" : "Deploy";
+  if (!relayerSettings.telegramBotToken || !relayerSettings.telegramLaunchesChatId) {
+    console.warn(
+      `[telegram] not announcing $${symbol}: ` +
+        `${!relayerSettings.telegramBotToken ? "no bot token saved" : "no launches chat ID saved"} (Admin → Relayer settings).`
+    );
+    return;
+  }
+  console.log(`[telegram] announcing $${symbol} (${token}) to chat ${relayerSettings.telegramLaunchesChatId}.`);
   await sendTelegramMessage(
     relayerSettings.telegramLaunchesChatId,
     `🚀 New launch: <b>${escapeTelegramHtml(name)}</b> ($${escapeTelegramHtml(symbol)})\n` +
@@ -4377,6 +4389,14 @@ async function main() {
         await announceLaunchToTelegram(network, watcher.kind, { token, name, symbol, pairAddress }).catch((err) =>
           console.warn(`[telegram] couldn't announce new launch ${token}: ${err.message}`)
         );
+      } else {
+        // Say WHY nothing was posted, so a missing announcement is never a mystery.
+        const why = isV4
+          ? "V4 launches are never announced publicly (admin-only)"
+          : isNeverRunOrStuck
+            ? "found on a catch-up scan (first run, or the saved scan position was reset)"
+            : "this token was already tracked before this scan";
+        console.log(`[telegram] not announcing $${symbol} (${token}): ${why}.`);
       }
     }
     await setCursor(cursorKey, toBlock);
@@ -5974,9 +5994,28 @@ async function main() {
     const d = await v4KeeperDistributor("creatorRewardsDistributor", V4_CREATOR_REWARDS_DISTRIBUTOR_ABI, "V4CreatorRewardsDistributor");
     if (!d) return;
     const slipBps = creatorRewardsSlippageBpsBig();
+    // The audited distributor only lets the owner, approved keepers and a token's
+    // creator convert (claiming stays open to everyone). If this relayer wallet is
+    // none of those, say so once and skip conversions; claims still run below.
+    let canConvert = true;
+    try {
+      const isKeeper = await d.contract.keepers(relayerWallet.address);
+      const ownerAddr = await d.contract.owner();
+      canConvert = isKeeper || String(ownerAddr).toLowerCase() === relayerWallet.address.toLowerCase();
+      if (!canConvert) {
+        v4KeeperWarnOnce(
+          `keeper:${d.address}`,
+          `[v4-creator-rewards] relayer wallet ${relayerWallet.address} is not an approved keeper on the creator-rewards distributor ${d.address}, ` +
+            "so it cannot convert creator rewards. Owner: call setKeeper(relayerWallet, true) on the distributor. Claims still run."
+        );
+      }
+    } catch (err) {
+      // an older distributor without keepers(): conversions are open to everyone
+    }
     for (const entry of await v4KeeperTokens()) {
       const tokenAddress = entry.tokenAddress;
       try {
+        if (!canConvert) throw Object.assign(new Error("not a keeper"), { code: "BAD_DATA" });
         const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
         const balance = await token.balanceOf(d.address);
         if (balance > 0n && balance >= (await d.contract.swapThreshold(tokenAddress))) {
