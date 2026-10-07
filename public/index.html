@@ -7590,6 +7590,10 @@
   const V4_ROUTER_SELL_SELECTOR = "92cdbac5";       // V4SwapRouter.sell(address,uint256,uint256,uint256)
   const V4_ROUTER_POOL_STATE_SELECTOR = "99cd120f"; // V4SwapRouter.poolState(address) -> (sqrtPriceX96, tick, liquidity)
   const V4_POOL_TAX_SELECTOR = "c2898f5e";          // V4TaxHook.poolTax(bytes32)
+  const V4_CURRENT_SNIPE_SELECTOR = "6aa5b8ce";     // V4TaxHook.currentSnipeBps(bytes32): early-buy surcharge right now
+  const V4_SNIPE_DEFAULT_START_SELECTOR = "13b2b0e3"; // V4TaxHook.snipeDefaultStartBps()
+  const V4_SNIPE_DEFAULT_DURATION_SELECTOR = "e58b26ac"; // V4TaxHook.snipeDefaultDuration()
+  const V4_SET_SNIPE_PROTECTION_SELECTOR = "de0cebe9"; // V4TokenFactory.setSnipeProtection(uint256,uint256)
   const V4_FACTORY_HOOK_SELECTOR = "7f5a7c7b";      // V4TokenFactory.hook()
   const V4_POOL_LP_FEE_PPM = 3000n;                 // 0.30%, must match V4TokenFactory
   const ERC20_BALANCE_OF_SELECTOR_V4 = "70a08231";
@@ -7627,8 +7631,12 @@
     if(!hook || !t.poolId) return { active:false, bps:0n };
     try{
       const w = splitWords(await ethCall(hook, "0x"+V4_POOL_TAX_SELECTOR+t.poolId.replace(/^0x/i,"")));
-      return { active: BigInt("0x"+w[1])===1n, bps: BigInt("0x"+w[4]) };
-    }catch(e){ return { active:false, bps:0n }; }
+      // Early-buy (anti-snipe) surcharge a buy would pay at this moment; 0 on a
+      // hook that predates the feature or once the window has passed.
+      let snipe = 0n;
+      try{ snipe = decodeUint256(await ethCall(hook, "0x"+V4_CURRENT_SNIPE_SELECTOR+t.poolId.replace(/^0x/i,""))); }catch(e){ snipe = 0n; }
+      return { active: BigInt("0x"+w[1])===1n, bps: BigInt("0x"+w[4]), snipe };
+    }catch(e){ return { active:false, bps:0n, snipe:0n }; }
   }
 
   async function wireV4TradePanel(t, routerAddress){
@@ -7678,7 +7686,8 @@
       const f = t.customTax ? (side==="buy" ? t.buyFees : t.sellFees) : null;
       const c = f ? BigInt((f.reflectionBps||0)+(f.marketingBps||0)+(f.liquidityBps||0)+(f.burnBps||0)) : 0n;
       const base = tax.active ? tax.bps : 0n;
-      return { active: tax.active || c>0n, bps: base + c };
+      const sn = side==="buy" ? (tax.snipe || 0n) : 0n; // early-buy surcharge: buys only, falls to 0
+      return { active: tax.active || c>0n || sn>0n, bps: base + c + sn, snipe: sn };
     }
     function currentQuote(){
       const amtStr = amtInput.value;
@@ -7705,7 +7714,8 @@
       const q = currentQuote();
       const platformNote = platformTaxDistributorAddress(t.networkMode)!==ZERO_ADDRESS ? " + platform fee 0.30%" : "";
       const st = sideTax(tradeSide);
-      const taxLine = (st.active ? `Pool fee 0.30% + trading tax ${(Number(st.bps)/100).toFixed(2)}%${t.customTax ? " (platform + custom)" : ""}` : "Pool fee 0.30% · trading tax off") + platformNote;
+      const snipeNote = st.snipe>0n ? ` · includes ${(Number(st.snipe)/100).toFixed(2)}% early-buy surcharge, falling to 0` : "";
+      const taxLine = (st.active ? `Pool fee 0.30% + trading tax ${(Number(st.bps)/100).toFixed(2)}%${t.customTax ? " (platform + custom)" : ""}${snipeNote}` : "Pool fee 0.30% · trading tax off") + platformNote;
       if(!q){ outEl.textContent = "0"; if(infoEl) infoEl.textContent = state ? taxLine : ""; return; }
       outEl.textContent = tradeSide==="buy"
         ? fmtInt(Number(weiToEtherString(q.out,6))) + " " + t.ticker
@@ -10832,6 +10842,7 @@
           <div class="admin-readout"><div class="l">LP lock duration</div><div class="v">${fmtInt(Number(state.lpLockDurationSeconds)/86400)} days</div></div>
           <div class="admin-readout"><div class="l">Max creator buy-in</div><div class="v">${(Number(state.maxCreatorBuyBps)/100).toFixed(2)}%</div></div>
           ${state.buyInSlippageBps!==undefined ? `<div class="admin-readout"><div class="l">Buy-in slippage</div><div class="v">${(Number(state.buyInSlippageBps)/100).toFixed(2)}%</div></div>` : ""}
+          ${state.snipeStartBps!==undefined ? `<div class="admin-readout"><div class="l">Snipe protection (new launches)</div><div class="v">${state.snipeStartBps===0n ? "Off" : `${(Number(state.snipeStartBps)/100).toFixed(2)}% falling to 0 over ${fmtInt(Number(state.snipeDurationSeconds))} s`}</div></div>` : ""}
           <div class="admin-readout"><div class="l">Gasless relayer</div><div class="v">${state.relayer.toLowerCase()===ZERO_ADDRESS ? "Unset — gasless relayed launches disabled" : escapeHtml(state.relayer)}</div></div>
           <div class="admin-readout"><div class="l">Max relayer gas reimbursement</div><div class="v">${weiToEtherString(state.maxRelayerGasReimbursementWei,6)} ETH</div></div>
           <div class="admin-readout"><div class="l">Platform fee wallet</div><div class="v">${state.platformFeeWallet.toLowerCase()===ZERO_ADDRESS ? "Unset" : escapeHtml(state.platformFeeWallet)}</div></div>
@@ -10871,6 +10882,13 @@
         <div class="admin-action-row">
           <div class="field"><label>Creator buy-in slippage (bps, 500–800)</label><input type="number" step="1" min="500" max="800" id="admin_${key}_buyInSlippage" placeholder="${state.buyInSlippageBps}"></div>
           <button class="btn btn-primary btn-sm" data-admin-action="buyInSlippage" data-factory-key="${key}">Update</button>
+        </div>` : ""}
+        ${state.snipeStartBps!==undefined ? `
+        <p class="admin-empty" style="margin:10px 0 6px;">Snipe protection: a surcharge on BUYS only, starting at the percentage below when a token's pool is created and falling in a straight line to zero over the duration. It is taken in the token and goes to the platform fee wallet. Each pool keeps the values it was created with, so changing this only affects launches from now on. Leave both at 0 to turn it off.</p>
+        <div class="admin-action-row">
+          <div class="field"><label>Snipe surcharge at launch (bps, max 7000 = 70%)</label><input type="number" step="1" min="0" max="7000" id="admin_${key}_snipeStartBps" placeholder="${state.snipeStartBps}"></div>
+          <div class="field"><label>Falls to zero over (seconds, max 3600)</label><input type="number" step="1" min="0" max="3600" id="admin_${key}_snipeDuration" placeholder="${state.snipeDurationSeconds}"></div>
+          <button class="btn btn-primary btn-sm" data-admin-action="snipeProtection" data-factory-key="${key}">Update</button>
         </div>` : ""}
 
         <div class="admin-section-label">Gasless relay · powers this factory's "Skip gas" Quick Launch flow</div>
@@ -13107,6 +13125,13 @@
     const st = await loadFactoryAdminState(address);
     const h = await v4Read(address, V4_BUY_IN_SLIPPAGE_BPS_SELECTOR);
     st.buyInSlippageBps = h ? decodeUint256(h) : undefined;
+    // Snipe protection lives on the hook; its defaults are what the NEXT launch will copy.
+    const hookH = await v4Read(address, V4_HOOK_SELECTOR);
+    const hookAddr = hookH ? decodeAddress(hookH) : null;
+    const sb = hookAddr ? await v4Read(hookAddr, V4_SNIPE_DEFAULT_START_SELECTOR) : null;
+    const sd = hookAddr ? await v4Read(hookAddr, V4_SNIPE_DEFAULT_DURATION_SELECTOR) : null;
+    st.snipeStartBps = sb ? decodeUint256(sb) : undefined;
+    st.snipeDurationSeconds = sd ? decodeUint256(sd) : undefined;
     return st;
   }
 
@@ -14269,6 +14294,15 @@
         if(isNaN(n) || n<500 || n>800) throw new Error("Enter a bps value between 500 and 800 (the V4 factory's fixed 5%-8% band).");
         data = encodeUint256Calldata(V4_SET_BUY_IN_SLIPPAGE_BPS_SELECTOR, BigInt(n));
         successMsg = "Creator buy-in slippage updated.";
+      } else if(action==="snipeProtection"){
+        const b = parseInt(field("snipeStartBps").value, 10);
+        const d = parseInt(field("snipeDuration").value, 10);
+        if(isNaN(b) || isNaN(d) || b<0 || d<0) throw new Error("Enter both values (use 0 and 0 to turn it off).");
+        if(b>7000) throw new Error("The surcharge can be at most 7000 bps (70%).");
+        if(d>3600) throw new Error("The duration can be at most 3600 seconds (1 hour).");
+        if((b===0) !== (d===0)) throw new Error("Set both the surcharge and the duration, or set both to 0 to turn it off.");
+        data = "0x"+V4_SET_SNIPE_PROTECTION_SELECTOR+toHex32(BigInt(b))+toHex32(BigInt(d));
+        successMsg = b===0 ? "Snipe protection turned off for new launches." : "Snipe protection updated for new launches.";
       } else if(action==="taxExemptOn" || action==="taxExemptOff"){
         const v = field("exemptAddr").value.trim();
         if(!isAddressLike(v)) throw new Error("Enter the distributor's address.");
