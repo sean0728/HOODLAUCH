@@ -152,6 +152,9 @@ const {
   setPlatformConfig,
   getRelayerSettings,
   setRelayerSettings,
+  getDeletedLaunches,
+  addDeletedLaunch,
+  removeDeletedLaunch,
   readPendingDeposits,
   upsertPendingDeposit,
   removePendingDeposit,
@@ -2420,7 +2423,24 @@ async function main() {
   // file always wins over them; none of the API paths (/health, /launches,
   // /vouchers/*, /status/*) collide with a file in public/, so this never
   // shadows them.
-  app.use(express.static(path.join(__dirname, "..", "public")));
+  // Caching: the page and config.json must never be served stale after a
+  // redeploy ("no-cache" = the browser/proxy may keep a copy but must check
+  // with the server first, and gets a cheap 304 if nothing changed). Without
+  // this a host or browser can keep showing an old index.html for a while
+  // after you publish a new one. Images/other assets keep the default.
+  app.use(
+    express.static(path.join(__dirname, "..", "public"), {
+      setHeaders(res, filePath) {
+        if (/\.(html?|json)$/i.test(filePath)) res.setHeader("Cache-Control", "no-cache");
+      },
+    })
+  );
+  // Everything below this line is the live API (launches, config, prices...):
+  // always fresh, never cached by the browser or an intermediate proxy.
+  app.use((_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
 
   // Some managed hosts (GoDaddy's Node.js Apps among them) run their own
   // platform-level health check against the bare site root before they'll
@@ -2542,7 +2562,11 @@ async function main() {
         explorerUrl: null,
         createdAt: t.discoveredAt || null,
       }));
-    const launches = [...ledger, ...trackedOnlyEntries].map((entry) => {
+    const deletedAddrs = await getDeletedLaunches().catch(() => []);
+    const deletedSet = new Set(deletedAddrs);
+    const launches = [...ledger, ...trackedOnlyEntries]
+      .filter((entry) => !(entry.tokenAddress && deletedSet.has(String(entry.tokenAddress).toLowerCase())))
+      .map((entry) => {
       const publicEntry = {};
       for (const field of PUBLIC_FIELDS) publicEntry[field] = entry[field] ?? null;
       const trackedEntry = entry.tokenAddress ? tracked[entry.tokenAddress.toLowerCase()] : null;
@@ -2593,7 +2617,8 @@ async function main() {
       publicEntry.sellFees = trackedEntry && trackedEntry.sellFees ? trackedEntry.sellFees : null;
       return publicEntry;
     });
-    sendJson(res, 200, { network, launches });
+    // `deleted`: addresses an admin removed — browsers drop their own copy.
+    sendJson(res, 200, { network, launches, deleted: deletedAddrs });
   }));
 
   // ---- delete a launch record (admin-gated, see lib/adminAuth.js) ----
@@ -2636,6 +2661,9 @@ async function main() {
       deleteLaunch(network, tokenAddress),
       deleteTrackedToken(network, tokenAddress),
     ]);
+    // Tombstone: lets every browser drop its own copy, and keeps the token
+    // hidden if it is ever re-discovered on-chain (see lib/relayerStore.js).
+    await addDeletedLaunch(tokenAddress);
     const deleted = !!(removedLaunch || removedTracked);
     console.log(
       deleted
@@ -2942,6 +2970,7 @@ async function main() {
       return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
     }
     const normalized = hre.ethers.getAddress(tokenAddress);
+    await removeDeletedLaunch(normalized).catch(() => {}); // tracking it again undoes an earlier delete
     // The direct-launch-only V4 watchers (v4custom/v4curve) expose no V2
     // router()/priceFeed(), so only a relay-capable watcher is a valid source.
     const sourceWatcher = watchers.find(canRelay);
@@ -3772,8 +3801,10 @@ async function main() {
       const cfgEvents = await watcher.factory.queryFilter(watcher.factory.filters.CustomCurveConfigured(), fromBlock, toBlock);
       for (const cfg of cfgEvents) curveConfigByToken.set(cfg.args.token.toLowerCase(), cfg.args);
     }
+    const deletedTokens = events.length ? new Set(await getDeletedLaunches().catch(() => [])) : new Set();
     for (const event of events) {
       const { token, creator, name, symbol, pair, poolId } = event.args;
+      if (deletedTokens.has(String(token).toLowerCase())) continue; // an admin deleted it — keep it gone
       const pairAddress = pair && pair !== hre.ethers.ZeroAddress ? pair : null;
       // V4 (kinds "v4token"/"v4custom"/"v4curve"): "v4token"'s and
       // "v4custom"'s created events carry a bytes32 poolId, not a pair. A zero
