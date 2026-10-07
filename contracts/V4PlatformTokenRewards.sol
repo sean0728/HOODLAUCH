@@ -28,6 +28,17 @@ import "./interfaces/V4IUniswapV2Router.sol";
 ///  - The buyback router must be a contract, and _tryBuyPlatformToken lets a
 ///    distributor degrade a failed buy instead of reverting its whole sale.
 ///
+/// Changes from the standalone audit of this base:
+///  - Airdrop rounds are paid from holders' balances AT THE MOMENT THEY RUN, so
+///    a caller who borrows tokens (a flash loan, a V2 pair's liquidity) and
+///    runs the round while holding them takes other holders' share. Only the
+///    owner and approved keepers may start or process a round, and
+///    runAirdropRound starts and pays a round in one transaction.
+///  - Liquidity pools and other non-holders can be left out of a round
+///    (setAirdropExcluded) so their share goes to real holders.
+///  - AirdropRoundCompleted reports what was really paid (roundDistributed),
+///    and the platform token must be a contract.
+///
 /// What changes on V4: launched tokens are converted to ETH in their own V4
 /// pool (V4TokenSeller). PlatformToken itself still trades wherever it trades,
 /// so ETH -> PlatformToken goes through a Uniswap V2 router that is passed in
@@ -50,6 +61,15 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
     uint256 public roundGenerationAtStart;
     /// @notice Part of roundAmount already paid out or re-queued this round.
     uint256 public roundUsed;
+    /// @notice Part of roundAmount actually transferred to holders this round.
+    uint256 public roundDistributed;
+
+    /// @notice Addresses left out of airdrops (V2 pair, PoolManager, the other
+    /// distributor, burn address...). Their balance is also removed from the
+    /// round's supply snapshot.
+    uint256 public constant MAX_AIRDROP_EXCLUDED = 16;
+    mapping(address => bool) public airdropExcluded;
+    address[] private _airdropExcludedList;
 
     event PlatformTokenSet(address indexed newToken);
     event PlatformTokensProcessed(uint256 tokensIn, uint256 burned, uint256 toAirdrop);
@@ -59,6 +79,7 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
     event AirdropHolderIneligibleThisRound(address indexed holder, uint256 holderGeneration, uint256 roundGeneration);
     event AirdropRoundCompleted(uint256 totalDistributed);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
+    event AirdropExclusionSet(address indexed account, bool excluded);
 
     constructor(IPoolManager poolManager_, address hook_, address initialOwner_, address buybackRouter_)
         V4TokenSeller(poolManager_, hook_, initialOwner_)
@@ -75,8 +96,41 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         require(!roundActive, "V4PlatformTokenRewards: round in progress");
         require(pendingAirdropTokens == 0, "V4PlatformTokenRewards: pending airdrop must clear first");
         require(newToken == address(0) || address(buybackRouter) != address(0), "V4PlatformTokenRewards: no buyback router");
+        require(newToken == address(0) || newToken.code.length > 0, "V4PlatformTokenRewards: platform token is not a contract");
         platformToken = V4IPlatformToken(newToken);
         emit PlatformTokenSet(newToken);
+    }
+
+    /// @notice Leave `account` out of airdrops (or put it back). Owner only, at most
+    /// MAX_AIRDROP_EXCLUDED entries, and not while a round is running (the round's
+    /// supply snapshot depends on it).
+    function setAirdropExcluded(address account, bool excluded) external onlyOwner {
+        require(!roundActive, "V4PlatformTokenRewards: round in progress");
+        require(account != address(0) && account != address(this), "V4PlatformTokenRewards: invalid account");
+        if (airdropExcluded[account] == excluded) return;
+        airdropExcluded[account] = excluded;
+        if (excluded) {
+            require(_airdropExcludedList.length < MAX_AIRDROP_EXCLUDED, "V4PlatformTokenRewards: too many exclusions");
+            _airdropExcludedList.push(account);
+        } else {
+            uint256 n = _airdropExcludedList.length;
+            for (uint256 i = 0; i < n; i++) {
+                if (_airdropExcludedList[i] == account) {
+                    _airdropExcludedList[i] = _airdropExcludedList[n - 1];
+                    _airdropExcludedList.pop();
+                    break;
+                }
+            }
+        }
+        emit AirdropExclusionSet(account, excluded);
+    }
+
+    function airdropExcludedCount() external view returns (uint256) {
+        return _airdropExcludedList.length;
+    }
+
+    function airdropExcludedAt(uint256 index) external view returns (address) {
+        return _airdropExcludedList[index];
     }
 
     /// @dev True when buying back is actually possible.
@@ -152,14 +206,38 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
     // Airdrop rounds (permissionless, batch-driven)
     // ---------------------------------------------------------------
 
-    function startAirdropRound() external nonReentrant {
+    modifier onlyRoundRunner() {
+        require(_isKeeper(msg.sender), "V4PlatformTokenRewards: not authorized to run rounds");
+        _;
+    }
+
+    /// @notice Owner and approved keepers only: a round is paid from balances at
+    /// the moment it runs, so an outsider could borrow tokens to inflate theirs.
+    function startAirdropRound() external nonReentrant onlyRoundRunner {
+        _startAirdropRound();
+    }
+
+    function processAirdropBatch(uint256 maxHolders) external nonReentrant onlyRoundRunner {
+        _processAirdropBatch(maxHolders);
+    }
+
+    /// @notice Starts a round if none is running and pays the first `maxHolders`
+    /// holders, all in one transaction (no gap between snapshot and payment).
+    function runAirdropRound(uint256 maxHolders) external nonReentrant onlyRoundRunner {
+        if (!roundActive) _startAirdropRound();
+        _processAirdropBatch(maxHolders);
+    }
+
+    function _startAirdropRound() private {
         require(!roundActive, "V4PlatformTokenRewards: round already active");
         require(address(platformToken) != address(0), "V4PlatformTokenRewards: platform token not set");
         require(pendingAirdropTokens > 0, "V4PlatformTokenRewards: nothing to distribute");
 
-        uint256 ownBalance = platformToken.balanceOf(address(this));
+        uint256 ineligible = platformToken.balanceOf(address(this));
+        uint256 n = _airdropExcludedList.length;
+        for (uint256 i = 0; i < n; i++) ineligible += platformToken.balanceOf(_airdropExcludedList[i]);
         uint256 supply = platformToken.totalSupply();
-        uint256 supplySnapshot = supply > ownBalance ? supply - ownBalance : 0;
+        uint256 supplySnapshot = supply > ineligible ? supply - ineligible : 0;
         require(supplySnapshot > 0, "V4PlatformTokenRewards: no eligible holders");
 
         roundAmount = pendingAirdropTokens;
@@ -167,6 +245,7 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         roundSupplySnapshot = supplySnapshot;
         roundCursor = 0;
         roundUsed = 0;
+        roundDistributed = 0;
         roundActive = true;
 
         uint256 holderCountAtStart = platformToken.holderCount();
@@ -184,7 +263,7 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         }
     }
 
-    function processAirdropBatch(uint256 maxHolders) external nonReentrant {
+    function _processAirdropBatch(uint256 maxHolders) private {
         require(roundActive, "V4PlatformTokenRewards: no active round");
         require(maxHolders > 0, "V4PlatformTokenRewards: maxHolders must be > 0");
 
@@ -198,7 +277,7 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         uint256 remaining = roundAmount - roundUsed;
         for (uint256 i = from; i < to; i++) {
             address holder = platformToken.holderAt(i);
-            if (holder == address(this)) continue;
+            if (holder == address(this) || airdropExcluded[holder]) continue;
             uint256 holderGen = platformToken.holderGeneration(holder);
             if (holderGen > roundGenerationAtStart) {
                 emit AirdropHolderIneligibleThisRound(holder, holderGen, roundGenerationAtStart);
@@ -219,11 +298,12 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         }
 
         roundCursor = to;
+        roundDistributed += distributed;
         emit AirdropBatchProcessed(from, to, distributed);
 
         if (roundCursor >= total) {
             roundActive = false;
-            emit AirdropRoundCompleted(roundAmount);
+            emit AirdropRoundCompleted(roundDistributed);
         }
     }
 
