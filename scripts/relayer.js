@@ -3626,7 +3626,11 @@ async function main() {
   // ---- real trade activity / price history (see pollTokenActivity /
   // pollTokenPrices below for what populates these) ----
   app.get("/activity", asyncRoute(async (_req, res) => {
-    sendJson(res, 200, { network, activity: await readActivity(network) });
+    // Entries recorded before sweeps were filtered out may name the relayer
+    // wallet as a "seller" (its own tax-conversion sales); never show those.
+    const relayerAddr = String(relayerWallet.address).toLowerCase();
+    const activity = (await readActivity(network)).filter((e) => String((e && e.wallet) || "").toLowerCase() !== relayerAddr);
+    sendJson(res, 200, { network, activity });
   }));
 
   // ---- wallet trading stats + leaderboard ----
@@ -3657,7 +3661,8 @@ async function main() {
   async function pnlSnapshot() {
     const now = Date.now();
     if (pnlCache.wallets && pnlCache.version === tradeStore.ledgerVersion() && now - pnlCache.at < PNL_CACHE_MS) return pnlCache;
-    const trades = await tradeStore.readAllTrades(network);
+    const relayerAddr = String(relayerWallet.address).toLowerCase();
+    const trades = (await tradeStore.readAllTrades(network)).filter((e) => String((e && e.wallet) || "").toLowerCase() !== relayerAddr);
     const wallets = pnlLib.buildPositions(trades);
     const tokenSet = new Set();
     for (const w of wallets.values()) for (const tok of w.positions.keys()) tokenSet.add(tok);
@@ -4341,6 +4346,10 @@ async function main() {
         // two-step, never-regresses progression every other kind follows.
         tokenStatus: pairAddress || v4PoolId ? TOKEN_STATUS.LAUNCHED : TOKEN_STATUS.DEPLOYED,
         discoveredAt: new Date().toISOString(),
+        // First activity scan starts at this token's launch block (see
+        // firstActivityBlock) so early buys aren't skipped. Only for a token
+        // found on a normal incremental scan, never a catch-up replay.
+        ...(!isNeverRunOrStuck && isNewToken ? { activityFromBlock: event.blockNumber } : {}),
         // pollTokenPrices/pollTokenActivity handle protocol "v4" entries via
         // their own PoolManager-based branches (pollV4TokenPrice /
         // pollV4Activity) instead of V2 pair reserves/Swap events.
@@ -4561,6 +4570,22 @@ async function main() {
   // and the permanent trade ledger that wallet PNL and the leaderboard are
   // built from. All four trade sources (V2 pair swaps, V2 curve, V4 pool, V4
   // curve) funnel through here, so V2 and V4 tokens are both covered.
+  // Where a token's FIRST activity scan starts. A token with no cursor yet
+  // used to start at the chain tip, which silently dropped every trade made
+  // between its launch and the first tick after discovery: the launch
+  // buy-in and any quick test buys right after launching never reached the
+  // live feed or the PNL ledger. A token discovered on a normal incremental
+  // scan carries activityFromBlock (its launch block), so its first scan
+  // starts there. Older tokens (initial catch-up) still start at the tip, so
+  // a fresh relayer never replays old history. `ownsPoolAtLaunch` is false
+  // for curve tokens' post-graduation pair/pool: that market didn't exist at
+  // the launch block, so it starts at the tip as before.
+  function firstActivityBlock(entry, latestBlock, ownsPoolAtLaunch) {
+    const b = Number(entry && entry.activityFromBlock);
+    if (ownsPoolAtLaunch && Number.isFinite(b) && b > 0 && b <= latestBlock) return b;
+    return latestBlock;
+  }
+
   async function appendTradeActivity(entry) {
     await appendActivity(network, entry);
     try {
@@ -4568,6 +4593,52 @@ async function main() {
     } catch (err) {
       console.warn(`[trades] could not record ${entry && entry.txHash}: ${err.message}`);
     }
+  }
+
+  // Platform contracts that sell or compound tokens on their own (the V2 and
+  // V4 reward distributors, the V4 liquidity compounder). A swap made by a
+  // keeper tick or a creator's "Convert to ETH" click goes through one of
+  // these; it is the platform converting collected tax, not a trader, so it
+  // must not show in the live feed or count toward anyone's PNL as "wallet X
+  // sold". Cached briefly: the slots can change in Admin without a restart.
+  let platformSweepCache = { at: 0, set: new Set() };
+  async function platformSweepAddresses() {
+    if (Date.now() - platformSweepCache.at < 60_000) return platformSweepCache.set;
+    const set = new Set();
+    const add = (a) => { if (a && typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) && a !== hre.ethers.ZeroAddress) set.add(a.toLowerCase()); };
+    for (const c of [creatorRewardsDistributor, feeWalletDistributor, platformRewardsDistributor]) {
+      try { if (c) add(await c.getAddress()); } catch (err) { /* ignore */ }
+    }
+    add(V4_COMPOUNDER_ADDRESS);
+    try {
+      const ctx = await getV4Context();
+      if (ctx) {
+        const slots = await hre.ethers.getContractAt(V4_FACTORY_SLOTS_ABI, ctx.slotsAddress, hre.ethers.provider);
+        for (const g of ["feeWalletDistributor", "creatorRewardsDistributor", "rewardsDistributor"]) {
+          try { add(await slots[g]()); } catch (err) { /* slot not on this contract */ }
+        }
+      }
+    } catch (err) { /* no V4 configured */ }
+    platformSweepCache = { at: Date.now(), set };
+    return set;
+  }
+
+  // For one swap event: { skip, wallet }. skip = a platform contract did it
+  // (the transaction was sent to a distributor/compounder, or the V4 pool's
+  // swap caller IS one). wallet = the transaction's sender, else `fallback`.
+  async function classifyTrade(event, fallback, swapCaller) {
+    const platform = await platformSweepAddresses();
+    if (swapCaller && platform.has(String(swapCaller).toLowerCase())) return { skip: true, wallet: fallback };
+    try {
+      const tx = await hre.ethers.provider.getTransaction(event.transactionHash);
+      if (tx) {
+        if (tx.to && platform.has(String(tx.to).toLowerCase())) return { skip: true, wallet: tx.from || fallback };
+        if (tx.from) return { skip: false, wallet: tx.from };
+      }
+    } catch (err) {
+      // fall through to the fallback
+    }
+    return { skip: false, wallet: fallback };
   }
 
   // The wallet that actually made a trade: the transaction's sender. A pair's
@@ -4596,7 +4667,7 @@ async function main() {
     const cursorKey = `${ctx.pmAddress}:${entry.poolId}:activity`;
     const latestBlock = await hre.ethers.provider.getBlockNumber();
     const storedCursor = await getCursor(cursorKey);
-    const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock;
+    const fromBlock = storedCursor !== null ? storedCursor + 1 : firstActivityBlock(entry, latestBlock, entry.kind !== "v4curve");
     if (fromBlock > latestBlock) return;
     const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
     const events = await ctx.pm.queryFilter(ctx.pm.filters.Swap(entry.poolId), fromBlock, toBlock);
@@ -4613,13 +4684,9 @@ async function main() {
         const side = amount0 < 0n ? "buy" : "sell";
         const ethAmount = amount0 < 0n ? -amount0 : amount0;
         const tokenAmount = amount1 < 0n ? -amount1 : amount1;
-        let wallet = event.args.sender;
-        try {
-          const tx = await hre.ethers.provider.getTransaction(event.transactionHash);
-          if (tx && tx.from) wallet = tx.from;
-        } catch (err) {
-          // keep the router address as a fallback
-        }
+        const who = await classifyTrade(event, event.args.sender, event.args.sender);
+        if (who.skip) continue; // a distributor/compounder converting tax, not a trader
+        const wallet = who.wallet;
         await appendTradeActivity({
           t: await blockTimestampMs(event.blockNumber),
           txHash: event.transactionHash,
@@ -4727,7 +4794,7 @@ async function main() {
     const cursorKey = `${factoryAddress}:curve-activity:${entry.tokenAddress}`;
     const latestBlock = await hre.ethers.provider.getBlockNumber();
     const storedCursor = await getCursor(cursorKey);
-    const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // skip pre-existing history
+    const fromBlock = storedCursor !== null ? storedCursor + 1 : firstActivityBlock(entry, latestBlock, true); // older history is skipped; a newly launched token starts at its launch block
     if (fromBlock > latestBlock) return true;
     const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
 
@@ -4849,7 +4916,7 @@ async function main() {
           const cursorKey = `${factoryAddress}:curve-activity:${entry.tokenAddress}`;
           const latestBlock = await hre.ethers.provider.getBlockNumber();
           const storedCursor = await getCursor(cursorKey);
-          const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // skip pre-existing history, same convention as the Swap loop below
+          const fromBlock = storedCursor !== null ? storedCursor + 1 : firstActivityBlock(entry, latestBlock, true); // older history is skipped; a newly launched token starts at its launch block
           if (fromBlock > latestBlock) continue;
           const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
 
@@ -4914,7 +4981,7 @@ async function main() {
         const cursorKey = `${entry.pairAddress}:activity`;
         const latestBlock = await hre.ethers.provider.getBlockNumber();
         const storedCursor = await getCursor(cursorKey);
-        const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // skip pre-existing history, same as pollWatcher
+        const fromBlock = storedCursor !== null ? storedCursor + 1 : firstActivityBlock(entry, latestBlock, entry.kind !== "curve" && entry.kind !== "custom-curve"); // older history is skipped; a newly launched token starts at its launch block
         if (fromBlock > latestBlock) continue;
         const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
 
@@ -4936,6 +5003,8 @@ async function main() {
           const ethUsd = await fetchEthUsdFromFeed(entry.priceFeed);
           const usdValue = (Number(ethAmount) / 1e18) * ethUsd;
           const t = await blockTimestampMs(event.blockNumber);
+          const who = await classifyTrade(event, to, null);
+          if (who.skip) continue; // a distributor converting tax, not a trader
 
           await appendTradeActivity({
             t,
@@ -4944,7 +5013,7 @@ async function main() {
             tokenAddress: entry.tokenAddress,
             symbol: entry.symbol || null,
             side,
-            wallet: await traderWallet(event, to),
+            wallet: who.wallet,
             tokenAmount: tokenAmount.toString(),
             usdValue,
           });
