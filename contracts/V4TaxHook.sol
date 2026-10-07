@@ -150,8 +150,41 @@ contract V4TaxHook {
     /// graduation check, which still runs on every swap.
     mapping(address => bool) public taxExempt;
 
+    // ---------------------------------------------------------------
+    // Snipe protection
+    // ---------------------------------------------------------------
+
+    /// @notice Anti-snipe surcharge on BUYS of a freshly launched pool. It
+    /// starts at `startBps` the moment the pool is configured and falls in a
+    /// straight line to zero over `duration` seconds, so a bot that buys in the
+    /// first blocks pays most of its position away while a human buying a
+    /// minute later pays little or nothing. It is taken in kind, in the token,
+    /// exactly like the normal tax, and goes to the platform fee wallet (or the
+    /// fee-wallet distributor) of the pool. Sells are never charged.
+    ///
+    /// The launcher's own seeding buy and every swapper marked taxExempt (the
+    /// platform's distributor contracts) are exempt, the same as for the tax.
+    ///
+    /// The global defaults below are set by the factory's owner and are
+    /// SNAPSHOTTED into each pool when it is configured: changing them later
+    /// affects only pools launched afterwards, so nobody can raise the
+    /// surcharge on a pool that already trades.
+    struct SnipeCfg {
+        uint16 startBps;
+        uint32 duration;
+        uint64 start;
+    }
+    uint256 public constant MAX_SNIPE_START_BPS = 7000; // 70%
+    uint256 public constant MAX_SNIPE_DURATION = 3600; // 1 hour
+    uint16 public snipeDefaultStartBps;
+    uint32 public snipeDefaultDuration;
+    mapping(PoolId => SnipeCfg) public snipe;
+
     event FactorySet(address indexed factory);
     event TaxExemptSet(address indexed swapper, bool exempt);
+    event SnipeDefaultsSet(uint256 startBps, uint256 duration);
+    event SnipeConfigured(PoolId indexed poolId, uint256 startBps, uint256 duration, uint256 startsAt);
+    event SnipeFeeCollected(PoolId indexed poolId, uint256 fee, uint256 snipeBps);
     event PoolConfigured(PoolId indexed poolId, address indexed token, address feeWallet, uint256 feeBps, uint256 graduationTargetUsd);
     event TaxCollected(PoolId indexed poolId, uint256 fee, uint256 toRewards, uint256 toCreator, uint256 toFeeWallet);
     event CustomTaxCollected(PoolId indexed poolId, uint256 reflection, uint256 marketing, uint256 liquidity, uint256 burned);
@@ -212,6 +245,19 @@ contract V4TaxHook {
     function setTaxExempt(address swapper, bool exempt) external onlyFactory {
         taxExempt[swapper] = exempt;
         emit TaxExemptSet(swapper, exempt);
+    }
+
+    /// @notice Factory-only (the factory forwards its owner's decision): the
+    /// snipe surcharge every pool configured from now on will start with. Both
+    /// values zero switches it off for new pools. Pools already configured keep
+    /// the values they were created with.
+    function setSnipeDefaults(uint256 startBps, uint256 duration) external onlyFactory {
+        require(startBps <= MAX_SNIPE_START_BPS, "V4TaxHook: snipe start above 70%");
+        require(duration <= MAX_SNIPE_DURATION, "V4TaxHook: snipe duration above 1 hour");
+        require((startBps == 0) == (duration == 0), "V4TaxHook: snipe start and duration must both be set");
+        snipeDefaultStartBps = uint16(startBps);
+        snipeDefaultDuration = uint32(duration);
+        emit SnipeDefaultsSet(startBps, duration);
     }
 
     /// @notice Deployer-only: allow (or stop allowing) an additional pool
@@ -287,6 +333,13 @@ contract V4TaxHook {
         p.taxActive = feeBps_ > 0 && feeWallet_ != address(0);
 
         emit PoolConfigured(id, p.token, feeWallet_, feeBps_, graduationTargetUsd_);
+
+        // Snipe protection needs somewhere to send the fee, so a pool with no
+        // fee wallet simply does not get it.
+        if (snipeDefaultStartBps > 0 && feeWallet_ != address(0)) {
+            snipe[id] = SnipeCfg(snipeDefaultStartBps, snipeDefaultDuration, uint64(block.timestamp));
+            emit SnipeConfigured(id, snipeDefaultStartBps, snipeDefaultDuration, block.timestamp);
+        }
     }
 
     /// @notice Attaches a creator fee split to a pool this launcher just
@@ -346,6 +399,24 @@ contract V4TaxHook {
         return IHooks.beforeInitialize.selector;
     }
 
+    /// @notice The snipe surcharge, in bps, a non-exempt BUY of this pool would
+    /// pay right now. Zero for unknown pools, pools launched without it, and
+    /// once the window has passed. Front ends add it to the normal buy tax.
+    function currentSnipeBps(PoolId id) public view returns (uint256) {
+        SnipeCfg storage s = snipe[id];
+        if (s.startBps == 0) return 0;
+        uint256 elapsed = block.timestamp - s.start;
+        if (elapsed >= s.duration) return 0;
+        return (uint256(s.startBps) * (s.duration - elapsed)) / s.duration;
+    }
+
+    /// @dev The surcharge that applies to THIS swap: buys only, and not for
+    /// launchers or tax-exempt swappers.
+    function _snipeFor(PoolId id, address sender, bool isBuy) private view returns (uint256) {
+        if (!isBuy || taxExempt[sender] || isLauncher(sender)) return 0;
+        return currentSnipeBps(id);
+    }
+
     /// @dev Total tax for one direction of one pool, split into the platform's
     /// part (switched off at graduation) and the creator's custom part (never
     /// switched off). A buy is zeroForOne (ETH in, token out).
@@ -379,7 +450,8 @@ contract V4TaxHook {
         bool tokenSpecified = exactIn != params.zeroForOne;
         if (tokenSpecified && !taxExempt[sender]) {
             (uint256 platformBps, uint256 customBps) = _bps(id, p, params.zeroForOne);
-            uint256 bps = platformBps + customBps;
+            uint256 snipeBps = _snipeFor(id, sender, params.zeroForOne);
+            uint256 bps = platformBps + customBps + snipeBps;
             if (bps > 0) {
                 uint256 fee;
                 if (exactIn) {
@@ -391,7 +463,7 @@ contract V4TaxHook {
                 }
                 fee = _affordable(p.token, fee);
                 if (fee > 0) {
-                    _distribute(id, p, fee, platformBps, customBps, params.zeroForOne);
+                    _distribute(id, p, fee, platformBps, customBps, snipeBps, params.zeroForOne);
                     return (IHooks.beforeSwap.selector, toBeforeSwapDelta(fee.toInt128(), 0), 0);
                 }
             }
@@ -410,25 +482,27 @@ contract V4TaxHook {
     {
         PoolId id = key.toId();
         PoolTax storage p = poolTax[id];
-        if (!p.taxActive && !hasCustomFees[id]) return (IHooks.afterSwap.selector, 0);
-
         bool exactIn = params.amountSpecified < 0;
         bool tokenUnspecified = (exactIn == params.zeroForOne);
+        // The snipe surcharge applies even to a pool whose normal tax is off.
+        uint256 snipeBps = tokenUnspecified ? _snipeFor(id, sender, params.zeroForOne) : 0;
+        if (!p.taxActive && !hasCustomFees[id] && snipeBps == 0) return (IHooks.afterSwap.selector, 0);
+
         uint256 fee;
         if (tokenUnspecified && !taxExempt[sender]) {
-            fee = _afterSwapFee(id, p, params.zeroForOne, exactIn, delta.amount1());
+            fee = _afterSwapFee(id, p, params.zeroForOne, exactIn, delta.amount1(), snipeBps);
         }
 
         if (p.taxActive) _maybeDisableTax(id, p);
         return (IHooks.afterSwap.selector, fee.toInt128());
     }
 
-    function _afterSwapFee(PoolId id, PoolTax storage p, bool isBuy, bool exactIn, int128 tokenDelta)
+    function _afterSwapFee(PoolId id, PoolTax storage p, bool isBuy, bool exactIn, int128 tokenDelta, uint256 snipeBps)
         private
         returns (uint256 fee)
     {
         (uint256 platformBps, uint256 customBps) = _bps(id, p, isBuy);
-        uint256 bps = platformBps + customBps;
+        uint256 bps = platformBps + customBps + snipeBps;
         if (bps == 0) return 0;
         if (exactIn) {
             // BUY exact-in: the swapper receives tokenDelta > 0
@@ -438,7 +512,7 @@ contract V4TaxHook {
             if (tokenDelta < 0) fee = (uint256(uint128(-tokenDelta)) * bps) / (10_000 - bps);
         }
         fee = _affordable(p.token, fee);
-        if (fee > 0) _distribute(id, p, fee, platformBps, customBps, isBuy);
+        if (fee > 0) _distribute(id, p, fee, platformBps, customBps, snipeBps, isBuy);
     }
 
     // ---------------------------------------------------------------
@@ -461,9 +535,31 @@ contract V4TaxHook {
     /// creator's custom part in proportion to their bps, then pays each out of
     /// the PoolManager. take() books a debt against this hook which the swap's
     /// returned delta credits back at the end of the swap, netting to zero.
-    function _distribute(PoolId id, PoolTax storage p, uint256 fee, uint256 platformBps, uint256 customBps, bool isBuy)
-        private
-    {
+    function _distribute(
+        PoolId id,
+        PoolTax storage p,
+        uint256 fee,
+        uint256 platformBps,
+        uint256 customBps,
+        uint256 snipeBps,
+        bool isBuy
+    ) private {
+        // The snipe surcharge is carved off first, in proportion to its bps;
+        // what is left is split exactly as before. With no surcharge running
+        // (snipeBps == 0) the arithmetic below is the original, unchanged.
+        if (snipeBps > 0) {
+            uint256 snipeFee = (platformBps + customBps == 0)
+                ? fee
+                : (fee * snipeBps) / (platformBps + customBps + snipeBps);
+            fee -= snipeFee;
+            if (snipeFee > 0) {
+                poolManager.take(
+                    Currency.wrap(p.token), p.feeWalletDistributor != address(0) ? p.feeWalletDistributor : p.feeWallet, snipeFee
+                );
+                emit SnipeFeeCollected(id, snipeFee, snipeBps);
+            }
+            if (fee == 0) return;
+        }
         uint256 totalBps = platformBps + customBps;
         uint256 platformFee = customBps == 0 ? fee : (platformBps == 0 ? 0 : (fee * platformBps) / totalBps);
         uint256 customFee = fee - platformFee;

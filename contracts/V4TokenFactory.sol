@@ -68,6 +68,11 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
 
     uint256 public constant MAX_FEE_BPS = 2_000; // 20.00%
 
+    /// @notice Ceiling on the LP lock: 10 years, the same bound V4PoolLauncher
+    /// uses. Zero is refused as well -- the locker rejects an unlock time that
+    /// is not in the future, so either extreme would make every launch revert.
+    uint256 public constant MAX_LOCK_DURATION = 3650 days;
+
     address public platformFeeWallet;
     uint256 public feeBps = 100; // 1.00%
     address public priceFeed;
@@ -171,6 +176,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     event FeeTreasuryUpdated(address newTreasury);
     event TaxDefaultsUpdated();
     event MaxCreatorBuyBpsUpdated(uint256 newBps);
+    event SnipeProtectionUpdated(uint256 startBps, uint256 duration);
     event BuyInSlippageBpsUpdated(uint256 newBps);
     event RewardsDistributorUpdated(address newDistributor);
     event CreatorRewardsDistributorUpdated(address newDistributor);
@@ -199,6 +205,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         require(locker_ != address(0), "V4TokenFactory: invalid locker");
         require(hook_ != address(0), "V4TokenFactory: invalid hook");
         require(feeTreasury_ != address(0), "V4TokenFactory: invalid treasury");
+        _checkLockDuration(lpLockDuration_);
 
         tokenImplementation = tokenImplementation_;
         poolManager = IPoolManager(poolManager_);
@@ -402,6 +409,14 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         require(bytes(voucher.name).length > 0, "V4TokenFactory: name required");
         require(bytes(voucher.symbol).length > 0, "V4TokenFactory: symbol required");
         require(voucher.totalSupply > 0, "V4TokenFactory: supply must be > 0");
+        // The direct entry points make the sender pay the platform's fee; the
+        // relayed path takes it from the escrowed deposit, so the fee the creator
+        // signed must not be below it (a fee of 0 would launch for free and leave
+        // the relayer paying the gas).
+        require(
+            voucher.fee >= (voucher.addLiquidityAtLaunch ? launchFee : deployFee),
+            "V4TokenFactory: voucher fee below the current launch fee"
+        );
 
         voucherHash = hashLaunchVoucher(voucher);
         require(
@@ -721,7 +736,13 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         emit LaunchFeeUpdated(newFee);
     }
 
+    function _checkLockDuration(uint256 d) private pure {
+        require(d > 0, "V4TokenFactory: lock duration must be > 0");
+        require(d <= MAX_LOCK_DURATION, "V4TokenFactory: lock duration above 10 year ceiling");
+    }
+
     function setLpLockDuration(uint256 newDuration) external onlyOwner {
+        _checkLockDuration(newDuration);
         lpLockDuration = newDuration;
         emit LpLockDurationUpdated(newDuration);
     }
@@ -750,6 +771,16 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     /// V4TaxHook.taxExempt.
     function setTaxExempt(address swapper, bool exempt) external onlyOwner {
         hook.setTaxExempt(swapper, exempt);
+    }
+
+    /// @notice Snipe protection for FUTURE launches: a surcharge on buys that
+    /// starts at `startBps` when a pool is created and falls linearly to zero
+    /// over `duration` seconds (max 70% and 1 hour; both zero = off). It is
+    /// copied into each pool when the pool is created, so changing it never
+    /// touches a pool that is already trading. See V4TaxHook.
+    function setSnipeProtection(uint256 startBps, uint256 duration) external onlyOwner {
+        hook.setSnipeDefaults(startBps, duration);
+        emit SnipeProtectionUpdated(startBps, duration);
     }
 
     function setRewardsDistributor(address newDistributor) external onlyOwner {
