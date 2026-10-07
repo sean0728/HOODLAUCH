@@ -78,6 +78,8 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         uint256 indexed lockId, bytes32 indexed poolId, address indexed owner, uint128 liquidity, uint256 unlockTime
     );
     event Withdrawn(uint256 indexed lockId, address indexed owner, uint256 amount0, uint256 amount1);
+    /// @dev Emitted after Withdrawn when the owner sent the payout to another address.
+    event PayoutRedirected(uint256 indexed lockId, address indexed to);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
     event EthRescued(address indexed to, uint256 amount);
 
@@ -136,6 +138,9 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         require(owner_ != address(0), "V4LiquidityLocker: invalid owner");
         require(refundTo != address(0), "V4LiquidityLocker: invalid refund recipient");
         require(unlockTime > block.timestamp, "V4LiquidityLocker: unlock time must be in the future");
+        // The time is stored as a uint64. Without this check a huge value would
+        // silently wrap into the past and create an already-expired lock.
+        require(unlockTime <= type(uint64).max, "V4LiquidityLocker: unlock time out of range");
         require(msg.value > 0 && tokenAmount > 0, "V4LiquidityLocker: nothing to seed");
         require(Currency.unwrap(key.currency0) == address(0), "V4LiquidityLocker: currency0 must be native ETH");
         require(
@@ -209,6 +214,20 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     /// unlockTime. Removes the entire position and sends the principal plus all
     /// accrued trading fees (both ETH and the token) to the owner.
     function withdraw(uint256 lockId) external nonReentrant {
+        _withdraw(lockId, msg.sender);
+    }
+
+    /// @notice Same as withdraw, but pays out to `to`. For a lock owner that
+    /// cannot receive ETH itself (a contract wallet with a reverting receive
+    /// hook), whose plain withdraw() would otherwise revert for ever. Only the
+    /// lock's owner can call it, so the timelock and the ownership are unchanged.
+    function withdrawTo(uint256 lockId, address to) external nonReentrant {
+        require(to != address(0) && to != address(this), "V4LiquidityLocker: invalid recipient");
+        _withdraw(lockId, to);
+    }
+
+    function _withdraw(uint256 lockId, address to) private {
+        require(lockId < locks.length, "V4LiquidityLocker: unknown lock");
         Lock storage l = locks[lockId];
         require(msg.sender == l.owner, "V4LiquidityLocker: not lock owner");
         require(block.timestamp >= l.unlockTime, "V4LiquidityLocker: still locked");
@@ -217,9 +236,10 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
 
         PoolKey memory key = _keyOf(l);
         bytes memory result =
-            poolManager.unlock(abi.encode(Action.WITHDRAW, abi.encode(key, lockId, uint256(l.liquidity), msg.sender)));
+            poolManager.unlock(abi.encode(Action.WITHDRAW, abi.encode(key, lockId, uint256(l.liquidity), to)));
         (uint256 amount0, uint256 amount1) = abi.decode(result, (uint256, uint256));
         emit Withdrawn(lockId, msg.sender, amount0, amount1);
+        if (to != msg.sender) emit PayoutRedirected(lockId, to);
     }
 
     // ---------------------------------------------------------------
