@@ -91,6 +91,7 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
 
     event LpLockDurationUpdated(uint256 newDuration);
     event MaxCreatorBuyBpsUpdated(uint256 newBps);
+    event SnipeProtectionUpdated(uint256 startBps, uint256 duration);
     event TokenPriceFeedUpdated(address indexed token, address newPriceFeed, uint256 newMaxOracleStaleness);
     event LiquidityAdded(
         address indexed token,
@@ -284,6 +285,18 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
         _checkLockDuration(newDuration);
         lpLockDuration = newDuration;
         emit LpLockDurationUpdated(newDuration);
+    }
+
+    /// @notice Snipe protection for FUTURE pools this launcher creates: a
+    /// surcharge on buys that starts at `startBps` when the pool is created and
+    /// falls linearly to zero over `duration` seconds (max 70% and 1 hour; both
+    /// zero = off). Each pool copies the value when it is created, so changing
+    /// it never touches a pool that already trades. For a bonding curve the
+    /// pool is created at graduation, so that is when its window starts. See
+    /// V4TaxHook. This launcher's value is independent of V4TokenFactory's.
+    function setSnipeProtection(uint256 startBps, uint256 duration) external onlyOwner {
+        hook.setSnipeDefaults(startBps, duration);
+        emit SnipeProtectionUpdated(startBps, duration);
     }
 
     function setMaxCreatorBuyBps(uint256 newBps) external onlyOwner {

@@ -90,12 +90,15 @@ contract V4SwapRouter is ReentrancyGuard, IUnlockCallback {
     {
         require(block.timestamp <= deadline, "V4SwapRouter: expired");
         require(amountIn > 0, "V4SwapRouter: nothing to sell");
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amountIn);
+        // The tokens go from the seller straight to the PoolManager inside the
+        // callback; the router never holds them. (If it did, a token that
+        // shares reflections among holders would count the router as a holder
+        // while the hook shares out the sell's tax, and the router could never
+        // claim that share.)
         bytes memory result = poolManager.unlock(abi.encode(false, _key(token), amountIn, msg.sender));
         uint256 tokenSpent;
         (tokenSpent, ethOut) = abi.decode(result, (uint256, uint256));
         require(ethOut > 0 && ethOut >= minEthOut, "V4SwapRouter: output below minimum");
-        if (amountIn > tokenSpent) IERC20(token).safeTransfer(msg.sender, amountIn - tokenSpent);
         emit Sold(token, msg.sender, tokenSpent, ethOut);
     }
 
@@ -125,7 +128,7 @@ contract V4SwapRouter is ReentrancyGuard, IUnlockCallback {
             uint256 ethOut = uint256(uint128(delta.amount0()));
             if (tokenSpent > 0) {
                 poolManager.sync(key.currency1);
-                IERC20(Currency.unwrap(key.currency1)).safeTransfer(address(poolManager), tokenSpent);
+                IERC20(Currency.unwrap(key.currency1)).safeTransferFrom(trader, address(poolManager), tokenSpent);
                 poolManager.settle();
             }
             if (ethOut > 0) poolManager.take(key.currency0, trader, ethOut);

@@ -165,8 +165,10 @@ contract V4TaxHook {
     /// The launcher's own seeding buy and every swapper marked taxExempt (the
     /// platform's distributor contracts) are exempt, the same as for the tax.
     ///
-    /// The global defaults below are set by the factory's owner and are
-    /// SNAPSHOTTED into each pool when it is configured: changing them later
+    /// Each launcher (V4TokenFactory, V4CustomTokenFactory, V4CurveFactory) has
+    /// its OWN default below, set by that launcher's owner, so plain, custom-tax
+    /// and curve launches can use different values. The launcher's default is
+    /// SNAPSHOTTED into each pool when it is configured: changing it later
     /// affects only pools launched afterwards, so nobody can raise the
     /// surcharge on a pool that already trades.
     struct SnipeCfg {
@@ -176,13 +178,16 @@ contract V4TaxHook {
     }
     uint256 public constant MAX_SNIPE_START_BPS = 7000; // 70%
     uint256 public constant MAX_SNIPE_DURATION = 3600; // 1 hour
-    uint16 public snipeDefaultStartBps;
-    uint32 public snipeDefaultDuration;
+    struct SnipeDefault {
+        uint16 startBps;
+        uint32 duration;
+    }
+    mapping(address => SnipeDefault) public snipeDefaults; // launcher => the setting its next pools copy
     mapping(PoolId => SnipeCfg) public snipe;
 
     event FactorySet(address indexed factory);
     event TaxExemptSet(address indexed swapper, bool exempt);
-    event SnipeDefaultsSet(uint256 startBps, uint256 duration);
+    event SnipeDefaultsSet(address indexed launcher, uint256 startBps, uint256 duration);
     event SnipeConfigured(PoolId indexed poolId, uint256 startBps, uint256 duration, uint256 startsAt);
     event SnipeFeeCollected(PoolId indexed poolId, uint256 fee, uint256 snipeBps);
     event PoolConfigured(PoolId indexed poolId, address indexed token, address feeWallet, uint256 feeBps, uint256 graduationTargetUsd);
@@ -247,17 +252,16 @@ contract V4TaxHook {
         emit TaxExemptSet(swapper, exempt);
     }
 
-    /// @notice Factory-only (the factory forwards its owner's decision): the
-    /// snipe surcharge every pool configured from now on will start with. Both
-    /// values zero switches it off for new pools. Pools already configured keep
-    /// the values they were created with.
-    function setSnipeDefaults(uint256 startBps, uint256 duration) external onlyFactory {
+    /// @notice Launcher-only (each launcher forwards its owner's decision): the
+    /// snipe surcharge every pool THIS launcher configures from now on will start
+    /// with. Both values zero switches it off for the launcher's new pools. Pools
+    /// already configured keep the values they were created with.
+    function setSnipeDefaults(uint256 startBps, uint256 duration) external onlyLauncher {
         require(startBps <= MAX_SNIPE_START_BPS, "V4TaxHook: snipe start above 70%");
         require(duration <= MAX_SNIPE_DURATION, "V4TaxHook: snipe duration above 1 hour");
         require((startBps == 0) == (duration == 0), "V4TaxHook: snipe start and duration must both be set");
-        snipeDefaultStartBps = uint16(startBps);
-        snipeDefaultDuration = uint32(duration);
-        emit SnipeDefaultsSet(startBps, duration);
+        snipeDefaults[msg.sender] = SnipeDefault(uint16(startBps), uint32(duration));
+        emit SnipeDefaultsSet(msg.sender, startBps, duration);
     }
 
     /// @notice Deployer-only: allow (or stop allowing) an additional pool
@@ -336,9 +340,10 @@ contract V4TaxHook {
 
         // Snipe protection needs somewhere to send the fee, so a pool with no
         // fee wallet simply does not get it.
-        if (snipeDefaultStartBps > 0 && feeWallet_ != address(0)) {
-            snipe[id] = SnipeCfg(snipeDefaultStartBps, snipeDefaultDuration, uint64(block.timestamp));
-            emit SnipeConfigured(id, snipeDefaultStartBps, snipeDefaultDuration, block.timestamp);
+        SnipeDefault memory d = snipeDefaults[msg.sender];
+        if (d.startBps > 0 && feeWallet_ != address(0)) {
+            snipe[id] = SnipeCfg(d.startBps, d.duration, uint64(block.timestamp));
+            emit SnipeConfigured(id, d.startBps, d.duration, block.timestamp);
         }
     }
 
