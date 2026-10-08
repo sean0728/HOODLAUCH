@@ -500,5 +500,111 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       await curveFactory.connect(trader).sell(addr, (await token.balanceOf(trader.address)) / 2n, 0);
       expect(await curveFactory.strandedFees()).to.be.gt(ETH("0.009"));
     });
+
+    it("FR-11. end to end: the curve fee stops at graduation, the pool's 1% runs until the $50K market cap, then shuts off", async () => {
+      const { addr } = await newCurve();
+      const [projected, known] = await curveFactory.projectedGraduationMarketCapUsd(SUPPLY);
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") }); // on the curve: fee goes through the distributors
+      const fee1 = (await crd.claimableEth(addr)) + (await fwd.claimableEth(ZERO)) + (await fwd.pendingBuybackEth());
+      expect(fee1).to.equal(ETH("0.01"));
+      await crossTarget(addr);
+      const id = await curveFactory.poolIdOf(addr);
+      const [mc0] = await hook.currentMarketCapInFeedDecimals(id);
+      const usd0 = mc0 / 10n ** 8n;
+      console.log(`      [MEASURE] market cap at graduation: $${usd0} (contract's projection $${projected}, known=${known}); target $${await factory.graduationTargetUsd()}`);
+      expect(known).to.equal(true);
+      expect(usd0).to.be.lt(50_000n);
+      expect(projected).to.be.gte((usd0 * 97n) / 100n);
+      expect(projected).to.be.lte((usd0 * 103n) / 100n);
+
+      // after graduation the curve takes nothing more
+      await expect(curveFactory.connect(trader).buy(addr, 0, { value: ETH("0.1") })).to.be.revertedWith("V4CurveFactory: already graduated");
+      const dep0 = [await crd.claimableEth(addr), await fwd.claimableEth(ZERO), await fwd.pendingBuybackEth(), await curveFactory.strandedFees()];
+
+      // the pool's tax is on and untouched by the curve's distributors
+      const key = await keyOf(addr);
+      const rc = await swap(sniper, key, true, -ETH("0.2"), ETH("0.2"));
+      expect(events(rc, hook.interface, "TaxCollected").length).to.equal(1);
+      expect((await hook.poolTax(id)).taxActive).to.equal(true);
+      expect([await crd.claimableEth(addr), await fwd.claimableEth(ZERO), await fwd.pendingBuybackEth(), await curveFactory.strandedFees()]).to.deep.equal(dep0);
+
+      // push the market cap over $50K: one observation is never enough
+      await swap(sniper, key, true, -ETH("3.5"), ETH("3.5"));
+      const [mc1] = await hook.currentMarketCapInFeedDecimals(id);
+      expect(mc1).to.be.gte(50_000n * 10n ** 8n);
+      let p = await hook.poolTax(id);
+      expect(p.graduationCandidateAt).to.be.gt(0n);
+      expect(p.taxActive).to.equal(true);
+      await network.provider.send("evm_increaseTime", [31 * 60]);
+      await network.provider.send("evm_mine");
+      await feed.set(2000n * 10n ** 8n);
+      await swap(sniper, key, true, -ETH("0.1"), ETH("0.1")); // the confirming observation
+      expect((await hook.poolTax(id)).taxActive).to.equal(false);
+
+      // shut off: no tax on a buy, none on a sell
+      const rc2 = await swap(sniper, key, true, -ETH("0.5"), ETH("0.5"));
+      expect(events(rc2, hook.interface, "TaxCollected").length).to.equal(0);
+      const token = await ethers.getContractAt("IERC20", addr);
+      const rc3 = await swap(sniper, key, false, -((await token.balanceOf(sniper.address)) / 4n));
+      expect(events(rc3, hook.interface, "TaxCollected").length).to.equal(0);
+    });
+
+    it("FR-12. a curve that would graduate at or above the tax target is refused at creation (the fee would outlive the tax)", async () => {
+      const [usd, known] = await curveFactory.projectedGraduationMarketCapUsd(SUPPLY);
+      expect(known).to.equal(true);
+      expect(usd).to.be.gt(1_000n).and.lt(50_000n);
+      // a much higher ETH price pushes the graduation market cap over $50K
+      await feed.set(20_000n * 10n ** 8n);
+      const [usdHigh] = await curveFactory.projectedGraduationMarketCapUsd(SUPPLY);
+      expect(usdHigh).to.be.gte(50_000n);
+      await expect(curveFactory.connect(creator).createCurveToken("H", "H", SUPPLY, 0, 0, saltCounter++, { value: CURVE_FEE }))
+        .to.be.revertedWith("V4CurveFactory: curve would graduate above the platform tax target");
+      await expect(curveFactory.connect(creator).createCustomCurveToken("H", "H", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), ZERO, 0, 0, saltCounter++, { value: CURVE_FEE }))
+        .to.be.revertedWith("V4CurveFactory: curve would graduate above the platform tax target");
+      await feed.set(2000n * 10n ** 8n);
+      await newCurve(); // back at $2000: fine
+      // the threshold is the platform's own target, not a constant
+      await factory.setTaxDefaults(feeWallet.address, 100, await A(feed), 5_000n, 3600, 0, 10);
+      await expect(curveFactory.connect(creator).createCurveToken("H", "H", SUPPLY, 0, 0, saltCounter++, { value: CURVE_FEE }))
+        .to.be.revertedWith("V4CurveFactory: curve would graduate above the platform tax target");
+    });
+
+    it("FR-13. an unreadable feed never blocks launches (fail-open, like the hook)", async () => {
+      await feed.set(20_000n * 10n ** 8n);
+      await network.provider.send("evm_increaseTime", [2 * 3600]); // older than maxOracleStaleness
+      await network.provider.send("evm_mine");
+      const [, known] = await curveFactory.projectedGraduationMarketCapUsd(SUPPLY);
+      expect(known).to.equal(false);
+      await newCurve();
+    });
+
+    it("FR-14. the 1% is continuous across graduation: curve fee on the last curve trade, pool fee on the very next buy AND sell, same rate", async () => {
+      const { addr, token } = await newCurve();
+      // last curve trade: the one that graduates it. Its fee is 1% of the ETH leg.
+      const poolSeed = (await curveFactory.curveState(addr)).poolSeedTargetWei_;
+      const need = ((poolSeed - (await curveFactory.curveState(addr)).realEthReserve) * 10_000n) / 9_900n + ETH("0.013");
+      const rcG = await (await curveFactory.connect(trader).buy(addr, 0, { value: need })).wait();
+      const bought = events(rcG, curveFactory.interface, "CurveBought")[0].args;
+      expect(bought.feeAmount).to.equal(need / 100n);
+      expect(events(rcG, curveFactory.interface, "CurveGraduated").length).to.equal(1);
+      const id = await curveFactory.poolIdOf(addr);
+      const cfg = await hook.poolTax(id);
+      expect(cfg.taxActive).to.equal(true);
+      expect(cfg.feeBps).to.equal(100n); // the same 1% the curve charged, active from the first block of the pool
+      // the first pool buy and the first pool sell are both taxed at 1%
+      const key = await keyOf(addr);
+      const b0 = await token.balanceOf(sniper.address);
+      const rcB = await swap(sniper, key, true, -ETH("0.3"), ETH("0.3"));
+      const evB = events(rcB, hook.interface, "TaxCollected")[0].args;
+      const gotB = (await token.balanceOf(sniper.address)) - b0;
+      const grossB = gotB + evB.fee;
+      expect((evB.fee * 10_000n) / grossB).to.be.within(99n, 100n);
+      const sellAmt = gotB / 2n;
+      const rcS = await swap(sniper, key, false, -sellAmt);
+      const evS = events(rcS, hook.interface, "TaxCollected")[0].args;
+      expect(evS.fee).to.equal(sellAmt / 100n);
+      // and the pool's fee splits like the curve's: 10% creator rewards, 90% fee-wallet distributor
+      expect(evS.toCreator).to.equal(evS.fee / 10n);
+    });
   });
 });
