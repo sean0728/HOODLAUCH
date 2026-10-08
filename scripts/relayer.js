@@ -1837,6 +1837,52 @@ async function announceLaunchToTelegram(network, kind, { token, name, symbol, pa
   );
 }
 
+// ---- milestone Telegram announcements: "live on DEX" and "graduated" ----
+// Same public launches channel as the new-launch post. Fired from
+// pollTokenPrices at the moment it OBSERVES a status transition it persists
+// anyway (curve -> live pool, and tax permanently off at the market-cap
+// target), so a token that already made either transition before this code
+// shipped never re-triggers (no backlog flood). A per-token flag
+// (liveAnnouncedAt / graduatedAnnouncedAt) is written BEFORE sending, so a
+// restart or a second tick can never post the same milestone twice. Like the
+// launch post this is best-effort, at-most-once, and never throws.
+// milestone: "live" (curve graduated to a DEX pool) | "graduated" (50K target).
+function formatMcapUsd(n) {
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return null;
+  return n >= 1_000_000 ? `$${(n / 1_000_000).toFixed(2)}M` : n >= 1000 ? `$${(n / 1000).toFixed(1)}K` : `$${n.toFixed(0)}`;
+}
+function buildMilestoneMessage(milestone, entry, { mcapUsd, link } = {}) {
+  const v4 = entry.protocol === "v4" || (entry.kind && String(entry.kind).startsWith("v4"));
+  const dex = v4 ? "Uniswap V4" : "Uniswap V2";
+  const name = escapeTelegramHtml(entry.name || "Token");
+  const sym = escapeTelegramHtml(entry.symbol || "?");
+  const mc = formatMcapUsd(mcapUsd);
+  const head =
+    milestone === "live"
+      ? `🟢 Live on DEX: <b>${name}</b> ($${sym})\nBonding curve filled — now trading on ${dex}.`
+      : `🎓 Graduated: <b>${name}</b> ($${sym})\nReached its market-cap target${mc ? ` (~${mc})` : ""} — launch tax permanently off.`;
+  return `${head}\n<code>${escapeTelegramHtml(entry.tokenAddress)}</code>` + (link ? `\n${link}` : "");
+}
+async function announceMilestoneToTelegram(network, entry, milestone, { mcapUsd } = {}) {
+  try {
+    const flag = milestone === "live" ? "liveAnnouncedAt" : "graduatedAnnouncedAt";
+    if (entry[flag]) return;
+    if (!relayerSettings.telegramBotToken || !relayerSettings.telegramLaunchesChatId) {
+      console.warn(`[telegram] not announcing ${milestone} milestone for $${entry.symbol}: bot token or launches chat ID not saved.`);
+      return;
+    }
+    const stamp = new Date().toISOString();
+    entry[flag] = stamp;
+    await upsertTrackedToken(network, entry.tokenAddress, { [flag]: stamp });
+    const explorerBrowserUrl = process.env.EXPLORER_BROWSER_URL || (ROBINHOOD_NETWORKS[network] || {}).explorerBrowserUrl || null;
+    const link = explorerBrowserUrl ? `${explorerBrowserUrl.replace(/\/$/, "")}/address/${entry.tokenAddress}` : null;
+    console.log(`[telegram] announcing ${milestone} milestone for $${entry.symbol} (${entry.tokenAddress}).`);
+    await sendTelegramMessage(relayerSettings.telegramLaunchesChatId, buildMilestoneMessage(milestone, entry, { mcapUsd, link }));
+  } catch (err) {
+    console.warn(`[telegram] couldn't announce ${milestone} milestone for ${entry && entry.tokenAddress}: ${err.message}`);
+  }
+}
+
 // Reports which required env vars this process can actually see — never
 // the values themselves, just presence and length — printed unconditionally
 // at startup, before any of the "missing X" throws below. Purely a
@@ -4613,14 +4659,17 @@ async function main() {
     const taxActive = taxState.taxActive;
     const feedAddress = taxState.priceFeed;
     if (feedAddress && entry.priceFeed !== feedAddress) await upsertTrackedToken(network, entry.tokenAddress, { priceFeed: feedAddress });
+    let justGraduated = false;
     if (taxActive === false && taxState.configured && entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
       entry.tokenStatus = TOKEN_STATUS.GRADUATED;
       await upsertTrackedToken(network, entry.tokenAddress, { tokenStatus: TOKEN_STATUS.GRADUATED });
+      justGraduated = true;
     }
     const { tokenReserve, wethReserve } = v4ReservesFromSqrtPrice(sqrtPriceX96);
     const ethUsd = await fetchEthUsdFromFeed(feedAddress);
     const priceUsd = computeTokenPriceUsd(tokenReserve, wethReserve, ethUsd);
     const mcapUsd = computeMarketCapUsd(priceUsd, totalSupply);
+    if (justGraduated) await announceMilestoneToTelegram(network, entry, "graduated", { mcapUsd });
     const taxProgressPct = computeTaxProgressPct(mcapUsd, taxState.graduationTargetUsd);
     const holders = await fetchHolderCount(entry.tokenAddress);
     const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive };
@@ -4822,6 +4871,7 @@ async function main() {
       }
       await upsertTrackedToken(network, entry.tokenAddress, patch);
       console.log(`[price] v4curve ${entry.tokenAddress} graduated -> V4 pool ${poolId}.`);
+      await announceMilestoneToTelegram(network, entry, "live");
       return true;
     }
     // Still pre-pool: marginal spot price off the curve's own constant-product
@@ -5211,6 +5261,7 @@ async function main() {
                   patch.tokenStatus = TOKEN_STATUS.LAUNCHED;
                 }
                 await upsertTrackedToken(network, entry.tokenAddress, patch);
+                await announceMilestoneToTelegram(network, entry, "live");
                 // Also backfill lib/launchStore's own launched_tokens ledger
                 // row, not just trackedTokensStore above — GET /launches
                 // already prefers trackedTokensStore's pairAddress (see that
@@ -5345,14 +5396,17 @@ async function main() {
         // "taxed"->"graduated" status string (see the comment there), just
         // persisted here so GET /launches reports it correctly too, even to
         // a visitor whose browser hasn't sampled price-history itself yet.
+        let justGraduated = false;
         if (taxActive === false && entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
           entry.tokenStatus = TOKEN_STATUS.GRADUATED;
           await upsertTrackedToken(network, entry.tokenAddress, { tokenStatus: TOKEN_STATUS.GRADUATED });
+          justGraduated = true;
         }
 
         const ethUsd = await fetchEthUsdFromFeed(feedAddress);
         const priceUsd = computeTokenPriceUsd(tokenReserve, wethReserve, ethUsd);
         const mcapUsd = computeMarketCapUsd(priceUsd, totalSupply);
+        if (justGraduated) await announceMilestoneToTelegram(network, entry, "graduated", { mcapUsd });
         const taxProgressPct = computeTaxProgressPct(mcapUsd, graduationTargetUsd);
         const holders = await fetchHolderCount(entry.tokenAddress);
 
