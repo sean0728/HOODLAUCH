@@ -25,6 +25,7 @@ describe("Telegram integration", function () {
   let server, port, received, nextStatus;
   const relayerSettings = {};
   let api;
+  let upserts = [];
 
   before(async function () {
     server = http.createServer((req, res) => {
@@ -47,13 +48,21 @@ describe("Telegram integration", function () {
       "relayerSettings",
       "process",
       "ROBINHOOD_NETWORKS",
-      `${code}\nreturn { sendTelegramMessage, announceLaunchToTelegram, escapeTelegramHtml };`
+      "upsertTrackedToken",
+      `${code}\nreturn { sendTelegramMessage, announceLaunchToTelegram, announceMilestoneToTelegram, buildMilestoneMessage, escapeTelegramHtml };`
     );
-    api = factory(fakeHttps, relayerSettings, { env: {} }, { robinhoodTestnet: { explorerBrowserUrl: "https://explorer.example/" } });
+    api = factory(
+      fakeHttps,
+      relayerSettings,
+      { env: {} },
+      { robinhoodTestnet: { explorerBrowserUrl: "https://explorer.example/" } },
+      async (_net, addr, patch) => upserts.push({ addr, patch })
+    );
   });
   after(() => server.close());
   beforeEach(() => {
     received = [];
+    upserts = [];
     nextStatus = 200;
     relayerSettings.telegramBotToken = "123:ABC";
     relayerSettings.telegramLaunchesChatId = "-1001";
@@ -123,6 +132,67 @@ describe("Telegram integration", function () {
     it("never announces catch-up scans or V4", () => {
       assert.strictEqual(classifyDiscoveredLaunch({ isV4: false, isNeverRunOrStuck: true, existingEntry: undefined }).announce, false);
       assert.strictEqual(classifyDiscoveredLaunch({ isV4: true, isNeverRunOrStuck: false, existingEntry: undefined }).announce, false);
+    });
+  });
+
+  describe("milestones: live on DEX + graduated", () => {
+    const v2 = () => ({ tokenAddress: "0xAAA", kind: "curve", protocol: "v2", name: "Cur<ve>", symbol: "CV" });
+    const v4 = () => ({ tokenAddress: "0xBBB", kind: "v4curve", protocol: "v4", name: "Four", symbol: "F4" });
+
+    it("announces a V2 curve going live on Uniswap V2 (escaped, with link)", async () => {
+      await api.announceMilestoneToTelegram("robinhoodTestnet", v2(), "live");
+      assert.strictEqual(received.length, 1);
+      const t = received[0].body.text;
+      assert.strictEqual(received[0].body.chat_id, "-1001");
+      assert.ok(t.includes("🟢 Live on DEX: <b>Cur&lt;ve&gt;</b> ($CV)"), t);
+      assert.ok(t.includes("Uniswap V2"), t);
+      assert.ok(t.includes("https://explorer.example/address/0xAAA"), t);
+    });
+
+    it("announces a V4 curve going live on Uniswap V4", async () => {
+      await api.announceMilestoneToTelegram("robinhoodTestnet", v4(), "live");
+      assert.ok(received[0].body.text.includes("Uniswap V4"));
+    });
+
+    it("announces graduation with the market cap, for V2 and V4", async () => {
+      await api.announceMilestoneToTelegram("robinhoodTestnet", v2(), "graduated", { mcapUsd: 50210 });
+      await api.announceMilestoneToTelegram("robinhoodTestnet", v4(), "graduated", { mcapUsd: 1250000 });
+      assert.ok(received[0].body.text.includes("🎓 Graduated: <b>Cur&lt;ve&gt;</b> ($CV)"));
+      assert.ok(received[0].body.text.includes("~$50.2K"), received[0].body.text);
+      assert.ok(received[1].body.text.includes("~$1.25M"), received[1].body.text);
+    });
+
+    it("omits the market cap cleanly when it is unknown", async () => {
+      await api.announceMilestoneToTelegram("robinhoodTestnet", v2(), "graduated", { mcapUsd: null });
+      assert.ok(!received[0].body.text.includes("~$"));
+      assert.ok(received[0].body.text.includes("market-cap target — launch tax"));
+    });
+
+    it("posts each milestone at most once per token (flag persisted before sending)", async () => {
+      const e = v2();
+      await api.announceMilestoneToTelegram("robinhoodTestnet", e, "live");
+      await api.announceMilestoneToTelegram("robinhoodTestnet", e, "live");
+      assert.strictEqual(received.length, 1);
+      assert.ok(upserts[0].patch.liveAnnouncedAt);
+      // a different milestone for the same token is independent
+      await api.announceMilestoneToTelegram("robinhoodTestnet", e, "graduated", { mcapUsd: 50000 });
+      assert.strictEqual(received.length, 2);
+      assert.ok(upserts[1].patch.graduatedAnnouncedAt);
+      // and a re-read of the persisted record (restart) also dedupes
+      const reloaded = { ...v2(), liveAnnouncedAt: upserts[0].patch.liveAnnouncedAt };
+      await api.announceMilestoneToTelegram("robinhoodTestnet", reloaded, "live");
+      assert.strictEqual(received.length, 2);
+    });
+
+    it("does nothing (and marks nothing) when Telegram is not configured, and never throws on API errors", async () => {
+      relayerSettings.telegramLaunchesChatId = "";
+      const e = v2();
+      await api.announceMilestoneToTelegram("robinhoodTestnet", e, "live");
+      assert.strictEqual(received.length, 0);
+      assert.strictEqual(upserts.length, 0);
+      relayerSettings.telegramLaunchesChatId = "-1001";
+      nextStatus = 500;
+      await api.announceMilestoneToTelegram("robinhoodTestnet", e, "live"); // resolves
     });
   });
 });
