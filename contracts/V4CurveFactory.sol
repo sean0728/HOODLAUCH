@@ -12,6 +12,7 @@ import {V4LaunchedToken} from "./V4LaunchedToken.sol";
 import {V4CustomToken} from "./V4CustomToken.sol";
 import {V4TaxHook} from "./V4TaxHook.sol";
 import {V4LiquidityCompounder} from "./V4LiquidityCompounder.sol";
+import {V4IAggregatorV3} from "./interfaces/V4IAggregatorV3.sol";
 
 /// @dev ETH intake on the platform distributors (see V4FeeWalletDistributor.depositFee
 /// and V4CreatorRewardsDistributor.depositFor).
@@ -79,6 +80,9 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     /// platform distributor's receive(); bounded so a recipient that burns gas
     /// cannot turn every curve trade (sell included) into a gas-limit-sized one.
     uint256 public constant FEE_CALL_GAS = 300_000;
+    /// @dev Gas for each read of the price feed (same bound the hook uses).
+    uint256 private constant FEED_CALL_GAS = 200_000;
+    uint256 private constant MAX_FEED_DECIMALS = 36;
 
     struct Curve {
         address creator;
@@ -341,8 +345,73 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         require(bytes(symbol_).length > 0, "V4CurveFactory: symbol required");
         require(totalSupply_ > 0, "V4CurveFactory: supply must be > 0");
         require(msg.value == curveLaunchFee + creatorBuyEthAmount, "V4CurveFactory: incorrect ETH sent");
-        _requireTermsReady(_currentTerms());
+        TaxTerms memory t = _currentTerms();
+        _requireTermsReady(t);
         _requireReachableTarget(totalSupply_);
+        // The curve-phase fee runs until graduation and the pool's tax until the
+        // market-cap target, so a curve that would already graduate AT or ABOVE
+        // that target would charge a fee on a token the platform tax says is done.
+        (uint256 usd, bool known) = _projectedGraduationUsd(t, totalSupply_);
+        require(!known || usd < t.graduationTargetUsd, "V4CurveFactory: curve would graduate above the platform tax target");
+    }
+
+    /// @notice The market cap, in whole USD, a curve for `totalSupply_` would have
+    /// the moment it graduates, under the current curve settings and the platform's
+    /// price feed. `known` is false when the feed cannot be read (dead, stale,
+    /// malformed), in which case launches are not blocked on it (the same fail-open
+    /// rule the hook uses). The pool's own market cap is price x total supply, so
+    /// this is the pool's opening price: target ETH over the tokens it is seeded with.
+    function projectedGraduationMarketCapUsd(uint256 totalSupply_) external view returns (uint256 usd, bool known) {
+        return _projectedGraduationUsd(_currentTerms(), totalSupply_);
+    }
+
+    function _projectedGraduationUsd(TaxTerms memory t, uint256 totalSupply_) private view returns (uint256 usd, bool known) {
+        uint256 curveSupply = (totalSupply_ * curveSupplyBps) / 10_000;
+        uint256 virtualToken = (totalSupply_ * virtualTokenReserveBps) / 10_000;
+        // Tokens left on the curve when its real ETH reaches the target: the
+        // constant-product point (rounded up, i.e. the curve's way).
+        uint256 effEthEnd = virtualEthReserveDefault + poolSeedTargetWei;
+        uint256 k = virtualEthReserveDefault * (virtualToken + curveSupply);
+        uint256 effTokenEnd = (k + effEthEnd - 1) / effEthEnd;
+        uint256 remaining = effTokenEnd > virtualToken ? effTokenEnd - virtualToken : 0;
+        uint256 poolTokens = remaining + (totalSupply_ - curveSupply);
+        if (poolTokens == 0) return (0, false);
+        uint256 capWei = (poolSeedTargetWei * totalSupply_) / poolTokens;
+
+        (bool ok, uint256 answer, uint256 decimals_) = _readFeed(t.priceFeed, t.maxOracleStaleness);
+        if (!ok) return (0, false);
+        return ((capWei * answer) / (1e18 * (10 ** decimals_)), true);
+    }
+
+    /// @dev Latest price and decimals via bounded raw staticcalls, as the hook does:
+    /// anything that is not a clean, fresh, positive answer counts as unreadable.
+    function _readFeed(address feed, uint256 maxStaleness) private view returns (bool ok, uint256 answer, uint256 decimals_) {
+        if (feed.code.length == 0) return (false, 0, 0);
+        bytes4 roundSel = V4IAggregatorV3.latestRoundData.selector;
+        bytes4 decSel = V4IAggregatorV3.decimals.selector;
+        uint256 callGas = FEED_CALL_GAS;
+        int256 raw;
+        uint256 updatedAt;
+        assembly ("memory-safe") {
+            let m := mload(0x40)
+            mstore(m, roundSel)
+            ok := staticcall(callGas, feed, m, 4, m, 160)
+            if lt(returndatasize(), 160) { ok := 0 }
+            if ok {
+                raw := mload(add(m, 32))
+                updatedAt := mload(add(m, 96))
+            }
+        }
+        if (!ok || raw <= 0 || updatedAt > block.timestamp || block.timestamp - updatedAt > maxStaleness) return (false, 0, 0);
+        assembly ("memory-safe") {
+            let m := mload(0x40)
+            mstore(m, decSel)
+            ok := staticcall(callGas, feed, m, 4, m, 32)
+            if lt(returndatasize(), 32) { ok := 0 }
+            if ok { decimals_ := mload(m) }
+        }
+        if (!ok || decimals_ > MAX_FEED_DECIMALS) return (false, 0, 0);
+        answer = uint256(raw);
     }
 
     /// @dev A curve can take at most virtualEth * curveSupply / virtualToken of
