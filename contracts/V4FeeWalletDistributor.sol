@@ -40,6 +40,10 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
     mapping(address => uint256) public swapThreshold;
     mapping(address => uint256) public maxSwapAmount;
 
+    /// @notice ETH from curve-phase fees (see depositFee) earmarked for the
+    /// platform-token buyback, run by an owner or keeper with a price floor.
+    uint256 public pendingBuybackEth;
+
     event FeeWalletUpdated(address indexed oldWallet, address indexed newWallet);
     event SwapThresholdUpdated(address indexed token, uint256 newThreshold);
     event MaxSwapAmountUpdated(address indexed token, uint256 newMax);
@@ -48,6 +52,9 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
     event PlatformTokenBuybackTriggered(address indexed token, uint256 ethIn, uint256 tokensOut);
     event PlatformTokenBuybackFailed(address indexed token, uint256 ethKept);
     event StrayEthRescued(address indexed to, uint256 amount);
+    event CurveFeeReceived(address indexed from, uint256 amount, uint256 creditedToFeeWallet, uint256 earmarkedForBuyback);
+    event PendingBuybackRun(uint256 ethIn, uint256 platformTokensOut);
+    event PendingBuybackFailed(uint256 ethKept);
 
     constructor(IPoolManager poolManager_, address hook_, address initialOwner_, address buybackRouter_, address feeWallet_)
         V4PlatformTokenRewards(poolManager_, hook_, initialOwner_, buybackRouter_)
@@ -137,7 +144,59 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
         }
     }
 
+    /// @notice Intake for fees that arrive as ETH rather than in kind: the
+    /// bonding curve's per-trade fee. Same split as the in-kind fee: half is
+    /// owed to the fee wallet (claimableEth[address(0)], paid by
+    /// claimFeeWalletRewards(address(0))), half is earmarked for buying
+    /// PlatformToken (burn / holder airdrop). The buyback is NOT run here: it
+    /// would put a V2 swap, with no price floor, inside every curve trade.
+    /// An owner or keeper runs it with triggerPendingBuyback. With no buyback
+    /// configured the whole amount is owed to the fee wallet. Anyone may send ETH
+    /// here; it is only ever distributed this way.
+    function depositFee() external payable {
+        require(msg.value > 0, "V4FeeWalletDistributor: no ETH");
+        uint256 toBuyback = _buybackEnabled() ? msg.value / 2 : 0;
+        uint256 credited = msg.value - toBuyback;
+        pendingBuybackEth += toBuyback;
+        claimableEth[address(0)] += credited;
+        totalClaimableEth += credited;
+        emit CurveFeeReceived(msg.sender, msg.value, credited, toBuyback);
+    }
+
+    /// @notice Owner and approved keepers: spends up to `ethIn` (0 = all) of the
+    /// earmarked ETH on PlatformToken, 50% burned and 50% queued for holders. If
+    /// buying back has since been switched off, or the buy fails and the caller
+    /// set no floor, the ETH is owed to the fee wallet instead.
+    function triggerPendingBuyback(uint256 ethIn, uint256 minPlatformTokensOut)
+        external
+        nonReentrant
+        returns (uint256 tokensOut)
+    {
+        require(_isKeeper(msg.sender), "V4FeeWalletDistributor: not authorized to convert");
+        uint256 amount = (ethIn == 0 || ethIn > pendingBuybackEth) ? pendingBuybackEth : ethIn;
+        require(amount > 0, "V4FeeWalletDistributor: nothing earmarked");
+        pendingBuybackEth -= amount;
+        bool ok;
+        if (!_buybackEnabled()) {
+            ok = false;
+        } else if (minPlatformTokensOut > 0) {
+            tokensOut = _buyPlatformToken(amount, minPlatformTokensOut);
+            ok = true;
+        } else {
+            (ok, tokensOut) = _tryBuyPlatformToken(amount, 0);
+        }
+        if (ok) {
+            _splitAndProcess(tokensOut);
+            emit PendingBuybackRun(amount, tokensOut);
+        } else {
+            claimableEth[address(0)] += amount;
+            totalClaimableEth += amount;
+            emit PendingBuybackFailed(amount);
+        }
+    }
+
     /// @notice Pays claimableEth[token] to the fee wallet as set at call time.
+    /// token == address(0) is the ETH-sourced (curve fee) balance.
     function claimFeeWalletRewards(address token) external nonReentrant returns (uint256 amount) {
         address recipient = feeWallet;
         require(recipient != address(0), "V4FeeWalletDistributor: fee wallet not set");
@@ -155,7 +214,8 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
     function rescueStrayEth(address to) external onlyOwner nonReentrant returns (uint256 amount) {
         require(to != address(0), "V4FeeWalletDistributor: invalid recipient");
         uint256 bal = address(this).balance;
-        amount = bal > totalClaimableEth ? bal - totalClaimableEth : 0;
+        uint256 owed = totalClaimableEth + pendingBuybackEth;
+        amount = bal > owed ? bal - owed : 0;
         require(amount > 0, "V4FeeWalletDistributor: no stray ETH");
         (bool sent,) = payable(to).call{value: amount}("");
         require(sent, "V4FeeWalletDistributor: ETH rescue failed");

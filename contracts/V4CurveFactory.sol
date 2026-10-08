@@ -13,6 +13,16 @@ import {V4CustomToken} from "./V4CustomToken.sol";
 import {V4TaxHook} from "./V4TaxHook.sol";
 import {V4LiquidityCompounder} from "./V4LiquidityCompounder.sol";
 
+/// @dev ETH intake on the platform distributors (see V4FeeWalletDistributor.depositFee
+/// and V4CreatorRewardsDistributor.depositFor).
+interface IV4FeeDeposit {
+    function depositFee() external payable;
+}
+
+interface IV4CreatorDeposit {
+    function depositFor(address token) external payable;
+}
+
 /// @title V4CurveFactory
 /// @notice V4's bonding-curve launches: the counterpart of V2's
 /// BondingCurveFactory (plain token) AND CustomBondingCurveFactory (custom-tax
@@ -36,9 +46,15 @@ import {V4LiquidityCompounder} from "./V4LiquidityCompounder.sol";
 /// a custom token needs no "curve managed" flag: its fees simply do not exist
 /// until its pool does.
 ///
-/// Curve-phase fees (curveFeeBps of the ETH on every buy and sell, and the flat
-/// launch fee) split 50/50 between the treasury and the platform rewards
-/// distributor, both read from V4TokenFactory (the tax source). A recipient that
+/// Curve-phase trade fees (curveFeeBps of the ETH on every buy and sell) follow
+/// the same route as the pool's tax, so a token pays one 1% fee from its first
+/// curve buy until the pool's market-cap target switches it off: the creator's
+/// share (creatorRewardBps / feeBps of the snapshotted terms, 10% by default)
+/// goes to the creator-rewards distributor, the rest to the fee-wallet
+/// distributor (half to the fee wallet, half to the platform-token buyback).
+/// The platform rewards distributor takes NO part of the trade fee; it only
+/// receives its half of the flat launch fee (split 50/50 with the treasury).
+/// All recipients are read from V4TokenFactory (the tax source). A recipient that
 /// rejects ETH, or burns gas, never blocks a trade: each fee transfer is
 /// gas-capped and a failed one is parked in strandedFees for the owner to
 /// recover. Pausing stops everything that puts new ETH on a curve (buy, launching
@@ -180,8 +196,32 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         quote.netEthOut = quote.ethOutGross - quote.feeAmount;
     }
 
-    /// @dev Same 50/50 split as the launch fees; a rejecting recipient never
-    /// reverts the trade (so sell() always works), the ETH is parked instead.
+    /// @dev Curve trade fee, routed like the pool's tax (see the contract notes):
+    /// creator share to the creator-rewards distributor, the rest to the
+    /// fee-wallet distributor, or straight to the platform fee wallet when no
+    /// fee-wallet distributor is set. A failing recipient never reverts the
+    /// trade (so sell() always works), the ETH is parked instead.
+    function _distributeTradeFee(address token, uint256 amount) private {
+        if (amount == 0) return;
+        TaxTerms storage t = curves[token].terms;
+        uint256 creatorCut;
+        address crd = taxSource.creatorRewardsDistributor();
+        if (crd != address(0) && t.feeBps > 0 && t.creatorRewardBps > 0) {
+            creatorCut = (amount * t.creatorRewardBps) / t.feeBps;
+            if (creatorCut > 0) {
+                _callOrStrand(crd, creatorCut, abi.encodeCall(IV4CreatorDeposit.depositFor, (token)));
+            }
+        }
+        uint256 rest = amount - creatorCut;
+        if (rest == 0) return;
+        address fwd = taxSource.feeWalletDistributor();
+        if (fwd != address(0)) _callOrStrand(fwd, rest, abi.encodeCall(IV4FeeDeposit.depositFee, ()));
+        else _sendOrStrand(t.feeWallet, rest);
+    }
+
+    /// @dev The flat launch fee: 50/50 between the treasury and the platform
+    /// rewards distributor when one is set (the distributor's only income from
+    /// this contract), all to the treasury otherwise. Same rule as V4TokenFactory.
     function _distributeEthFee(uint256 amount) private {
         if (amount == 0) return;
         address rd = taxSource.rewardsDistributor();
@@ -197,7 +237,11 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     }
 
     function _sendOrStrand(address to, uint256 amount) private {
-        (bool ok,) = to.call{value: amount, gas: FEE_CALL_GAS}("");
+        _callOrStrand(to, amount, "");
+    }
+
+    function _callOrStrand(address to, uint256 amount, bytes memory data) private {
+        (bool ok,) = to.call{value: amount, gas: FEE_CALL_GAS}(data);
         if (!ok) {
             strandedFees += amount;
             emit FeeTransferFailed(to, amount);
@@ -218,7 +262,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         totalCurveReserveEth += netEthIn;
         curve.tokensRemaining -= tokensOut;
 
-        _distributeEthFee(feeAmount);
+        _distributeTradeFee(token, feeAmount);
         IERC20(token).safeTransfer(recipient, tokensOut);
 
         require(
@@ -464,7 +508,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
             IERC20(token).balanceOf(address(this)) >= curve.tokensRemaining + (curve.totalSupply - curve.curveSupply),
             "V4CurveFactory: token balance invariant violated"
         );
-        _distributeEthFee(quote.feeAmount);
+        _distributeTradeFee(token, quote.feeAmount);
         ethOut = quote.netEthOut;
         (bool sentEth,) = payable(msg.sender).call{value: ethOut}("");
         require(sentEth, "V4CurveFactory: ETH payout failed");

@@ -56,6 +56,7 @@ contract V4CreatorRewardsDistributor is V4TokenSeller {
     event OrphanedTokensRescued(address indexed token, address indexed to, uint256 amount);
     event CreatorRewardsClaimedTo(address indexed token, address indexed creator, address indexed to, uint256 amount);
     event StrayEthRescued(address indexed to, uint256 amount);
+    event CreatorFeeDeposited(address indexed token, address indexed from, uint256 amount);
     event StrayTokensRescued(address indexed token, address indexed to, uint256 amount);
 
     constructor(IPoolManager poolManager_, address hook_, address initialOwner_)
@@ -93,6 +94,18 @@ contract V4CreatorRewardsDistributor is V4TokenSeller {
         claimableEth[token] += ethOut;
         totalClaimableEth += ethOut;
         emit CreatorSwapTriggered(token, creator, spent, ethOut);
+    }
+
+    /// @notice Intake for the creator's share of fees that arrive as ETH: the
+    /// bonding curve's per-trade fee. Credited to `token`'s creator exactly like
+    /// ETH converted from in-kind rewards, and claimed the same way. Anyone may
+    /// send ETH here; it can only ever be claimed by the token's creator.
+    function depositFor(address token) external payable {
+        require(token != address(0), "V4CreatorRewardsDistributor: invalid token");
+        require(msg.value > 0, "V4CreatorRewardsDistributor: no ETH");
+        claimableEth[token] += msg.value;
+        totalClaimableEth += msg.value;
+        emit CreatorFeeDeposited(token, msg.sender, msg.value);
     }
 
     /// @notice Pays claimableEth[token] to that token's own creator(). Anyone may
