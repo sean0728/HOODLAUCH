@@ -191,7 +191,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       await token.connect(trader).approve(await A(curveFactory), ethers.MaxUint256);
       const grief = await (await ethers.getContractFactory("V4MockCreator")).deploy();
       await grief.setMode(2); // receive() loops forever
-      await factory.setFeeTreasury(await A(grief));
+      await factory.setFeeWalletDistributor(await A(grief));
       const s0 = await curveFactory.strandedFees();
       let used, rc = null;
       try {
@@ -209,7 +209,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       const { addr } = await newCurve();
       const grief = await (await ethers.getContractFactory("V4MockCreator")).deploy();
       await grief.setMode(2);
-      await factory.setFeeTreasury(await A(grief));
+      await factory.setFeeWalletDistributor(await A(grief));
       let used, rc = null;
       try { rc = await (await curveFactory.connect(trader).buy(addr, 0, { value: ETH("0.2"), gasLimit: 3_000_000 })).wait(); used = rc.gasUsed; } catch (e) { used = 3_000_000n; }
       expect(used).to.be.lt(700_000n);
@@ -220,13 +220,12 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       expect((await ethers.provider.getBalance(other.address)) - b0).to.equal(stranded);
     });
 
-    it("CV-2c. a normal contract recipient (Safe-like receive hook, real platform distributor) still gets its fee", async () => {
-      const dist = await (await ethers.getContractFactory("V4PlatformTaxDistributor")).deploy(ZERO, ZERO, feeWallet.address);
-      await factory.setRewardsDistributor(await A(dist));
+    it("CV-2c. a normal contract recipient (the real FeeWalletDistributor) still gets its fee, within the gas cap", async () => {
+      const fwd = await (await ethers.getContractFactory("V4FeeWalletDistributor")).deploy(await A(pm), await A(hook), owner.address, ZERO, feeWallet.address);
+      await factory.setFeeWalletDistributor(await A(fwd));
       const { addr } = await newCurve();
-      const d0 = await ethers.provider.getBalance(await A(dist));
       await curveFactory.connect(trader).buy(addr, 0, { value: ETH("0.5") });
-      expect(await ethers.provider.getBalance(await A(dist))).to.equal(d0 + ETH("0.0025"));
+      expect(await fwd.claimableEth(ZERO)).to.equal(ETH("0.005"));
       expect(await curveFactory.strandedFees()).to.equal(0n);
     });
 
@@ -262,7 +261,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       await curveFactory.transferOwnership(await A(atk));
       await atk.accept(await A(curveFactory));
       expect(await curveFactory.owner()).to.equal(await A(atk));
-      await factory.setRewardsDistributor(await A(atk)); // attacker is also the rewards recipient
+      await factory.setFeeWalletDistributor(await A(atk)); // attacker is also the fee recipient
       const { addr } = await newCurve();
       await curveFactory.connect(trader).buy(addr, 0, { value: ETH("0.5") }); // warm up, attacker not armed
       await atk.arm(other.address);
@@ -355,6 +354,151 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       await crossTarget(addr);
       // graduation succeeded under the snapshot
       expect(await curveFactory.poolIdOf(addr)).to.not.equal(ethers.ZeroHash);
+    });
+  });
+
+  // =========================================================== FEE ROUTING
+  describe("FR. curve-phase fee routing: one 1% fee to graduation, FeeWalletDistributor path; RewardsDistributor only at launch", () => {
+    let fwd, crd, plat, v2router, rdWallet;
+    beforeEach(async () => {
+      rdWallet = third; // stands in for the platform RewardsDistributor (launch-fee half only)
+      plat = await (await ethers.getContractFactory("V4MockPlatformToken")).deploy(ETH("1000000"));
+      v2router = await (await ethers.getContractFactory("V4MockV2Router")).deploy(await A(plat), ETH("1000"));
+      await plat.transfer(await A(v2router), ETH("500000"));
+      fwd = await (await ethers.getContractFactory("V4FeeWalletDistributor")).deploy(await A(pm), await A(hook), owner.address, await A(v2router), feeWallet.address);
+      crd = await (await ethers.getContractFactory("V4CreatorRewardsDistributor")).deploy(await A(pm), await A(hook), owner.address);
+      await factory.setFeeWalletDistributor(await A(fwd));
+      await factory.setCreatorRewardsDistributor(await A(crd));
+      await factory.setRewardsDistributor(rdWallet.address);
+    });
+    const bal = (a) => ethers.provider.getBalance(a);
+
+    it("FR-1. a curve buy splits the 1%: 10% to creator rewards, 90% to the FeeWalletDistributor (half fee wallet, half buyback); the RewardsDistributor gets nothing", async () => {
+      await fwd.setPlatformToken(await A(plat));
+      const rd0 = await bal(rdWallet.address), tr0 = await bal(treasury.address);
+      const { addr } = await newCurve();
+      // launch fee: the one-time 50/50 to treasury and RewardsDistributor
+      expect((await bal(rdWallet.address)) - rd0).to.equal(ETH("0.005"));
+      expect((await bal(treasury.address)) - tr0).to.equal(ETH("0.005"));
+      const rd1 = await bal(rdWallet.address), tr1 = await bal(treasury.address);
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") }); // fee 0.01
+      expect(await crd.claimableEth(addr)).to.equal(ETH("0.001")); // 10%
+      expect(await fwd.claimableEth(ZERO)).to.equal(ETH("0.0045")); // 45% owed to the fee wallet
+      expect(await fwd.pendingBuybackEth()).to.equal(ETH("0.0045")); // 45% for the platform-token buyback
+      expect(await bal(rdWallet.address)).to.equal(rd1); // RewardsDistributor: nothing
+      expect(await bal(treasury.address)).to.equal(tr1); // treasury: nothing from trades
+      expect(await curveFactory.strandedFees()).to.equal(0n);
+    });
+
+    it("FR-2. sells follow the same route, and every fee wei is accounted for", async () => {
+      await fwd.setPlatformToken(await A(plat));
+      const { addr, token } = await newCurve({ creatorBuy: ETH("0.05") });
+      await token.connect(trader).approve(await A(curveFactory), ethers.MaxUint256);
+      let fees = 0n;
+      let rc = await (await curveFactory.connect(trader).buy(addr, 0, { value: ETH("0.6") })).wait();
+      fees += events(rc, curveFactory.interface, "CurveBought")[0].args.feeAmount;
+      rc = await (await curveFactory.connect(trader).sell(addr, (await token.balanceOf(trader.address)) / 2n, 0)).wait();
+      fees += events(rc, curveFactory.interface, "CurveSold")[0].args.feeAmount;
+      const creatorBuyFee = ETH("0.05") / 100n;
+      fees += creatorBuyFee;
+      const got = (await crd.claimableEth(addr)) + (await fwd.claimableEth(ZERO)) + (await fwd.pendingBuybackEth());
+      expect(got).to.equal(fees);
+      expect(await crd.claimableEth(addr)).to.equal(fees / 10n);
+    });
+
+    it("FR-3. the creator claims their 10% in ETH; anyone else's claim still pays only the creator", async () => {
+      const { addr } = await newCurve();
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") });
+      const c0 = await bal(creator.address);
+      await crd.connect(other).claimCreatorRewards(addr);
+      expect((await bal(creator.address)) - c0).to.equal(ETH("0.001"));
+      expect(await crd.claimableEth(addr)).to.equal(0n);
+    });
+
+    it("FR-4. the buyback leg: a keeper runs it with a floor, 50% is burned and 50% queued for holders; the fee wallet's half is paid in ETH", async () => {
+      await fwd.setPlatformToken(await A(plat));
+      const { addr } = await newCurve();
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") });
+      await expect(fwd.connect(other).triggerPendingBuyback(0, 0)).to.be.revertedWith("V4FeeWalletDistributor: not authorized to convert");
+      const supply0 = await plat.totalSupply();
+      await fwd.triggerPendingBuyback(0, 1);
+      expect(await fwd.pendingBuybackEth()).to.equal(0n);
+      expect(await fwd.pendingAirdropTokens()).to.be.gt(0n);
+      expect(await plat.totalSupply()).to.be.lt(supply0); // the burned half
+      await expect(fwd.triggerPendingBuyback(0, 0)).to.be.revertedWith("V4FeeWalletDistributor: nothing earmarked");
+      const f0 = await bal(feeWallet.address);
+      await fwd.connect(other).claimFeeWalletRewards(ZERO);
+      expect((await bal(feeWallet.address)) - f0).to.equal(ETH("0.0045"));
+    });
+
+    it("FR-5. no platform token / buyback: the whole 90% is owed to the fee wallet; a buyback that is switched off later falls back to it too", async () => {
+      const { addr } = await newCurve();
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") });
+      expect(await fwd.claimableEth(ZERO)).to.equal(ETH("0.009"));
+      expect(await fwd.pendingBuybackEth()).to.equal(0n);
+      await fwd.setPlatformToken(await A(plat));
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("0.2") }); // fee 0.002 -> 0.0018 to fwd
+      expect(await fwd.pendingBuybackEth()).to.equal(ETH("0.0009"));
+      await fwd.setPlatformToken(ZERO);
+      await fwd.triggerPendingBuyback(0, 0);
+      expect(await fwd.pendingBuybackEth()).to.equal(0n);
+      expect(await fwd.claimableEth(ZERO)).to.equal(ETH("0.009") + ETH("0.0018"));
+    });
+
+    it("FR-6. with no distributors set, the whole fee goes to the platform fee wallet (as in the pool), never to the RewardsDistributor or treasury", async () => {
+      await factory.setFeeWalletDistributor(ZERO);
+      await factory.setCreatorRewardsDistributor(ZERO);
+      const { addr } = await newCurve();
+      const rd0 = await bal(rdWallet.address), tr0 = await bal(treasury.address), fw0 = await bal(feeWallet.address);
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") });
+      expect((await bal(feeWallet.address)) - fw0).to.equal(ETH("0.01"));
+      expect(await bal(rdWallet.address)).to.equal(rd0);
+      expect(await bal(treasury.address)).to.equal(tr0);
+    });
+
+    it("FR-7. custom curves route the same way, to the custom token's creator", async () => {
+      const { addr } = await newCurve({ custom: true });
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") });
+      expect(await crd.claimableEth(addr)).to.equal(ETH("0.001"));
+      expect(await fwd.claimableEth(ZERO)).to.equal(ETH("0.0045") + ETH("0.0045")); // no platform token set: all 0.009 owed to the fee wallet
+    });
+
+    it("FR-8. the RewardsDistributor takes no cut of curve trades even when the ongoing rewardBps is switched on", async () => {
+      await factory.setTaxDefaults(feeWallet.address, 100, await A(feed), 50_000n, 3600, 50, 10);
+      const { addr } = await newCurve();
+      const rd0 = await bal(rdWallet.address);
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") });
+      expect(await bal(rdWallet.address)).to.equal(rd0);
+      expect(await crd.claimableEth(addr)).to.equal(ETH("0.001"));
+    });
+
+    it("FR-9. the ETH the distributors hold for the fee wallet, the buyback and creators cannot be swept as 'stray'", async () => {
+      await fwd.setPlatformToken(await A(plat));
+      const { addr } = await newCurve();
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") });
+      await expect(fwd.rescueStrayEth(other.address)).to.be.revertedWith("V4FeeWalletDistributor: no stray ETH");
+      await expect(crd.rescueStrayEth(other.address)).to.be.reverted;
+      const b = await bal(await A(fwd));
+      await network.provider.send("hardhat_setBalance", [await A(fwd), "0x" + (b + ETH("1")).toString(16)]);
+      const o0 = await bal(other.address);
+      await fwd.rescueStrayEth(other.address);
+      expect((await bal(other.address)) - o0).to.equal(ETH("1"));
+      expect(await bal(await A(fwd))).to.equal((await fwd.totalClaimableEth()) + (await fwd.pendingBuybackEth()));
+      await expect(fwd.depositFee({ value: 0 })).to.be.revertedWith("V4FeeWalletDistributor: no ETH");
+      await expect(crd.depositFor(addr, { value: 0 })).to.be.revertedWith("V4CreatorRewardsDistributor: no ETH");
+    });
+
+    it("FR-10. a distributor that rejects ETH never blocks buys or sells; its share is parked and the creator's still arrives", async () => {
+      const bad = await (await ethers.getContractFactory("V4MockCreator")).deploy();
+      await bad.setMode(1); // rejects
+      await factory.setFeeWalletDistributor(await A(bad));
+      const { addr, token } = await newCurve();
+      await token.connect(trader).approve(await A(curveFactory), ethers.MaxUint256);
+      await curveFactory.connect(trader).buy(addr, 0, { value: ETH("1") });
+      expect(await curveFactory.strandedFees()).to.equal(ETH("0.009"));
+      expect(await crd.claimableEth(addr)).to.equal(ETH("0.001"));
+      await curveFactory.connect(trader).sell(addr, (await token.balanceOf(trader.address)) / 2n, 0);
+      expect(await curveFactory.strandedFees()).to.be.gt(ETH("0.009"));
     });
   });
 });
