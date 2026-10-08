@@ -1191,6 +1191,10 @@ const V4_FEE_WALLET_DISTRIBUTOR_ABI = [
   "function triggerFeeWalletSwap(address token, uint256 minEthOut) returns (uint256)",
   "function triggerFeeWalletSwap(address token, uint256 minEthOut, uint256 minPlatformTokensOut) returns (uint256)",
   "function claimFeeWalletRewards(address token) returns (uint256)",
+  // Curve-phase fees arrive as ETH (V4CurveFactory -> depositFee): the fee wallet's half is owed
+  // under key address(0); the buyback half is earmarked until a keeper runs it with a floor.
+  "function pendingBuybackEth() view returns (uint256)",
+  "function triggerPendingBuyback(uint256 ethIn, uint256 minPlatformTokensOut) returns (uint256)",
   // Present on the audited V4FeeWalletDistributor: only the owner and approved
   // keepers may convert. Older deployments lack these.
   "function keepers(address) view returns (bool)",
@@ -6063,6 +6067,40 @@ async function main() {
       } catch (err) {
         console.warn(`[v4-fee-wallet] claim skip ${tokenAddress}: ${err.message}`);
       }
+    }
+    // Curve-phase fees (ETH, from V4CurveFactory): run the earmarked platform-token buyback with a
+    // price floor, then pay out the fee wallet's ETH (tracked under the zero-address key). Older
+    // distributors without these functions simply throw here, which is ignored.
+    try {
+      if (canConvert) {
+        const pendingEth = await d.contract.pendingBuybackEth();
+        if (pendingEth > 0n) {
+          let minPlatform = 0n;
+          let skip = false;
+          if (buyback) {
+            const quoted = await quoteV4PlatformBuy(routerAddress, platformTokenAddress, pendingEth);
+            if (quoted === 0n) skip = true; // can't quote the buy: leave it earmarked, try next tick
+            minPlatform = (quoted * (10000n - slipBps)) / 10000n;
+          }
+          if (!skip) {
+            const tx = await sendRelayerTx(() => d.contract.triggerPendingBuyback(0, minPlatform));
+            const receipt = await tx.wait();
+            console.log(`[v4-fee-wallet] curve-fee buyback of ${pendingEth} wei (floor ${minPlatform}) in tx ${receipt.hash}.`);
+          }
+        }
+      }
+    } catch (err) {
+      if (err && err.code !== "BAD_DATA" && err.code !== "CALL_EXCEPTION") console.warn(`[v4-fee-wallet] curve-fee buyback skip: ${err.message}`);
+    }
+    try {
+      const curveClaimable = await d.contract.claimableEth(hre.ethers.ZeroAddress);
+      if (curveClaimable > 0n && curveClaimable >= feeWalletClaimMinWeiBig()) {
+        const tx = await sendRelayerTx(() => d.contract.claimFeeWalletRewards(hre.ethers.ZeroAddress));
+        const receipt = await tx.wait();
+        console.log(`[v4-fee-wallet] claimed ${curveClaimable} wei of curve-phase fees in tx ${receipt.hash}.`);
+      }
+    } catch (err) {
+      if (err && err.code !== "BAD_DATA" && err.code !== "CALL_EXCEPTION") console.warn(`[v4-fee-wallet] curve-fee claim skip: ${err.message}`);
     }
     // Airdrop rounds are owner/keeper-only on the audited distributor, like conversions.
     if (canConvert) await v4KeeperAirdropRound("v4-fee-wallet", d.contract, relayerSettings.feeWalletAirdropBatchSize, relayerSettings.feeWalletAirdropMaxBatchesPerTick);
