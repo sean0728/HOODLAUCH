@@ -172,6 +172,7 @@ const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/pl
 const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/tokenMetadata");
 const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
 const { readTrackedTokens, upsertTrackedToken, deleteTrackedToken } = require("../lib/trackedTokensStore");
+const { classifyDiscoveredLaunch } = require("../lib/launchAnnouncement");
 const { readActivity, appendActivity } = require("../lib/activityStore");
 const tradeStore = require("../lib/tradeStore");
 const pnlLib = require("../lib/pnl");
@@ -4325,8 +4326,10 @@ async function main() {
     const filter = watcher.factory.filters[watcher.createdEventName]();
     const events = await watcher.factory.queryFilter(filter, fromBlock, toBlock);
     // Snapshot of everything already tracked BEFORE this tick's upserts
-    // below — used only to decide whether a given token is genuinely new
-    // (never seen before) for the Telegram announcement gate further down.
+    // below — used only to decide whether discovery has already processed a
+    // given token (its discoveredAt) for the Telegram announcement gate
+    // further down. A partial row written earlier by /token-metadata does
+    // NOT count — see lib/launchAnnouncement.js.
     // Under normal single-process operation this loop never revisits a
     // block range twice (the cursor at the bottom always advances past
     // whatever was just scanned), so this check is a no-op belt-and-
@@ -4370,7 +4373,14 @@ async function main() {
       } else if (watcher.kind === "v4curve") {
         customPatch = await readV4CurveCustomConfig(watcher.factory, token, curveConfigByToken.get(token.toLowerCase()));
       }
-      const isNewToken = !alreadyTrackedBeforeThisTick[token.toLowerCase()];
+      // "New" = discovery has never processed this token (no discoveredAt) —
+      // NOT merely "a row exists": /token-metadata and others can create a
+      // partial row first. See lib/launchAnnouncement.js.
+      const { firstDiscovery: isNewToken, announce: shouldAnnounce, reason: skipReason } = classifyDiscoveredLaunch({
+        isV4,
+        isNeverRunOrStuck,
+        existingEntry: alreadyTrackedBeforeThisTick[token.toLowerCase()],
+      });
       await upsertTrackedToken(network, token, {
         kind: watcher.kind,
         creator,
@@ -4422,18 +4432,13 @@ async function main() {
       // already announced, rather than a flood of historical ones.
       // V4 is admin-only while under development — never announce it to the
       // public launches channel.
-      if (!isNeverRunOrStuck && isNewToken && !isV4) {
+      if (shouldAnnounce) {
         await announceLaunchToTelegram(network, watcher.kind, { token, name, symbol, pairAddress }).catch((err) =>
           console.warn(`[telegram] couldn't announce new launch ${token}: ${err.message}`)
         );
       } else {
         // Say WHY nothing was posted, so a missing announcement is never a mystery.
-        const why = isV4
-          ? "V4 launches are never announced publicly (admin-only)"
-          : isNeverRunOrStuck
-            ? "found on a catch-up scan (first run, or the saved scan position was reset)"
-            : "this token was already tracked before this scan";
-        console.log(`[telegram] not announcing $${symbol} (${token}): ${why}.`);
+        console.log(`[telegram] not announcing $${symbol} (${token}): ${skipReason}.`);
       }
     }
     await setCursor(cursorKey, toBlock);
