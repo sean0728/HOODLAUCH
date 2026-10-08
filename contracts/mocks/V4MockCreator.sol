@@ -53,6 +53,16 @@ contract V4MockCreator {
     }
 
     receive() external payable {
+        _onEth();
+    }
+
+    /// @dev Also reached by calls that carry data (a distributor's deposit
+    /// function), with the same accept / reject / burn-gas behaviour.
+    fallback() external payable {
+        _onEth();
+    }
+
+    function _onEth() private view {
         if (mode == 1) revert("no ETH");
         if (mode == 2) {
             for (;;) {}

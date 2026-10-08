@@ -27,6 +27,15 @@ contract V4MockRescueReenter {
     }
 
     receive() external payable {
+        _reenter();
+    }
+
+    /// @dev A distributor's deposit call carries data, so it lands here.
+    fallback() external payable {
+        _reenter();
+    }
+
+    function _reenter() private {
         if (armed) {
             armed = false;
             try IV4CurveRescue(target).rescueStrayEth(sink) returns (uint256 a) {
