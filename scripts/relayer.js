@@ -5704,6 +5704,30 @@ async function main() {
       await trySwap(tokenAddress);
       await tryClaim(tokenAddress);
     }
+
+    // ---- step 3: the bonding curves' per-trade fee. It arrives as ETH (not in
+    // kind), so it has no token to swap: half is already owed to the fee wallet
+    // under key address(0), and half is earmarked in pendingBuybackEth for the
+    // platform-token buyback. Run the buyback with a quote-based floor (skipped
+    // quietly when there is no platform token or no quotable pool; the
+    // contract's own protective floor still applies), then claim the fee
+    // wallet's share. Each step is independent and never aborts the sweep.
+    try {
+      const pending = await feeWalletDistributor.pendingBuybackEth();
+      const platformTokenAddress = await feeWalletDistributor.platformToken();
+      if (pending > 0n && platformTokenAddress !== hre.ethers.ZeroAddress) {
+        const quotedTokens = await quoteV4PlatformBuy(routerAddress, platformTokenAddress, pending);
+        if (quotedTokens > 0n) {
+          const minPlatform = (quotedTokens * (10000n - feeWalletSlippageBpsBig())) / 10000n;
+          const tx = await sendRelayerTx(() => feeWalletDistributor.triggerPendingBuyback(0, minPlatform));
+          const receipt = await tx.wait();
+          console.log(`[fee-wallet] curve-fee buyback of ${pending} wei ran in tx ${receipt.hash}.`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[fee-wallet] curve-fee buyback skip: ${err.message}`);
+    }
+    await tryClaim(hre.ethers.ZeroAddress);
   }
 
   // Drives FeeWalletDistributor's OTHER half of its buyback pipeline — the
