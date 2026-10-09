@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "cluster": "devnet",
+  "rpcUrl": "https://api.devnet.solana.com",
+  "dbcConfig": ""
+}
