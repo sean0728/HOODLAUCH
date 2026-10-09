@@ -54,9 +54,10 @@ import "./interfaces/ITokenFactoryTaxDefaults.sol";
 /// for any of them anywhere below. What CAN change after launch is
 /// operational, never the rate itself: the marketing wallet address, the
 /// swap-threshold batching knob, the processing-slippage tolerance, the
-/// rewards-blocked list, and a tax-exemption whitelist (isTaxExempt /
-/// setTaxExempt — bypasses tax entirely for a specific address, but never
-/// changes what rate anyone else pays). All of those, plus the creator
+/// rewards-blocked list, and a creator-fee exemption whitelist (isTaxExempt /
+/// setTaxExempt — waives only the creator's OWN buy/sell fees
+/// (reflection/marketing/liquidity/burn) for a specific address, never the
+/// platform's cut, and never changes what rate anyone else pays). All of those, plus the creator
 /// role itself, go permanently dark the moment the creator calls
 /// renounceCreator() — see that function and transferCreator/
 /// acceptCreator below. This is deliberate: the classic "creator jacks up
@@ -317,13 +318,14 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// balance, trading ability, or already-claimed history.
     mapping(address => bool) public isBlockedFromRewards;
 
-    /// @notice Creator-controlled tax-exemption whitelist: an address with
-    /// isTaxExempt[account] == true pays (and triggers) no tax at all —
-    /// neither the creator's own buy/sell fee (reflection/marketing/
-    /// liquidity/burn) nor the platform's graduating tax — on any
-    /// transfer where it's either side. See setTaxExempt() below for the
-    /// full reasoning on why this is safe: it only ever changes WHO pays
-    /// the already-fixed rate, never the rate itself.
+    /// @notice Creator-controlled exemption whitelist for the CREATOR'S OWN
+    /// fees only. An address with isTaxExempt[account] == true pays (and
+    /// triggers) none of the creator's buy/sell fee components
+    /// (reflection/marketing/liquidity/burn) on any transfer where it's
+    /// either side. It does NOT exempt anyone from the platform's graduating
+    /// tax (platformFeeBps): that cut applies to every buy and sell of every
+    /// address, whatever this list says, until the token graduates. See
+    /// setTaxExempt() below.
     mapping(address => bool) public isTaxExempt;
 
     /// @notice True iff either side's reflectionBps was nonzero at
@@ -884,7 +886,7 @@ contract CustomToken is ERC20, ReentrancyGuard {
     /// anywhere sets them after initialize()/configurePlatformTax()), so
     /// renouncing doesn't "lock in" the tax rate — it was already locked
     /// in at launch. What renouncing removes is every remaining
-    /// *operational* lever, including the tax-exemption whitelist below.
+    /// *operational* lever, including the creator-fee exemption whitelist below.
     function renounceCreator() external onlyCreator {
         address previousCreator = creator;
         creator = address(0);
@@ -965,17 +967,19 @@ contract CustomToken is ERC20, ReentrancyGuard {
         emit RewardsAccessUpdated(account, blocked);
     }
 
-    /// @notice Whitelists (or un-whitelists) `account` to bypass ALL tax —
-    /// both the creator's own buy/sell fee (reflection/marketing/
-    /// liquidity/burn) and the platform's graduating tax — on any
-    /// transfer where it's either side (see _update's `exempt` check).
-    /// Does NOT touch buyFees/sellFees/platformFeeBps themselves, which
-    /// stay exactly as fixed at launch — this only ever changes WHO pays
-    /// the already-fixed rate, never the rate itself, so it can't be used
-    /// to reintroduce the "creator jacks up the tax" rug this contract's
-    /// immutable fee rates are built to prevent. Meant for addresses that
-    /// legitimately shouldn't be taxed on their own token movements —
-    /// e.g. the LiquidityLocker holding the locked LP, a vesting or
+    /// @notice Whitelists (or un-whitelists) `account` to skip the CREATOR'S
+    /// OWN buy/sell fee components (reflection, marketing, liquidity, burn)
+    /// on any transfer where it's either side. The platform's graduating
+    /// tax is deliberately NOT affected: an exempt address still pays the
+    /// platform's platformFeeBps on every buy and sell until graduation, so
+    /// no creator can route their own (or anyone's) trading around the
+    /// platform's cut. Does NOT touch buyFees/sellFees/platformFeeBps
+    /// themselves, which stay exactly as fixed at launch — this only ever
+    /// changes WHO pays the already-fixed creator rate, never the rate
+    /// itself, so it can't be used to reintroduce the "creator jacks up the
+    /// tax" rug this contract's immutable fee rates are built to prevent.
+    /// Meant for addresses that legitimately shouldn't pay the creator's
+    /// own fees on their token movements — e.g. a vesting or
     /// airdrop-distribution contract, or a CEX deposit wallet the creator
     /// has arranged a listing with.
     function setTaxExempt(address account, bool exempt) external onlyCreator {
@@ -1057,23 +1061,15 @@ contract CustomToken is ERC20, ReentrancyGuard {
             return;
         }
 
-        // Tax-exemption whitelist (see setTaxExempt above): bypasses BOTH
-        // the creator's own fee and the platform's cut for this specific
-        // transfer, but every other side effect of a buy/sell still runs
-        // exactly as normal — the pending-fee batch can still be
-        // triggered by an exempt seller (it's about the token's overall
-        // backlog, not this trade), and the graduation check still runs
-        // (it's about market cap, not this trade's tax). Only the fee
-        // computation itself is skipped.
-        if (isTaxExempt[from] || isTaxExempt[to]) {
-            super._update(from, to, value);
-            _afterBalanceChange(from, to, value);
-            if (isSell) _maybeSwapAndProcess();
-            if (platformTaxActive) _maybeDisablePlatformTax();
-            return;
+        // Creator-fee exemption whitelist (see setTaxExempt above): waives
+        // ONLY the creator's own fee components for this transfer. The
+        // platform's cut below is computed regardless of the whitelist, so
+        // an exempt wallet still pays it. Every other side effect of a
+        // buy/sell (pending-fee batch, graduation check) runs as normal.
+        FeeSet memory fees;
+        if (!(isTaxExempt[from] || isTaxExempt[to])) {
+            fees = isBuy ? buyFees : sellFees;
         }
-
-        FeeSet memory fees = isBuy ? buyFees : sellFees;
         TransferCuts memory cuts;
         cuts.reflection = (value * fees.reflectionBps) / 10_000;
         cuts.marketing = (value * fees.marketingBps) / 10_000;
