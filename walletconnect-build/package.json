@@ -1,0 +1,16 @@
+{
+  "name": "hoodlaunch-walletconnect-bundle",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Builds public/vendor/hood-walletconnect.js (self-hosted WalletConnect provider + QR generator).",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --minify --format=iife --platform=browser --target=es2020 --define:global=globalThis --define:process.env.NODE_ENV='\"production\"' --legal-comments=none --outfile=../public/vendor/hood-walletconnect.js"
+  },
+  "dependencies": {
+    "@walletconnect/ethereum-provider": "2.23.9",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
