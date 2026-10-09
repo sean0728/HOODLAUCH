@@ -178,6 +178,7 @@ const { readActivity, appendActivity } = require("../lib/activityStore");
 const tradeStore = require("../lib/tradeStore");
 const pnlLib = require("../lib/pnl");
 const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore");
+const { registerSolanaRoutes } = require("../lib/solanaApi");
 const { ROBINHOOD_NETWORKS } = require("../lib/networks");
 const { isDbConfigured, ensureSchema } = require("../lib/db");
 
@@ -3829,6 +3830,12 @@ async function main() {
       initialSupply: tracked ? tracked.initialSupply || null : null,
     });
   }));
+
+  // Solana (devnet) prototype: metadata hosting, launch registry and price
+  // history for Meteora DBC quick launches. Write routes are admin-signed, the
+  // price poller is off unless SOLANA_RPC_URL is set, and the Solana packages
+  // are loaded lazily — see lib/solanaApi.js and README "Solana (devnet prototype)".
+  registerSolanaRoutes(app, { sendJson, asyncRoute, verifyAdminSignature, isFreshTimestamp });
 
   app.get("/holder-distribution/:tokenAddress", async (req, res) => {
     const rows = await computeHolderDistribution(req.params.tokenAddress);
