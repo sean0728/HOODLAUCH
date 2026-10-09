@@ -430,6 +430,8 @@ describe("POST /solana/launches, GET /solana/launches, POST /solana/launches/del
     assert.strictEqual(created.status, 200);
     assert.strictEqual(created.json.created, true);
     assert.strictEqual(created.json.launch.cluster, "devnet"); // default
+    assert.strictEqual(created.json.launch.chain, "solana"); // network family is part of the record
+    assert.strictEqual((await store.listLaunches()).find((l) => l.mint === mint).chain, "solana"); // ...and persisted with it
     const createdAt = created.json.launch.createdAt;
     assert.ok(Math.abs(createdAt - Date.now()) < 5000);
 
@@ -451,7 +453,7 @@ describe("POST /solana/launches, GET /solana/launches, POST /solana/launches/del
     assert.strictEqual(list.json.cluster, "devnet");
     const mine = list.json.launches.filter((l) => l.mint === mint || l.mint === other);
     assert.deepStrictEqual(mine.map((l) => l.mint), [other, mint]); // newest first, one row per mint
-    assert.deepStrictEqual(Object.keys(mine[1]).sort(), ["cluster", "createdAt", "creator", "image", "metadataId", "mint", "name", "pool", "symbol"]);
+    assert.deepStrictEqual(Object.keys(mine[1]).sort(), ["chain", "cluster", "createdAt", "creator", "image", "metadataId", "mint", "name", "pool", "symbol"]);
     assert.strictEqual(mine[1].name, "Renamed");
     assert.strictEqual(mine[1].symbol, "TWO");
 
@@ -770,5 +772,33 @@ describe("registerSolanaRoutes", () => {
     assert.strictEqual(api.metadataMessage("abc", 5), "IgnitionX admin: solana metadata abc at 5");
     assert.strictEqual(api.registerLaunchMessage("M", 5), "IgnitionX admin: register solana launch M at 5");
     assert.strictEqual(api.deleteLaunchMessage("M", 5), "IgnitionX admin: delete solana launch M at 5");
+  });
+});
+
+
+describe("chain field (network family of a launched token)", () => {
+  const { CHAINS, normalizeChain } = require("../lib/chains");
+  const launchStore = require("../lib/launchStore");
+
+  it("normalizeChain keeps known values and defaults old/unknown rows to robinhood", () => {
+    assert.strictEqual(normalizeChain("solana"), "solana");
+    assert.strictEqual(normalizeChain(" Solana "), "solana");
+    assert.strictEqual(normalizeChain("robinhood"), "robinhood");
+    for (const v of [undefined, null, "", "ethereum", 5, {}]) assert.strictEqual(normalizeChain(v), "robinhood");
+    assert.deepStrictEqual(Object.values(CHAINS).sort(), ["robinhood", "solana"]);
+  });
+
+  it("the Robinhood launch ledger exposes `chain` as a public column", () => {
+    assert.ok(launchStore.PUBLIC_FIELDS.includes("chain"));
+  });
+
+  it("GET /solana/launches labels every launch solana, even a record stored before the field existed", async () => {
+    const mint = randAddr();
+    const meta = await call("POST", "/solana/metadata", await signedMetadata());
+    const r = await call("POST", "/solana/launches", await signedLaunch({ mint, pool: randAddr(), creator: randAddr(), name: "Old", symbol: "OLD", metadataId: meta.json.id }));
+    assert.strictEqual(r.status, 200);
+    const list = await call("GET", "/solana/launches");
+    const row = list.json.launches.find((l) => l.mint === mint);
+    assert.strictEqual(row.chain, "solana");
   });
 });
