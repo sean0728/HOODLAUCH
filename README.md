@@ -123,7 +123,7 @@ Key routes:
 
 `public/index.html` is a single self-contained page (no build step) covering:
 
-- The launch flow for all six modes, wallet connection, and network switching (MetaMask-style injected wallet).
+- The launch flow for all six modes, wallet connection (see "Wallet connection" below), and network switching.
 - A token grid with search/status filters, live price sparklines, and a market-cap badge per token.
 - A live trade feed, polling the relayer's `/activity` endpoint, tagging bonding-curve trades distinctly from ordinary DEX-pool trades, and posting a banner announcement whenever a brand-new token launches.
 - A per-wallet portfolio view (your launches, your holdings, claimable creator rewards, LP unlock status).
@@ -132,6 +132,26 @@ Key routes:
 The page reads its contract addresses from a three-layer precedence chain: a static `public/config.json` shipped with the deploy, overridden by whatever the admin has saved server-side via the admin panel, overridden in turn by anything already in the visitor's own browser `localStorage`.
 
 Demo mode always maps to Robinhood Chain **testnet**; Live mode always maps to **mainnet** — the grid, the header stats, and the live feed all scope to whichever one is currently active, so switching networks never mixes testnet and mainnet tokens together.
+
+## Wallet connection
+
+The Connect Wallet button opens a picker. It offers:
+
+- **Every wallet installed in the browser**, discovered through EIP-6963 (the standard wallet announcement), so a visitor with two extensions installed chooses which one to use instead of getting whichever claimed `window.ethereum` first. Wallets that predate EIP-6963 still work through `window.ethereum`.
+- **WalletConnect** (QR code on desktop, "Open wallet app" link on phones) for mobile wallets such as Rainbow, Trust, Zerion, MetaMask Mobile and Ledger Live. It appears only when a project ID is configured.
+- **Open-in-wallet links** (MetaMask, Coinbase Wallet, Trust, Phantom, OKX) for a phone browser that has no wallet injected.
+
+The last wallet used is remembered and restored on reload. Every wallet call in `index.html` goes through one accessor, `getEth()`, which returns the provider the visitor picked.
+
+**Enabling WalletConnect.** Create a free project at dashboard.reown.com, add your site's domain to its allowed domains, and put the project ID in `public/wallet-config.json`:
+
+```json
+{ "walletConnectProjectId": "0123456789abcdef0123456789abcdef" }
+```
+
+It is a public identifier, not a secret. Blank or missing means the WalletConnect option is simply not shown. WalletConnect support is a self-hosted bundle, `public/vendor/hood-walletconnect.js` (about 2 MB, downloaded only when someone picks WalletConnect); no third-party script is loaded. To rebuild it: `cd walletconnect-build && npm install && npm run build`. The page's Content-Security-Policy allows only the WalletConnect relay and verification hosts.
+
+**Known limits.** WalletConnect sessions need Robinhood Chain to be available in the visitor's mobile wallet (the picker tells them the chain ID to add). Smart-contract wallets (Safe, passkey wallets) cannot sign gasless launches or profile actions, because the server and the factory contracts verify ordinary (EOA) signatures only.
 
 ## Networks
 
