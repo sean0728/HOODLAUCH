@@ -246,6 +246,7 @@ with sync_playwright() as p:
     tip = pg.inner_text("#chartWrap .cc-tip")
     check("6f hover tooltip shows OHLC in SOL", "SOL" in tip and "$" not in tip, tip)
     check("6g explorer links are devnet", pg.evaluate("[...document.querySelectorAll('#solDetailRoot a')].every(a=>a.href.includes('cluster=devnet'))"))
+    check("6h2 detail header shows the Solana badge", pg.evaluate("(()=>{const b=document.querySelector('#solDetailRoot .detail-head img.chain-badge'); return !!b && b.dataset.chain==='solana'})()"))
     check("6h logo comes from same-origin path only", pg.evaluate("document.querySelector('#solDetailRoot .tc-mark img').getAttribute('src')") == f"/solana/metadata/{mb.get('id')}.png", pg.evaluate("document.querySelector('#solDetailRoot .tc-mark img').getAttribute('src')"))
     if SHOTS: pg.screenshot(path=os.path.join(SHOTS, "sol_detail.png"), full_page=True)
 
@@ -280,6 +281,7 @@ with sync_playwright() as p:
     ct = pg.inner_text("#solanaGrid")
     check("8b card shows name, ticker, SOL price + progress", "Ignition Cat" in ct and "$IGCAT" in ct and "SOL" in ct and "16.7%" in ct, ct)
     check("8c card logo uses same-origin path", pg.evaluate("document.querySelector('#solanaGrid .tc-logo-img').getAttribute('src')").startswith("/solana/metadata/"))
+    check("8c2 card shows the Solana badge to the left of the name", pg.evaluate("(()=>{const h=document.querySelector('#solanaGrid .tc-head'); const b=h.querySelector('img.chain-badge'); const n=h.querySelector('.tc-name'); return !!b && b.dataset.chain==='solana' && /brand\\/chains\\/solana\\.svg$/.test(b.getAttribute('src')) && b.getBoundingClientRect().right<=n.getBoundingClientRect().left+1})()"))
     check("8d logo actually loaded", pg.evaluate("(()=>{const i=document.querySelector('#solanaGrid .tc-logo-img'); return i.complete && i.naturalWidth>0})()"))
     if SHOTS:
         pg.evaluate("document.getElementById('solanaExploreSection').scrollIntoView({block:'center'})"); pg.wait_for_timeout(300)

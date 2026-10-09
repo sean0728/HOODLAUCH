@@ -19,7 +19,7 @@ def logo_data_url():
 A1, A2, A3 = "0x" + "a1"*20, "0x" + "b2"*20, "0x" + "c3"*20
 PAIR = "0x" + "d4"*20
 LAUNCHES = [
-  {"tokenAddress": A1, "name": "Logo Coin", "symbol": "LOGO", "pairAddress": PAIR, "tokenStatus": 1, "logo": logo_data_url(), "createdAt": "2026-10-09T00:00:00Z", "mode": "relayed-token"},
+  {"tokenAddress": A1, "name": "Logo Coin", "symbol": "LOGO", "pairAddress": PAIR, "tokenStatus": 1, "logo": logo_data_url(), "createdAt": "2026-10-09T00:00:00Z", "mode": "relayed-token", "chain": "robinhood"},
   {"tokenAddress": A2, "name": "Plain Coin", "symbol": "PLN", "pairAddress": "0x" + "e5"*20, "tokenStatus": 1, "createdAt": "2026-10-09T00:00:00Z", "mode": "relayed-token"},
   {"tokenAddress": A3, "name": "Held Coin", "symbol": "HELD", "tokenStatus": 0, "createdAt": "2026-10-09T00:00:00Z", "mode": "relayed-token"},
 ]
@@ -61,11 +61,14 @@ with sync_playwright() as p:
     check("A3 every card has a logo tile", pg.locator(".token-card .tc-logo").count() == 3)
     check("A4 uploaded logo image is shown on its card", pg.locator(".token-card .tc-logo img.tc-logo-img").count() == 1)
     check("A5 no-logo tokens get an initials tile", pg.locator(".token-card .tc-logo-ph").count() == 2)
+    check("A7 every Robinhood card has the Robinhood badge left of its name (incl. a record with no chain field)",
+          pg.evaluate("[...document.querySelectorAll('.token-card .tc-head')].every(h=>{const b=h.querySelector('img.chain-badge'); const n=h.querySelector('.tc-name'); return b && b.dataset.chain==='robinhood' && /robinhood\\.svg$/.test(b.getAttribute('src')) && b.getBoundingClientRect().right<=n.getBoundingClientRect().left+1})") and pg.locator(".token-card .chain-badge").count()==3)
     check("A6 price + change still shown on live cards", pg.locator(".token-card .tc-metrics").count() == 2)
     pg.locator("#tokenGrid").scroll_into_view_if_needed(); pg.evaluate("document.getElementById('tokenGrid').scrollIntoView({block:'center'})"); pg.wait_for_timeout(300)
     if SHOTS: pg.screenshot(path=os.path.join(SHOTS, "cc_home.png"), full_page=False)
     # open the live token with a logo
     pg.locator(".token-card", has_text="Logo Coin").click(); pg.wait_for_timeout(600)
+    check("B0 detail header shows the Robinhood badge", pg.evaluate("(()=>{const b=document.querySelector('#view-detail .detail-head img.chain-badge'); return !!b && b.dataset.chain==='robinhood'})()"))
     check("B1 detail shows candle chart", pg.locator("#chartWrap .cc").count() == 1)
     n = pg.locator("#chartWrap .cc-plot svg rect").count()
     check("B2 many candles drawn (>=30, <=90)", 30 <= n <= 90, n)
