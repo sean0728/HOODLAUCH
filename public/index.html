@@ -393,6 +393,11 @@
     border:1px dashed var(--line-strong); border-radius:var(--radius-md); padding:48px 24px; text-align:center; color:var(--paper-500);
   }
 
+  /* ---- network badge (which chain a token lives on); files: brand/chains/<chain>.svg ---- */
+  .chain-badge{width:24px; height:24px; flex:none; border-radius:50%; object-fit:contain; background:var(--ink-800); display:block;}
+  .tc-head .chain-badge{margin-right:-2px;}
+  .detail-head .chain-badge{width:32px; height:32px;}
+
   /* ---- Solana quick launch (admin-only devnet prototype) ---- */
   .launch-netbar{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:28px 0 18px;}
   .netchoice{font-family:var(--font-mono); font-size:.8rem; padding:8px 14px; border-radius:999px; background:var(--ink-850); color:var(--paper-500); border:1px solid var(--line); cursor:pointer; display:inline-flex; align-items:center; gap:8px;}
@@ -6761,6 +6766,7 @@
       tokenAddress: entry.tokenAddress,
       pairAddress: (isLiquidity && !isV4Entry) ? entry.pairAddress : null,
       protocol: isV4Entry ? "v4" : "v2",
+      chain: entry.chain === "solana" ? "solana" : "robinhood",
       ...(isV4Entry ? { poolId: entry.poolId || null } : {}),
       // The ledger has no per-token factoryAddress column at all (every
       // other factory call this page makes for a remote token goes through
@@ -7365,6 +7371,17 @@
   // sparkline. Falls back to the ticker's first two letters on the token's
   // category color when no logo was uploaded. The chart lives on the token's
   // own page, one click away.
+  // Which network a token lives on comes from the `chain` field the relayer stores with every launch
+  // ("robinhood" | "solana"). Anything unknown/missing is treated as Robinhood (older records).
+  const CHAINS = {
+    robinhood: { label:"Robinhood Chain", icon:"brand/chains/robinhood.svg" },
+    solana:    { label:"Solana",          icon:"brand/chains/solana.svg" },
+  };
+  function chainOf(t){ return (t && CHAINS[t.chain]) ? t.chain : "robinhood"; }
+  function chainBadgeHTML(chain){
+    const c = CHAINS[chain] || CHAINS.robinhood;
+    return `<img class="chain-badge" data-chain="${chain in CHAINS ? chain : "robinhood"}" src="${c.icon}" alt="${c.label}" title="${c.label}" width="24" height="24">`;
+  }
   function tcLogoTileHTML(t, hint){
     const initials = escapeHtml((t.ticker||"??").slice(0,2));
     const catColor = escapeHtml(t.catColor||"var(--signal-500)");
@@ -7402,6 +7419,7 @@
     return `
       ${tcLogoTileHTML(t, noSimulatedMarket ? "" : "View chart ›")}
       <div class="tc-head">
+        ${chainBadgeHTML(chainOf(t))}
         <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)} ${protoBadgeHTML(t, "margin-left:4px;")}${profileNameOf(t.creatorWallet) ? `<span class="tc-by" title="Created by ${escapeHtml(profileNameOf(t.creatorWallet))}">by ${escapeHtml(profileNameOf(t.creatorWallet))}</span>` : ""}</div></div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px; margin-left:auto;">
           ${(!noSimulatedMarket && t.mcap>0) ? `<div class="tc-mcap"><span class="l">Mcap</span>${fmtUSD(t.mcap)}</div>` : ""}
@@ -7971,6 +7989,7 @@
           ${safeImageSrc(t.banner) ? `<div class="detail-banner"><img src="${safeImageSrc(t.banner)}" alt=""></div>` : ""}
           <div class="detail-head">
             ${tcMarkHTML(t)}
+            ${chainBadgeHTML(chainOf(t))}
             <div style="flex:1;"><h2>${escapeHtml(t.name)}</h2><div class="tc-ticker">$${escapeHtml(t.ticker)} · ${statusBadgeHTML(t.mode, t.status, "display:inline-block; margin-left:4px;")} <span class="proto-badge ${tokenProtocol(t)}" id="detailProtocolBadge" title="${tokenProtocol(t)==='v4' ? 'Launched on Uniswap V4' : 'Launched on Uniswap V2'}">${tokenProtocol(t).toUpperCase()}</span></div></div>
             ${isOwner ? `<button class="btn btn-ghost" id="detailEditBtn" style="padding:8px 14px; font-size:.8rem;">Edit token</button>` : ""}
           </div>
@@ -9645,7 +9664,8 @@
       const res = await fetch(SOL_RELAYER+"/solana/launches", { cache:"no-store" });
       if(!res.ok) throw new Error("bad status");
       const data = await res.json();
-      solLaunches = Array.isArray(data.launches) ? data.launches : [];
+      // everything from /solana/launches is a Solana token, whatever an older relayer did or didn't stamp on it
+      solLaunches = (Array.isArray(data.launches) ? data.launches : []).map(l=> Object.assign({}, l, { chain:"solana" }));
       solLaunchesLoaded = true;
     }catch(e){
       solLaunchesLoaded = true; // don't hammer a relayer that has no Solana routes yet
@@ -9682,12 +9702,12 @@
     const grad = !!(info && info.migrated);
     const pct = info ? Math.max(0, Math.min(100, info.progressPct)) : 0;
     return `
+      ${solLogoTileHTML(l, "View chart ›")}
       <div class="tc-head">
-        <div class="tc-mark" style="background:#ffa03a">${solSafeImg(l.image) ? `<img src="${solSafeImg(l.image)}" alt="">` : escapeHtml((l.symbol||"?").slice(0,1))}</div>
+        ${chainBadgeHTML(chainOf(l))}
         <div><div class="tc-name">${escapeHtml(l.name)}</div><div class="tc-ticker">$${escapeHtml(l.symbol)}</div></div>
         <span class="tc-status ${grad?"graduated":"curve-trading"}">${grad?"Graduated":"Curve"}</span>
       </div>
-      ${solLogoTileHTML(l, "View chart ›")}
       <div class="tc-metrics">
         <div class="m"><div class="v">${info ? solFmtPrice(info.priceSol) : "—"}</div><div class="l">Price</div></div>
         <div class="m"><div class="v">${info && info.marketCapSol!=null ? solFmtSol(info.marketCapSol, 1) : "—"}</div><div class="l">Market cap</div></div>
@@ -9930,6 +9950,7 @@
       <div class="panel" id="solDetailRoot" data-mint="${escapeHtml(mint)}">
         <div class="detail-head">
           <div class="tc-mark" style="background:#ffa03a">${img ? `<img src="${img}" alt="">` : escapeHtml((l.symbol||"?").slice(0,1))}</div>
+          ${chainBadgeHTML(chainOf(l))}
           <div><div class="tc-name" style="font-size:1.25rem">${escapeHtml(l.name)}</div><div class="tc-ticker">$${escapeHtml(l.symbol)} · Solana devnet</div></div>
           <span class="tc-status curve-trading" id="solDStatus" style="margin-left:auto">Curve</span>
         </div>
