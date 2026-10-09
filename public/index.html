@@ -19,7 +19,7 @@
   add `Content-Security-Policy: frame-ancestors 'none'` (or 'self') there
   too, to stop this page from being framed by another site.
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.coingecko.com https://rpc.testnet.chain.robinhood.com https://rpc.mainnet.chain.robinhood.com https://explorer.testnet.chain.robinhood.com https://robinhoodchain.blockscout.com; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.coingecko.com https://rpc.testnet.chain.robinhood.com https://rpc.mainnet.chain.robinhood.com https://explorer.testnet.chain.robinhood.com https://robinhoodchain.blockscout.com wss://relay.walletconnect.org wss://relay.walletconnect.com https://rpc.walletconnect.org https://rpc.walletconnect.com https://verify.walletconnect.org https://verify.walletconnect.com https://pulse.walletconnect.org; frame-src https://verify.walletconnect.org https://verify.walletconnect.com; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Hood Launch</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -686,6 +686,24 @@
   .modal-card.neutral{border-color:var(--line-strong); border-top-color:var(--signal-500); box-shadow:var(--shadow-panel), 0 0 40px -16px rgba(255,157,60,.2);}
   .modal-actions{display:flex; justify-content:flex-end; gap:10px;}
 
+  /* ---------------- Wallet picker ---------------- */
+  .wallet-sec-label{font-family:var(--font-mono); font-size:.68rem; letter-spacing:.08em; text-transform:uppercase; color:var(--paper-500); margin:0 0 8px;}
+  .wallet-list{display:flex; flex-direction:column; gap:8px; margin:0 0 18px;}
+  .wallet-opt{
+    display:flex; align-items:center; gap:12px; width:100%; text-align:left; text-decoration:none;
+    background:var(--ink-800); border:1px solid var(--line-strong); color:var(--paper-100);
+    padding:11px 14px; border-radius:var(--radius-md); font:inherit; font-size:.92rem; cursor:pointer;
+  }
+  .wallet-opt:hover,.wallet-opt:focus-visible{border-color:var(--signal-500); outline:none;}
+  .wallet-opt img,.wallet-ico{width:28px; height:28px; border-radius:7px; flex:none; object-fit:contain;}
+  .wallet-ico{display:grid; place-items:center; background:var(--ink-900); border:1px solid var(--line-strong); font-family:var(--font-mono); font-size:.68rem; color:var(--signal-300);}
+  .wallet-opt-text{display:flex; flex-direction:column; gap:2px; min-width:0;}
+  .wallet-opt-text small{color:var(--paper-500); font-size:.74rem; line-height:1.35;}
+  .modal-card .wallet-note{color:var(--paper-500); font-size:.82rem; line-height:1.5; margin:0 0 14px;}
+  .wallet-qr{background:#fff; padding:10px; border-radius:12px; width:min(260px,100%); margin:0 auto 14px;}
+  .wallet-qr svg{display:block; width:100%; height:auto;}
+  .wallet-row{display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin:0 0 14px;}
+
   /* ---------------- contract / social links, My Tokens ---------------- */
   .meta-line{color:var(--paper-500); font-size:.84rem; margin-top:14px; display:flex; flex-wrap:wrap; gap:4px 10px;}
   .meta-line a{color:var(--signal-300); text-decoration:none;}
@@ -826,6 +844,16 @@
     <div class="modal-actions">
       <button class="btn btn-ghost" id="modeConfirmCancel">Stay on Testnet</button>
       <button class="btn btn-primary" id="modeConfirmOk">Switch to Mainnet</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="walletOverlay" hidden>
+  <div class="modal-card neutral" role="dialog" aria-modal="true" aria-labelledby="walletModalTitle" style="max-width:420px;">
+    <h3 id="walletModalTitle">Connect a wallet</h3>
+    <div id="walletModalBody"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="walletModalClose" type="button">Cancel</button>
     </div>
   </div>
 </div>
@@ -1019,6 +1047,44 @@
 (function(){
   "use strict";
   const REDUCE_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---------------- wallet providers (EIP-6963 + WalletConnect) ----------------
+     This page used to talk to `window.ethereum` directly. That single global
+     is claimed by whichever wallet extension loads first, so a visitor with
+     two wallets installed (MetaMask + Phantom, say) got whichever one won,
+     with no choice — and a visitor on a phone browser, or on a desktop with
+     only a mobile wallet, got nothing at all.
+
+     Every wallet call now goes through getEth(), which returns the provider
+     the visitor actually chose:
+       - an injected wallet announced through EIP-6963 (the standard way
+         extensions and in-app wallet browsers advertise themselves), or the
+         old window.ethereum for wallets that predate it;
+       - a WalletConnect session (QR code / phone wallet), driven by the
+         self-hosted bundle in ./vendor/hood-walletconnect.js, which is only
+         downloaded when someone picks WalletConnect.
+     Until the visitor picks one, getEth() falls back to window.ethereum (then
+     to the first announced wallet), so read-only calls and already-connected
+     visitors behave exactly as they did before. */
+  const discoveredProviders = new Map(); // EIP-6963 uuid -> { info, provider }
+  let activeProvider = null;             // the provider the visitor picked (null = default injected wallet)
+  let activeProviderInfo = null;         // { kind:"injected"|"legacy"|"walletconnect", name, rdns }
+  let walletUiReady = false;             // flips once the picker modal code further down has run
+  function onProviderAnnounced(e){
+    const d = e && e.detail;
+    if(!d || !d.info || !d.provider || typeof d.provider.request !== "function" || !d.info.uuid) return;
+    discoveredProviders.set(String(d.info.uuid), d);
+    if(walletUiReady) onWalletListChanged(); // wallets can announce before the picker below exists
+  }
+  window.addEventListener("eip6963:announceProvider", onProviderAnnounced);
+  function requestWalletAnnouncements(){ try{ window.dispatchEvent(new Event("eip6963:requestProvider")); }catch(e){} }
+  requestWalletAnnouncements();
+  function getEth(){
+    if(activeProvider) return activeProvider;
+    if(window.ethereum) return window.ethereum;
+    const first = discoveredProviders.values().next().value;
+    return first ? first.provider : null;
+  }
 
   /* ---------------- utils ---------------- */
   function seededRandom(seed){
@@ -1877,12 +1943,12 @@
   // channel here, just polling.
   async function requestActiveNetworkChange(targetNetwork){
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     const timestamp = Date.now();
     const message = `Hood Launch admin: set active network to ${targetNetwork} at ${timestamp}`;
     let signature;
     try{
-      signature = await window.ethereum.request({
+      signature = await getEth().request({
         method: "personal_sign",
         params: ["0x"+utf8Hex(message), wallet],
       });
@@ -1946,7 +2012,7 @@
   // of whether personal_sign was ever even answered.
   async function syncTokenMetadataToServer(t){
     if(!(t && t.onChain && t.tokenAddress)) return false;
-    if(!window.ethereum) return false; // no injected wallet to sign with (e.g. WalletConnect-only) — nothing this call can do about that here
+    if(!getEth()) return false; // no wallet to sign with — nothing this call can do about that here
     const url = relayerApiUrl(t.networkMode);
     if(!url) return false;
     const metadata = { logo: t.logo||null, banner: t.banner||null, socials: t.socials||{} };
@@ -1954,7 +2020,7 @@
     const message = tokenMetadataMessage(t.tokenAddress, metadata, timestamp);
     let signature;
     try{
-      signature = await window.ethereum.request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
+      signature = await getEth().request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
     }catch(err){ return false; } // rejected or the prompt was missed
     for(let attempt=1; attempt<=SYNC_TOKEN_METADATA_MAX_ATTEMPTS; attempt++){
       try{
@@ -1986,12 +2052,12 @@
   // the relayer instead of (or as well as) localStorage.
   async function requestPlatformConfigSave(layer){
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return null; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return null; }
+    if(!getEth()){ toast("No wallet connected."); return null; }
     const timestamp = Date.now();
     const message = platformConfigMessage(layer, timestamp);
     let signature;
     try{
-      signature = await window.ethereum.request({
+      signature = await getEth().request({
         method: "personal_sign",
         params: ["0x"+utf8Hex(message), wallet],
       });
@@ -2054,7 +2120,7 @@
 
   async function fetchEthUsdPriceOnChain(){
     const feed = priceFeedAddress();
-    if(!feed || !window.ethereum) return null;
+    if(!feed || !getEth()) return null;
     try{
       const [decHex, roundHex] = await Promise.all([
         ethCall(feed, "0x"+FEED_DECIMALS_SELECTOR),
@@ -2088,7 +2154,7 @@
     if(views.create.classList.contains("active")) renderWizard();
   }
 
-  /* ---------------- wallet connect (real, via window.ethereum) ---------------- */
+  /* ---------------- wallet connect (any injected wallet, or WalletConnect) ---------------- */
   let wallet = null;
   const walletBtn = document.getElementById("walletBtn");
   function refreshWalletBtn(){
@@ -2128,17 +2194,17 @@
 
   async function ensureNetwork(mode){
     const net = NETWORKS[mode];
-    if(!window.ethereum) return;
+    if(!getEth()) return;
     if(!net.chainIdHex){
       toast(`${net.chainName}'s chain ID isn't configured yet — please switch to it manually in your wallet.`);
       return;
     }
     try{
-      await window.ethereum.request({ method:"wallet_switchEthereumChain", params:[{ chainId: net.chainIdHex }] });
+      await getEth().request({ method:"wallet_switchEthereumChain", params:[{ chainId: net.chainIdHex }] });
     }catch(switchErr){
       if(switchErr && switchErr.code===4902){
         try{
-          await window.ethereum.request({
+          await getEth().request({
             method:"wallet_addEthereumChain",
             params:[{ chainId:net.chainIdHex, chainName:net.chainName, rpcUrls:net.rpcUrls, blockExplorerUrls:net.blockExplorerUrls, nativeCurrency:net.nativeCurrency }]
           });
@@ -2151,67 +2217,414 @@
     }
   }
 
-  async function connectWallet(){
-    if(!window.ethereum){
-      toast("No browser wallet detected — install MetaMask or a compatible wallet extension to connect.");
-      return;
-    }
+  /* ---------------- wallet picker + WalletConnect ---------------- */
+  const WALLET_CHOICE_KEY = "hoodlaunch_wallet_choice";
+  const IS_MOBILE_BROWSER = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "") || (/Macintosh/.test(navigator.userAgent || "") && navigator.maxTouchPoints > 1); // iPadOS reports itself as a Mac
+
+  // ./wallet-config.json holds the WalletConnect project ID (free from
+  // dashboard.reown.com). It is a public identifier, not a secret, and it is
+  // kept out of the signed platform config on purpose. Blank or missing =
+  // the WalletConnect option simply isn't offered.
+  let walletCfg = { walletConnectProjectId: "" };
+  const walletConfigReady = (async ()=>{
     try{
-      const accounts = await window.ethereum.request({ method:"eth_requestAccounts" });
-      wallet = accounts && accounts[0] ? accounts[0] : null;
-      try{ if(wallet) localStorage.setItem("hoodlaunch_wallet", wallet); else localStorage.removeItem("hoodlaunch_wallet"); }catch(e){}
-      refreshWalletBtn();
-      refreshAdminTabVisibility();
-      if(views.portfolio.classList.contains("active")) renderPortfolio();
-      if(views.detail.classList.contains("active") && currentDetailTokenId) openDetail(currentDetailTokenId);
-      if(wallet){
-        toast(`Wallet connected: ${fmtAddr(wallet)}.`);
-        await ensureNetwork(appMode);
+      const res = await fetch("./wallet-config.json", { cache:"no-store" });
+      if(res.ok){
+        const j = await res.json();
+        const id = j && typeof j.walletConnectProjectId === "string" ? j.walletConnectProjectId.trim() : "";
+        if(/^[0-9a-f]{32}$/i.test(id)) walletCfg.walletConnectProjectId = id;
       }
-    }catch(err){
-      if(err && err.code===4001) toast("Wallet connection was rejected.");
-      else toast("Wallet connection failed.");
-    }
+    }catch(e){ /* missing/blocked: WalletConnect stays hidden */ }
+    return walletCfg;
+  })();
+  function wcEnabled(){ return !!walletCfg.walletConnectProjectId; }
+
+  function storeWalletChoice(info){
+    try{
+      if(info) localStorage.setItem(WALLET_CHOICE_KEY, JSON.stringify({ kind: info.kind, rdns: info.rdns || null, name: info.name || null }));
+      else localStorage.removeItem(WALLET_CHOICE_KEY);
+    }catch(e){}
   }
-  function disconnectWallet(){
-    // Real wallet providers have no "disconnect" call — this only clears
-    // this page's local connection state, same as most dapps.
-    wallet = null;
-    try{ localStorage.removeItem("hoodlaunch_wallet"); }catch(e){}
+  function readWalletChoice(){
+    try{ const j = JSON.parse(localStorage.getItem(WALLET_CHOICE_KEY) || "null"); return j && typeof j.kind === "string" ? j : null; }catch(e){ return null; }
+  }
+
+  // Wallets this browser can reach right now, announced ones first. Falls
+  // back to a single generic entry for a legacy window.ethereum that never
+  // announced itself through EIP-6963.
+  function injectedWalletList(){
+    const list = [];
+    discoveredProviders.forEach((d, uuid)=>{
+      list.push({ key: uuid, name: String(d.info.name || "Browser wallet").slice(0, 40), icon: d.info.icon, rdns: d.info.rdns || null, provider: d.provider, legacy: false });
+    });
+    list.sort((a, b)=> a.name.localeCompare(b.name));
+    if(!list.length && window.ethereum){
+      list.push({ key: "legacy", name: "Browser wallet", icon: null, rdns: null, provider: window.ethereum, legacy: true });
+    }
+    return list;
+  }
+
+  // "Open this site inside your wallet app" links for phones with no wallet
+  // injected into the browser. Each wallet app opens its own in-app browser
+  // on this URL, where its provider is injected and the normal flow works.
+  function mobileWalletLinks(href){
+    const u = encodeURIComponent(href);
+    let hostPath = href.replace(/^https?:\/\//, "");
+    return [
+      { name:"MetaMask",        url:`https://metamask.app.link/dapp/${hostPath}` },
+      { name:"Coinbase Wallet", url:`https://go.cb-w.com/dapp?cb_url=${u}` },
+      { name:"Trust Wallet",    url:`https://link.trustwallet.com/open_url?coin_id=60&url=${u}` },
+      { name:"Phantom",         url:`https://phantom.app/ul/browse/${u}?ref=${encodeURIComponent(location.origin)}` },
+      { name:"OKX Wallet",      url:`okx://wallet/dapp/url?dappUrl=${u}` },
+    ];
+  }
+
+  // ---- provider event wiring (once per provider object) ----
+  const boundProviders = new WeakSet();
+  function bindProviderEvents(p){
+    if(!p || typeof p.on !== "function" || boundProviders.has(p)) return;
+    boundProviders.add(p);
+    p.on("accountsChanged", (accounts)=>{ if(getEth() === p) handleAccountsChanged(accounts); });
+    p.on("chainChanged", ()=>{ if(getEth() === p) toast("Network changed in your wallet."); });
+    p.on("disconnect", ()=>{
+      // Only WalletConnect meaningfully "disconnects" (the phone ended the
+      // session). Injected wallets fire this on RPC drops, which must not log
+      // the visitor out.
+      if(p === activeProvider && activeProviderInfo && activeProviderInfo.kind === "walletconnect"){
+        clearActiveWallet();
+        toast("Your phone wallet disconnected from Hood Launch.");
+      }
+    });
+  }
+  function refreshAfterWalletChange(){
     refreshWalletBtn();
     refreshAdminTabVisibility();
-    toast("Wallet disconnected from Hood Launch.");
     if(views.portfolio.classList.contains("active")) renderPortfolio();
     if(views.detail.classList.contains("active") && currentDetailTokenId) openDetail(currentDetailTokenId);
   }
+  function handleAccountsChanged(accounts){
+    wallet = accounts && accounts[0] ? accounts[0] : null;
+    try{ if(wallet) localStorage.setItem("hoodlaunch_wallet", wallet); else localStorage.removeItem("hoodlaunch_wallet"); }catch(e){}
+    refreshAfterWalletChange();
+    toast(wallet ? `Wallet account switched: ${fmtAddr(wallet)}.` : "Wallet disconnected from your browser wallet.");
+  }
+  function clearActiveWallet(){
+    activeProvider = null;
+    activeProviderInfo = null;
+    wallet = null;
+    storeWalletChoice(null);
+    try{ localStorage.removeItem("hoodlaunch_wallet"); }catch(e){}
+    refreshAfterWalletChange();
+  }
+  // Records which provider the visitor chose and who is connected.
+  function activateProvider(provider, info, account){
+    const prev = activeProvider;
+    const prevInfo = activeProviderInfo;
+    // Leaving a WalletConnect session for something else: end it so the
+    // phone isn't left thinking it's still connected.
+    if(prev && prev !== provider && prevInfo && prevInfo.kind === "walletconnect"){
+      try{ Promise.resolve(prev.disconnect()).catch(()=>{}); }catch(e){}
+    }
+    activeProvider = info.kind === "legacy" ? null : provider;
+    activeProviderInfo = info;
+    bindProviderEvents(provider);
+    wallet = account;
+    storeWalletChoice(info);
+    try{ localStorage.setItem("hoodlaunch_wallet", wallet); }catch(e){}
+  }
+  async function afterWalletConnected(){
+    refreshAfterWalletChange();
+    if(wallet){
+      toast(`Wallet connected: ${fmtAddr(wallet)}.`);
+      await ensureNetwork(appMode);
+    }
+  }
+
+  // ---- WalletConnect provider (lazy: the 2 MB bundle loads on first use) ----
+  let wcProviderPromise = null;
+  function loadScriptOnce(src){
+    return new Promise((resolve, reject)=>{
+      const s = document.createElement("script");
+      s.src = src; s.async = true;
+      s.onload = ()=> resolve();
+      s.onerror = ()=> reject(new Error("Couldn't load the WalletConnect module."));
+      document.head.appendChild(s);
+    });
+  }
+  function wcChainIds(){
+    // The network the page is on goes first: the provider treats the first
+    // chain as its default.
+    const first = NETWORKS[appMode], other = NETWORKS[appMode === "live" ? "demo" : "live"];
+    return [first, other].filter(n=> n && n.chainIdHex).map(n=> parseInt(n.chainIdHex, 16));
+  }
+  function getWcProvider(){
+    if(wcProviderPromise) return wcProviderPromise;
+    wcProviderPromise = (async ()=>{
+      const cfg = await walletConfigReady;
+      if(!cfg.walletConnectProjectId) throw new Error("WalletConnect isn't set up on this site yet.");
+      if(!window.HoodWC) await loadScriptOnce("./vendor/hood-walletconnect.js");
+      const rpcMap = {};
+      Object.keys(NETWORKS).forEach(k=>{
+        const n = NETWORKS[k];
+        if(n.chainIdHex && n.rpcUrls && n.rpcUrls[0]) rpcMap[String(parseInt(n.chainIdHex, 16))] = n.rpcUrls[0];
+      });
+      return window.HoodWC.init({
+        projectId: cfg.walletConnectProjectId,
+        chainIds: wcChainIds(),
+        rpcMap,
+        metadata: { name:"Hood Launch", description:"Token launchpad on Robinhood Chain", url: location.origin, icons: [] },
+      });
+    })().catch(err=>{ wcProviderPromise = null; throw err; });
+    return wcProviderPromise;
+  }
+  let wcAttempt = 0; // bumps on every start/cancel so a late approval from an abandoned attempt can be ignored
+
+  /* ---- modal ---- */
+  const walletOverlay = document.getElementById("walletOverlay");
+  const walletModalBody = document.getElementById("walletModalBody");
+  function wEl(tag, cls, text){
+    const e = document.createElement(tag);
+    if(cls) e.className = cls;
+    if(text != null) e.textContent = text;
+    return e;
+  }
+  function walletOptButton(name, sub, iconSrc, onClick){
+    const b = wEl("button", "wallet-opt");
+    b.type = "button";
+    let ico;
+    if(iconSrc && /^data:image\/(png|svg\+xml|webp|jpeg|gif);/i.test(iconSrc)){
+      ico = document.createElement("img");
+      ico.src = iconSrc; ico.alt = ""; ico.width = 28; ico.height = 28;
+    }else{
+      ico = wEl("span", "wallet-ico", (name || "?").slice(0, 2).toUpperCase());
+    }
+    const t = wEl("span", "wallet-opt-text");
+    t.appendChild(wEl("span", null, name));
+    if(sub) t.appendChild(wEl("small", null, sub));
+    b.appendChild(ico); b.appendChild(t);
+    b.addEventListener("click", onClick);
+    return b;
+  }
+  function chainHint(){
+    const n = NETWORKS[appMode];
+    return `Robinhood Chain isn't built into every mobile wallet. If yours doesn't list it, add it first (${n.chainName}, chain ID ${parseInt(n.chainIdHex, 16)}).`;
+  }
+  let walletModalView = "list";
+  function renderWalletModal(view, arg){
+    walletModalView = view;
+    walletModalBody.textContent = "";
+    const title = document.getElementById("walletModalTitle");
+    if(view === "list"){
+      title.textContent = "Connect a wallet";
+      const injected = injectedWalletList();
+      if(injected.length){
+        walletModalBody.appendChild(wEl("div", "wallet-sec-label", "Detected on this device"));
+        const l = wEl("div", "wallet-list");
+        injected.forEach(opt=> l.appendChild(walletOptButton(opt.name, null, opt.icon, ()=> connectInjected(opt))));
+        walletModalBody.appendChild(l);
+      }
+      if(wcEnabled()){
+        walletModalBody.appendChild(wEl("div", "wallet-sec-label", injected.length ? "Other wallets" : "Connect"));
+        const l = wEl("div", "wallet-list");
+        l.appendChild(walletOptButton("WalletConnect", "Scan a QR code with a mobile wallet — Rainbow, Trust, Zerion, MetaMask Mobile, Ledger Live and more", null, connectWalletConnect));
+        walletModalBody.appendChild(l);
+      }
+      if(!injected.length){
+        if(IS_MOBILE_BROWSER){
+          walletModalBody.appendChild(wEl("div", "wallet-sec-label", "Open this site in your wallet app"));
+          const l = wEl("div", "wallet-list");
+          mobileWalletLinks(location.href).forEach(w=>{
+            const a = wEl("a", "wallet-opt", null);
+            a.href = w.url; a.rel = "noopener";
+            a.appendChild(wEl("span", "wallet-ico", w.name.slice(0, 2).toUpperCase()));
+            a.appendChild(wEl("span", "wallet-opt-text", w.name));
+            l.appendChild(a);
+          });
+          walletModalBody.appendChild(l);
+        }else{
+          walletModalBody.appendChild(wEl("p", "wallet-note", "No wallet extension found in this browser. Install one such as MetaMask, Rabby or Coinbase Wallet, then reload this page" + (wcEnabled() ? " — or use WalletConnect above to connect a phone wallet." : ".")));
+        }
+      }
+      walletModalBody.appendChild(wEl("p", "wallet-note", "Smart-contract wallets (Safe, passkey wallets) can't sign Hood Launch's gasless launches or profile actions yet — use a standard wallet for those."));
+    }else if(view === "wc-loading"){
+      title.textContent = "WalletConnect";
+      walletModalBody.appendChild(wEl("p", "wallet-note", "Starting a secure session…"));
+    }else if(view === "wc-qr"){
+      title.textContent = "Scan with your wallet";
+      const qr = wEl("div", "wallet-qr");
+      qr.setAttribute("role", "img");
+      qr.setAttribute("aria-label", "WalletConnect QR code");
+      try{ qr.innerHTML = window.HoodWC.qrSvg(arg); }catch(e){ qr.textContent = "Couldn't draw the QR code — use the link below."; }
+      walletModalBody.appendChild(qr);
+      walletModalBody.appendChild(wEl("p", "wallet-note", "Open your wallet app, choose WalletConnect or Scan, and approve the connection. Waiting for approval…"));
+      const row = wEl("div", "wallet-row");
+      if(IS_MOBILE_BROWSER){
+        const a = wEl("a", "btn btn-primary", "Open wallet app");
+        a.href = arg; a.rel = "noopener";
+        row.appendChild(a);
+      }
+      const copy = wEl("button", "btn btn-ghost", "Copy link");
+      copy.type = "button";
+      copy.addEventListener("click", async ()=>{
+        try{ await navigator.clipboard.writeText(arg); toast("Connection link copied."); }catch(e){ toast("Couldn't copy — select the link manually."); }
+      });
+      row.appendChild(copy);
+      walletModalBody.appendChild(row);
+      walletModalBody.appendChild(wEl("p", "wallet-note", chainHint()));
+    }else if(view === "wc-error"){
+      title.textContent = "Couldn't connect";
+      walletModalBody.appendChild(wEl("p", "wallet-note", arg || "The connection didn't complete."));
+      const row = wEl("div", "wallet-row");
+      const retry = wEl("button", "btn btn-primary", "Try again"); retry.type = "button";
+      retry.addEventListener("click", connectWalletConnect);
+      const back = wEl("button", "btn btn-ghost", "Back"); back.type = "button";
+      back.addEventListener("click", ()=>{ wcAttempt++; renderWalletModal("list"); });
+      row.appendChild(retry); row.appendChild(back);
+      walletModalBody.appendChild(row);
+    }
+    const firstFocusable = walletModalBody.querySelector("button, a");
+    if(firstFocusable && !walletOverlay.hidden) firstFocusable.focus();
+  }
+  function onWalletListChanged(){
+    if(!walletOverlay.hidden && walletModalView === "list") renderWalletModal("list");
+  }
+  function openWalletModal(){
+    requestWalletAnnouncements();
+    renderWalletModal("list");
+    walletOverlay.hidden = false;
+    const f = walletModalBody.querySelector("button, a");
+    if(f) f.focus();
+  }
+  function closeWalletModal(){
+    walletOverlay.hidden = true;
+    wcAttempt++; // abandon any QR attempt still waiting on a phone
+  }
+  document.getElementById("walletModalClose").addEventListener("click", closeWalletModal);
+  walletOverlay.addEventListener("click", (e)=>{ if(e.target === walletOverlay) closeWalletModal(); });
+  document.addEventListener("keydown", (e)=>{ if(e.key === "Escape" && !walletOverlay.hidden) closeWalletModal(); });
+
+  walletUiReady = true;
+
+  /* ---- connect flows ---- */
+  async function connectInjected(opt){
+    walletOverlay.hidden = true;
+    try{
+      const accounts = await opt.provider.request({ method:"eth_requestAccounts" });
+      const account = accounts && accounts[0] ? accounts[0] : null;
+      if(!account) throw new Error("no accounts returned");
+      activateProvider(opt.provider, { kind: opt.legacy ? "legacy" : "injected", name: opt.name, rdns: opt.rdns }, account);
+      await afterWalletConnected();
+    }catch(err){
+      if(err && err.code === 4001) toast("Wallet connection was rejected.");
+      else toast("Wallet connection failed.");
+    }
+  }
+  const WC_START_TIMEOUT_MS = 20000; // no QR by then = the relay is unreachable
+  async function connectWalletConnect(){
+    const attempt = ++wcAttempt;
+    renderWalletModal("wc-loading");
+    let provider;
+    const startTimer = setTimeout(()=>{
+      if(attempt === wcAttempt && walletModalView === "wc-loading"){
+        wcAttempt++; // abandon: if it connects later, the late approval is dropped
+        renderWalletModal("wc-error", "Couldn't reach the WalletConnect service. Check your connection and try again.");
+      }
+    }, WC_START_TIMEOUT_MS);
+    try{
+      provider = await getWcProvider();
+      if(attempt !== wcAttempt) return;
+      const onUri = (uri)=>{ clearTimeout(startTimer); if(attempt === wcAttempt) renderWalletModal("wc-qr", uri); };
+      provider.on("display_uri", onUri);
+      try{
+        if(!(provider.session && provider.accounts && provider.accounts[0])){
+          await provider.connect({ optionalChains: wcChainIds() });
+        }
+      }finally{
+        try{ provider.removeListener("display_uri", onUri); }catch(e){}
+      }
+      if(attempt !== wcAttempt){
+        // Visitor closed the dialog; don't let a late approval connect them.
+        try{ await provider.disconnect(); }catch(e){}
+        return;
+      }
+      const account = provider.accounts && provider.accounts[0];
+      if(!account) throw new Error("The wallet didn't share an account.");
+      const peer = provider.session && provider.session.peer && provider.session.peer.metadata;
+      clearTimeout(startTimer);
+      walletOverlay.hidden = true;
+      activateProvider(provider, { kind:"walletconnect", name: (peer && peer.name) ? String(peer.name).slice(0, 40) : "WalletConnect", rdns: null }, account);
+      await afterWalletConnected();
+    }catch(err){
+      clearTimeout(startTimer);
+      if(attempt !== wcAttempt) return;
+      const msg = err && err.message ? String(err.message) : "";
+      renderWalletModal("wc-error", /reject|denied|cancel/i.test(msg) ? "The connection was declined in your wallet." : (msg || "The connection didn't complete."));
+    }
+  }
+
+  async function connectWallet(){
+    await walletConfigReady;
+    requestWalletAnnouncements();
+    const injected = injectedWalletList();
+    // Exactly one wallet and nothing else to choose: skip the dialog.
+    if(injected.length === 1 && !wcEnabled()) return connectInjected(injected[0]);
+    openWalletModal();
+  }
+  async function disconnectWallet(){
+    // Injected wallets have no "disconnect" call — this only clears this
+    // page's own connection state, same as most dapps. A WalletConnect
+    // session is really ended so the phone drops it too.
+    const prev = activeProvider, prevInfo = activeProviderInfo;
+    if(prev && prevInfo && prevInfo.kind === "walletconnect"){
+      try{ await prev.disconnect(); }catch(e){}
+    }
+    clearActiveWallet();
+    toast("Wallet disconnected from Hood Launch.");
+  }
   walletBtn.addEventListener("click", ()=>{ wallet ? disconnectWallet() : connectWallet(); });
 
+  // On load: put the visitor back on the wallet they used last time. With no
+  // saved choice this is the old behavior (ask window.ethereum whether the
+  // site is already authorized).
   async function checkExistingWalletConnection(){
-    if(!window.ethereum){ refreshWalletBtn(); refreshAdminTabVisibility(); return; }
+    const choice = readWalletChoice();
     try{
-      const accounts = await window.ethereum.request({ method:"eth_accounts" });
-      wallet = accounts && accounts[0] ? accounts[0] : null;
-      try{ if(wallet) localStorage.setItem("hoodlaunch_wallet", wallet); else localStorage.removeItem("hoodlaunch_wallet"); }catch(e){}
+      if(choice && choice.kind === "walletconnect"){
+        await walletConfigReady;
+        if(wcEnabled()){
+          const provider = await getWcProvider();
+          const account = provider.session && provider.accounts && provider.accounts[0];
+          if(account) activateProvider(provider, { kind:"walletconnect", name: choice.name || "WalletConnect", rdns: null }, account);
+          else storeWalletChoice(null);
+        }
+      }else{
+        let provider = null, info = null;
+        if(choice && choice.kind === "injected" && choice.rdns){
+          // Extensions announce within the first moments of page load; give a
+          // late one a short window before giving up on the saved choice.
+          for(let i = 0; i < 6 && !provider; i++){
+            discoveredProviders.forEach(d=>{ if(!provider && d.info.rdns === choice.rdns){ provider = d.provider; info = { kind:"injected", name: String(d.info.name || choice.name || "Browser wallet").slice(0, 40), rdns: choice.rdns }; } });
+            if(!provider){ requestWalletAnnouncements(); await new Promise(r=> setTimeout(r, 120)); }
+          }
+        }
+        const target = provider || getEth();
+        if(target){
+          const accounts = await target.request({ method:"eth_accounts" });
+          const account = accounts && accounts[0] ? accounts[0] : null;
+          if(account){
+            if(provider) activateProvider(provider, info, account);
+            else{ bindProviderEvents(target); wallet = account; try{ localStorage.setItem("hoodlaunch_wallet", wallet); }catch(e){} }
+          }else{
+            wallet = null;
+            try{ localStorage.removeItem("hoodlaunch_wallet"); }catch(e){}
+          }
+        }
+      }
     }catch(e){ /* provider not ready yet — leave wallet disconnected */ }
     refreshWalletBtn();
     refreshAdminTabVisibility();
   }
-  checkExistingWalletConnection();
-
-  if(window.ethereum && window.ethereum.on){
-    window.ethereum.on("accountsChanged", (accounts)=>{
-      wallet = accounts && accounts[0] ? accounts[0] : null;
-      try{ if(wallet) localStorage.setItem("hoodlaunch_wallet", wallet); else localStorage.removeItem("hoodlaunch_wallet"); }catch(e){}
-      refreshWalletBtn();
-      refreshAdminTabVisibility();
-      if(views.portfolio.classList.contains("active")) renderPortfolio();
-      if(views.detail.classList.contains("active") && currentDetailTokenId) openDetail(currentDetailTokenId);
-      toast(wallet ? `Wallet account switched: ${fmtAddr(wallet)}.` : "Wallet disconnected from your browser wallet.");
-    });
-    window.ethereum.on("chainChanged", ()=>{
-      toast("Network changed in your wallet.");
-    });
-  }
+  checkExistingWalletConnection().then(()=>{ if(!activeProvider){ const d = getEth(); if(d) bindProviderEvents(d); } });
 
   /* ---------------- on-chain launch (calls the real TokenFactory) ----------------
      No ethers.js/web3 dependency on purpose: this page has to stay one
@@ -3450,7 +3863,7 @@
   async function ethCall(to, dataHex, from){
     const callObj = { to, data: dataHex };
     if(from) callObj.from = from; // needed to simulate a caller-gated function (see quoteCreatorSwapMinEthOut)
-    return window.ethereum.request({ method:"eth_call", params:[callObj, "latest"] });
+    return getEth().request({ method:"eth_call", params:[callObj, "latest"] });
   }
 
   // Wallet-INDEPENDENT eth_call, used only by the platform-token spotlight
@@ -3534,7 +3947,7 @@
   async function waitForReceipt(txHash, {intervalMs=1500, timeoutMs=180000}={}){
     const start = Date.now();
     while(Date.now()-start < timeoutMs){
-      const receipt = await window.ethereum.request({ method:"eth_getTransactionReceipt", params:[txHash] });
+      const receipt = await getEth().request({ method:"eth_getTransactionReceipt", params:[txHash] });
       if(receipt) return receipt;
       await new Promise(r=>setTimeout(r, intervalMs));
     }
@@ -3689,7 +4102,7 @@
     liveCustomCurveSupplyBps = null;
     liveCustomCurveFeeBps = null;
     const reads = [];
-    if(factoryAddress && window.ethereum){
+    if(factoryAddress && getEth()){
       reads.push((async()=>{
         try{
           const [deployFeeHex, launchFeeHex, lockHex, maxBuyBpsHex] = await Promise.all([
@@ -3706,7 +4119,7 @@
       })());
     }
     const customFactoryAddress = v4Wizard ? v4CustomTokenFactoryAddress() : customTokenFactoryAddress();
-    if(customFactoryAddress && window.ethereum){
+    if(customFactoryAddress && getEth()){
       reads.push((async()=>{
         try{
           const [deployFeeHex, launchFeeHex, lockHex, maxBuyBpsHex] = await Promise.all([
@@ -3724,7 +4137,7 @@
       })());
     }
     const curveFactoryAddress = v4Wizard ? v4CurveFactoryAddress() : bondingCurveFactoryAddress();
-    if(curveFactoryAddress && window.ethereum){
+    if(curveFactoryAddress && getEth()){
       reads.push((async()=>{
         try{
           const [feeHex, maxBuyBpsHex, seedHex, vEthHex, vTokBpsHex, supplyBpsHex, feeBpsHex] = await Promise.all([
@@ -3747,7 +4160,7 @@
       })());
     }
     const customCurveFactoryAddress = v4Wizard ? v4CurveFactoryAddress() : customBondingCurveFactoryAddress();
-    if(customCurveFactoryAddress && window.ethereum){
+    if(customCurveFactoryAddress && getEth()){
       reads.push((async()=>{
         try{
           const [feeHex, maxBuyBpsHex, seedHex, vEthHex, vTokBpsHex, supplyBpsHex, feeBpsHex] = await Promise.all([
@@ -3992,7 +4405,7 @@
 
   async function performOnChainLaunch(factoryAddress, onStep){
     if(!onStep) onStep = ()=>{};
-    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!getEth()) throw new Error("No wallet connected.");
     if(!wallet) throw new Error("Connect your wallet first.");
 
     // Confirm the wallet is actually on the right chain before building a
@@ -4001,10 +4414,10 @@
     // happens to share the address on that chain.
     const expected = NETWORKS[appMode].chainIdHex;
     if(expected){
-      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      let currentChainId = await getEth().request({ method:"eth_chainId" });
       if(currentChainId.toLowerCase() !== expected.toLowerCase()){
         await ensureNetwork(appMode);
-        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        currentChainId = await getEth().request({ method:"eth_chainId" });
         if(currentChainId.toLowerCase() !== expected.toLowerCase()){
           throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
         }
@@ -4045,7 +4458,7 @@
 
     onStep("deploy", "active", "Confirm the transaction in your wallet…");
     toast("Confirm the transaction in your wallet…");
-    const txHash = await window.ethereum.request({
+    const txHash = await getEth().request({
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+totalWei.toString(16), data }],
     });
@@ -4228,15 +4641,15 @@
   // by a different wallet.
   async function performRelayedLaunch(factoryAddress, relayerUrl, onStep){
     if(!onStep) onStep = ()=>{};
-    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!getEth()) throw new Error("No wallet connected.");
     if(!wallet) throw new Error("Connect your wallet first.");
 
     const expected = NETWORKS[appMode].chainIdHex;
     if(expected){
-      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      let currentChainId = await getEth().request({ method:"eth_chainId" });
       if(currentChainId.toLowerCase() !== expected.toLowerCase()){
         await ensureNetwork(appMode);
-        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        currentChainId = await getEth().request({ method:"eth_chainId" });
         if(currentChainId.toLowerCase() !== expected.toLowerCase()){
           throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
         }
@@ -4284,7 +4697,7 @@
       name: launchProtocolOpts().domainName, version: "1",
       chainId: parseInt(NETWORKS[appMode].chainIdHex, 16), verifyingContract: factoryAddress,
     };
-    const signature = await window.ethereum.request({
+    const signature = await getEth().request({
       method: "eth_signTypedData_v4",
       params: [wallet, JSON.stringify({
         domain, primaryType: "LaunchVoucher",
@@ -4297,7 +4710,7 @@
 
     onStep("deploy", "active", "Confirm the deposit in your wallet — a small, ordinary transfer, not the deploy transaction itself…");
     toast("Confirm the deposit in your wallet…");
-    const depositTxHash = await window.ethereum.request({
+    const depositTxHash = await getEth().request({
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
     });
@@ -4524,15 +4937,15 @@
   */
   async function performOnChainCustomLaunch(factoryAddress, onStep){
     if(!onStep) onStep = ()=>{};
-    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!getEth()) throw new Error("No wallet connected.");
     if(!wallet) throw new Error("Connect your wallet first.");
 
     const expected = NETWORKS[appMode].chainIdHex;
     if(expected){
-      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      let currentChainId = await getEth().request({ method:"eth_chainId" });
       if(currentChainId.toLowerCase() !== expected.toLowerCase()){
         await ensureNetwork(appMode);
-        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        currentChainId = await getEth().request({ method:"eth_chainId" });
         if(currentChainId.toLowerCase() !== expected.toLowerCase()){
           throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
         }
@@ -4575,7 +4988,7 @@
 
     onStep("deploy", "active", "Confirm the transaction in your wallet…");
     toast("Confirm the transaction in your wallet…");
-    const txHash = await window.ethereum.request({
+    const txHash = await getEth().request({
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+totalWei.toString(16), data }],
     });
@@ -4722,15 +5135,15 @@
   // relayer trust-model reasoning; it applies unchanged here.
   async function performRelayedCustomLaunch(factoryAddress, relayerUrl, onStep){
     if(!onStep) onStep = ()=>{};
-    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!getEth()) throw new Error("No wallet connected.");
     if(!wallet) throw new Error("Connect your wallet first.");
 
     const expected = NETWORKS[appMode].chainIdHex;
     if(expected){
-      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      let currentChainId = await getEth().request({ method:"eth_chainId" });
       if(currentChainId.toLowerCase() !== expected.toLowerCase()){
         await ensureNetwork(appMode);
-        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        currentChainId = await getEth().request({ method:"eth_chainId" });
         if(currentChainId.toLowerCase() !== expected.toLowerCase()){
           throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
         }
@@ -4786,7 +5199,7 @@
       name: "HoodLaunchCustomTokenFactory", version: "1",
       chainId: parseInt(NETWORKS[appMode].chainIdHex, 16), verifyingContract: factoryAddress,
     };
-    const signature = await window.ethereum.request({
+    const signature = await getEth().request({
       method: "eth_signTypedData_v4",
       params: [wallet, JSON.stringify({
         domain, primaryType: "CustomLaunchVoucher",
@@ -4799,7 +5212,7 @@
 
     onStep("deploy", "active", "Confirm the deposit in your wallet — a small, ordinary transfer, not the deploy transaction itself…");
     toast("Confirm the deposit in your wallet…");
-    const depositTxHash = await window.ethereum.request({
+    const depositTxHash = await getEth().request({
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
     });
@@ -4975,15 +5388,15 @@
   */
   async function performOnChainCurveLaunch(factoryAddress, onStep){
     if(!onStep) onStep = ()=>{};
-    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!getEth()) throw new Error("No wallet connected.");
     if(!wallet) throw new Error("Connect your wallet first.");
 
     const expected = NETWORKS[appMode].chainIdHex;
     if(expected){
-      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      let currentChainId = await getEth().request({ method:"eth_chainId" });
       if(currentChainId.toLowerCase() !== expected.toLowerCase()){
         await ensureNetwork(appMode);
-        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        currentChainId = await getEth().request({ method:"eth_chainId" });
         if(currentChainId.toLowerCase() !== expected.toLowerCase()){
           throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
         }
@@ -5017,7 +5430,7 @@
 
     onStep("deploy", "active", "Confirm the transaction in your wallet…");
     toast("Confirm the transaction in your wallet…");
-    const txHash = await window.ethereum.request({
+    const txHash = await getEth().request({
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+totalWei.toString(16), data }],
     });
@@ -5057,15 +5470,15 @@
   // performOnChainCurveLaunch just above.
   async function performOnChainCustomCurveLaunch(factoryAddress, onStep){
     if(!onStep) onStep = ()=>{};
-    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!getEth()) throw new Error("No wallet connected.");
     if(!wallet) throw new Error("Connect your wallet first.");
 
     const expected = NETWORKS[appMode].chainIdHex;
     if(expected){
-      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      let currentChainId = await getEth().request({ method:"eth_chainId" });
       if(currentChainId.toLowerCase() !== expected.toLowerCase()){
         await ensureNetwork(appMode);
-        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        currentChainId = await getEth().request({ method:"eth_chainId" });
         if(currentChainId.toLowerCase() !== expected.toLowerCase()){
           throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
         }
@@ -5100,7 +5513,7 @@
 
     onStep("deploy", "active", "Confirm the transaction in your wallet…");
     toast("Confirm the transaction in your wallet…");
-    const txHash = await window.ethereum.request({
+    const txHash = await getEth().request({
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+totalWei.toString(16), data }],
     });
@@ -5214,15 +5627,15 @@
   // one.
   async function performRelayedCurveLaunch(factoryAddress, relayerUrl, onStep){
     if(!onStep) onStep = ()=>{};
-    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!getEth()) throw new Error("No wallet connected.");
     if(!wallet) throw new Error("Connect your wallet first.");
 
     const expected = NETWORKS[appMode].chainIdHex;
     if(expected){
-      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      let currentChainId = await getEth().request({ method:"eth_chainId" });
       if(currentChainId.toLowerCase() !== expected.toLowerCase()){
         await ensureNetwork(appMode);
-        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        currentChainId = await getEth().request({ method:"eth_chainId" });
         if(currentChainId.toLowerCase() !== expected.toLowerCase()){
           throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
         }
@@ -5263,7 +5676,7 @@
       name: "HoodLaunchBondingCurveFactory", version: "1",
       chainId: parseInt(NETWORKS[appMode].chainIdHex, 16), verifyingContract: factoryAddress,
     };
-    const signature = await window.ethereum.request({
+    const signature = await getEth().request({
       method: "eth_signTypedData_v4",
       params: [wallet, JSON.stringify({
         domain, primaryType: "CurveLaunchVoucher",
@@ -5276,7 +5689,7 @@
 
     onStep("deploy", "active", "Confirm the deposit in your wallet — a small, ordinary transfer, not the deploy transaction itself…");
     toast("Confirm the deposit in your wallet…");
-    const depositTxHash = await window.ethereum.request({
+    const depositTxHash = await getEth().request({
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
     });
@@ -5338,15 +5751,15 @@
   // path.
   async function performRelayedCustomCurveLaunch(factoryAddress, relayerUrl, onStep){
     if(!onStep) onStep = ()=>{};
-    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!getEth()) throw new Error("No wallet connected.");
     if(!wallet) throw new Error("Connect your wallet first.");
 
     const expected = NETWORKS[appMode].chainIdHex;
     if(expected){
-      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      let currentChainId = await getEth().request({ method:"eth_chainId" });
       if(currentChainId.toLowerCase() !== expected.toLowerCase()){
         await ensureNetwork(appMode);
-        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        currentChainId = await getEth().request({ method:"eth_chainId" });
         if(currentChainId.toLowerCase() !== expected.toLowerCase()){
           throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
         }
@@ -5394,7 +5807,7 @@
       name: "HoodLaunchCustomBondingCurveFactory", version: "1",
       chainId: parseInt(NETWORKS[appMode].chainIdHex, 16), verifyingContract: factoryAddress,
     };
-    const signature = await window.ethereum.request({
+    const signature = await getEth().request({
       method: "eth_signTypedData_v4",
       params: [wallet, JSON.stringify({
         domain, primaryType: "CustomCurveLaunchVoucher",
@@ -5407,7 +5820,7 @@
 
     onStep("deploy", "active", "Confirm the deposit in your wallet — a small, ordinary transfer, not the deploy transaction itself…");
     toast("Confirm the deposit in your wallet…");
-    const depositTxHash = await window.ethereum.request({
+    const depositTxHash = await getEth().request({
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
     });
@@ -5550,14 +5963,14 @@
      their events and views are byte-identical.
   */
   async function ensureWalletOnAppNetwork(){
-    if(!window.ethereum) throw new Error("No browser wallet detected.");
+    if(!getEth()) throw new Error("No wallet connected.");
     if(!wallet) throw new Error("Connect your wallet first.");
     const expected = NETWORKS[appMode].chainIdHex;
     if(expected){
-      let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      let currentChainId = await getEth().request({ method:"eth_chainId" });
       if(currentChainId.toLowerCase() !== expected.toLowerCase()){
         await ensureNetwork(appMode);
-        currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+        currentChainId = await getEth().request({ method:"eth_chainId" });
         if(currentChainId.toLowerCase() !== expected.toLowerCase()){
           throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
         }
@@ -5579,7 +5992,7 @@
   async function sendV4LaunchTx(factoryAddress, totalWei, data, onStep){
     onStep("deploy", "active", "Confirm the transaction in your wallet…");
     toast("Confirm the transaction in your wallet…");
-    const txHash = await window.ethereum.request({
+    const txHash = await getEth().request({
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+totalWei.toString(16), data }],
     });
@@ -6525,7 +6938,7 @@
     // shared DEX factory/WETH — falls back to CustomTokenFactory when only
     // that one is deployed for this network.
     const factoryAddress = tokenFactoryAddress(networkMode) || customTokenFactoryAddress(networkMode);
-    if(!factoryAddress || !window.ethereum) return null;
+    if(!factoryAddress || !getEth()) return null;
     try{
       const routerAddress = decodeAddress(await ethCall(factoryAddress, "0x"+ROUTER_OF_FACTORY_SELECTOR));
       const [dexFactoryHex, wethHex] = await Promise.all([
@@ -6580,7 +6993,7 @@
   //    so a creator who activates from another session/device still gets
   //    picked up here.
   async function checkPendingLiquidity(){
-    if(!window.ethereum) return;
+    if(!getEth()) return;
     const pending = tokens.filter(t=> t.onChain && t.mode==="just" && (t.status==="creator-held"||t.status==="pool-detected") && t.tokenAddress && t.networkMode===appMode);
     // Quick Launch tokens still trading on their curve — polled here too so
     // a graduation gets picked up (and the card's progress bars/status flip
@@ -7019,7 +7432,7 @@
   async function wireV4ReflectionPanel(t){
     const box = document.getElementById("v4ReflectionBox");
     if(!box) return;
-    if(!wallet || !window.ethereum){
+    if(!wallet || !getEth()){
       box.innerHTML = `<div class="hint">Connect a wallet to see your claimable reflections.</div>`;
       return;
     }
@@ -7041,7 +7454,7 @@
         btn.disabled = true; btn.textContent = "Confirm in wallet…";
         try{
           await ensureWalletOnAppNetwork();
-          const txHash = await window.ethereum.request({
+          const txHash = await getEth().request({
             method:"eth_sendTransaction",
             params:[{ from: wallet, to: t.tokenAddress, data: "0x"+V4_CLAIM_REFLECTIONS_SELECTOR }],
           });
@@ -7654,9 +8067,9 @@
     let busy = false;
 
     async function refreshBalances(){
-      if(!wallet || !window.ethereum || !balEl) return;
+      if(!wallet || !getEth() || !balEl) return;
       try{
-        ethBal = BigInt(await window.ethereum.request({ method:"eth_getBalance", params:[wallet, "latest"] }));
+        ethBal = BigInt(await getEth().request({ method:"eth_getBalance", params:[wallet, "latest"] }));
         tokBal = decodeUint256(await ethCall(t.tokenAddress, "0x"+ERC20_BALANCE_OF_SELECTOR_V4+encodeAddressParam(wallet)));
       }catch(e){ return; }
       if(!panelAlive()) return;
@@ -7759,7 +8172,7 @@
 
     async function submitTrade(){
       if(busy) return;
-      if(!window.ethereum){ toast("No browser wallet detected."); return; }
+      if(!getEth()){ toast("No wallet connected."); return; }
       if(!wallet){ connectWallet(); return; }
       const amtStr = amtInput.value;
       const amt = parseFloat(amtStr);
@@ -7774,10 +8187,10 @@
       try{
         const net = NETWORKS[t.networkMode] || NETWORKS[appMode];
         if(net.chainIdHex){
-          let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+          let currentChainId = await getEth().request({ method:"eth_chainId" });
           if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
             await ensureNetwork(t.networkMode);
-            currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+            currentChainId = await getEth().request({ method:"eth_chainId" });
             if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
               throw new Error(`Switch your wallet to ${net.chainName} and try again.`);
             }
@@ -7803,7 +8216,7 @@
           if(taxWei>0n){
             submitBtn.textContent = "Sending platform fee…";
             toast("Sending the 0.30% platform fee — confirm in your wallet…");
-            const taxTxHash = await window.ethereum.request({
+            const taxTxHash = await getEth().request({
               method:"eth_sendTransaction",
               params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
             });
@@ -7813,7 +8226,7 @@
           submitBtn.textContent = "Confirm in your wallet…";
           toast("Confirm the buy in your wallet…");
           const data = "0x"+V4_ROUTER_BUY_SELECTOR+encodeAddressParam(t.tokenAddress)+toHex32(minOut)+toHex32(deadline);
-          const txHash = await window.ethereum.request({
+          const txHash = await getEth().request({
             method:"eth_sendTransaction",
             params:[{ from: wallet, to: routerAddress, value: "0x"+swapWei.toString(16), data }],
           });
@@ -7830,7 +8243,7 @@
           if(allowance < wei){
             submitBtn.textContent = "Approve in your wallet…";
             toast(`Approve $${t.ticker} for trading — confirm in your wallet…`);
-            const approveTx = await window.ethereum.request({
+            const approveTx = await getEth().request({
               method:"eth_sendTransaction",
               params:[{ from: wallet, to: t.tokenAddress, data: encodeApproveCalldata(routerAddress, wei) }],
             });
@@ -7841,7 +8254,7 @@
           submitBtn.textContent = "Confirm in your wallet…";
           toast("Confirm the sell in your wallet…");
           const data = "0x"+V4_ROUTER_SELL_SELECTOR+encodeAddressParam(t.tokenAddress)+toHex32(wei)+toHex32(minOut)+toHex32(deadline);
-          const txHash = await window.ethereum.request({
+          const txHash = await getEth().request({
             method:"eth_sendTransaction",
             params:[{ from: wallet, to: routerAddress, data }],
           });
@@ -7858,7 +8271,7 @@
               try{
                 submitBtn.textContent = "Sending platform fee…";
                 toast("Sale complete — sending the 0.30% platform fee…");
-                const taxTxHash = await window.ethereum.request({
+                const taxTxHash = await getEth().request({
                   method:"eth_sendTransaction",
                   params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
                 });
@@ -8005,7 +8418,7 @@
     renderQuote();
 
     async function submitTrade(){
-      if(!window.ethereum){ toast("No browser wallet detected."); return; }
+      if(!getEth()){ toast("No wallet connected."); return; }
       if(!wallet){ connectWallet(); return; }
 
       const amtStr = amtInput.value;
@@ -8023,10 +8436,10 @@
       try{
         const net = NETWORKS[t.networkMode] || NETWORKS[appMode];
         if(net.chainIdHex){
-          let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+          let currentChainId = await getEth().request({ method:"eth_chainId" });
           if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
             await ensureNetwork(t.networkMode);
-            currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+            currentChainId = await getEth().request({ method:"eth_chainId" });
             if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
               throw new Error(`Switch your wallet to ${net.chainName} and try again.`);
             }
@@ -8073,7 +8486,7 @@
           if(taxWei>0n){
             submitBtn.textContent = "Sending platform fee…";
             toast("Sending the 0.30% platform fee — confirm in your wallet…");
-            const taxTxHash = await window.ethereum.request({
+            const taxTxHash = await getEth().request({
               method:"eth_sendTransaction",
               params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
             });
@@ -8084,7 +8497,7 @@
           submitBtn.textContent = "Confirm in your wallet…";
           toast("Confirm the buy in your wallet…");
           const data = encodeSwapExactETHForTokensCalldata({ amountOutMin, path:[dexInfo.weth, t.tokenAddress], to: wallet, deadline });
-          const txHash = await window.ethereum.request({
+          const txHash = await getEth().request({
             method:"eth_sendTransaction",
             params:[{ from: wallet, to: dexInfo.router, value: "0x"+swapEthIn.toString(16), data }],
           });
@@ -8101,7 +8514,7 @@
           if(allowance < tokensIn){
             submitBtn.textContent = "Approve in your wallet…";
             toast(`Approve $${t.ticker} for trading — confirm in your wallet…`);
-            const approveTxHash = await window.ethereum.request({
+            const approveTxHash = await getEth().request({
               method:"eth_sendTransaction",
               params:[{ from: wallet, to: t.tokenAddress, data: encodeApproveCalldata(dexInfo.router, tokensIn) }],
             });
@@ -8130,7 +8543,7 @@
           submitBtn.textContent = "Confirm in your wallet…";
           toast("Confirm the sell in your wallet…");
           const data = encodeSwapExactTokensForETHCalldata({ amountIn: tokensIn, amountOutMin, path:[t.tokenAddress, dexInfo.weth], to: wallet, deadline });
-          const txHash = await window.ethereum.request({
+          const txHash = await getEth().request({
             method:"eth_sendTransaction",
             params:[{ from: wallet, to: dexInfo.router, data }],
           });
@@ -8151,7 +8564,7 @@
               try{
                 submitBtn.textContent = "Sending platform fee…";
                 toast("Sale complete — sending the 0.30% platform fee…");
-                const taxTxHash = await window.ethereum.request({
+                const taxTxHash = await getEth().request({
                   method:"eth_sendTransaction",
                   params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
                 });
@@ -8269,7 +8682,7 @@
     renderQuote();
 
     async function submitTrade(){
-      if(!window.ethereum){ toast("No browser wallet detected."); return; }
+      if(!getEth()){ toast("No wallet connected."); return; }
       if(!wallet){ connectWallet(); return; }
 
       const amtStr = amtInput.value;
@@ -8284,10 +8697,10 @@
       try{
         const net = NETWORKS[t.networkMode] || NETWORKS[appMode];
         if(net.chainIdHex){
-          let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+          let currentChainId = await getEth().request({ method:"eth_chainId" });
           if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
             await ensureNetwork(t.networkMode);
-            currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+            currentChainId = await getEth().request({ method:"eth_chainId" });
             if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
               throw new Error(`Switch your wallet to ${net.chainName} and try again.`);
             }
@@ -8317,7 +8730,7 @@
           if(taxWei>0n){
             submitBtn.textContent = "Sending platform fee…";
             toast("Sending the 0.30% platform fee — confirm in your wallet…");
-            const taxTxHash = await window.ethereum.request({
+            const taxTxHash = await getEth().request({
               method:"eth_sendTransaction",
               params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
             });
@@ -8328,7 +8741,7 @@
           submitBtn.textContent = "Confirm in your wallet…";
           toast("Confirm the buy in your wallet…");
           const data = encodeAddressUint256Calldata(CURVE_BUY_SELECTOR, t.tokenAddress, minTokensOut);
-          const txHash = await window.ethereum.request({
+          const txHash = await getEth().request({
             method:"eth_sendTransaction",
             params:[{ from: wallet, to: t.factoryAddress, value: "0x"+curveEthIn.toString(16), data }],
           });
@@ -8345,7 +8758,7 @@
           if(allowance < tokensIn){
             submitBtn.textContent = "Approve in your wallet…";
             toast(`Approve $${t.ticker} for trading — confirm in your wallet…`);
-            const approveTxHash = await window.ethereum.request({
+            const approveTxHash = await getEth().request({
               method:"eth_sendTransaction",
               params:[{ from: wallet, to: t.tokenAddress, data: encodeApproveCalldata(t.factoryAddress, tokensIn) }],
             });
@@ -8361,7 +8774,7 @@
           submitBtn.textContent = "Confirm in your wallet…";
           toast("Confirm the sell in your wallet…");
           const data = encodeCurveSellCalldata(t.tokenAddress, tokensIn, minEthOut);
-          const txHash = await window.ethereum.request({
+          const txHash = await getEth().request({
             method:"eth_sendTransaction",
             params:[{ from: wallet, to: t.factoryAddress, data }],
           });
@@ -8382,7 +8795,7 @@
               try{
                 submitBtn.textContent = "Sending platform fee…";
                 toast("Sale complete — sending the 0.30% platform fee…");
-                const taxTxHash = await window.ethereum.request({
+                const taxTxHash = await getEth().request({
                   method:"eth_sendTransaction",
                   params:[{ from: wallet, to: taxDistributor, value: "0x"+taxWei.toString(16) }],
                 });
@@ -8490,7 +8903,7 @@
       }catch(e){ /* retried on the next poll tick */ }
       if(t.poolId && t.lockId==null){
         try{
-          const logs = await window.ethereum.request({ method:"eth_getLogs", params:[{
+          const logs = await getEth().request({ method:"eth_getLogs", params:[{
             address: t.factoryAddress, fromBlock:"0x0", toBlock:"latest",
             topics:[V4_CURVE_GRADUATED_TOPIC0, "0x"+encodeAddressParam(t.tokenAddress)],
           }]});
@@ -8743,7 +9156,7 @@
   // every chart/activity feature on the site).
   async function requestTrackToken(tokenAddress, initialSupply){
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     const timestamp = Date.now();
     // initialSupply is deliberately NOT part of the signed message (kept
     // identical to relayer.js's own reconstruction of it) — it's a plain
@@ -8753,7 +9166,7 @@
     const message = `Hood Launch admin: track token ${tokenAddress} at ${timestamp}`;
     let signature;
     try{
-      signature = await window.ethereum.request({
+      signature = await getEth().request({
         method: "personal_sign",
         params: ["0x"+utf8Hex(message), wallet],
       });
@@ -9526,7 +9939,7 @@
     renderReflectionTokenInfo();
     const mySeq = ++reflectionTokenCheckSeq;
     reflectionTokenCheckTimer = setTimeout(async()=>{
-      if(!window.ethereum){
+      if(!getEth()){
         if(mySeq!==reflectionTokenCheckSeq) return;
         reflectionTokenCheck = { address: raw, status: "offline", info: null };
         renderReflectionTokenInfo();
@@ -9962,16 +10375,16 @@
         saveCustomTokens();
         toast(`🔓 $${t.ticker}'s LP unlocked (demo) — no real contract call, since this token was never deployed on-chain.`);
       } else {
-        if(!window.ethereum) throw new Error("No browser wallet detected.");
+        if(!getEth()) throw new Error("No wallet connected.");
         if(!wallet) throw new Error("Connect your wallet first.");
         if(t.lockId==null) throw new Error("No lock ID on record for this token — check the block explorer directly.");
 
         const net = NETWORKS[t.networkMode] || NETWORKS[appMode];
         if(net.chainIdHex){
-          let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+          let currentChainId = await getEth().request({ method:"eth_chainId" });
           if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
             await ensureNetwork(t.networkMode);
-            currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+            currentChainId = await getEth().request({ method:"eth_chainId" });
             if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
               throw new Error(`Switch your wallet to ${net.chainName} and try again.`);
             }
@@ -10008,7 +10421,7 @@
         } else {
           toast("Confirm the transaction in your wallet…");
           const data = "0x"+WITHDRAW_SELECTOR+toHex32(BigInt(t.lockId));
-          const txHash = await window.ethereum.request({
+          const txHash = await getEth().request({
             method:"eth_sendTransaction",
             params:[{ from: wallet, to: lockerAddress, data }],
           });
@@ -10067,16 +10480,16 @@
         saveCustomTokens();
         toast(`🎉 $${t.ticker}'s tax activated (demo) — no real contract call, since this token was never deployed on-chain.`);
       } else {
-        if(!window.ethereum) throw new Error("No browser wallet detected.");
+        if(!getEth()) throw new Error("No wallet connected.");
         if(!wallet) throw new Error("Connect your wallet first.");
         if(!t.creatorWallet || wallet.toLowerCase()!==t.creatorWallet.toLowerCase()) throw new Error("Only this token's creator wallet can activate its tax.");
 
         const net = NETWORKS[t.networkMode] || NETWORKS[appMode];
         if(net.chainIdHex){
-          let currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+          let currentChainId = await getEth().request({ method:"eth_chainId" });
           if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
             await ensureNetwork(t.networkMode);
-            currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+            currentChainId = await getEth().request({ method:"eth_chainId" });
             if(currentChainId.toLowerCase() !== net.chainIdHex.toLowerCase()){
               throw new Error(`Switch your wallet to ${net.chainName} and try again.`);
             }
@@ -10093,7 +10506,7 @@
           toast(`$${t.ticker}'s tax was already active — synced.`);
         } else {
           toast("Confirm the transaction in your wallet…");
-          const txHash = await window.ethereum.request({
+          const txHash = await getEth().request({
             method:"eth_sendTransaction",
             params:[{ from: wallet, to: t.tokenAddress, data: "0x"+ACTIVATE_INDEPENDENT_PAIR_SELECTOR }],
           });
@@ -10304,14 +10717,14 @@
     btnEl.disabled = true;
     btnEl.textContent = "Confirm in wallet…";
     try{
-      if(!window.ethereum) throw new Error("No browser wallet detected.");
+      if(!getEth()) throw new Error("No wallet connected.");
       if(!wallet) throw new Error("Connect your wallet first.");
       await ensureNetwork(appMode);
-      const currentChainId = await window.ethereum.request({ method:"eth_chainId" });
+      const currentChainId = await getEth().request({ method:"eth_chainId" });
       if(NETWORKS[appMode].chainIdHex && currentChainId.toLowerCase() !== NETWORKS[appMode].chainIdHex.toLowerCase()){
         throw new Error(`Switch your wallet to ${NETWORKS[appMode].chainName} and try again.`);
       }
-      const txHash = await window.ethereum.request({
+      const txHash = await getEth().request({
         method: "eth_sendTransaction",
         params: [{ from: wallet, to: factoryAddress, data: encodeReclaimDepositCalldata(f.voucherHash) }],
       });
@@ -10343,7 +10756,7 @@
     const bodyEl = document.getElementById("portfolioHoldingsBody");
     const stillCurrent = () => wallet===forWallet && views.portfolio.classList.contains("active");
 
-    if(!window.ethereum){
+    if(!getEth()){
       if(totalEl) totalEl.textContent = "—";
       if(bodyEl) bodyEl.innerHTML = `<tr><td colspan="4" style="color:var(--paper-700);">No wallet provider available to read balances from.</td></tr>`;
       return;
@@ -10360,7 +10773,7 @@
 
     let ethBalanceWei = null;
     try{
-      const hex = await window.ethereum.request({ method:"eth_getBalance", params:[forWallet, "latest"] });
+      const hex = await getEth().request({ method:"eth_getBalance", params:[forWallet, "latest"] });
       ethBalanceWei = decodeUint256(hex);
     }catch(e){ /* left null — surfaced as a row-level failure below */ }
 
@@ -10629,7 +11042,7 @@
   // Also slippage-protected — see quoteCreatorSwapMinEthOut above; this no
   // longer sends minEthOut=0.
   async function convertCreatorRewards(tokenAddress, distributorAddress, btnEl){
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     if(!wallet){ toast("Connect your wallet first."); return; }
     const originalLabel = btnEl ? btnEl.textContent : "";
     if(btnEl){ btnEl.disabled = true; btnEl.textContent = "Quoting…"; }
@@ -10648,7 +11061,7 @@
       if(btnEl) btnEl.textContent = "Converting…";
       toast("Confirm the transaction in your wallet…");
       const data = encodeAddressUint256Calldata(CRD_TRIGGER_CREATOR_SWAP_SELECTOR, tokenAddress, quote.minEthOut);
-      const txHash = await window.ethereum.request({
+      const txHash = await getEth().request({
         method:"eth_sendTransaction",
         params:[{ from: wallet, to: distributorAddress, data }],
       });
@@ -10673,14 +11086,14 @@
   // creator's own Portfolio, and the contract would reject it from anyone
   // else regardless.
   async function claimCreatorRewards(tokenAddress, distributorAddress, btnEl){
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     if(!wallet){ toast("Connect your wallet first."); return; }
     const originalLabel = btnEl ? btnEl.textContent : "";
     if(btnEl){ btnEl.disabled = true; btnEl.textContent = "Claiming…"; }
     try{
       toast("Confirm the transaction in your wallet…");
       const data = "0x"+CRD_CLAIM_CREATOR_REWARDS_SELECTOR+encodeAddressParam(tokenAddress);
-      const txHash = await window.ethereum.request({
+      const txHash = await getEth().request({
         method:"eth_sendTransaction",
         params:[{ from: wallet, to: distributorAddress, data }],
       });
@@ -11336,7 +11749,7 @@
   async function runCreatorRewardsDistributorAction(action, btnEl){
     const address = await creatorRewardsDistributorContractAddress();
     if(!address){ toast("CreatorRewardsDistributor isn't wired up on the current network."); return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
 
     const field = (suffix) => document.getElementById(`admin_crd_${suffix}`);
@@ -11395,7 +11808,7 @@
     btnEl.textContent = "Confirm in wallet…";
     try{
       toast("Confirm the transaction in your wallet…");
-      const txHash = await window.ethereum.request({
+      const txHash = await getEth().request({
         method:"eth_sendTransaction",
         params:[{ from: wallet, to: address, data }],
       });
@@ -11665,7 +12078,7 @@
   async function runFeeWalletDistributorAction(action, btnEl){
     const address = await feeWalletDistributorContractAddress();
     if(!address){ toast("FeeWalletDistributor isn't wired up on the current network."); return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
 
     const field = (suffix) => document.getElementById(`admin_fwd_${suffix}`);
@@ -11760,7 +12173,7 @@
     btnEl.textContent = "Confirm in wallet…";
     try{
       toast("Confirm the transaction in your wallet…");
-      const txHash = await window.ethereum.request({
+      const txHash = await getEth().request({
         method:"eth_sendTransaction",
         params:[{ from: wallet, to: address, data }],
       });
@@ -12186,7 +12599,7 @@
   async function runRewardsToggleAction(turnOn, toggleEl){
     const distributorAddress = rewardsDistributorAddress();
     if(!distributorAddress){ toast("Set the PlatformRewardsDistributor address in Platform contracts first."); if(toggleEl) toggleEl.checked = !turnOn; return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); if(toggleEl) toggleEl.checked = !turnOn; return; }
+    if(!getEth()){ toast("No wallet connected."); if(toggleEl) toggleEl.checked = !turnOn; return; }
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); if(toggleEl) toggleEl.checked = !turnOn; return; }
 
     const tokenFieldEl = document.getElementById("admin_rewards_platformToken");
@@ -12257,7 +12670,7 @@
       for(let i=0;i<steps.length;i++){
         const step = steps[i];
         toast(`Confirm in your wallet (${i+1}/${steps.length}): ${step.label}…`);
-        const txHash = await window.ethereum.request({
+        const txHash = await getEth().request({
           method:"eth_sendTransaction",
           params:[{ from: wallet, to: step.to, data: step.data }],
         });
@@ -12737,14 +13150,14 @@
   // actually confirmed the delete.
   async function requestDeleteLaunch(tokenAddress){
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return false; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return false; }
+    if(!getEth()){ toast("No wallet connected."); return false; }
     const url = relayerApiUrl(appMode);
     if(!url){ toast("No relayer configured for this network."); return false; }
     const timestamp = Date.now();
     const message = `Hood Launch admin: delete launch ${tokenAddress} at ${timestamp}`;
     let signature;
     try{
-      signature = await window.ethereum.request({
+      signature = await getEth().request({
         method: "personal_sign",
         params: ["0x"+utf8Hex(message), wallet],
       });
@@ -12905,7 +13318,7 @@
 
   async function runRelayerSettingsSave(btnEl){
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     const url = relayerApiUrl(appMode);
     if(!url){ toast("No relayer configured for this network."); return; }
     const settings = {};
@@ -12917,7 +13330,7 @@
     const message = relayerSettingsMessage(settings, timestamp);
     let signature;
     try{
-      signature = await window.ethereum.request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
+      signature = await getEth().request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
     }catch(err){
       toast("Signature was rejected — nothing was saved.");
       return;
@@ -13110,7 +13523,7 @@
   async function v4HasCode(addr){
     if(!addr) return null;
     try{
-      const c = await window.ethereum.request({ method:"eth_getCode", params:[addr, "latest"] });
+      const c = await getEth().request({ method:"eth_getCode", params:[addr, "latest"] });
       return !!c && c!=="0x" && c!=="0x0";
     }catch(e){ return null; }
   }
@@ -13203,7 +13616,7 @@
         code[k] ? v4Read(addr, V4_PENDING_AIRDROP_SELECTOR) : null,
         code[k] ? v4Read(addr, V4_BUYBACK_ROUTER_SELECTOR) : null,
         code[k] ? v4Read(addr, V4_FEE_WALLET_SELECTOR) : null,
-        window.ethereum.request({ method:"eth_getBalance", params:[addr, "latest"] }).catch(()=>null),
+        getEth().request({ method:"eth_getBalance", params:[addr, "latest"] }).catch(()=>null),
       ]);
       slots[k] = {
         addr,
@@ -13826,8 +14239,8 @@
     const rw = document.getElementById("v4RewardsWrap");
     const dp = document.getElementById("v4DeployWrap");
     if(dp) dp.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><div class="admin-panel-head"><h3><span class="proto-badge v4">V4</span> Deploy</h3></div><p class="admin-empty">V4 contracts aren't deployed from this page yet — the deploy script is on hold until the V4 contracts are final. Once they're deployed, paste their addresses into Overview → Platform contracts and everything on the V4 tabs lights up.</p></div>`;
-    if(!window.ethereum){
-      const m = v4AdminMessagePanel("No browser wallet detected — connect one to read V4 contract state.");
+    if(!getEth()){
+      const m = v4AdminMessagePanel("No wallet connected — connect one to read V4 contract state.");
       ov.innerHTML = m; if(ct) ct.innerHTML = m; if(rw) rw.innerHTML = m; if(act) act.innerHTML = "";
       return;
     }
@@ -14004,7 +14417,7 @@
 
   async function runDeploy(btnEl){
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     const url = relayerApiUrl(appMode);
     if(!url){ toast("No relayer configured for this network."); return; }
     const config = gatherDeployConfigFromForm();
@@ -14012,7 +14425,7 @@
     const message = deployMessage(config, timestamp);
     let signature;
     try{
-      signature = await window.ethereum.request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
+      signature = await getEth().request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
     }catch(err){
       toast("Signature was rejected — nothing was deployed.");
       return;
@@ -14193,10 +14606,10 @@
     renderDeployedContractsPanel();
     renderV4AdminSections();
 
-    if(!window.ethereum){
-      document.getElementById("platformRewardsWrap").innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No browser wallet detected — connect one to manage platform rewards.</p></div>`;
-      document.getElementById("adminGrid").innerHTML = `<div class="panel admin-panel"><p class="admin-empty">No browser wallet detected — connect one to read or update on-chain settings.</p></div>`;
-      document.getElementById("rewardsGrid").innerHTML = `<div class="panel admin-panel"><p class="admin-empty">No browser wallet detected — connect one to read or update on-chain settings.</p></div>`;
+    if(!getEth()){
+      document.getElementById("platformRewardsWrap").innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No wallet connected — connect one to manage platform rewards.</p></div>`;
+      document.getElementById("adminGrid").innerHTML = `<div class="panel admin-panel"><p class="admin-empty">No wallet connected — connect one to read or update on-chain settings.</p></div>`;
+      document.getElementById("rewardsGrid").innerHTML = `<div class="panel admin-panel"><p class="admin-empty">No wallet connected — connect one to read or update on-chain settings.</p></div>`;
       return;
     }
 
@@ -14285,7 +14698,7 @@
   async function runAdminAction(action, key, btnEl){
     const address = adminFactoryAddress(key);
     if(!address){ toast("This factory isn't deployed on the current network."); return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
 
     const field = (suffix) => document.getElementById(`admin_${key}_${suffix}`);
@@ -14501,7 +14914,7 @@
     btnEl.textContent = "Confirm in wallet…";
     try{
       toast("Confirm the transaction in your wallet…");
-      const txHash = await window.ethereum.request({
+      const txHash = await getEth().request({
         method:"eth_sendTransaction",
         params:[{ from: wallet, to: address, data }],
       });
@@ -14532,7 +14945,7 @@
   async function runDistributorAction(action, btnEl){
     const address = rewardsDistributorAddress();
     if(!address){ toast("PlatformRewardsDistributor isn't deployed on the current network."); return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
 
     // Off-chain (an admin-signed relayer call, not a contract transaction)
@@ -14613,7 +15026,7 @@
     btnEl.textContent = "Confirm in wallet…";
     try{
       toast("Confirm the transaction in your wallet…");
-      const txHash = await window.ethereum.request({
+      const txHash = await getEth().request({
         method:"eth_sendTransaction",
         params:[{ from: wallet, to: address, data }],
       });
@@ -15006,7 +15419,7 @@
 
   async function saveMyProfile(nameInput, setMsg, saveBtn){
     if(!wallet){ toast("Connect your wallet first."); return; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
     const name = normalizeProfileName(nameInput.value);
     const err = validateProfileName(name);
     if(err){ setMsg(err, "err"); return; }
@@ -15019,7 +15432,7 @@
       const message = profileMessage(wallet, name, avatarPart, timestamp);
       let signature;
       try{
-        signature = await window.ethereum.request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] });
+        signature = await getEth().request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] });
       }catch(e){ setMsg("Signature was rejected — nothing was saved.", "err"); saveBtn.disabled = false; return; }
       setMsg("Saving…");
       const body = { address: wallet, name, timestamp, signature };
@@ -15051,7 +15464,7 @@
     const timestamp = Date.now();
     const message = `Hood Launch admin: remove profile ${String(addr).toLowerCase()} at ${timestamp}`;
     let signature;
-    try{ signature = await window.ethereum.request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] }); }
+    try{ signature = await getEth().request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] }); }
     catch(e){ toast("Signature was rejected — nothing was removed."); return; }
     try{
       const res = await fetch(`${location.origin}/profile/remove`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ address: addr, timestamp, signature }) });
@@ -15092,8 +15505,8 @@
 
   async function signWith(message){
     if(!wallet){ toast("Connect your wallet first."); return null; }
-    if(!window.ethereum){ toast("No browser wallet detected."); return null; }
-    try{ return await window.ethereum.request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] }); }
+    if(!getEth()){ toast("No wallet connected."); return null; }
+    try{ return await getEth().request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] }); }
     catch(e){ toast("Signature was rejected — nothing was changed."); return null; }
   }
   function agoShort(ms){
