@@ -179,6 +179,7 @@ const tradeStore = require("../lib/tradeStore");
 const pnlLib = require("../lib/pnl");
 const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore");
 const { registerSolanaRoutes } = require("../lib/solanaApi");
+const { CHAINS, normalizeChain } = require("../lib/chains");
 const { ROBINHOOD_NETWORKS } = require("../lib/networks");
 const { isDbConfigured, ensureSchema } = require("../lib/db");
 
@@ -1670,6 +1671,8 @@ async function postLaunchPipeline({
     ...(isV4Kind(kind)
       ? { protocol: "v4", poolId: poolId && poolId !== hre.ethers.ZeroHash ? poolId : null }
       : { protocol: "v2" }),
+    // Network family this token lives on (this relayer is the Robinhood Chain one).
+    chain: CHAINS.ROBINHOOD,
     ...extra,
   };
 
@@ -2106,11 +2109,44 @@ async function backfillProtocolLabels() {
   }
 }
 
+// One-time, idempotent: stamp chain "robinhood" on every ledger row / tracked token that
+// predates the chain field (everything this relayer has ever recorded is Robinhood Chain).
+async function backfillChainLabels() {
+  const network = hre.network.name;
+  let trackedCount = 0;
+  let ledgerCount = 0;
+  try {
+    const tracked = (await readTrackedTokens(network)) || {};
+    for (const [addr, entry] of Object.entries(tracked)) {
+      if (entry && !entry.chain) {
+        try { await upsertTrackedToken(network, addr, { chain: CHAINS.ROBINHOOD }); trackedCount++; }
+        catch (err) { console.warn(`[chain] could not label tracked token ${addr}: ${err.message}`); }
+      }
+    }
+  } catch (err) {
+    console.warn(`[chain] could not read tracked tokens (${err.message}) — skipped them.`);
+  }
+  try {
+    const ledger = await readLedger(network);
+    for (const row of ledger) {
+      if (!row.tokenAddress || row.chain) continue;
+      try { await updateLaunch(network, row.tokenAddress, { chain: CHAINS.ROBINHOOD }); ledgerCount++; }
+      catch (err) { console.warn(`[chain] could not label ledger row ${row.tokenAddress}: ${err.message}`); }
+    }
+  } catch (err) {
+    console.warn(`[chain] could not read the launch ledger (${err.message}) — skipped it.`);
+  }
+  if (trackedCount || ledgerCount) {
+    console.log(`[chain] labelled ${trackedCount} tracked token(s) and ${ledgerCount} ledger row(s) as robinhood.`);
+  }
+}
+
 async function main() {
   await initStorageBackend();
   await loadRelayerSettingsFromStore();
   const cfgAddr = await loadConfigAddresses();
   await backfillProtocolLabels().catch((err) => console.warn(`[protocol] backfill failed: ${err.message}`));
+  await backfillChainLabels().catch((err) => console.warn(`[chain] backfill failed: ${err.message}`));
   logEnvVarPresence();
   const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
   if (!relayerPrivateKey) {
@@ -2753,6 +2789,9 @@ async function main() {
       // other (V2) entry reports "v2" and a null poolId.
       const protocolSource = (trackedEntry && trackedEntry.protocol) || entry.protocol || null;
       publicEntry.protocol = protocolSource === "v4" ? "v4" : "v2";
+      // Always present, never null: every row on this relayer is a Robinhood Chain token
+      // (rows from before the column existed are backfilled at startup too).
+      publicEntry.chain = normalizeChain((trackedEntry && trackedEntry.chain) || entry.chain);
       publicEntry.poolId = (trackedEntry && trackedEntry.poolId) || entry.poolId || null;
       publicEntry.logo = trackedEntry && trackedEntry.logo != null ? trackedEntry.logo : null;
       publicEntry.banner = trackedEntry && trackedEntry.banner != null ? trackedEntry.banner : null;
@@ -4468,6 +4507,7 @@ async function main() {
         // pollV4Activity) instead of V2 pair reserves/Swap events.
         // Explicit label for every tracked token: "v4" (+ poolId) or "v2".
         protocol: isV4 ? "v4" : "v2",
+        chain: CHAINS.ROBINHOOD,
         ...(isV4 ? { poolId: v4PoolId } : {}),
         ...customPatch,
       });
