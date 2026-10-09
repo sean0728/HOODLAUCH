@@ -173,6 +173,7 @@ const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/toke
 const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
 const { readTrackedTokens, upsertTrackedToken, deleteTrackedToken } = require("../lib/trackedTokensStore");
 const { classifyDiscoveredLaunch } = require("../lib/launchAnnouncement");
+const { mergeV2KeeperTokens } = require("../lib/keeperTokens");
 const { readActivity, appendActivity } = require("../lib/activityStore");
 const tradeStore = require("../lib/tradeStore");
 const pnlLib = require("../lib/pnl");
@@ -5517,7 +5518,7 @@ async function main() {
     const wethAddress = await (
       await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
     ).WETH();
-    const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
+    const tokenAddresses = mergeV2KeeperTokens(ledger, await readTrackedTokens(network)); // ledger + every discovered launch (direct launches have no ledger row)
 
     // ---- step 1: convert each token's accumulated in-kind balance to ETH.
     // See sweepFeeWalletRewardsOnce's trySwap for why "nothing to do this
@@ -5625,7 +5626,7 @@ async function main() {
     const wethAddress = await (
       await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
     ).WETH();
-    const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
+    const tokenAddresses = mergeV2KeeperTokens(ledger, await readTrackedTokens(network)); // ledger + every discovered launch (direct launches have no ledger row)
 
     // ---- step 1: convert each token's accumulated in-kind balance to ETH.
     // Broken out as its own inner function (rather than inline in the loop
@@ -5815,7 +5816,7 @@ async function main() {
     const wethAddress = await (
       await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
     ).WETH();
-    const tokenAddresses = [...new Set(ledger.map((entry) => entry.tokenAddress).filter(Boolean))];
+    const tokenAddresses = mergeV2KeeperTokens(ledger, await readTrackedTokens(network)); // ledger + every discovered launch (direct launches have no ledger row)
 
     for (const tokenAddress of tokenAddresses) {
       try {
