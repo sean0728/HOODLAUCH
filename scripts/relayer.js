@@ -3085,7 +3085,7 @@ async function main() {
     const tokenKey = String(token).toLowerCase();
     let known = !!((await readTrackedTokens(net)) || {})[tokenKey];
     if (!known) known = (await readLedger(net)).some((e) => e.tokenAddress && e.tokenAddress.toLowerCase() === tokenKey);
-    if (!known) return sendJson(res, 404, { error: "Hood Launch has no record of this token." });
+    if (!known) return sendJson(res, 404, { error: "IgnitionX has no record of this token." });
     const prof = await profileStore.getProfile(author);
     if (!prof || !prof.name) return sendJson(res, 403, { error: "Set a display name in your Profile before commenting." });
     // Same text from the same wallet on the same token in the last day = a duplicate.
@@ -3235,7 +3235,7 @@ async function main() {
     const tokenKey = String(token).toLowerCase();
     let known = !!((await readTrackedTokens(net)) || {})[tokenKey];
     if (!known) known = (await readLedger(net)).some((e) => e.tokenAddress && e.tokenAddress.toLowerCase() === tokenKey);
-    if (!known) return sendJson(res, 404, { error: "Hood Launch has no record of this token." });
+    if (!known) return sendJson(res, 404, { error: "IgnitionX has no record of this token." });
     const prof = await profileStore.getProfile(caller);
     if (!prof || !prof.name) return sendJson(res, 403, { error: "Set a display name in your Profile before making a callout." });
     const existing = await calloutStore.getForPair(net, caller, token);
@@ -3684,7 +3684,7 @@ async function main() {
       }
     }
     if (!creatorAddress) {
-      return sendJson(res, 404, { error: "Hood Launch has no record of this token yet." });
+      return sendJson(res, 404, { error: "IgnitionX has no record of this token yet." });
     }
 
     if (!isFreshTimestamp(timestamp)) {
