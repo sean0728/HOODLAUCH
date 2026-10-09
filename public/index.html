@@ -11141,7 +11141,7 @@
         </div>
 
         <div class="admin-section-label">Rewards distributor · buyback/burn/holder-airdrop</div>
-        <p class="admin-empty" style="margin-bottom:10px;">Splits 50% of every curveLaunchFee/curveFeeBps revenue, plus the reward-diversion bps above out of the ongoing post-graduation tax, to a PlatformRewardsDistributor contract instead of feeTreasury/the platform fee wallet. Leaving this unset (the default) keeps 100% of every fee exactly where it's always gone.</p>
+        <p class="admin-empty" style="margin-bottom:10px;">Sends 50% of the one-time launch fee (curveLaunchFee) to a PlatformRewardsDistributor contract instead of feeTreasury; leaving this unset keeps all of it with the treasury. The 1% per-trade curve fee does not go here: like the post-graduation tax it goes 10% to creator rewards and 90% to the FeeWalletDistributor (45% fee wallet, 45% platform-token buyback), with whatever reward-diversion bps you set above applying to the post-graduation tax only.</p>
         <div class="admin-action-row">
           <div class="field"><label>Rewards distributor (address)</label><input type="text" id="admin_${key}_rewardsDistributor" placeholder="${state.rewardsDistributor.toLowerCase()===ZERO_ADDRESS ? "0x… (currently unset)" : state.rewardsDistributor}"></div>
           <button class="btn btn-primary btn-sm" data-admin-action="rewardsDistributor" data-factory-key="${key}">Update</button>
