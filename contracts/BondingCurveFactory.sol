@@ -76,20 +76,25 @@ import "./interfaces/IUniswapV2Router02.sol";
 /// able to exit), and a running balanceOf() invariant check after every
 /// trade.
 ///
-/// Curve-phase trading fees (curveFeeBps, skimmed from ETH on both buy and
-/// sell) and the flat curveLaunchFee are both native-ETH revenue, so they
-/// reuse the exact 50/50 feeTreasury/rewardsDistributor split TokenFactory.
-/// _finalizeLaunch already uses for deployFee/launchFee (see
-/// _distributeEthFee) -- no new revenue-routing concept. This deliberately
-/// does NOT reuse creatorRewardsDistributor/feeWalletDistributor for
-/// curve-phase fees: both of those are built around an in-kind, per-
-/// launched-token ERC20 balance that gets swapped for ETH later (see
-/// CreatorRewardsDistributor.triggerCreatorSwap), which doesn't fit an
-/// already-ETH-denominated fee collected before any pool even exists.
-/// creatorRewardsDistributor/feeWalletDistributor are still configured on
-/// this factory and used, exactly like every other factory, for the
-/// POST-graduation LaunchedToken transfer tax (_doGraduate's configureTax
-/// call) -- just never for the curve-phase fee itself.
+/// Fees, two separate streams:
+///  1. The flat curveLaunchFee is a ONE-TIME, native-ETH launch fee. It is
+///     split 50/50 between feeTreasury and PlatformRewardsDistributor (see
+///     _distributeEthFee; for a gasless launch the relayer's gas is refunded
+///     out of it first). This is the ONLY money PlatformRewardsDistributor
+///     ever receives from a curve.
+///  2. The curve-phase trading fee (curveFeeBps, 1.00%, skimmed from the ETH
+///     on every buy and sell) is the SAME continuous stream as the pool-phase
+///     tax: it runs from the first curve buy through graduation and on to the
+///     market-cap target, where the pool tax switches itself off. It is routed
+///     by _distributeTradeFee: the creator's share (creatorRewardBps of
+///     feeBps, 10% by default) to CreatorRewardsDistributor.depositFor, and
+///     the rest to FeeWalletDistributor.depositFee, which owes half to the fee
+///     wallet and earmarks half for the platform-token buyback (burn / holder
+///     airdrop). Net 45 / 45 / 10, the same split the pool-phase tax gets
+///     through the FeeWalletDistributor.
+/// creatorRewardsDistributor/feeWalletDistributor are also what
+/// _doGraduate's configureTax call wires into the token for the post-
+/// graduation transfer tax.
 ///
 /// Gasless relayed launches (fast-follow to v1's direct-wallet-only
 /// createCurveToken -- see the "gasless relayed launches" section below):
@@ -257,18 +262,16 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     uint256 private graduationTargetUsd = 50_000; // whole dollars; the POST-graduation tax permanently disables once the pool's live market cap crosses this -- unrelated to poolSeedTargetWei above, see its own doc comment
     uint256 private maxOracleStaleness = 1 hours;
 
-    /// @notice PlatformRewardsDistributor's address. Used for TWO unrelated
-    /// things here: (1) 50% of curveLaunchFee/curveFeeBps revenue, in native
-    /// ETH, exactly like TokenFactory._finalizeLaunch (see _distributeEthFee)
-    /// while this is set, and (2) the ongoing POST-graduation LaunchedToken
-    /// transfer-tax carve-out via rewardBps below, exactly like every other
-    /// factory. address(0) (the default) disables both: curveLaunchFee/
-    /// curveFeeBps revenue stays 100% feeTreasury, and every curve that
-    /// graduates from here on configures its token with no reward diversion.
-    /// Deliberately read LIVE at every trade and at graduation time, never
-    /// snapshotted -- this is "is the feature live yet," not a term any
-    /// buyer bought into (see the contract-level note on Finding 4). Private
-    /// for the same Finding 8 reason as the tax-default fields above.
+    /// @notice PlatformRewardsDistributor's address. Receives 50% of the
+    /// ONE-TIME curveLaunchFee, in native ETH, exactly like
+    /// TokenFactory._finalizeLaunch (see _distributeEthFee) while this is set;
+    /// address(0) leaves the launch fee 100% feeTreasury. It is NOT used for
+    /// the per-trade curve fee (see _distributeTradeFee), and (rewardBps below
+    /// defaulting to 0) it gets none of the post-graduation tax either.
+    /// Deliberately read LIVE, never snapshotted: this is "is the feature live
+    /// yet," not a term any buyer bought into (see the contract-level note on
+    /// Finding 4). Private for the same Finding 8 reason as the tax-default
+    /// fields above.
     address private rewardsDistributor;
     // Defaults to 0 by design -- PlatformRewardsDistributor (rewardsDistributor
     // above) is meant to be funded ONLY by the one-time 50% curveLaunchFee
@@ -385,7 +388,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
     address[] private _tokenList;
     mapping(address => address[]) private _tokensByCreator;
 
-    /// @notice ETH that _distributeEthFee tried to forward to feeTreasury or
+    /// @notice ETH that _distributeEthFee/_distributeTradeFee tried to forward to feeTreasury or
     /// rewardsDistributor but couldn't, because the recipient's receive/
     /// fallback reverted (see Finding 1). Stays on this contract's own
     /// balance, tracked here rather than lost, until an owner sweeps it via
@@ -606,10 +609,11 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         quote.netEthOut = quote.ethOutGross - quote.feeAmount;
     }
 
-    /// @dev Same 50/50 feeTreasury/rewardsDistributor split as
-    /// TokenFactory._finalizeLaunch -- see the contract-level note on why
-    /// curve-phase ETH revenue reuses this instead of
-    /// creatorRewardsDistributor/feeWalletDistributor.
+    /// @dev The ONE-TIME curveLaunchFee split, same 50/50
+    /// feeTreasury/rewardsDistributor split as TokenFactory._finalizeLaunch.
+    /// Used for the launch fee ONLY (including a gasless launch's post-gas
+    /// remainder); the per-trade curve fee goes through _distributeTradeFee,
+    /// to the creator and the FeeWalletDistributor, never here.
     ///
     /// Post-audit (Finding 1): neither transfer's failure reverts the
     /// caller anymore. `.call{value}("")` already returns a bool rather
@@ -648,6 +652,64 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         }
     }
 
+    /// @dev Gas given to each fee-recipient call, so a hostile or broken
+    /// recipient can burn at most this much of a trader's gas and can never
+    /// block a buy or a sell (a failed delivery goes to strandedFees).
+    uint256 private constant FEE_CALL_GAS = 300_000;
+
+    /// @dev The curve-phase 1% per-trade fee, routed exactly like the pool-phase
+    /// tax so the fee is one continuous stream from the first curve buy up to
+    /// the market-cap target:
+    ///   - the creator's share (the curve's snapshotted creatorRewardBps out of
+    ///     its snapshotted feeBps, 10% of the fee by default) goes to
+    ///     CreatorRewardsDistributor.depositFor(token), claimable by the
+    ///     token's creator;
+    ///   - the rest goes to FeeWalletDistributor.depositFee(), which owes half
+    ///     to the fee wallet and earmarks half for the platform-token buyback
+    ///     (burn / holder airdrop): the 45 / 45 / 10 rule.
+    /// With no FeeWalletDistributor set (the original system) the rest goes
+    /// straight to the platform fee wallet snapshotted on the curve, as the
+    /// pool-phase tax does; with no CreatorRewardsDistributor the creator's
+    /// share folds into the rest. PlatformRewardsDistributor receives NOTHING
+    /// here: it is funded only by the one-time launch fee (_distributeEthFee).
+    /// Never reverts the trade: a failed delivery is parked in strandedFees.
+    function _distributeTradeFee(address token, Curve storage curve, uint256 amount) private {
+        if (amount == 0) return;
+        uint256 creatorShare;
+        if (creatorRewardsDistributor != address(0) && curve.taxFeeBps > 0 && curve.taxCreatorRewardBps > 0) {
+            creatorShare = (amount * curve.taxCreatorRewardBps) / curve.taxFeeBps;
+            if (creatorShare > amount) creatorShare = amount;
+        }
+        uint256 rest = amount - creatorShare;
+        if (creatorShare > 0) {
+            (bool okC, ) = creatorRewardsDistributor.call{value: creatorShare, gas: FEE_CALL_GAS}(
+                abi.encodeWithSignature("depositFor(address)", token)
+            );
+            if (!okC) {
+                strandedFees += creatorShare;
+                emit FeeTransferFailed(creatorRewardsDistributor, creatorShare);
+            }
+        }
+        if (rest > 0) {
+            if (feeWalletDistributor != address(0)) {
+                (bool okF, ) = feeWalletDistributor.call{value: rest, gas: FEE_CALL_GAS}(
+                    abi.encodeWithSignature("depositFee()")
+                );
+                if (!okF) {
+                    strandedFees += rest;
+                    emit FeeTransferFailed(feeWalletDistributor, rest);
+                }
+            } else {
+                address wallet = curve.taxPlatformFeeWallet != address(0) ? curve.taxPlatformFeeWallet : feeTreasury;
+                (bool okW, ) = wallet.call{value: rest, gas: FEE_CALL_GAS}("");
+                if (!okW) {
+                    strandedFees += rest;
+                    emit FeeTransferFailed(wallet, rest);
+                }
+            }
+        }
+    }
+
     /// @dev Shared core of a buy, used both by buy() itself and by
     /// createCurveToken()'s optional same-transaction creator buy-in.
     /// Checks-effects-interactions: curve storage is updated before the fee
@@ -673,7 +735,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         curve.realEthReserve += netEthIn;
         curve.tokensRemaining -= tokensOut;
 
-        _distributeEthFee(feeAmount);
+        _distributeTradeFee(token, curve, feeAmount);
 
         bool sent = IERC20(token).transfer(recipient, tokensOut);
         require(sent, "BondingCurveFactory: token transfer failed");
@@ -1055,7 +1117,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
             "BondingCurveFactory: token balance invariant violated"
         );
 
-        _distributeEthFee(quote.feeAmount);
+        _distributeTradeFee(token, curve, quote.feeAmount);
 
         ethOut = quote.netEthOut;
         (bool sentEth, ) = payable(msg.sender).call{value: ethOut}("");
@@ -1411,7 +1473,7 @@ contract BondingCurveFactory is Ownable2Step, ReentrancyGuard, Pausable {
         emit TokenPriceFeedUpdated(token, newPriceFeed_, newMaxOracleStaleness_);
     }
 
-    /// @notice Sweeps ETH that _distributeEthFee couldn't deliver (Finding 1
+    /// @notice Sweeps ETH that _distributeEthFee/_distributeTradeFee couldn't deliver (Finding 1
     /// / strandedFees) to `to`. Deliberately scoped to ONLY the tracked
     /// strandedFees counter -- never address(this).balance directly -- so
     /// this can never touch a live curve's own realEthReserve or a router

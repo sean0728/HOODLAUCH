@@ -166,11 +166,20 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
     /// Identical role to PlatformRewardsDistributor.pendingAirdropTokens.
     uint256 public pendingAirdropTokens;
 
+    /// @notice ETH from the bonding curves' per-trade fee (see depositFee)
+    /// earmarked for buying platformToken: the buyback half of the curve-phase
+    /// fee. Waiting here until triggerPendingBuyback spends it. Never part of
+    /// any claimableEth balance.
+    uint256 public pendingBuybackEth;
+
     bool public roundActive;
     uint256 public roundAmount; // total PlatformToken being paid out this round, frozen at round start
     uint256 public roundSupplySnapshot; // denominator: eligible supply frozen at round start (see startAirdropRound)
     uint256 public roundCursor; // next holder-registry index processAirdropBatch will start from
 
+    event CurveFeeReceived(address indexed from, uint256 amount, uint256 creditedToFeeWallet, uint256 earmarkedForBuyback);
+    event PendingBuybackRun(uint256 ethIn, uint256 platformTokensOut, uint256 burned, uint256 toAirdrop);
+    event PendingBuybackRedirected(uint256 amount);
     event FeeWalletUpdated(address indexed oldWallet, address indexed newWallet);
     event PlatformTokenSet(address indexed newToken);
     event SwapThresholdUpdated(address indexed token, uint256 newThreshold);
@@ -536,6 +545,78 @@ contract FeeWalletDistributor is Ownable2Step, ReentrancyGuard {
         toAirdrop = amount - burned;
         if (burned > 0) platformToken.burn(burned);
         pendingAirdropTokens += toAirdrop;
+    }
+
+    // ---------------------------------------------------------------
+    // Bonding-curve per-trade fee (arrives as ETH, not in kind)
+    // ---------------------------------------------------------------
+
+    /// @notice Intake for fees that arrive as ETH rather than as the launched
+    /// token: the bonding curves' per-trade fee (what is left after the
+    /// creator's 10% share). Same split as the in-kind fee: half is owed to
+    /// feeWallet (claimableEth[address(0)], paid by
+    /// claimFeeWalletRewards(address(0))), and half is earmarked for buying
+    /// platformToken (pendingBuybackEth), which triggerPendingBuyback later
+    /// turns into a 50% burn / 50% holder airdrop. The buyback is NOT run here:
+    /// that would put a swap inside every curve trade. With platformToken
+    /// unset, the whole amount is owed to feeWallet (the "original system").
+    /// Anyone may send ETH here; it is only ever distributed this way.
+    function depositFee() external payable {
+        require(msg.value > 0, "FeeWalletDistributor: no ETH");
+        uint256 toBuyback = address(platformToken) != address(0) ? msg.value / 2 : 0;
+        uint256 credited = msg.value - toBuyback;
+        pendingBuybackEth += toBuyback;
+        claimableEth[address(0)] += credited;
+        emit CurveFeeReceived(msg.sender, msg.value, credited, toBuyback);
+    }
+
+    /// @notice Spends up to `ethIn` (0 = everything) of the earmarked curve-fee
+    /// ETH on platformToken, then burns 50% and queues 50% for the holder
+    /// airdrop, exactly like the in-kind buyback leg. Permissionless like every
+    /// trigger here: the destination never depends on the caller. Protected by
+    /// the same reserve-derived slippage floor as the other buybacks, and by the
+    /// caller's own minPlatformTokensOut when given. Reverts (leaving the ETH
+    /// earmarked) if the swap cannot meet the floor; if buying back is not
+    /// possible at all, the owner can release it with redirectPendingBuyback.
+    function triggerPendingBuyback(uint256 ethIn, uint256 minPlatformTokensOut)
+        external
+        nonReentrant
+        returns (uint256 tokensOut)
+    {
+        require(address(platformToken) != address(0), "FeeWalletDistributor: platform token not set");
+        uint256 amount = (ethIn == 0 || ethIn > pendingBuybackEth) ? pendingBuybackEth : ethIn;
+        require(amount > 0, "FeeWalletDistributor: nothing earmarked");
+        pendingBuybackEth -= amount;
+
+        address[] memory path = new address[](2);
+        path[0] = router.WETH();
+        path[1] = address(platformToken);
+        uint256 floor = _protectiveMinOut(path, amount);
+        uint256 effectiveMinOut = minPlatformTokensOut > floor ? minPlatformTokensOut : floor;
+
+        uint256 before = platformToken.balanceOf(address(this));
+        router.swapExactETHForTokensSupportingFeeOnTransferTokens{value: amount}(
+            effectiveMinOut,
+            path,
+            address(this),
+            block.timestamp + 15 minutes
+        );
+        tokensOut = platformToken.balanceOf(address(this)) - before;
+
+        (uint256 burned, uint256 toAirdrop) = _splitAndProcess(tokensOut);
+        emit PendingBuybackRun(amount, tokensOut, burned, toAirdrop);
+    }
+
+    /// @notice Owner only: releases `amount` (0 = everything) of the earmarked
+    /// curve-fee ETH to the fee wallet's claimable balance, for when the
+    /// platform-token buyback has been switched off or cannot run (no pool).
+    /// It can only ever move earmarked ETH to feeWallet, never anywhere else.
+    function redirectPendingBuyback(uint256 amount) external onlyOwner {
+        uint256 a = (amount == 0 || amount > pendingBuybackEth) ? pendingBuybackEth : amount;
+        require(a > 0, "FeeWalletDistributor: nothing earmarked");
+        pendingBuybackEth -= a;
+        claimableEth[address(0)] += a;
+        emit PendingBuybackRedirected(a);
     }
 
     /// @notice Pays out claimableEth[token] to feeWallet, read live at call

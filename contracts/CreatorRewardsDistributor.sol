@@ -237,6 +237,20 @@ contract CreatorRewardsDistributor is Ownable2Step, ReentrancyGuard {
         emit CreatorSwapTriggered(token, creator, plan.amountIn, ethOut);
     }
 
+    /// @notice Intake for the creator's share of a bonding curve's per-trade fee,
+    /// which arrives as ETH rather than as the launched token. Credited to
+    /// `token`'s creator exactly like ETH converted from in-kind rewards, and
+    /// claimed the same way (claimCreatorRewards). Anyone may send ETH here; it
+    /// can only ever be claimed by the token's creator.
+    event CreatorFeeDeposited(address indexed token, address indexed from, uint256 amount);
+
+    function depositFor(address token) external payable {
+        require(token != address(0), "CreatorRewardsDistributor: invalid token");
+        require(msg.value > 0, "CreatorRewardsDistributor: no ETH");
+        claimableEth[token] += msg.value;
+        emit CreatorFeeDeposited(token, msg.sender, msg.value);
+    }
+
     /// @notice Pays out claimableEth[token] to that token's own creator().
     /// Callable by anyone — same permissionless-but-fixed-destination
     /// pattern as triggerCreatorSwap above — so a creator's own claim
