@@ -20,14 +20,23 @@
   too, to stop this page from being framed by another site.
 -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.coingecko.com https://rpc.testnet.chain.robinhood.com https://rpc.mainnet.chain.robinhood.com https://explorer.testnet.chain.robinhood.com https://robinhoodchain.blockscout.com wss://relay.walletconnect.org wss://relay.walletconnect.com https://rpc.walletconnect.org https://rpc.walletconnect.com https://verify.walletconnect.org https://verify.walletconnect.com https://pulse.walletconnect.org; frame-src https://verify.walletconnect.org https://verify.walletconnect.com; object-src 'none'; base-uri 'none'; form-action 'none'">
-<title>Hood Launch</title>
+<title>IgnitionX</title>
+<meta name="description" content="IgnitionX — launch, create and trade tokens on Robinhood Chain.">
+<meta name="theme-color" content="#050505">
+<link rel="icon" href="brand/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/favicon-32.png">
+<link rel="apple-touch-icon" href="brand/favicon-180.png">
+<meta property="og:title" content="IgnitionX">
+<meta property="og:description" content="Launch · Create · Trade on Robinhood Chain.">
+<meta property="og:image" content="brand/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
 <style>
   /* ============================================================
-     HOOD LAUNCH — mission-control instrument panel for a token
+     IGNITIONX — mission-control instrument panel for a token
      launchpad on Robinhood Chain. Deliberately single dark world
      (like a trading terminal / avionics HUD) — intentionally not
      theme-adaptive; background and every color are set explicitly
@@ -39,28 +48,28 @@
     /* ground — near-black, same instrument-panel world as before but the
        card/panel steps are a touch more neutral (less blue-violet cast) so
        surfaces read as considered dark-graphite rather than "screen glow" */
-    --ink-950:#06080c;
-    --ink-900:#11161f;
-    --ink-850:#161c28;
-    --ink-800:#1d2431;
-    --ink-700:#2b3244;
-    --line:      rgba(170,190,220,.09);
-    --line-strong: rgba(180,200,230,.17);
+    --ink-950:#050505;
+    --ink-900:#100d0d;
+    --ink-850:#161212;
+    --ink-800:#1d1817;
+    --ink-700:#2f2827;
+    --line:      rgba(255,225,215,.09);
+    --line-strong: rgba(255,225,215,.18);
     /* ink */
-    --paper-100:#eef1f8;
-    --paper-300:#c4cade;
-    --paper-500:#8d94ab;
-    --paper-700:#5f6680;
+    --paper-100:#f5f1ef;
+    --paper-300:#d2cac7;
+    --paper-500:#a0979a;
+    --paper-700:#6f6668;
     /* brand — same hue, kept as the one confident accent */
-    --signal-300:#ffcf9e;
-    --signal-500:#ff9d3c;
-    --signal-600:#e2791f;
-    --signal-wash: rgba(255,157,60,.11);
+    --signal-300:#ffb59e;
+    --signal-500:#ff4a1c;
+    --signal-600:#ec4614;
+    --signal-wash: rgba(255,74,28,.11);
     /* secondary / info — same cyan family, dialed back from "electric" to
        a calmer, more legible teal-cyan */
-    --cyan-400:#8fe3f2;
-    --cyan-500:#3dc7de;
-    --cyan-wash: rgba(61,199,222,.11);
+    --cyan-400:#ffc27a;
+    --cyan-500:#ffa03a;
+    --cyan-wash: rgba(255,160,58,.11);
     /* status (reserved, never used as brand) — same hues, less neon-hot */
     --good-500:#34dd9c;
     --good-wash: rgba(52,221,156,.12);
@@ -75,8 +84,8 @@
        genuine soft glows (this is still a dark instrument-panel aesthetic)
        but roughly a third less blur/opacity than before, so accents read as
        a warm halo rather than a lit-up sign. */
-    --glow-signal: 0 0 1px rgba(255,157,60,.75), 0 0 11px rgba(255,157,60,.32), 0 0 26px rgba(255,157,60,.11);
-    --glow-cyan: 0 0 1px rgba(61,199,222,.75), 0 0 11px rgba(61,199,222,.28), 0 0 26px rgba(61,199,222,.10);
+    --glow-signal: 0 0 1px rgba(255,74,28,.75), 0 0 11px rgba(255,74,28,.32), 0 0 26px rgba(255,74,28,.11);
+    --glow-cyan: 0 0 1px rgba(255,160,58,.75), 0 0 11px rgba(255,160,58,.28), 0 0 26px rgba(255,160,58,.10);
     --glow-good: 0 0 9px rgba(52,221,156,.32);
     --glow-critical: 0 0 9px rgba(240,64,95,.32);
     /* radius — a single scale used everywhere instead of the old ad-hoc
@@ -122,9 +131,9 @@
     content:"";
     position:fixed; inset:0; z-index:0; pointer-events:none;
     background:
-      radial-gradient(1200px 680px at 82% -8%, rgba(255,157,60,.08), transparent 60%),
-      radial-gradient(1000px 560px at -10% 8%, rgba(61,199,222,.06), transparent 55%),
-      radial-gradient(900px 500px at 50% 110%, rgba(61,199,222,.035), transparent 60%),
+      radial-gradient(1200px 680px at 82% -8%, rgba(255,74,28,.08), transparent 60%),
+      radial-gradient(1000px 560px at -10% 8%, rgba(255,160,58,.06), transparent 55%),
+      radial-gradient(900px 500px at 50% 110%, rgba(255,160,58,.035), transparent 60%),
       linear-gradient(var(--ink-950), var(--ink-950));
   }
 
@@ -146,25 +155,17 @@
   /* ---------------- HUD bar ---------------- */
   .hud{
     position:sticky; top:0; z-index:40;
-    background:rgba(5,7,12,.82); backdrop-filter:blur(14px) saturate(140%);
+    background:rgba(5,5,5,.82); backdrop-filter:blur(14px) saturate(140%);
     border-bottom:1px solid var(--line-strong);
-    box-shadow:0 1px 0 rgba(61,199,222,.14), 0 20px 40px -24px rgba(0,0,0,.75);
+    box-shadow:0 1px 0 rgba(255,160,58,.14), 0 20px 40px -24px rgba(0,0,0,.75);
   }
   .hud-inner{
     max-width:1240px; margin:0 auto; padding:14px 28px;
     display:flex; align-items:center; gap:28px;
   }
   .brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; font-size:1.05rem; letter-spacing:.01em; white-space:nowrap;}
-  .brand-mark{
-    width:30px; height:30px; flex:none; position:relative;
-    background:linear-gradient(155deg, var(--signal-300), var(--signal-600));
-    clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
-    filter:drop-shadow(0 0 6px rgba(255,157,60,.5)) drop-shadow(0 0 13px rgba(255,157,60,.22));
-  }
-  .brand-mark::after{
-    content:""; position:absolute; left:50%; top:56%; width:6px; height:6px; border-radius:50%;
-    background:var(--ink-950); transform:translate(-50%,-50%);
-  }
+  .brand-logo{height:31px; width:auto; flex:none; filter:drop-shadow(0 0 8px rgba(255,74,28,.35));}
+  .brand-x{color:var(--signal-500); text-shadow:0 0 12px rgba(255,74,28,.45);}
   .brand small{font-family:var(--font-mono); font-weight:500; font-size:.62rem; letter-spacing:.1em; color:var(--paper-500); display:block; margin-top:1px;}
 
   .tabs{display:flex; gap:4px; background:var(--ink-900); border:1px solid var(--line); padding:4px; border-radius:var(--radius-sm);}
@@ -174,7 +175,7 @@
     padding:7px 14px; border-radius:var(--radius-xs); cursor:pointer; transition:color .15s, background .15s, border-color .15s, box-shadow .15s;
   }
   .tab:hover{color:var(--paper-100);}
-  .tab[aria-selected="true"]{background:var(--ink-800); border-color:rgba(255,157,60,.4); color:var(--signal-300); box-shadow:inset 0 0 0 1px rgba(255,157,60,.15), 0 0 10px rgba(255,157,60,.14);}
+  .tab[aria-selected="true"]{background:var(--ink-800); border-color:rgba(255,74,28,.4); color:var(--signal-300); box-shadow:inset 0 0 0 1px rgba(255,74,28,.15), 0 0 10px rgba(255,74,28,.14);}
 
   .net-pill{
     display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:.74rem; color:var(--paper-300);
@@ -196,7 +197,7 @@
     padding:7px 12px; border-radius:var(--radius-xs); cursor:pointer; transition:color .15s, background .15s, border-color .15s, box-shadow .15s;
   }
   .mode-tab:hover{color:var(--paper-100);}
-  .mode-tab[aria-pressed="true"]{background:var(--ink-800); border-color:rgba(255,157,60,.4); color:var(--signal-300); box-shadow:inset 0 0 0 1px rgba(255,157,60,.15), 0 0 10px rgba(255,157,60,.14);}
+  .mode-tab[aria-pressed="true"]{background:var(--ink-800); border-color:rgba(255,74,28,.4); color:var(--signal-300); box-shadow:inset 0 0 0 1px rgba(255,74,28,.15), 0 0 10px rgba(255,74,28,.14);}
   .mode-tab.live-tab[aria-pressed="true"]{color:var(--critical-500); border-color:rgba(240,64,95,.45); box-shadow:inset 0 0 0 1px rgba(240,64,95,.18), 0 0 10px rgba(240,64,95,.18);}
 
   .hud-spacer{flex:1;}
@@ -206,7 +207,7 @@
     padding:9px 16px; border:1px solid var(--signal-600); background:var(--signal-wash); color:var(--signal-300);
     transition:background .15s, transform .1s, box-shadow .15s; white-space:nowrap;
   }
-  .wallet-btn:hover{background:rgba(255,157,60,.2); box-shadow:var(--glow-signal);}
+  .wallet-btn:hover{background:rgba(255,74,28,.2); box-shadow:var(--glow-signal);}
   .wallet-btn:active{transform:translateY(1px);}
   .wallet-btn.connected{border-color:var(--line-strong); background:var(--ink-800); color:var(--paper-100);}
   .wallet-btn.connected:hover{box-shadow:var(--glow-cyan);}
@@ -226,10 +227,11 @@
     display:grid; grid-template-columns:1.15fr .85fr; gap:52px; align-items:center;
     padding:76px 0 56px;
   }
+  .hero-logo{display:block; width:min(100%,520px); height:auto; margin:-6px 0 14px -6px; filter:drop-shadow(0 0 22px rgba(255,74,28,.18));}
   .hero-eyebrow{display:flex; align-items:center; gap:10px; margin-bottom:18px;}
-  .hero-eyebrow .rule{width:28px; height:1px; background:var(--signal-500); box-shadow:0 0 5px rgba(255,157,60,.5);}
+  .hero-eyebrow .rule{width:28px; height:1px; background:var(--signal-500); box-shadow:0 0 5px rgba(255,74,28,.5);}
   h1.hero-h{font-size:clamp(2.4rem, 4.4vw, 3.6rem); line-height:1.04;}
-  h1.hero-h em{font-style:normal; color:var(--signal-300); text-shadow:0 0 14px rgba(255,157,60,.28);}
+  h1.hero-h em{font-style:normal; color:var(--signal-300); text-shadow:0 0 14px rgba(255,74,28,.28);}
   .hero-sub{margin:20px 0 28px; max-width:46ch; color:var(--paper-300); font-size:1.05rem;}
   .hero-cta{display:flex; gap:12px; flex-wrap:wrap;}
   .btn{
@@ -247,7 +249,7 @@
   .btn-primary{background:linear-gradient(155deg, var(--signal-500), var(--signal-600)); color:#1a0f04;}
   .btn-primary:hover{background:linear-gradient(155deg, var(--signal-300), var(--signal-500)); box-shadow:var(--glow-signal);}
   .btn-ghost{background:transparent; border-color:var(--line-strong); color:var(--paper-100);}
-  .btn-ghost:hover{border-color:var(--cyan-500); box-shadow:0 0 11px rgba(61,199,222,.16);}
+  .btn-ghost:hover{border-color:var(--cyan-500); box-shadow:0 0 11px rgba(255,160,58,.16);}
   .btn-block{width:100%; text-align:center;}
   .btn-sm{padding:9px 14px; font-size:.82rem;}
 
@@ -271,7 +273,7 @@
   .launch-console .console-body::-webkit-scrollbar-thumb:hover, #feedBody::-webkit-scrollbar-thumb:hover{background:var(--signal-300);}
   .console{
     position:relative; background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg);
-    box-shadow:var(--shadow-panel), 0 0 26px -18px rgba(61,199,222,.12);
+    box-shadow:var(--shadow-panel), 0 0 26px -18px rgba(255,160,58,.12);
     overflow:hidden;
   }
   .console::before{
@@ -282,7 +284,7 @@
   .console-head .dots{display:flex; gap:6px;}
   .console-head .dots span{width:8px; height:8px; border-radius:50%; background:var(--ink-700);}
   .console-head .dots span:nth-child(1){background:var(--critical-500); box-shadow:0 0 5px rgba(240,64,95,.45);}
-  .console-head .dots span:nth-child(2){background:var(--signal-500); box-shadow:0 0 5px rgba(255,157,60,.45);}
+  .console-head .dots span:nth-child(2){background:var(--signal-500); box-shadow:0 0 5px rgba(255,74,28,.45);}
   .console-head .dots span:nth-child(3){background:var(--good-500); box-shadow:0 0 5px rgba(52,221,156,.45);}
   .console-body{padding:6px 4px; height:280px; overflow:hidden; display:flex; flex-direction:column-reverse; gap:2px;}
   .feed-line{
@@ -300,12 +302,12 @@
      see .launch-console above) rather than mixed into the trade-activity
      feed, so a brand-new launch no longer gets evicted by ordinary trade
      lines within a minute of appearing. */
-  .feed-announce{background:linear-gradient(90deg, rgba(255,157,60,.14), rgba(61,199,222,.07)); padding:12px 14px;}
+  .feed-announce{background:linear-gradient(90deg, rgba(255,74,28,.14), rgba(255,160,58,.07)); padding:12px 14px;}
   .feed-announce .msg{color:var(--paper-100); font-weight:600; font-size:.86rem;}
   .feed-announce-badge{
     font-family:var(--font-mono); font-size:.6rem; letter-spacing:.05em; text-transform:uppercase;
     padding:2px 7px; border-radius:999px; background:var(--signal-wash); color:var(--signal-300);
-    border:1px solid rgba(255,157,60,.35); flex:none;
+    border:1px solid rgba(255,74,28,.35); flex:none;
   }
 
   /* ---------------- stat row ---------------- */
@@ -331,7 +333,7 @@
     appearance:none; cursor:pointer; background:var(--ink-900); border:1px solid var(--line); color:var(--paper-300);
     font-family:var(--font-mono); font-size:.74rem; letter-spacing:.03em; padding:7px 13px; border-radius:999px; transition:all .15s;
   }
-  .chip[aria-pressed="true"]{border-color:var(--signal-500); color:var(--signal-300); background:var(--signal-wash); box-shadow:0 0 8px rgba(255,157,60,.16);}
+  .chip[aria-pressed="true"]{border-color:var(--signal-500); color:var(--signal-300); background:var(--signal-wash); box-shadow:0 0 8px rgba(255,74,28,.16);}
   .search{
     background:var(--ink-900); border:1px solid var(--line); color:var(--paper-100); font-family:var(--font-mono);
     font-size:.82rem; padding:9px 12px; border-radius:var(--radius-sm); min-width:200px; transition:border-color .15s, box-shadow .15s;
@@ -347,10 +349,10 @@
     position:relative; background:var(--ink-900); border:1px solid var(--line); padding:20px; border-radius:var(--radius-lg);
     cursor:pointer; text-align:left; width:100%; color:inherit; transition:border-color .18s, transform .15s, box-shadow .18s;
   }
-  .token-card:hover{border-color:rgba(61,199,222,.38); transform:translateY(-3px); box-shadow:0 18px 40px -22px rgba(0,0,0,.7), 0 0 16px rgba(61,199,222,.08);}
+  .token-card:hover{border-color:rgba(255,160,58,.38); transform:translateY(-3px); box-shadow:0 18px 40px -22px rgba(0,0,0,.7), 0 0 16px rgba(255,160,58,.08);}
 
   .tc-head{display:flex; gap:12px; align-items:center; margin-bottom:14px;}
-  .tc-mark{width:38px; height:38px; border-radius:var(--radius-sm); display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:700; font-size:1rem; flex:none; color:#0c0f16; overflow:hidden;}
+  .tc-mark{width:38px; height:38px; border-radius:var(--radius-sm); display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:700; font-size:1rem; flex:none; color:#0d0b0b; overflow:hidden;}
   .tc-mark img{width:100%; height:100%; object-fit:cover; display:block;}
   .tc-name{font-weight:600; font-size:.98rem; line-height:1.2;}
   .tc-ticker{font-family:var(--font-mono); font-size:.72rem; color:var(--paper-500); letter-spacing:.04em;}
@@ -364,7 +366,7 @@
      (which flips to "graduated" once a curve crosses poolSeedTargetWei):
      this stays visible on a card so a Quick Launch token's pump.fun-style
      origin is never lost after graduation. */
-  .tc-quicklaunch-badge{font-family:var(--font-mono); font-size:.62rem; letter-spacing:.05em; text-transform:uppercase; padding:2px 8px; border-radius:999px; white-space:nowrap; background:var(--signal-wash); color:var(--signal-300); border:1px solid rgba(255,157,60,.35);}
+  .tc-quicklaunch-badge{font-family:var(--font-mono); font-size:.62rem; letter-spacing:.05em; text-transform:uppercase; padding:2px 8px; border-radius:999px; white-space:nowrap; background:var(--signal-wash); color:var(--signal-300); border:1px solid rgba(255,74,28,.35);}
   /* Market cap badge, top-right corner of each token's card — sits above the
      Quick Launch/status badges in that same right-aligned column. */
   .tc-mcap{font-family:var(--font-mono); font-size:.74rem; font-weight:600; color:var(--paper-100); white-space:nowrap;}
@@ -430,13 +432,13 @@
      draws them. */
   svg path[stroke="var(--good-500)"], svg circle[fill="var(--good-500)"]{ filter:drop-shadow(0 0 4px rgba(52,221,156,.45)); }
   svg path[stroke="var(--critical-500)"], svg circle[fill="var(--critical-500)"]{ filter:drop-shadow(0 0 4px rgba(240,64,95,.4)); }
-  svg path[stroke="var(--signal-500)"], svg circle[fill="var(--signal-500)"]{ filter:drop-shadow(0 0 4px rgba(255,157,60,.4)); }
-  svg path[stroke="var(--cyan-500)"], svg circle[fill="var(--cyan-500)"]{ filter:drop-shadow(0 0 4px rgba(61,199,222,.4)); }
+  svg path[stroke="var(--signal-500)"], svg circle[fill="var(--signal-500)"]{ filter:drop-shadow(0 0 4px rgba(255,74,28,.4)); }
+  svg path[stroke="var(--cyan-500)"], svg circle[fill="var(--cyan-500)"]{ filter:drop-shadow(0 0 4px rgba(255,160,58,.4)); }
 
   /* platform token spotlight — pinned above the hero/live feed */
   .spotlight{
-    position:relative; background:var(--ink-900); border:1px solid rgba(61,199,222,.22); border-radius:var(--radius-lg);
-    box-shadow:var(--shadow-panel), 0 0 30px -20px rgba(61,199,222,.25);
+    position:relative; background:var(--ink-900); border:1px solid rgba(255,160,58,.22); border-radius:var(--radius-lg);
+    box-shadow:var(--shadow-panel), 0 0 30px -20px rgba(255,160,58,.25);
     padding:22px 26px 26px; margin:32px 0 -4px; overflow:hidden;
   }
   .spotlight::before{
@@ -448,7 +450,7 @@
   .spotlight-name{font-family:var(--font-display); font-size:1.15rem; font-weight:700;}
   .spotlight-symbol{font-family:var(--font-mono); color:var(--paper-500); font-size:.85rem;}
   .spotlight-figures{display:flex; align-items:baseline; gap:14px;}
-  .spotlight-price{font-family:var(--font-mono); font-size:1.5rem; font-weight:600; text-shadow:0 0 11px rgba(61,199,222,.22);}
+  .spotlight-price{font-family:var(--font-mono); font-size:1.5rem; font-weight:600; text-shadow:0 0 11px rgba(255,160,58,.22);}
   .spotlight-delta{font-family:var(--font-mono); font-size:.85rem; font-weight:600;}
   .spotlight-body{display:grid; grid-template-columns:1fr 1fr; gap:22px; margin-top:16px; align-items:start;}
   .spotlight .chart-wrap svg{height:150px;}
@@ -568,7 +570,7 @@
 
 
   /* ---------------- Wallet profiles ---------------- */
-  .pf-av{display:inline-flex; align-items:center; justify-content:center; border-radius:50%; overflow:hidden; flex:none; font-family:var(--font-mono); font-weight:700; color:#0c0f16; vertical-align:middle; object-fit:cover;}
+  .pf-av{display:inline-flex; align-items:center; justify-content:center; border-radius:50%; overflow:hidden; flex:none; font-family:var(--font-mono); font-weight:700; color:#0d0b0b; vertical-align:middle; object-fit:cover;}
   img.pf-av{display:inline-block;}
   .pf-chip{display:inline-flex; align-items:center; gap:6px; font-family:var(--font-mono); font-size:.76rem; color:var(--paper-300); text-decoration:none; background:none; border:0; padding:0; cursor:default;}
   .pf-chip.link{cursor:pointer;}
@@ -604,7 +606,7 @@
   .cm-del{margin-left:auto; background:none; border:0; color:var(--paper-700); font-family:var(--font-mono); font-size:.68rem; cursor:pointer; padding:2px 4px;}
   .cm-del:hover{color:var(--critical-500);}
   .cm-text{margin-top:6px; font-size:.9rem; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--paper-100);}
-  #commentInput{width:100%; background:var(--ink-950, #05070b); border:1px solid var(--line-strong); border-radius:var(--radius-sm); color:var(--paper-100); font-family:inherit; font-size:.9rem; padding:10px 12px; resize:vertical; min-height:70px;}
+  #commentInput{width:100%; background:var(--ink-950, #050505); border:1px solid var(--line-strong); border-radius:var(--radius-sm); color:var(--paper-100); font-family:inherit; font-size:.9rem; padding:10px 12px; resize:vertical; min-height:70px;}
   .cm-bar{display:flex; align-items:center; gap:12px; margin-top:8px;}
   .cm-bar .btn{margin-left:auto;}
   .cm-count{font-family:var(--font-mono); font-size:.7rem; color:var(--paper-700);}
@@ -654,6 +656,9 @@
   /* ---------------- Footer ---------------- */
   footer{position:relative; z-index:1; border-top:1px solid var(--line); margin-top:20px;}
   .footer-inner{max-width:1240px; margin:0 auto; padding:28px 28px 36px; display:flex; justify-content:space-between; gap:24px; flex-wrap:wrap;}
+  .footer-brand{display:flex; flex-direction:column; gap:8px; align-items:flex-start;}
+  .footer-brand img{height:34px; width:auto; display:block;}
+  .footer-brand span{font-family:var(--font-mono); font-size:.62rem; letter-spacing:.2em; color:var(--paper-500);}
   .footer-note{font-size:.76rem; color:var(--paper-700); max-width:56ch; line-height:1.6;}
   .footer-links{display:flex; gap:18px; font-family:var(--font-mono); font-size:.74rem; color:var(--paper-500); white-space:nowrap;}
   .footer-links a{text-decoration:none; color:inherit; transition:color .15s;}
@@ -663,7 +668,7 @@
   .toast-stack{position:fixed; right:20px; bottom:20px; z-index:80; display:flex; flex-direction:column; gap:10px; align-items:flex-end;}
   .toast{
     background:var(--ink-800); border:1px solid var(--line-strong); border-left:3px solid var(--signal-500); color:var(--paper-100);
-    padding:12px 16px; border-radius:var(--radius-md); font-size:.84rem; box-shadow:var(--shadow-panel), -4px 0 14px -8px rgba(255,157,60,.22); max-width:320px;
+    padding:12px 16px; border-radius:var(--radius-md); font-size:.84rem; box-shadow:var(--shadow-panel), -4px 0 14px -8px rgba(255,74,28,.22); max-width:320px;
     animation:toastIn .22s ease; backdrop-filter:blur(8px);
   }
   @keyframes toastIn{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:translateY(0);}}
@@ -683,7 +688,7 @@
   .modal-card h3{margin-bottom:12px; color:var(--paper-100);}
   .modal-card p{color:var(--paper-500); font-size:.9rem; margin:0 0 20px;}
   .modal-card p strong{color:var(--paper-100);}
-  .modal-card.neutral{border-color:var(--line-strong); border-top-color:var(--signal-500); box-shadow:var(--shadow-panel), 0 0 40px -16px rgba(255,157,60,.2);}
+  .modal-card.neutral{border-color:var(--line-strong); border-top-color:var(--signal-500); box-shadow:var(--shadow-panel), 0 0 40px -16px rgba(255,74,28,.2);}
   .modal-actions{display:flex; justify-content:flex-end; gap:10px;}
 
   /* ---------------- Wallet picker ---------------- */
@@ -785,7 +790,7 @@
   .admin-locked .glyph{font-size:2rem; margin-bottom:14px;}
   .admin-status-badge{display:inline-block; font-family:var(--font-mono); font-size:.66rem; letter-spacing:.05em; padding:2px 9px; border-radius:999px; margin-left:10px; vertical-align:middle; border:1px solid var(--line-strong); background:var(--ink-800); color:var(--paper-500);}
   .admin-status-badge.on{color:var(--good-500); background:var(--good-wash); border-color:rgba(52,221,156,.4); box-shadow:0 0 7px rgba(52,221,156,.2);}
-  .admin-status-badge.partial{color:var(--signal-300); background:var(--signal-wash); border-color:rgba(255,157,60,.4); box-shadow:0 0 7px rgba(255,157,60,.18);}
+  .admin-status-badge.partial{color:var(--signal-300); background:var(--signal-wash); border-color:rgba(255,74,28,.4); box-shadow:0 0 7px rgba(255,74,28,.18);}
   /* Compact one-row-per-key layout for the "Platform contracts" panel — see
      platformContractsPanelHTML(). Replaces a full section-label + paragraph
      + field-grid per key (very tall) with a single grid row per key; the
@@ -818,7 +823,7 @@
 
 <div class="hud">
   <div class="hud-inner">
-    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>HOOD LAUNCH<small>TOKEN LAUNCH CONSOLE</small></span></div>
+    <div class="brand"><img class="brand-logo" src="brand/ignitionx-mark.png" alt="" width="36" height="31"><span>IGNITION<b class="brand-x">X</b><small>LAUNCH · CREATE · TRADE</small></span></div>
     <div class="tabs" role="tablist" aria-label="Sections">
       <button class="tab" role="tab" aria-selected="true" data-view="explore">Explore</button>
       <button class="tab" role="tab" aria-selected="false" data-view="create">Launch</button>
@@ -861,7 +866,7 @@
 <div class="modal-overlay" id="editTokenOverlay" hidden>
   <div class="modal-card neutral" style="max-width:520px;">
     <h3 id="editTokenTitle">Edit token</h3>
-    <p style="margin-bottom:14px;">Updates the description, branding, and social links shown on Hood Launch. This is off-chain, display-only metadata — it doesn't touch the token contract itself.</p>
+    <p style="margin-bottom:14px;">Updates the description, branding, and social links shown on IgnitionX. This is off-chain, display-only metadata — it doesn't touch the token contract itself.</p>
     <div class="field"><label for="editDesc">Description</label><textarea id="editDesc" rows="2" maxlength="140"></textarea></div>
     <div class="field">
       <label style="margin-bottom:8px; display:block;">Branding</label>
@@ -921,9 +926,10 @@
 
       <div class="hero">
         <div>
+          <img class="hero-logo" src="brand/ignitionx-hero.png" alt="IgnitionX — Launch, Create, Trade" width="1000" height="402">
           <div class="hero-eyebrow"><span class="rule"></span><span class="eyebrow">Built on Robinhood Chain</span></div>
           <h1 class="hero-h">Ignite a token.<br>Track its <em>trajectory</em>.</h1>
-          <p class="hero-sub">Hood Launch is a mission-control panel for launching community tokens on Robinhood Chain. Deploy Token puts 100% of the supply straight in your wallet — no pool, no tax, liquidity is on you. Or Deploy and Add Liquidity (Launch): pair your own ETH into a live pool atomically, with a 1.00% tax funding the climb to a fixed $50,000 market cap before it shuts off for good.</p>
+          <p class="hero-sub">IgnitionX is a mission-control panel for launching community tokens on Robinhood Chain. Deploy Token puts 100% of the supply straight in your wallet — no pool, no tax, liquidity is on you. Or Deploy and Add Liquidity (Launch): pair your own ETH into a live pool atomically, with a 1.00% tax funding the climb to a fixed $50,000 market cap before it shuts off for good.</p>
           <div class="hero-cta">
             <button class="btn btn-primary" data-goto="create">Launch a token</button>
             <button class="btn btn-ghost" data-goto-scroll="market">View live launches</button>
@@ -1036,7 +1042,8 @@
 
 <footer>
   <div class="footer-inner">
-    <p class="footer-note">Hood Launch is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Wallet connection is real (via your browser wallet), and the Demo/Live switch targets testnet or mainnet respectively. Once real factory addresses are configured for a network, launching a token, trading it, and its own price and chart (for a "taxed"/"graduated" token — one created through this platform's own Deploy and Add Liquidity flow) all reflect genuine on-chain transactions and live pool state, not a simulation — real tokens and funds move. What stays illustrative regardless: the holder breakdown, 24h volume, and — deliberately — the price of any pool Hood Launch merely detected rather than created itself (shown as "price isn't tracked here", since this platform doesn't vouch for those). With no factory configured, or on the fully offline demo path, everything shown is simulated and nothing real ever moves.</p>
+    <div class="footer-brand"><img src="brand/ignitionx-wordmark.png" alt="IgnitionX" width="180" height="34"><span>LAUNCH · CREATE · TRADE</span></div>
+    <p class="footer-note">IgnitionX is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Wallet connection is real (via your browser wallet), and the Demo/Live switch targets testnet or mainnet respectively. Once real factory addresses are configured for a network, launching a token, trading it, and its own price and chart (for a "taxed"/"graduated" token — one created through this platform's own Deploy and Add Liquidity flow) all reflect genuine on-chain transactions and live pool state, not a simulation — real tokens and funds move. What stays illustrative regardless: the holder breakdown, 24h volume, and — deliberately — the price of any pool IgnitionX merely detected rather than created itself (shown as "price isn't tracked here", since this platform doesn't vouch for those). With no factory configured, or on the fully offline demo path, everything shown is simulated and nothing real ever moves.</p>
     <div class="footer-links"><a href="docs.html">Docs</a><span>Status</span><span>Terms</span></div>
   </div>
 </footer>
@@ -2292,7 +2299,7 @@
       // the visitor out.
       if(p === activeProvider && activeProviderInfo && activeProviderInfo.kind === "walletconnect"){
         clearActiveWallet();
-        toast("Your phone wallet disconnected from Hood Launch.");
+        toast("Your phone wallet disconnected from IgnitionX.");
       }
     });
   }
@@ -2372,7 +2379,7 @@
         projectId: cfg.walletConnectProjectId,
         chainIds: wcChainIds(),
         rpcMap,
-        metadata: { name:"Hood Launch", description:"Token launchpad on Robinhood Chain", url: location.origin, icons: [] },
+        metadata: { name:"IgnitionX", description:"Token launchpad on Robinhood Chain", url: location.origin, icons: [location.origin + "/brand/favicon-180.png"] },
       });
     })().catch(err=>{ wcProviderPromise = null; throw err; });
     return wcProviderPromise;
@@ -2445,7 +2452,7 @@
           walletModalBody.appendChild(wEl("p", "wallet-note", "No wallet extension found in this browser. Install one such as MetaMask, Rabby or Coinbase Wallet, then reload this page" + (wcEnabled() ? " — or use WalletConnect above to connect a phone wallet." : ".")));
         }
       }
-      walletModalBody.appendChild(wEl("p", "wallet-note", "Smart-contract wallets (Safe, passkey wallets) can't sign Hood Launch's gasless launches or profile actions yet — use a standard wallet for those."));
+      walletModalBody.appendChild(wEl("p", "wallet-note", "Smart-contract wallets (Safe, passkey wallets) can't sign IgnitionX's gasless launches or profile actions yet — use a standard wallet for those."));
     }else if(view === "wc-loading"){
       title.textContent = "WalletConnect";
       walletModalBody.appendChild(wEl("p", "wallet-note", "Starting a secure session…"));
@@ -2579,7 +2586,7 @@
       try{ await prev.disconnect(); }catch(e){}
     }
     clearActiveWallet();
-    toast("Wallet disconnected from Hood Launch.");
+    toast("Wallet disconnected from IgnitionX.");
   }
   walletBtn.addEventListener("click", ()=>{ wallet ? disconnectWallet() : connectWallet(); });
 
@@ -6331,8 +6338,8 @@
     return { tokenReserve: isToken0 ? reserve0 : reserve1, wethReserve: isToken0 ? reserve1 : reserve0 };
   }
 
-  /* ---------------- live price tracking for real, on-chain Hood Launch pools ---------------- */
-  // Scope: only tokens Hood Launch itself created with a live pool — status
+  /* ---------------- live price tracking for real, on-chain IgnitionX pools ---------------- */
+  // Scope: only tokens IgnitionX itself created with a live pool — status
   // "taxed" (tax still active) or "graduated" (tax disabled) — with a real
   // pairAddress. This deliberately excludes "pool-detected"/"live-pool"
   // (pools added independently, outside this platform — see their own
@@ -6627,7 +6634,7 @@
       id: entry.tokenAddress,
       name: entry.name || entry.symbol || "Unnamed token",
       ticker: entry.symbol || "TOKEN",
-      desc: "Launched on Hood Launch.",
+      desc: "Launched on IgnitionX.",
       price: 0, change24h: 0, hist: [0.0000001, 0.0000001], // refreshLiveTokenPrices fills this in for real, right after this merge
       taxProgress: 0,
       holders: 1, mcap: 0, vol: 0, // illustrative only, same as every other launch — see the footer disclaimer
@@ -7130,7 +7137,7 @@
   // above): DEPLOYED (0) -> "creator-held", LAUNCHED (1) -> "taxed",
   // GRADUATED (2) -> "graduated". "live-pool"/"pool-detected" are a separate,
   // narrower case (a pool detected on-chain that was added completely
-  // outside Hood Launch, never through recordLaunch/tokenStatus) — folded
+  // outside IgnitionX, never through recordLaunch/tokenStatus) — folded
   // into the "Launched" tab since they do have a live pool, same as "taxed",
   // rather than inventing a 5th tab for what's a rare edge case.
   function matchesStatusFilter(t, filter){
@@ -7207,7 +7214,7 @@
     if(t.status==="creator-held"){
       return `
       <div class="bond-wrap">
-        <div class="bond-labels"><span>No pool on Hood Launch</span><span>100% creator-held</span></div>
+        <div class="bond-labels"><span>No pool on IgnitionX</span><span>100% creator-held</span></div>
         <div class="bond-track"><div class="bond-fill" style="width:0%; background:var(--paper-700)"></div><div class="bond-ticks"></div></div>
       </div>`;
     }
@@ -7229,7 +7236,7 @@
       </div>`;
     }
     if(t.status==="live-pool"){
-      // Liquidity that Hood Launch detected on-chain after the fact, added
+      // Liquidity that IgnitionX detected on-chain after the fact, added
       // independently of this platform — configureTax()/LiquidityLocker.lock()
       // were never called for it, so unlike "taxed"/"graduated" there is no
       // platform tax and no LP lock here. For a plain Deploy Token this also
@@ -7275,8 +7282,8 @@
       ? "A pool was found for this token, added independently — but its configured tax stays inactive until the creator activates it. Price isn't tracked here."
       : isLivePool
         ? (t.customTax
-          ? "Liquidity was detected on-chain for this token — added independently, outside Hood Launch. Its creator's configured tax is active, but there's no platform tax or LP lock, and price isn't tracked here."
-          : "Liquidity was detected on-chain for this token — added independently, outside Hood Launch. No platform tax, no LP lock, and price isn't tracked here.")
+          ? "Liquidity was detected on-chain for this token — added independently, outside IgnitionX. Its creator's configured tax is active, but there's no platform tax or LP lock, and price isn't tracked here."
+          : "Liquidity was detected on-chain for this token — added independently, outside IgnitionX. No platform tax, no LP lock, and price isn't tracked here.")
         : isCurveTrading
           ? "Trading live on the bonding curve on its own network — switch networks (or check back once it's really deployed) to see its live price here."
           : "Deployed and verified — 100% of supply is in the creator's wallet. No pool exists here.";
@@ -7563,7 +7570,7 @@
     const v4HasPool = isV4Token && !!t.poolId;
     const noPriceChart = (noSimulatedMarket && !v4HasPool) || (isCurveTrading && !isCurveToken);
     // Real buy/sell turns on for a token that (a) was actually deployed
-    // on-chain through Hood Launch's own "Deploy and Add Liquidity" flow,
+    // on-chain through IgnitionX's own "Deploy and Add Liquidity" flow,
     // with a real recorded pair, and (b) is being viewed on whichever
     // network it actually lives on — Demo/testnet and Live/mainnet are
     // treated the same here, since both are genuine on-chain deployments
@@ -7678,7 +7685,7 @@
           <div class="bond-gauge">
             <div class="bond-labels"><span>Pool found — tax not active yet</span><span>Awaiting activation</span></div>
             <div class="bond-track"><div class="bond-fill" style="width:100%; background:var(--cyan-500)"></div><div class="bond-ticks"></div></div>
-            <div class="hint" style="margin-top:8px;">Hood Launch detected a pool for this token, added independently outside the platform — but its contract doesn't apply your configured buy/sell tax until the creator activates it, a one-time transaction. The platform's own 1.00% tax is never available on this launch path, activated or not.</div>
+            <div class="hint" style="margin-top:8px;">IgnitionX detected a pool for this token, added independently outside the platform — but its contract doesn't apply your configured buy/sell tax until the creator activates it, a one-time transaction. The platform's own 1.00% tax is never available on this launch path, activated or not.</div>
             ${activateCta}
           </div>`;
     } else if(isLivePool){
@@ -7686,12 +7693,12 @@
           <div class="bond-gauge">
             <div class="bond-labels"><span>Independent pool · your tax active</span><span>No platform tax · No LP lock</span></div>
             <div class="bond-track"><div class="bond-fill" style="width:100%; background:var(--signal-600)"></div><div class="bond-ticks"></div></div>
-            <div class="hint" style="margin-top:8px;">This pool was added independently and its creator has activated the tax configured at launch (see below) — every trade here now carries that rate. Because it wasn't created through Hood Launch's Deploy and Add Liquidity (Live) flow, it carries none of that flow's other protections: no platform 1.00% tax, and no LP lock securing the liquidity.</div>
+            <div class="hint" style="margin-top:8px;">This pool was added independently and its creator has activated the tax configured at launch (see below) — every trade here now carries that rate. Because it wasn't created through IgnitionX's Deploy and Add Liquidity (Live) flow, it carries none of that flow's other protections: no platform 1.00% tax, and no LP lock securing the liquidity.</div>
           </div>` : `
           <div class="bond-gauge">
             <div class="bond-labels"><span>Independent pool detected</span><span>No tax · No LP lock</span></div>
             <div class="bond-track"><div class="bond-fill" style="width:100%; background:var(--signal-600)"></div><div class="bond-ticks"></div></div>
-            <div class="hint" style="margin-top:8px;">Hood Launch periodically checks Deploy Token tokens for a pool the creator may have added independently — this one now has one. Because it wasn't created through Hood Launch's Deploy and Add Liquidity (Launch) flow, it carries none of that flow's protections: no transfer tax, and no LP lock securing the liquidity.</div>
+            <div class="hint" style="margin-top:8px;">IgnitionX periodically checks Deploy Token tokens for a pool the creator may have added independently — this one now has one. Because it wasn't created through IgnitionX's Deploy and Add Liquidity (Launch) flow, it carries none of that flow's protections: no transfer tax, and no LP lock securing the liquidity.</div>
           </div>`;
     }
     // Note: isCurveTrading has no branch here — a Quick Launch token in
@@ -7788,22 +7795,22 @@
     `) : isPoolDetected ? `
       <div class="panel">
         <div class="eyebrow" style="margin-bottom:10px;">Pool found — tax not active yet</div>
-        <p style="color:var(--paper-500); font-size:.88rem; margin:0 0 14px;">Liquidity now exists for this token, added independently outside Hood Launch — but the contract itself applies no tax at all until activated (see above). Once activated, your configured buy/sell rates apply here going forward; the platform's own 1.00% tax is never available on this launch path either way. Use the contract address below with a DEX interface on ${escapeHtml(tokenNetwork.chainName)} to trade it.</p>
-        <p class="disclaimer-line" style="text-align:left; margin-top:0;">Hood Launch shows this status for visibility only — it does not vouch for this pool's safety, and doesn't lock this liquidity.</p>
+        <p style="color:var(--paper-500); font-size:.88rem; margin:0 0 14px;">Liquidity now exists for this token, added independently outside IgnitionX — but the contract itself applies no tax at all until activated (see above). Once activated, your configured buy/sell rates apply here going forward; the platform's own 1.00% tax is never available on this launch path either way. Use the contract address below with a DEX interface on ${escapeHtml(tokenNetwork.chainName)} to trade it.</p>
+        <p class="disclaimer-line" style="text-align:left; margin-top:0;">IgnitionX shows this status for visibility only — it does not vouch for this pool's safety, and doesn't lock this liquidity.</p>
       </div>
     ` : isLivePool ? `
       <div class="panel">
-        <div class="eyebrow" style="margin-bottom:10px;">Pool found — outside Hood Launch</div>
+        <div class="eyebrow" style="margin-bottom:10px;">Pool found — outside IgnitionX</div>
         <p style="color:var(--paper-500); font-size:.88rem; margin:0 0 14px;">${t.customTax
-          ? `Liquidity exists here and the creator's configured tax is active on it (see below) — but it wasn't added through Hood Launch, so there's no in-platform trading. Use the contract address below with a DEX interface on ${escapeHtml(tokenNetwork.chainName)} to trade it directly — and note the liquidity isn't locked by this platform, so treat it with the same caution as any pool you haven't verified yourself.`
-          : `Liquidity now exists for this token, but it wasn't added through Hood Launch, so there's no in-platform trading here. Use the contract address below with a DEX interface on ${escapeHtml(tokenNetwork.chainName)} to trade it directly — and note the liquidity isn't locked by this platform, so treat it with the same caution as any pool you haven't verified yourself.`
+          ? `Liquidity exists here and the creator's configured tax is active on it (see below) — but it wasn't added through IgnitionX, so there's no in-platform trading. Use the contract address below with a DEX interface on ${escapeHtml(tokenNetwork.chainName)} to trade it directly — and note the liquidity isn't locked by this platform, so treat it with the same caution as any pool you haven't verified yourself.`
+          : `Liquidity now exists for this token, but it wasn't added through IgnitionX, so there's no in-platform trading here. Use the contract address below with a DEX interface on ${escapeHtml(tokenNetwork.chainName)} to trade it directly — and note the liquidity isn't locked by this platform, so treat it with the same caution as any pool you haven't verified yourself.`
         }</p>
-        <p class="disclaimer-line" style="text-align:left; margin-top:0;">Hood Launch shows this status for visibility only — it does not vouch for this pool's safety.</p>
+        <p class="disclaimer-line" style="text-align:left; margin-top:0;">IgnitionX shows this status for visibility only — it does not vouch for this pool's safety.</p>
       </div>
     ` : isCreatorHeld ? `
       <div class="panel">
         <div class="eyebrow" style="margin-bottom:10px;">No pool here</div>
-        <p style="color:var(--paper-500); font-size:.88rem; margin:0 0 14px;">This token was created and verified directly to its creator's wallet — that's the entirety of what Hood Launch does for a Deploy Token token. There's no pool to trade against here yet; Hood Launch checks periodically and will show it here automatically if the creator adds liquidity independently.</p>
+        <p style="color:var(--paper-500); font-size:.88rem; margin:0 0 14px;">This token was created and verified directly to its creator's wallet — that's the entirety of what IgnitionX does for a Deploy Token token. There's no pool to trade against here yet; IgnitionX checks periodically and will show it here automatically if the creator adds liquidity independently.</p>
         <p class="disclaimer-line" style="text-align:left; margin-top:0;">Demo only — reflects on-chain state, not a real transaction.</p>
       </div>
     ` : isRealLiquidityToken ? `
@@ -7857,7 +7864,7 @@
             ${isOwner ? `<button class="btn btn-ghost" id="detailEditBtn" style="padding:8px 14px; font-size:.8rem;">Edit token</button>` : ""}
           </div>
           ${t.creatorWallet ? `<div class="detail-by">Created by ${profileChipHTML(t.creatorWallet, {link:true, size:20})}</div>` : ""}
-          ${isCreatorHeld ? `<p style="color:var(--paper-500); margin:18px 0 0;">No pool — 100% of the supply is in the creator's wallet. Hood Launch has no further role here: if this creator adds liquidity, it happens off-platform, on their own terms.</p>` : ""}
+          ${isCreatorHeld ? `<p style="color:var(--paper-500); margin:18px 0 0;">No pool — 100% of the supply is in the creator's wallet. IgnitionX has no further role here: if this creator adds liquidity, it happens off-platform, on their own terms.</p>` : ""}
           ${noPriceChart ? "" : `
           <div class="detail-price num">${fmtUSD(t.price)}</div>
           <div class="detail-delta num" style="color:${t.change24h>=0?'var(--good-500)':'var(--critical-500)'}">${fmtPct(t.change24h)} · ${changeLabelFor(t)}</div>
@@ -8307,7 +8314,7 @@
 
   /* ---------------- real buy/sell (Demo/testnet and Live/mainnet) ----------------
      Only ever wired up when openDetail() set isRealLiquidityToken — a
-     token actually deployed through Hood Launch's own liquidity flow,
+     token actually deployed through IgnitionX's own liquidity flow,
      with a real recorded pair, viewed on whichever network (testnet or
      mainnet) it was actually deployed to. Sends ordinary swaps straight to the same Uniswap V2-style
      router this platform's launch flow already calls
@@ -9430,7 +9437,7 @@
         <div class="curve-options">
           <div class="curve-card ${draft.mode==='just'?'selected':''} ${lockCls('just')}" data-mode="just" style="text-align:left; padding:16px;">
             <div class="name" style="margin-bottom:6px;">🚀 Deploy 0% Tax Token Only</div>
-            <div class="desc">Create and verify — nothing else. 100% of supply goes straight to your wallet. No pool, no tax, no further involvement from Hood Launch. Adding liquidity anywhere, any time, is entirely on you.</div>
+            <div class="desc">Create and verify — nothing else. 100% of supply goes straight to your wallet. No pool, no tax, no further involvement from IgnitionX. Adding liquidity anywhere, any time, is entirely on you.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("just")}</div>
           </div>
           <div class="curve-card ${draft.mode==='customDeploy'?'selected':''} ${lockCls('customDeploy')}" data-mode="customDeploy" style="text-align:left; padding:16px;">
@@ -9484,7 +9491,7 @@
             <div class="review-row"><span class="k">Transfer tax</span><span class="v">None</span></div>
             <div class="review-row"><span class="k">Deploy fee</span><span class="v num">$${DEPLOY_FEE_USD} ≈ ${fmtEthAmt(depFeeEth())} ETH</span></div>
           </div>
-          <div class="hint">There's nothing to configure here — no liquidity, no tax, no LP lock. Once this confirms, the full supply is in your wallet and Hood Launch's involvement ends. Adding liquidity later, anywhere, is entirely up to you. ${ethPriceNote()}.</div>
+          <div class="hint">There's nothing to configure here — no liquidity, no tax, no LP lock. Once this confirms, the full supply is in your wallet and IgnitionX's involvement ends. Adding liquidity later, anywhere, is entirely up to you. ${ethPriceNote()}.</div>
           <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizNext">Continue</button></div>
         `;
       }
@@ -9597,7 +9604,7 @@
       ? `<span><strong>This sends a real transaction on Uniswap V4</strong> from your connected wallet on ${escapeHtml(NETWORKS[appMode].chainName)}, spending the ${totalEth} ETH above (plus gas). I understand the V4 contracts are new, unaudited and admin-only while under development, and I want to launch.</span>`
       : isRealLaunch
       ? `<span><strong>This sends a real transaction</strong> from your connected wallet on ${escapeHtml(NETWORKS[appMode].chainName)}, spending the ${totalEth} ETH above (plus gas). I've reviewed the details and want to launch.</span>`
-      : `<span>I understand Hood Launch is a demo interface — this will not deploy a real token or move real funds.</span>`;
+      : `<span>I understand IgnitionX is a demo interface — this will not deploy a real token or move real funds.</span>`;
     return `
       <h3 style="margin-bottom:18px;">Review &amp; launch</h3>
       ${isRealLaunch && !protoV4 ? `<div class="hint" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:16px;">This network has a live ${factoryLabel} configured — launching here calls the real contract and spends real ETH from your wallet, not a simulation.</div>` : ""}
@@ -10171,7 +10178,7 @@
     tokens.unshift(newToken);
     saveCustomTokens();
     if(isLiquidity){
-      setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on Hood Launch (simulated).`);
+      setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on IgnitionX (simulated).`);
     } else {
       setLaunchStep("live", "done", `✅ $${escapeHtml(newToken.ticker)} is deployed and verified (simulated) — 100% of supply is in your wallet. <strong>It has no liquidity pool yet, so it isn't tradeable.</strong> You'd need to add liquidity yourself (e.g. on Uniswap) to make it live.`);
     }
@@ -10179,7 +10186,7 @@
       ? `🚀 $${newToken.ticker} created and verified — 100% of supply is in your wallet (demo).`
       : (buyInEth>0
           ? `🚀 $${newToken.ticker} launched — pool live and your ${buyInEth} ETH buy-in filled in the same transaction (demo).`
-          : `🚀 $${newToken.ticker} launched with a live pool on Hood Launch, taxed 1.00% to $50,000 MC (demo).`));
+          : `🚀 $${newToken.ticker} launched with a live pool on IgnitionX, taxed 1.00% to $50,000 MC (demo).`));
     appendLaunchActions(newToken);
     renderStats();
     renderGrid();
@@ -10269,7 +10276,7 @@
     tokens.unshift(newToken);
     saveCustomTokens();
     if(addLiquidity){
-      setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on Hood Launch (simulated).`);
+      setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on IgnitionX (simulated).`);
       toast(`🚀 $${newToken.ticker} launched with your own tax configuration on top of the platform's 1.00% (demo).`);
     } else {
       setLaunchStep("live", "done", `✅ $${escapeHtml(newToken.ticker)} is deployed and verified (simulated) — 100% of supply is in your wallet. <strong>It has no liquidity pool yet, so it isn't tradeable and none of your configured tax is active.</strong> You'd need to add liquidity yourself (e.g. on Uniswap) to make it live.`);
@@ -10549,7 +10556,7 @@
     const myTokensHTML = myTokens.length ? `
       <div class="panel" style="margin-bottom:20px;">
         <div class="eyebrow" style="margin-bottom:6px;">Your launches</div>
-        <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 4px;">Tokens you've launched from this wallet. Edit a token's description and social links any time — that's off-chain, display-only metadata on Hood Launch.</p>
+        <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 4px;">Tokens you've launched from this wallet. Edit a token's description and social links any time — that's off-chain, display-only metadata on IgnitionX.</p>
         ${myTokens.map(t=>{
           const lpMeta = t.mode!=="liquidity" ? "" : `
             <div class="mtr-meta" style="margin-top:3px;">
@@ -10594,7 +10601,7 @@
 
     // Portfolio value below is real, not simulated: it's your wallet's
     // actual native balance plus the actual on-chain balanceOf() of any
-    // token you've launched through Hood Launch on the network you're
+    // token you've launched through IgnitionX on the network you're
     // currently connected to. Both require live eth_call/eth_getBalance
     // round-trips through your wallet, so render a loading state first and
     // patch in the real numbers once loadRealPortfolio() resolves — see
@@ -10611,7 +10618,7 @@
 
       <div class="panel">
         <div class="eyebrow" style="margin-bottom:6px;">Holdings</div>
-        <p style="color:var(--paper-500); font-size:.82rem; margin:0 0 10px;">Your wallet's real balance on ${escapeHtml(NETWORKS[appMode].chainName)} — not simulated. A token needs a live pool for Hood Launch to price it; one you hold without a pool yet still shows up with its real balance.</p>
+        <p style="color:var(--paper-500); font-size:.82rem; margin:0 0 10px;">Your wallet's real balance on ${escapeHtml(NETWORKS[appMode].chainName)} — not simulated. A token needs a live pool for IgnitionX to price it; one you hold without a pool yet still shows up with its real balance.</p>
         <div style="overflow-x:auto;">
         <table class="holdings">
           <thead><tr><th>Asset</th><th>Amount</th><th>Price</th><th>Value</th></tr></thead>
@@ -10847,7 +10854,7 @@
     if(totalEl) totalEl.textContent = fmtUSD(total);
     if(bodyEl){
       if(!rows.length){
-        bodyEl.innerHTML = `<tr><td colspan="4" style="color:var(--paper-700);">No ETH or Hood Launch tokens found in this wallet on ${escapeHtml(NETWORKS[appMode].chainName)}.</td></tr>`;
+        bodyEl.innerHTML = `<tr><td colspan="4" style="color:var(--paper-700);">No ETH or IgnitionX tokens found in this wallet on ${escapeHtml(NETWORKS[appMode].chainName)}.</td></tr>`;
       } else {
         bodyEl.innerHTML = rows.map(r=>`<tr>
           <td>${escapeHtml(r.label)} <span style="color:var(--paper-700)">${escapeHtml(r.sub)}</span></td>
@@ -15137,7 +15144,7 @@
      lib/profile.js); saving needs a personal_sign signature from the wallet
      itself. Buys/sells/PNL per wallet are planned for this page later. */
   const PROFILE_NAME_MIN = 2, PROFILE_NAME_MAX = 24;
-  const PROFILE_RESERVED_KEYS = ["admin","administrator","hoodlaunch","hood","official","support","team","staff","moderator","mod","robinhood","system"];
+  const PROFILE_RESERVED_KEYS = ["ignitionx","ignition","admin","administrator","hoodlaunch","hood","official","support","team","staff","moderator","mod","robinhood","system"];
   const PROFILE_AVATAR_MAX_CHARS = 110000; // server limit is 120000
   const PROFILES_POLL_MS = 60000;
   // Must match lib/profile.js normalizeName / validateName / profileMessage exactly.
@@ -15255,7 +15262,7 @@
           for(let i=0;i<8;i++){
             const c = document.createElement("canvas"); c.width = size; c.height = size;
             const ctx = c.getContext("2d");
-            ctx.fillStyle = "#0c0f16"; ctx.fillRect(0,0,size,size);
+            ctx.fillStyle = "#0d0b0b"; ctx.fillRect(0,0,size,size);
             ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
             const url = c.toDataURL("image/jpeg", q);
             if(url.length <= PROFILE_AVATAR_MAX_CHARS){ resolve(url); return; }
@@ -15887,7 +15894,7 @@
     if(d===null){ again.innerHTML = `<p class="pf-soon">Trading stats aren't available — no relayer is configured for this network.</p>`; return; }
     if(d===undefined){ again.innerHTML = `<p class="pf-soon">Couldn't load trading stats right now.</p>`; return; }
     if(!d.overall || !d.tokens.length){
-      again.innerHTML = `<p class="pf-soon">No trades recorded for this wallet yet. Buys and sells on Hood Launch tokens show up here with profit &amp; loss.</p>`;
+      again.innerHTML = `<p class="pf-soon">No trades recorded for this wallet yet. Buys and sells on IgnitionX tokens show up here with profit &amp; loss.</p>`;
       return;
     }
     const o = d.overall;
@@ -15932,7 +15939,7 @@
     if(!body) return;
     if(d===null){ body.innerHTML = `<p class="pf-soon">The leaderboard isn't available — no relayer is configured for this network.</p>`; return; }
     if(d===undefined){ body.innerHTML = `<p class="pf-soon">Couldn't load the leaderboard right now.</p>`; return; }
-    if(!d.entries.length){ body.innerHTML = `<p class="pf-soon">No ranked traders yet. Members who trade Hood Launch tokens will appear here.</p>`; return; }
+    if(!d.entries.length){ body.innerHTML = `<p class="pf-soon">No ranked traders yet. Members who trade IgnitionX tokens will appear here.</p>`; return; }
     const me = (wallet||"").toLowerCase();
     body.innerHTML = `<div class="pnl-tablewrap"><table class="pnl-table lb"><thead><tr><th>#</th><th>Member</th><th>Overall PNL</th><th>Realized</th><th>Unrealized</th><th>Trades</th></tr></thead><tbody>${
       d.entries.map(e=>`<tr class="${e.rank<=3?"top"+e.rank:""} ${e.address===me?"me":""}">
@@ -15988,10 +15995,10 @@
       return;
     }
     render(`
-      <p class="pf-soon" style="margin:0 0 10px;">Call this token publicly. Hood Launch records its price and market cap at the moment you post, and your profile shows how it does from there. One callout per token; you can delete it, but not re-call it for 24 hours.</p>
+      <p class="pf-soon" style="margin:0 0 10px;">Call this token publicly. IgnitionX records its price and market cap at the moment you post, and your profile shows how it does from there. One callout per token; you can delete it, but not re-call it for 24 hours.</p>
       <button class="btn btn-primary" id="coOpen" style="padding:9px 18px;">Call out this token</button>
       <div id="coForm" hidden style="margin-top:12px;">
-        <textarea id="calloutReason" rows="2" maxlength="600" placeholder="Why are you calling it? (optional)" style="width:100%; background:var(--ink-950,#05070b); border:1px solid var(--line-strong); border-radius:var(--radius-sm); color:var(--paper-100); font-family:inherit; font-size:.9rem; padding:10px 12px; resize:vertical;"></textarea>
+        <textarea id="calloutReason" rows="2" maxlength="600" placeholder="Why are you calling it? (optional)" style="width:100%; background:var(--ink-950,#050505); border:1px solid var(--line-strong); border-radius:var(--radius-sm); color:var(--paper-100); font-family:inherit; font-size:.9rem; padding:10px 12px; resize:vertical;"></textarea>
         <div class="cm-bar"><span class="cm-count" id="coCount">0/${COMMENT_MAX}</span><span class="pf-form-msg" id="coMsg" style="margin:0;"></span>
           <button class="btn btn-primary" id="coPost" style="padding:9px 18px;">Post callout</button></div>
       </div>`);
@@ -16028,7 +16035,7 @@
   // random flavor-text verb, a random fake wallet address, on a fixed 4.2s
   // timer — none of it real. This polls the relayer's own
   // GET /activity (see pollTokenActivity in scripts/relayer.js), which
-  // watches real Swap events on every tracked pool — same "real Hood Launch
+  // watches real Swap events on every tracked pool — same "real IgnitionX
   // pools only" scope the price charts already use. Whichever network is
   // active (appMode) decides which relayer/ledger this reads, same as
   // refreshRemoteLaunches/refreshLiveTokenPrices.
@@ -16079,7 +16086,7 @@
     const badge = (t.mode==="curve"||t.mode==="customCurve") ? "⚡ Quick Launch" : "New launch";
     const div = document.createElement("div");
     div.className = "feed-line feed-announce";
-    div.innerHTML = `<span class="t mono">${time}</span><span class="feed-announce-badge">${badge}</span><span class="msg">🚀 <span class="tk">$${escapeHtml(t.ticker)}</span> just launched on Hood Launch — ${escapeHtml(t.name)}${profileNameOf(t.creatorWallet) ? ` · by ${escapeHtml(profileNameOf(t.creatorWallet))}` : ""}</span>`;
+    div.innerHTML = `<span class="t mono">${time}</span><span class="feed-announce-badge">${badge}</span><span class="msg">🚀 <span class="tk">$${escapeHtml(t.ticker)}</span> just launched on IgnitionX — ${escapeHtml(t.name)}${profileNameOf(t.creatorWallet) ? ` · by ${escapeHtml(profileNameOf(t.creatorWallet))}` : ""}</span>`;
     return div;
   }
 
@@ -16232,7 +16239,7 @@
   // Launch tokens — see checkPendingLiquidity() above.
   setInterval(checkPendingLiquidity, 45000);
   checkPendingLiquidity();
-  // Live price tracking for real Hood Launch pools — see
+  // Live price tracking for real IgnitionX pools — see
   // refreshLiveTokenPrices' own comment for exactly what this covers.
   setInterval(refreshLiveTokenPrices, LIVE_TOKEN_POLL_MS);
   refreshLiveTokenPrices();

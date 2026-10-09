@@ -3,14 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Hood Launch documentation — platform features and a step-by-step guide to deploying a token.">
+<meta name="description" content="IgnitionX documentation — platform features and a step-by-step guide to deploying a token.">
 <!-- Same defense-in-depth CSP as index.html: single static file, no
      per-request nonce available, so script-src keeps 'unsafe-inline' and
      relies on this page never writing untrusted input into the DOM (it
      doesn't — every string below is authored here, nothing is fetched or
      interpolated). See index.html's own CSP comment for the full reasoning. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-<title>Docs — Hood Launch</title>
+<title>Docs — IgnitionX</title>
+<link rel="icon" href="brand/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/favicon-32.png">
+<link rel="apple-touch-icon" href="brand/favicon-180.png">
+<meta name="theme-color" content="#050505">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -23,15 +27,15 @@
      ============================================================ */
   :root{
     color-scheme: dark;
-    --ink-950:#06080c; --ink-900:#11161f; --ink-850:#161c28; --ink-800:#1d2431; --ink-700:#2b3244;
-    --line: rgba(170,190,220,.09); --line-strong: rgba(180,200,230,.17);
-    --paper-100:#eef1f8; --paper-300:#c4cade; --paper-500:#8d94ab; --paper-700:#5f6680;
-    --signal-300:#ffcf9e; --signal-500:#ff9d3c; --signal-600:#e2791f; --signal-wash: rgba(255,157,60,.11);
-    --cyan-400:#8fe3f2; --cyan-500:#3dc7de; --cyan-wash: rgba(61,199,222,.11);
+    --ink-950:#050505; --ink-900:#100d0d; --ink-850:#161212; --ink-800:#1d1817; --ink-700:#2f2827;
+    --line: rgba(255,225,215,.09); --line-strong: rgba(255,225,215,.18);
+    --paper-100:#f5f1ef; --paper-300:#d2cac7; --paper-500:#a0979a; --paper-700:#6f6668;
+    --signal-300:#ffb59e; --signal-500:#ff4a1c; --signal-600:#ec4614; --signal-wash: rgba(255,74,28,.11);
+    --cyan-400:#ffc27a; --cyan-500:#ffa03a; --cyan-wash: rgba(255,160,58,.11);
     --good-500:#34dd9c; --good-wash: rgba(52,221,156,.12);
     --critical-500:#f0405f; --critical-wash: rgba(240,64,95,.12);
-    --glow-signal: 0 0 1px rgba(255,157,60,.75), 0 0 11px rgba(255,157,60,.32), 0 0 26px rgba(255,157,60,.11);
-    --glow-cyan: 0 0 1px rgba(61,199,222,.75), 0 0 11px rgba(61,199,222,.28), 0 0 26px rgba(61,199,222,.10);
+    --glow-signal: 0 0 1px rgba(255,74,28,.75), 0 0 11px rgba(255,74,28,.32), 0 0 26px rgba(255,74,28,.11);
+    --glow-cyan: 0 0 1px rgba(255,160,58,.75), 0 0 11px rgba(255,160,58,.28), 0 0 26px rgba(255,160,58,.10);
     --radius-xs: 6px; --radius-sm: 10px; --radius-md: 16px; --radius-lg: 22px;
     --font-display:'Chakra Petch', system-ui, sans-serif;
     --font-body:'IBM Plex Sans', system-ui, -apple-system, sans-serif;
@@ -48,8 +52,8 @@
   body::before{
     content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
     background:
-      radial-gradient(1200px 680px at 82% -8%, rgba(255,157,60,.07), transparent 60%),
-      radial-gradient(1000px 560px at -10% 8%, rgba(61,199,222,.055), transparent 55%),
+      radial-gradient(1200px 680px at 82% -8%, rgba(255,74,28,.07), transparent 60%),
+      radial-gradient(1000px 560px at -10% 8%, rgba(255,160,58,.055), transparent 55%),
       linear-gradient(var(--ink-950), var(--ink-950));
   }
   a{color:inherit;}
@@ -62,18 +66,13 @@
 
   /* ---------------- header ---------------- */
   .hud{
-    position:sticky; top:0; z-index:40; background:rgba(5,7,12,.86); backdrop-filter:blur(14px) saturate(140%);
-    border-bottom:1px solid var(--line-strong); box-shadow:0 1px 0 rgba(61,199,222,.14), 0 20px 40px -24px rgba(0,0,0,.75);
+    position:sticky; top:0; z-index:40; background:rgba(5,5,5,.86); backdrop-filter:blur(14px) saturate(140%);
+    border-bottom:1px solid var(--line-strong); box-shadow:0 1px 0 rgba(255,160,58,.14), 0 20px 40px -24px rgba(0,0,0,.75);
   }
   .hud-inner{max-width:1320px; margin:0 auto; padding:14px 28px; display:flex; align-items:center; gap:20px;}
   .brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; font-size:1.05rem; letter-spacing:.01em; white-space:nowrap; text-decoration:none;}
-  .brand-mark{
-    width:30px; height:30px; flex:none; position:relative;
-    background:linear-gradient(155deg, var(--signal-300), var(--signal-600));
-    clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
-    filter:drop-shadow(0 0 6px rgba(255,157,60,.5)) drop-shadow(0 0 13px rgba(255,157,60,.22));
-  }
-  .brand-mark::after{content:""; position:absolute; left:50%; top:56%; width:6px; height:6px; border-radius:50%; background:var(--ink-950); transform:translate(-50%,-50%);}
+  .brand-logo{height:31px; width:auto; flex:none; filter:drop-shadow(0 0 8px rgba(255,74,28,.35));}
+  .brand-x{color:var(--signal-500); text-shadow:0 0 12px rgba(255,74,28,.45);}
   .brand small{font-family:var(--font-mono); font-weight:500; font-size:.62rem; letter-spacing:.1em; color:var(--paper-500); display:block; margin-top:1px;}
   .hud-spacer{flex:1;}
   .hud-nav{display:flex; gap:2px;}
@@ -91,7 +90,7 @@
   .btn-primary{background:linear-gradient(155deg, var(--signal-500), var(--signal-600)); color:#1a0f04;}
   .btn-primary:hover{background:linear-gradient(155deg, var(--signal-300), var(--signal-500)); box-shadow:var(--glow-signal);}
   .btn-ghost{background:transparent; border-color:var(--line-strong); color:var(--paper-100);}
-  .btn-ghost:hover{border-color:var(--cyan-500); box-shadow:0 0 11px rgba(61,199,222,.16);}
+  .btn-ghost:hover{border-color:var(--cyan-500); box-shadow:0 0 11px rgba(255,160,58,.16);}
   .nav-toggle{display:none; background:transparent; border:1px solid var(--line-strong); color:var(--paper-100); border-radius:var(--radius-xs); padding:8px 10px; cursor:pointer;}
 
   /* ---------------- layout ---------------- */
@@ -127,7 +126,7 @@
   .feature-card{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:20px;}
   .feature-icon{
     width:36px; height:36px; border-radius:var(--radius-sm); display:flex; align-items:center; justify-content:center;
-    font-size:1.05rem; margin-bottom:14px; background:var(--signal-wash); border:1px solid rgba(255,157,60,.3);
+    font-size:1.05rem; margin-bottom:14px; background:var(--signal-wash); border:1px solid rgba(255,74,28,.3);
   }
   .feature-card h3{font-size:1rem; margin-bottom:6px;}
   .feature-card p{font-size:.86rem; margin:0; color:var(--paper-500);}
@@ -142,7 +141,7 @@
   .mode-badge{font-family:var(--font-mono); font-size:.64rem; letter-spacing:.05em; text-transform:uppercase; padding:3px 9px; border-radius:999px; white-space:nowrap;}
   .mode-badge.free{background:var(--good-wash); color:var(--good-500);}
   .mode-badge.eth{background:var(--cyan-wash); color:var(--cyan-400);}
-  .mode-badge.quick{background:var(--signal-wash); color:var(--signal-300); border:1px solid rgba(255,157,60,.35);}
+  .mode-badge.quick{background:var(--signal-wash); color:var(--signal-300); border:1px solid rgba(255,74,28,.35);}
   .mode-card p{font-size:.88rem; margin:0 0 12px;}
   .mode-specs{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px;}
   .mode-specs li{font-size:.8rem; color:var(--paper-500); display:flex; gap:8px;}
@@ -168,10 +167,10 @@
 
   /* ---------------- misc content blocks ---------------- */
   .callout{
-    display:flex; gap:12px; align-items:flex-start; background:var(--cyan-wash); border:1px solid rgba(61,199,222,.3);
+    display:flex; gap:12px; align-items:flex-start; background:var(--cyan-wash); border:1px solid rgba(255,160,58,.3);
     border-radius:var(--radius-md); padding:16px 18px; font-size:.88rem; color:var(--paper-300); margin:18px 0;
   }
-  .callout.warn{background:var(--signal-wash); border-color:rgba(255,157,60,.35);}
+  .callout.warn{background:var(--signal-wash); border-color:rgba(255,74,28,.35);}
   .callout-icon{flex:none; font-size:1.1rem; line-height:1;}
   .callout p{margin:0; color:inherit;}
   .callout b{color:var(--paper-100);}
@@ -224,7 +223,7 @@
 
 <div class="hud">
   <div class="hud-inner">
-    <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true"></span><span>HOOD LAUNCH<small>DOCUMENTATION</small></span></a>
+    <a class="brand" href="index.html"><img class="brand-logo" src="brand/ignitionx-mark.png" alt="" width="36" height="31"><span>IGNITION<b class="brand-x">X</b><small>DOCUMENTATION</small></span></a>
     <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="docsNav">☰ Menu</button>
     <div class="hud-spacer"></div>
     <nav class="hud-nav" aria-label="Docs sections">
@@ -273,8 +272,8 @@
     <section id="overview">
       <div class="doc-hero">
         <span class="eyebrow">Documentation</span>
-        <h1>Everything Hood Launch does, and how to launch a token on it.</h1>
-        <p>Hood Launch is a token-launchpad for Robinhood Chain. This page covers what's on the platform — the live launch feed, the six ways to deploy a token, trading, and the anti-rug protections built into every launch — and walks through deploying a token from start to finish.</p>
+        <h1>Everything IgnitionX does, and how to launch a token on it.</h1>
+        <p>IgnitionX is a token-launchpad for Robinhood Chain. This page covers what's on the platform — the live launch feed, the six ways to deploy a token, trading, and the anti-rug protections built into every launch — and walks through deploying a token from start to finish.</p>
         <div class="doc-hero-cta">
           <a class="btn btn-primary" href="#how-to-deploy">Jump to: How to deploy a token</a>
           <a class="btn btn-ghost" href="#features">See all features</a>
@@ -282,7 +281,7 @@
       </div>
       <div class="callout warn">
         <span class="callout-icon">◆</span>
-        <p><b>Hood Launch is an independent, unofficial interface built for Robinhood Chain.</b> It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
+        <p><b>IgnitionX is an independent, unofficial interface built for Robinhood Chain.</b> It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
       </div>
     </section>
 
@@ -291,7 +290,7 @@
       <p class="section-intro">Three things to know before you do anything else on the platform.</p>
       <div class="table-wrap" style="margin-top:16px;">
         <table class="kv-table">
-          <tr><th>Connect a wallet</th><td>Click <b>Connect Wallet</b> in the top right. Hood Launch talks to whatever wallet your browser has injected (e.g. MetaMask) — no account or sign-up beyond that.</td></tr>
+          <tr><th>Connect a wallet</th><td>Click <b>Connect Wallet</b> in the top right. IgnitionX talks to whatever wallet your browser has injected (e.g. MetaMask) — no account or sign-up beyond that.</td></tr>
           <tr><th>Pick a network</th><td>The network pill next to your wallet shows whether you're on <b>Testnet</b> or <b>Mainnet</b>. This is a platform-wide setting, not a personal preference — everyone browsing sees the same one at the same time.</td></tr>
           <tr><th>Know which one is real</th><td>Testnet uses Robinhood Chain's test network — nothing has real value. Mainnet is the real chain: real ETH, real tokens, real trades. Always check the network pill before sending anything.</td></tr>
         </table>
@@ -518,7 +517,7 @@
 
     <section id="graduation">
       <h2><span class="eyebrow">08</span>Tax &amp; graduation</h2>
-      <p class="section-intro">Every taxed token on Hood Launch is built to tax itself out of existence, not to tax forever.</p>
+      <p class="section-intro">Every taxed token on IgnitionX is built to tax itself out of existence, not to tax forever.</p>
       <ul style="color:var(--paper-300); font-size:.92rem; padding-left:20px; margin:0 0 12px;">
         <li style="margin-bottom:8px;">A <b>Deploy + Add Liquidity</b> or <b>Custom Tax</b> pool starts taxed the instant it launches, and that tax <b>permanently disables itself</b>, forever, the moment the pool's live market cap crosses its target — checked automatically on every taxed trade.</li>
         <li style="margin-bottom:8px;">A <b>Quick Launch</b> token has <b>zero tax</b> while it's trading on the curve. The moment it graduates into a real pool, it opts into that same kind of post-launch tax — which then disables itself the same way, once the (now real) pool's market cap crosses its own target.</li>
@@ -542,7 +541,7 @@
         </div>
         <div class="feature-card">
           <h3>Independently-added pools</h3>
-          <p>If liquidity is ever detected for a token outside Hood Launch's own launch flow, its card says so plainly and its price isn't tracked here — the platform doesn't vouch for a market it didn't create.</p>
+          <p>If liquidity is ever detected for a token outside IgnitionX's own launch flow, its card says so plainly and its price isn't tracked here — the platform doesn't vouch for a market it didn't create.</p>
         </div>
         <div class="feature-card">
           <h3>Testnet vs. Mainnet</h3>
@@ -551,7 +550,7 @@
       </div>
       <div class="callout warn" style="margin-top:20px;">
         <span class="callout-icon">◆</span>
-        <p>Hood Launch is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Launching or trading a token carries real financial risk. Nothing on this page or on the platform is financial advice; review a token's own contract and terms before committing real funds.</p>
+        <p>IgnitionX is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Launching or trading a token carries real financial risk. Nothing on this page or on the platform is financial advice; review a token's own contract and terms before committing real funds.</p>
       </div>
     </section>
 
@@ -579,12 +578,12 @@
           <p>For a taxed pool, it means the tax has permanently switched off — the market cap target was hit and trading is now tax-free for good. For a Quick Launch token specifically, "graduated" also marks the moment it moved off the bonding curve and into a real DEX pool.</p>
         </details>
         <details class="faq-item">
-          <summary>Is Hood Launch affiliated with Robinhood?</summary>
-          <p>No. Hood Launch is an independent, unofficial interface built for Robinhood Chain. It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
+          <summary>Is IgnitionX affiliated with Robinhood?</summary>
+          <p>No. IgnitionX is an independent, unofficial interface built for Robinhood Chain. It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
         </details>
         <details class="faq-item">
           <summary>Is any of this simulated?</summary>
-          <p>Once real contracts are configured for a network, launching, trading, and a taxed/graduated token's own price all reflect genuine on-chain activity — not a simulation. What stays illustrative regardless: holder-count breakdowns, 24h volume shown before any real trades exist, and the price of a pool Hood Launch merely detected rather than created itself.</p>
+          <p>Once real contracts are configured for a network, launching, trading, and a taxed/graduated token's own price all reflect genuine on-chain activity — not a simulation. What stays illustrative regardless: holder-count breakdowns, 24h volume shown before any real trades exist, and the price of a pool IgnitionX merely detected rather than created itself.</p>
         </details>
       </div>
     </section>
@@ -594,7 +593,7 @@
 
 <footer>
   <div class="footer-inner">
-    <p class="footer-note">Hood Launch is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Wallet connection is real (via your browser wallet), and the Demo/Live switch targets testnet or mainnet respectively. Once real factory addresses are configured for a network, launching a token, trading it, and its own price and chart (for a "taxed"/"graduated" token) all reflect genuine on-chain transactions and live pool state, not a simulation — real tokens and funds move. What stays illustrative regardless: the holder breakdown, 24h volume, and the price of any pool Hood Launch merely detected rather than created itself.</p>
+    <p class="footer-note">IgnitionX is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Wallet connection is real (via your browser wallet), and the Demo/Live switch targets testnet or mainnet respectively. Once real factory addresses are configured for a network, launching a token, trading it, and its own price and chart (for a "taxed"/"graduated" token) all reflect genuine on-chain transactions and live pool state, not a simulation — real tokens and funds move. What stays illustrative regardless: the holder breakdown, 24h volume, and the price of any pool IgnitionX merely detected rather than created itself.</p>
     <div class="footer-links"><a href="index.html">App</a><a href="docs.html" aria-current="page">Docs</a><span>Status</span><span>Terms</span></div>
   </div>
 </footer>
