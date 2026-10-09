@@ -213,7 +213,9 @@
   .wallet-btn.connected:hover{box-shadow:var(--glow-cyan);}
 
   @media (max-width: 900px){
-    .tabs{order:3; width:100%;}
+    .tabs{order:3; width:100%; overflow-x:auto; scrollbar-width:none;}
+    .tabs::-webkit-scrollbar{display:none;}
+    .tab{flex:none;}
     .hud-inner{flex-wrap:wrap; row-gap:10px;}
     .net-pill{display:none;}
   }
@@ -348,6 +350,7 @@
   .token-card{
     position:relative; background:var(--ink-900); border:1px solid var(--line); padding:20px; border-radius:var(--radius-lg);
     cursor:pointer; text-align:left; width:100%; color:inherit; transition:border-color .18s, transform .15s, box-shadow .18s;
+    display:flex; flex-direction:column; justify-content:flex-start; /* a <button> centers its content vertically by default — keep every card's logo tile on the same line */
   }
   .token-card:hover{border-color:rgba(255,160,58,.38); transform:translateY(-3px); box-shadow:0 18px 40px -22px rgba(0,0,0,.7), 0 0 16px rgba(255,160,58,.08);}
 
@@ -422,6 +425,62 @@
   }
   .chart-tip .p{color:var(--paper-100); font-weight:600;}
   .chart-tip .d{color:var(--paper-700); margin-top:1px;}
+
+  /* ---- token logo tile (replaces the sparkline on cards + platform spotlight) ---- */
+  .tc-logo{
+    position:relative; height:116px; margin-bottom:14px; border-radius:var(--radius-md); overflow:hidden;
+    display:flex; align-items:center; justify-content:center;
+    border:1px solid var(--line);
+    background:radial-gradient(120px 90px at 50% 50%, rgba(255,74,28,.13), transparent 70%), var(--ink-850);
+  }
+  .tc-logo-img, .tc-logo-ph{
+    width:88px; height:88px; border-radius:var(--radius-md); flex:none; display:block;
+    box-shadow:0 0 0 1px rgba(255,225,215,.12), 0 8px 24px -8px rgba(0,0,0,.8), 0 0 22px rgba(255,74,28,.16);
+  }
+  .tc-logo-img{object-fit:cover; background:var(--ink-800);}
+  .tc-logo-ph{display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:700; font-size:2.1rem; color:#0d0b0b;}
+  .tc-logo-hint{
+    position:absolute; right:10px; bottom:8px; font-family:var(--font-mono); font-size:.6rem; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--paper-500); opacity:0; transform:translateY(3px); transition:opacity .15s, transform .15s;
+  }
+  .token-card:hover .tc-logo-hint, button.tc-logo:hover .tc-logo-hint, button.tc-logo:focus-visible .tc-logo-hint{opacity:1; transform:none; color:var(--signal-300);}
+  button.tc-logo{width:100%; margin:0; padding:0; cursor:pointer; color:inherit; font:inherit; height:150px;}
+  button.tc-logo:hover{border-color:rgba(255,160,58,.38);}
+  button.tc-logo:focus-visible{outline:2px solid var(--signal-500); outline-offset:2px;}
+  .spotlight .tc-logo-img, .spotlight .tc-logo-ph{width:104px; height:104px;}
+
+  /* ---- candlestick chart ---- */
+  .cc{display:block;}
+  .cc-bar{display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:10px;}
+  .cc-tfs{display:flex; gap:4px; flex-wrap:wrap; align-items:center;}
+  .cc-tf{
+    appearance:none; border:1px solid var(--line); background:var(--ink-850); color:var(--paper-500); cursor:pointer;
+    font-family:var(--font-mono); font-size:.68rem; letter-spacing:.04em; padding:4px 10px; border-radius:999px; transition:color .12s, border-color .12s, background .12s;
+  }
+  .cc-tf:hover{color:var(--paper-100); border-color:var(--line-strong);}
+  .cc-tf[aria-pressed="true"]{color:var(--signal-300); border-color:rgba(255,74,28,.55); background:var(--signal-wash);}
+  .cc-meta{font-family:var(--font-mono); font-size:.64rem; color:var(--paper-700); letter-spacing:.04em;}
+  .cc-body{position:relative; padding-right:68px;}
+  .cc-plot{position:relative; height:100%; touch-action:pan-y; cursor:crosshair; border-left:1px solid var(--line); border-bottom:1px solid var(--line);}
+  .chart-wrap .cc-plot svg, .spotlight .chart-wrap .cc-plot svg{width:100%; height:100%; display:block; overflow:hidden;}
+  .cc-y{position:absolute; left:100%; padding-left:8px; transform:translateY(-50%); font-family:var(--font-mono); font-size:.62rem; color:var(--paper-700); white-space:nowrap; pointer-events:none;}
+  .cc-last{position:absolute; left:100%; margin-left:2px; transform:translateY(-50%); font-family:var(--font-mono); font-size:.62rem; font-weight:600; color:#0d0b0b; padding:2px 5px; border-radius:3px; white-space:nowrap; pointer-events:none;}
+  .cc-vline, .cc-hline{position:absolute; pointer-events:none; opacity:0; background:rgba(255,225,215,.22);}
+  .cc-vline{top:0; bottom:0; width:1px;}
+  .cc-hline{left:0; right:0; height:1px;}
+  .cc-tip{
+    position:absolute; top:6px; pointer-events:none; opacity:0; transition:opacity .08s; z-index:2;
+    background:var(--ink-800); border:1px solid var(--line-strong); border-radius:var(--radius-xs); padding:7px 10px;
+    font-family:var(--font-mono); font-size:.68rem; line-height:1.5; white-space:nowrap; transform:translateX(-50%);
+  }
+  .cc-tip .t{color:var(--paper-500); margin-bottom:2px;}
+  .cc-tip .r{display:flex; justify-content:space-between; gap:14px;}
+  .cc-tip .r span:first-child{color:var(--paper-700);}
+  .cc-x{position:relative; height:16px; margin:5px 68px 0 0; font-family:var(--font-mono); font-size:.6rem; color:var(--paper-700);}
+  .cc-x span{position:absolute; top:0; transform:translateX(-50%); white-space:nowrap;}
+  .cc-x span:first-child{transform:none;}
+  .cc-x span:last-child{transform:translateX(-100%);}
+  .cc-empty{padding:34px 0; text-align:center; color:var(--paper-500); font-size:.84rem;}
 
   /* Neon glow on every price line/sparkline site-wide. Every chart path/
      circle in this file is drawn with an inline stroke/fill of literally
@@ -7262,6 +7321,19 @@
         <div class="bond-track"><div class="bond-fill" style="width:${lpElapsedPct(t)}%; background:linear-gradient(90deg, var(--good-500), var(--cyan-400))"></div><div class="bond-ticks"></div></div>
       </div>`;
   }
+  // Big logo tile shown on the main-screen cards in place of the old
+  // sparkline. Falls back to the ticker's first two letters on the token's
+  // category color when no logo was uploaded. The chart lives on the token's
+  // own page, one click away.
+  function tcLogoTileHTML(t, hint){
+    const initials = escapeHtml((t.ticker||"??").slice(0,2));
+    const catColor = escapeHtml(t.catColor||"var(--signal-500)");
+    const safeLogo = safeImageSrc(t.logo);
+    const inner = safeLogo
+      ? `<img class="tc-logo-img" src="${safeLogo}" alt="">`
+      : `<div class="tc-logo-ph" style="background:${catColor}">${initials}</div>`;
+    return `<div class="tc-logo">${inner}${hint ? `<span class="tc-logo-hint">${hint}</span>` : ""}</div>`;
+  }
   function tokenCardHTML(t){
     const isCreatorHeld = t.status==="creator-held";
     const isPoolDetected = t.status==="pool-detected";
@@ -7288,8 +7360,8 @@
           ? "Trading live on the bonding curve on its own network — switch networks (or check back once it's really deployed) to see its live price here."
           : "Deployed and verified — 100% of supply is in the creator's wallet. No pool exists here.";
     return `
+      ${tcLogoTileHTML(t, noSimulatedMarket ? "" : "View chart ›")}
       <div class="tc-head">
-        ${tcMarkHTML(t)}
         <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)} ${protoBadgeHTML(t, "margin-left:4px;")}${profileNameOf(t.creatorWallet) ? `<span class="tc-by" title="Created by ${escapeHtml(profileNameOf(t.creatorWallet))}">by ${escapeHtml(profileNameOf(t.creatorWallet))}</span>` : ""}</div></div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px; margin-left:auto;">
           ${(!noSimulatedMarket && t.mcap>0) ? `<div class="tc-mcap"><span class="l">Mcap</span>${fmtUSD(t.mcap)}</div>` : ""}
@@ -7300,8 +7372,7 @@
       <p class="tc-desc">${escapeHtml(t.desc)}</p>
       ${noSimulatedMarket
         ? `<div class="empty" style="padding:20px 14px; margin-bottom:14px; font-size:.78rem;">${emptyText}</div>`
-        : `<div class="tc-spark">${sparkSVG(t.hist, {color: t.change24h>=0 ? "var(--good-500)" : "var(--critical-500)"})}</div>
-      <div class="tc-metrics">
+        : `<div class="tc-metrics">
         <div class="m"><div class="v num">${fmtUSD(t.price)}</div><div class="l">Price</div></div>
         <div class="m"><div class="v num" style="color:${t.change24h>=0?'var(--good-500)':'var(--critical-500)'}">${fmtPct(t.change24h)}</div><div class="l">${changeLabelFor(t)}</div></div>
       </div>`}
@@ -7871,8 +7942,6 @@
           ${isLiveTrackedToken(t) ? `<div class="hint" style="margin-top:2px;">Live price, sampled from this pool's own reserves${t.livePriceUpdatedAt ? ` · updated ${fmtAgo(Date.now()-t.livePriceUpdatedAt)}` : ""}.</div>` : ""}
 
           <div class="chart-wrap" id="chartWrap">
-            ${detailChartSVG(hist)}
-            <div class="chart-tip" id="chartTip"><div class="p"></div><div class="d"></div></div>
           </div>`}
 
           ${progressHTML}
@@ -7921,6 +7990,8 @@
 
     initComments(t);
     initCalloutBox(t);
+
+    mountCandleChart(document.getElementById("chartWrap"), t);
 
     const detailEditBtn = document.getElementById("detailEditBtn");
     if(detailEditBtn) detailEditBtn.addEventListener("click", ()=> openEditToken(t.id) );
@@ -8944,6 +9015,191 @@
     return state;
   }
 
+
+  /* ---------------- candlestick chart ----------------
+     The relayer records {t, p} price samples about once a minute (see
+     lib/priceHistoryStore.js). Candles are built here by bucketing those
+     samples into fixed time frames: open = previous candle's close (so
+     candles connect, like a normal exchange chart), close = last sample in
+     the bucket, high/low = extremes of the bucket. A bucket with no sample
+     becomes a flat candle at the previous close. Up candles are green, down
+     candles red. Volume isn't recorded per sample, so none is drawn. */
+  const CANDLE_FRAMES = [["1m",60000],["5m",300000],["15m",900000],["1h",3600000],["4h",14400000]];
+  const CANDLE_MAX = 90;      // most candles ever drawn
+  const CANDLE_MIN_SLOTS = 40; // candles are right-aligned in at least this many slots, so a young chart doesn't draw a few giant candles
+  let candleFramePref = "auto"; // survives the detail view re-rendering on each price refresh
+  let spotlightShowChart = false; // platform-token spotlight: false = logo tile, true = chart
+
+  function pricePointsFor(t){
+    const lp = (t && Array.isArray(t.livePriceHistory))
+      ? t.livePriceHistory.filter(pt=>pt && isFinite(pt.t) && isFinite(pt.p) && pt.p>0) : [];
+    if(lp.length) return lp;
+    // Demo/simulated tokens only carry a bare list of prices — spread them one hour apart ending now.
+    const h = (t && Array.isArray(t.hist)) ? t.hist.filter(v=>isFinite(v) && v>0) : [];
+    if(h.length<2) return [];
+    const now = Date.now();
+    return h.map((p,i)=>({ t: now-(h.length-1-i)*3600000, p }));
+  }
+  function buildCandles(points, step){
+    if(!points.length) return [];
+    const pts = points.slice().sort((a,b)=>a.t-b.t);
+    const buckets = new Map();
+    for(const pt of pts){
+      const k = Math.floor(pt.t/step)*step;
+      const b = buckets.get(k);
+      if(!b) buckets.set(k, {o:pt.p, h:pt.p, l:pt.p, c:pt.p, n:1});
+      else { if(pt.p>b.h) b.h=pt.p; if(pt.p<b.l) b.l=pt.p; b.c=pt.p; b.n++; }
+    }
+    const keys = [...buckets.keys()].sort((a,b)=>a-b);
+    const last = keys[keys.length-1];
+    const startK = Math.max(keys[0], last-(CANDLE_MAX-1)*step);
+    let prevClose = null;
+    for(const k of keys){ if(k<startK) prevClose = buckets.get(k).c; }
+    const out = [];
+    for(let k=startK; k<=last; k+=step){
+      const b = buckets.get(k);
+      if(b){
+        const o = prevClose==null ? b.o : prevClose;
+        out.push({ t:k, o, h:Math.max(b.h,o), l:Math.min(b.l,o), c:b.c, n:b.n });
+        prevClose = b.c;
+      } else if(prevClose!=null){
+        out.push({ t:k, o:prevClose, h:prevClose, l:prevClose, c:prevClose, n:0 });
+      }
+    }
+    return out;
+  }
+  function autoCandleFrame(points){
+    if(!points.length) return CANDLE_FRAMES[1];
+    let lo=Infinity, hi=-Infinity;
+    for(const pt of points){ if(pt.t<lo) lo=pt.t; if(pt.t>hi) hi=pt.t; }
+    const span = hi-lo;
+    // smallest frame that needs at most ~1.5x the candle cap (older candles simply scroll off the left)
+    for(const f of CANDLE_FRAMES){ if(span/f[1] <= CANDLE_MAX*1.5) return f; }
+    return CANDLE_FRAMES[CANDLE_FRAMES.length-1];
+  }
+  function fmtAxisPrice(v, range){
+    if(v>=1e6) return fmtUSD(v);
+    const r = range>0 ? range : Math.abs(v)*0.05 || 1e-9;
+    const dec = Math.min(12, Math.max(2, Math.ceil(-Math.log10(r/4))+1));
+    return "$"+v.toFixed(dec);
+  }
+  function fmtCandleTime(ms, step, full){
+    const d = new Date(ms);
+    const time = d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    const day = d.toLocaleDateString([], {month:"short", day:"numeric"});
+    return (full || step>=3600000) ? `${day} ${time}` : time;
+  }
+
+  // Draws the chart into `container`. `src` is anything pricePointsFor accepts
+  // (a token record, or just {livePriceHistory}). opts.onBack adds a "Logo"
+  // button (used by the platform-token panel to swap back to its logo tile).
+  function mountCandleChart(container, src, opts){
+    if(!container) return;
+    opts = opts || {};
+    const W = 600, H = 240;
+    const bodyH = opts.compact ? 180 : 270;
+    function render(){
+      const points = pricePointsFor(src);
+      if(!points.length){
+        container.innerHTML = `<div class="cc-empty">No price data recorded yet — candles appear once this token's price has been sampled.</div>`;
+        return;
+      }
+      const frame = candleFramePref==="auto" ? autoCandleFrame(points) : (CANDLE_FRAMES.find(f=>f[0]===candleFramePref) || autoCandleFrame(points));
+      const step = frame[1];
+      const candles = buildCandles(points, step);
+      const n = candles.length;
+      let lo = Math.min(...candles.map(c=>c.l)), hi = Math.max(...candles.map(c=>c.h));
+      if(!(hi>lo)){ const pad = (hi||1e-9)*0.05; lo -= pad; hi += pad; }
+      const pad = (hi-lo)*0.08; lo -= pad; hi += pad;
+      lo = Math.max(lo, 0);
+      const range = hi-lo;
+      const yOf = v => (1-(v-lo)/range)*H;
+      const slot = W/Math.max(n, CANDLE_MIN_SLOTS);
+      const bodyW = slot*0.68;
+      const xOf = i => W-(n-i-0.5)*slot;
+      let grid = "", ylabels = "";
+      [0.2,0.4,0.6,0.8].forEach(f=>{
+        grid += `<line x1="0" x2="${W}" y1="${(f*H).toFixed(1)}" y2="${(f*H).toFixed(1)}" stroke="rgba(255,225,215,.06)" stroke-width="1" vector-effect="non-scaling-stroke"></line>`;
+        ylabels += `<span class="cc-y" style="top:${f*100}%">${fmtAxisPrice(hi-f*range, range)}</span>`;
+      });
+      let bars = "";
+      candles.forEach((c,i)=>{
+        const up = c.c>=c.o, col = up ? "var(--good-500)" : "var(--critical-500)";
+        const x = xOf(i), yo = yOf(c.o), yc = yOf(c.c);
+        const top = Math.min(yo,yc), h = Math.max(Math.abs(yo-yc), 1.3);
+        bars += `<line x1="${x.toFixed(2)}" x2="${x.toFixed(2)}" y1="${yOf(c.h).toFixed(2)}" y2="${yOf(c.l).toFixed(2)}" stroke="${col}" stroke-width="1.2" vector-effect="non-scaling-stroke"></line>`
+              + `<rect x="${(x-bodyW/2).toFixed(2)}" y="${top.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${h.toFixed(2)}" fill="${col}"></rect>`;
+      });
+      const lastC = candles[n-1], lastUp = lastC.c>=lastC.o;
+      const lastCol = lastUp ? "var(--good-500)" : "var(--critical-500)";
+      const lastY = yOf(lastC.c);
+      const lastLine = `<line x1="0" x2="${W}" y1="${lastY.toFixed(1)}" y2="${lastY.toFixed(1)}" stroke="${lastCol}" stroke-width="1" stroke-dasharray="3 4" opacity=".7" vector-effect="non-scaling-stroke"></line>`;
+      const lastTag = `<span class="cc-last" style="top:${(lastY/H*100).toFixed(2)}%; background:${lastCol}">${fmtAxisPrice(lastC.c, range)}</span>`;
+      // five time labels along the candle span
+      let xl = "";
+      const labelIdx = n>1 ? [0,1,2,3,4].map(k=>Math.round(k*(n-1)/4)) : [0];
+      const x0 = W-n*slot; // left edge of the first candle's slot
+      [...new Set(labelIdx)].forEach(i=>{
+        const pct = (xOf(i)/W*100);
+        xl += `<span style="left:${pct.toFixed(2)}%">${fmtCandleTime(candles[i].t, step, false)}</span>`;
+      });
+      const tfBtns = CANDLE_FRAMES.map(f=>`<button type="button" class="cc-tf" data-tf="${f[0]}" aria-pressed="${f[0]===frame[0]}">${f[0]}</button>`).join("");
+      container.innerHTML = `
+        <div class="cc">
+          <div class="cc-bar">
+            <div class="cc-tfs">${opts.onBack ? `<button type="button" class="cc-tf" data-back="1" title="Back to the token logo">← Logo</button>` : ""}${tfBtns}</div>
+            <div class="cc-meta">${n} candle${n===1?"":"s"} · ${frame[0]}</div>
+          </div>
+          <div class="cc-body" style="height:${bodyH}px">
+            <div class="cc-plot" data-cc-plot>
+              <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Candlestick price chart, ${frame[0]} candles">${grid}${lastLine}${bars}</svg>
+              ${ylabels}${lastTag}
+              <div class="cc-vline"></div><div class="cc-hline"></div>
+              <div class="cc-tip"></div>
+            </div>
+          </div>
+          <div class="cc-x">${xl}</div>
+        </div>`;
+      container.querySelectorAll(".cc-tf[data-tf]").forEach(b=>{
+        b.addEventListener("click", ev=>{ ev.stopPropagation(); candleFramePref = b.dataset.tf; render(); });
+      });
+      const back = container.querySelector("[data-back]");
+      if(back) back.addEventListener("click", ev=>{ ev.stopPropagation(); opts.onBack(); });
+      // hover / touch
+      const plot = container.querySelector("[data-cc-plot]");
+      const vline = plot.querySelector(".cc-vline"), hline = plot.querySelector(".cc-hline"), tip = plot.querySelector(".cc-tip");
+      function show(evt){
+        const rect = plot.getBoundingClientRect();
+        if(!rect.width) return;
+        const xu = (evt.clientX-rect.left)/rect.width*W;
+        let i = Math.round((xu-(W-n*slot))/slot-0.5);
+        i = Math.max(0, Math.min(n-1, i));
+        const c = candles[i];
+        const xp = xOf(i)/W*100;
+        const yp = Math.max(0, Math.min(100, (evt.clientY-rect.top)/rect.height*100));
+        vline.style.left = xp+"%"; vline.style.opacity = "1";
+        hline.style.top = yp+"%"; hline.style.opacity = "1";
+        const chg = c.o>0 ? (c.c-c.o)/c.o*100 : 0;
+        const col = c.c>=c.o ? "var(--good-500)" : "var(--critical-500)";
+        tip.style.left = `clamp(78px, ${xp}%, calc(100% - 78px))`;
+        tip.innerHTML = `<div class="t">${escapeHtml(fmtCandleTime(c.t, step, true))}</div>`
+          + `<div class="r"><span>O</span><span>${fmtUSD(c.o)}</span></div>`
+          + `<div class="r"><span>H</span><span>${fmtUSD(c.h)}</span></div>`
+          + `<div class="r"><span>L</span><span>${fmtUSD(c.l)}</span></div>`
+          + `<div class="r"><span>C</span><span style="color:${col}">${fmtUSD(c.c)}</span></div>`
+          + `<div class="r"><span>Chg</span><span style="color:${col}">${fmtPct(chg)}</span></div>`;
+        tip.style.opacity = "1";
+      }
+      function hide(){ vline.style.opacity="0"; hline.style.opacity="0"; tip.style.opacity="0"; }
+      plot.addEventListener("mousemove", show);
+      plot.addEventListener("mouseleave", hide);
+      plot.addEventListener("touchstart", e=>{ if(e.touches[0]) show(e.touches[0]); }, {passive:true});
+      plot.addEventListener("touchmove", e=>{ if(e.touches[0]) show(e.touches[0]); }, {passive:true});
+      plot.addEventListener("touchend", hide);
+    }
+    render();
+  }
+
   function detailChartSVG(hist){
     const w=600,h=220; const min=Math.min(...hist), max=Math.max(...hist); const range=(max-min)||1;
     const pts = hist.map((v,i)=>[ (i/(hist.length-1))*w, h - ((v-min)/range)*h*0.82 - h*0.09 ]);
@@ -9151,7 +9407,19 @@
     priceEl.textContent = fmtUSD(latest.p);
     deltaEl.textContent = `${fmtPct(change.pct)} · ${change.spansFullDay ? "24h" : "since tracking began"}`;
     deltaEl.style.color = change.pct>=0 ? "var(--good-500)" : "var(--critical-500)";
-    chartWrap.innerHTML = spotlightChartSVG(hist);
+    // Logo tile by default; click it for the candlestick chart (and "← Logo" to go back).
+    const knownTok = tokens.find(x=>x.tokenAddress && x.tokenAddress.toLowerCase()===String(tokenAddress).toLowerCase());
+    const spotLogo = safeImageSrc(knownTok && knownTok.logo) || "brand/ignitionx-badge.png";
+    const showSpotlightLogo = ()=>{
+      spotlightShowChart = false;
+      chartWrap.innerHTML = `<button type="button" class="tc-logo" aria-label="Show price chart for ${escapeHtml(name || "this token")}"><img class="tc-logo-img" src="${spotLogo}" alt=""><span class="tc-logo-hint">View chart ›</span></button>`;
+      chartWrap.querySelector("button").addEventListener("click", showSpotlightChart);
+    };
+    const showSpotlightChart = ()=>{
+      spotlightShowChart = true;
+      mountCandleChart(chartWrap, { livePriceHistory: history }, { compact:true, onBack: showSpotlightLogo });
+    };
+    if(spotlightShowChart) showSpotlightChart(); else showSpotlightLogo();
     panel.hidden = false;
   }
 
