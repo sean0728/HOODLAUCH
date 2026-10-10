@@ -231,6 +231,7 @@ describe("public launching over HTTP", () => {
   const admin = Wallet.createRandom();
   const CFG = randAddr();
   let mem, srv, base, calls, verifyLaunchResult, verifySupplyResult;
+  let announced = [], announceFails = false;
   let claimerResult = { ok: false, retryable: false, reason: "no platform config on this test network" };
   const sendJson = (res, status, body) => res.status(status).type("application/json").send(JSON.stringify(body));
   const pre = "publictest-solana-devnet";
@@ -250,6 +251,7 @@ describe("public launching over HTTP", () => {
     api.registerSolanaRoutes(a, {
       sendJson, verifyAdminSignature: (m, s) => verifySignatureFrom(m, s, admin.address), isFreshTimestamp,
       logger: { log() {}, warn() {}, error() {} }, env: { PUBLIC_BASE_URL: "https://ix.example" }, startTracker: false, store: testStore, limits,
+      announceLaunch: async (l) => { announced.push(l); if (announceFails) throw new Error("telegram down"); },
       readPlatformClaimer: async (args) => { calls.push(["readPlatformClaimer", args]); return claimerResult; },
       verifyLaunch: async (args) => { calls.push(["verifyLaunch", args]); return verifyLaunchResult; },
       verifySupplyConfig: async (args) => { calls.push(["verifySupply", args]); return verifySupplyResult; },
@@ -458,6 +460,34 @@ describe("public launching over HTTP", () => {
       verifyLaunchResult = { ok: true, config: CFG, standard: true };
       assert.strictEqual((await call("POST", "/solana/launches", await regBody(stranger, m.id))).status, 403);
     } finally { claimerResult = { ok: false, retryable: false, reason: "no platform config on this test network" }; base = prev; await new Promise((r) => sv.close(r)); }
+  });
+
+  it("a new launch is announced once (not on re-registration), and a failing announcement never breaks registration", async () => {
+    const { sv, base: b2 } = await boot({ ...publicOn });
+    const prev = base; base = b2;
+    try {
+      const w = makeSolWallet();
+      const m = await metaBody(w, { name: "Ann Coin", symbol: "ANN" });
+      await call("POST", "/solana/metadata", m);
+      verifyLaunchResult = { ok: true, config: CFG, standard: true };
+      announced = [];
+      const b = await regBody(w, m.id);
+      const r = await call("POST", "/solana/launches", b);
+      assert.strictEqual(r.status, 200);
+      await new Promise((x) => setTimeout(x, 30));
+      assert.strictEqual(announced.length, 1);
+      assert.deepStrictEqual({ mint: announced[0].mint, name: announced[0].name, symbol: announced[0].symbol, cluster: announced[0].cluster, creator: announced[0].creator }, { mint: b.mint, name: "Ann Coin", symbol: "ANN", cluster: "devnet", creator: w.address });
+      // the same mint again: already listed -> nothing new to announce
+      assert.strictEqual((await call("POST", "/solana/launches", await regBody(w, m.id, { mint: b.mint }))).status, 200);
+      await new Promise((x) => setTimeout(x, 30));
+      assert.strictEqual(announced.length, 1);
+      // a throwing announcer doesn't turn a good registration into an error
+      announceFails = true;
+      const m2 = await metaBody(w, { name: "Ann Two", symbol: "ANN2" });
+      await call("POST", "/solana/metadata", m2);
+      const r2 = await call("POST", "/solana/launches", await regBody(w, m2.id));
+      assert.strictEqual(r2.status, 200);
+    } finally { announceFails = false; base = prev; await new Promise((r) => sv.close(r)); }
   });
 
   it("OFF: if the platform wallet can't be read right now the request is refused (503 when retryable) — never let through", async () => {

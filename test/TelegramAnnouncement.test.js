@@ -49,7 +49,7 @@ describe("Telegram integration", function () {
       "process",
       "ROBINHOOD_NETWORKS",
       "upsertTrackedToken",
-      `${code}\nreturn { sendTelegramMessage, announceLaunchToTelegram, announceMilestoneToTelegram, buildMilestoneMessage, escapeTelegramHtml };`
+      `${code}\nreturn { sendTelegramMessage, announceSolanaLaunchToTelegram, announceLaunchToTelegram, announceMilestoneToTelegram, buildMilestoneMessage, escapeTelegramHtml };`
     );
     api = factory(
       fakeHttps,
@@ -101,6 +101,21 @@ describe("Telegram integration", function () {
     assert.ok(t.includes("$X&amp;Y"), t);
     assert.ok(t.includes("⚡ Quick Launch via BondingCurveFactory"), t);
     assert.ok(t.includes("https://explorer.example/address/0xAbC"), t);
+  });
+
+  it("announces a Solana Quick Launch to the same channel, escaped, with the Solana explorer link", async () => {
+    await api.announceSolanaLaunchToTelegram({ mint: "MintAddr111", name: "Sol<Cat>", symbol: "S&C", cluster: "devnet" });
+    assert.strictEqual(received.length, 1);
+    assert.strictEqual(received[0].body.chat_id, "-1001");
+    const t = received[0].body.text;
+    assert.ok(t.startsWith("🚀 New launch: <b>Sol&lt;Cat&gt;</b> ($S&amp;C)"), t);
+    assert.ok(t.includes("Quick Launch on Solana devnet (testnet) via Meteora"), t);
+    assert.ok(t.includes("<code>MintAddr111</code>") && t.includes("https://explorer.solana.com/address/MintAddr111?cluster=devnet"), t);
+    await api.announceSolanaLaunchToTelegram({ mint: "MintAddr222", name: "Main", symbol: "MN", cluster: "mainnet-beta" });
+    const m = received[1].body.text;
+    assert.ok(m.includes("Solana mainnet") && m.includes("https://explorer.solana.com/address/MintAddr222") && !m.includes("cluster=devnet"), m);
+    await api.announceSolanaLaunchToTelegram(null); // never throws on junk
+    assert.strictEqual(received.length, 2);
   });
 
   it("labels plain launches by pool presence and skips quietly when unconfigured", async () => {
