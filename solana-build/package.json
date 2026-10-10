@@ -3,10 +3,11 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Builds public/vendor/ignitionx-solana.js — self-hosted Solana wallet-standard + Meteora Dynamic Bonding Curve helpers (devnet prototype).",
+  "description": "Builds public/vendor/ignitionx-solana.js \u2014 self-hosted Solana wallet-standard + Meteora Dynamic Bonding Curve helpers (devnet prototype).",
   "scripts": {
     "build": "esbuild entry.js --bundle --minify --format=iife --platform=browser --target=es2020 --inject:./buffer-shim.js --define:global=globalThis --define:process.env.NODE_ENV='\"production\"' --legal-comments=none --outfile=../public/vendor/ignitionx-solana.js",
-    "test": "node test/core.test.mjs"
+    "test": "node test/core.test.mjs",
+    "build:node": "esbuild node-entry.cjs --bundle --minify --platform=node --target=node18 --format=cjs --external:bufferutil --external:utf-8-validate --legal-comments=none --outfile=../lib/vendor/solana-node.js"
   },
   "dependencies": {
     "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
