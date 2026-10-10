@@ -691,6 +691,25 @@ describe("pollAllOnce / start / stop", () => {
     assert.strictEqual(warns.length, 2);
   });
 
+  it("the sampling pass drives the Telegram milestones (filled, then graduated, each once)", async () => {
+    const launch = { mint: "mile1", pool: "pool-mile1", symbol: "MIL", name: "Mile", cluster: "devnet", createdAt: 1_000_000 - 60000 };
+    const rec = { ...launch };
+    let pool = { ...POOL };
+    const fired = [];
+    const ctx = {
+      client: { state: { getPool: async () => pool, getPoolConfig: async () => CFG } },
+      logger: quietLogger,
+      store: { listLaunches: async () => [{ ...rec }], patchLaunch: async (m, patch) => Object.assign(rec, patch) },
+      onMilestone: async (m) => { fired.push(m); },
+      deps: { getPriceFromSqrtPrice: () => bn("1"), appendPricePoint: async () => true, now: () => 1_000_000, configCache: new Map() },
+    };
+    await tracker.pollAllOnce(ctx);
+    assert.deepStrictEqual(fired, []);
+    pool = { ...POOL, isMigrated: 1 };
+    await tracker.pollAllOnce(ctx); await tracker.pollAllOnce(ctx);
+    assert.deepStrictEqual(fired, ["graduated"]);
+  });
+
   it("survives the launch list being unreadable", async () => {
     const warns = [];
     const ctx = {
@@ -1305,5 +1324,91 @@ describe("trade detection from a pool's vaults (swapFromTransaction / sampleTrad
     assert.strictEqual(await tracker.sampleTradesOnce(ctx2, launch, POOL), 0);
     assert.strictEqual(seenUntil[2], sellSig);
     assert.strictEqual(written.length, 2);
+  });
+});
+
+describe("Telegram milestones (checkMilestones) and patchLaunch", () => {
+  const launchStore = require("../lib/launchStore");
+  function harness(launch0, { failOn } = {}) {
+    const rec = { ...launch0 };
+    const saved = [];
+    const fired = [];
+    const store = { patchLaunch: async (mint, patch) => { Object.assign(rec, patch); saved.push({ ...patch }); return rec; } };
+    let nowMs = Date.now();
+    const ctx = {
+      store, network: "solana-devnet", logger: quietLogger, deps: { now: () => nowMs },
+      onMilestone: async (m, l) => {
+        fired.push({ m, flagSavedFirst: !!(m === "filled" ? rec.filledAnnouncedAt : rec.graduatedAnnouncedAt), l });
+        if (failOn === m) throw new Error("telegram down");
+      },
+    };
+    const pass = (progressPct, migrated = false) => tracker.checkMilestones(ctx, { ...rec }, { progressPct, migrated });
+    return { rec, fired, pass, setNow: (n) => { nowMs = n; }, saved };
+  }
+  const fresh = () => ({ mint: randAddr(), symbol: "MS", name: "Mile Stone", cluster: "devnet", createdAt: Date.now() - 60_000 });
+
+  it("posts 'filled' once when the curve fills, then 'graduated' once on migration", async () => {
+    const h = harness(fresh());
+    await h.pass(10); await h.pass(55);
+    assert.strictEqual(h.fired.length, 0);
+    await h.pass(100); await h.pass(100); await h.pass(100);
+    assert.deepStrictEqual(h.fired.map((f) => f.m), ["filled"]);
+    await h.pass(100, true); await h.pass(100, true);
+    assert.deepStrictEqual(h.fired.map((f) => f.m), ["filled", "graduated"]);
+    assert.strictEqual(h.fired[1].l.mint, h.rec.mint);
+  });
+
+  it("the 'already sent' flag is saved BEFORE the post goes out (at-most-once)", async () => {
+    const h = harness(fresh());
+    await h.pass(100);
+    assert.strictEqual(h.fired[0].flagSavedFirst, true);
+  });
+
+  it("a brand-new token first seen already migrated posts only 'graduated' (never a late 'filled')", async () => {
+    const h = harness(fresh());
+    await h.pass(100, true);
+    assert.deepStrictEqual(h.fired.map((f) => f.m), ["graduated"]);
+    await h.pass(100, true);
+    assert.strictEqual(h.fired.length, 1);
+  });
+
+  it("no backlog flood: an old launch that is already past a milestone when first seen is recorded, not announced", async () => {
+    const h = harness({ ...fresh(), createdAt: Date.now() - 3 * 24 * 3600 * 1000 });
+    await h.pass(100, false);
+    assert.strictEqual(h.fired.length, 0);
+    assert.strictEqual(h.rec.filledAnnouncedAt, "baseline");
+    await h.pass(100, false);
+    assert.strictEqual(h.fired.length, 0);
+    await h.pass(100, true); // a transition seen afterwards IS announced
+    assert.deepStrictEqual(h.fired.map((f) => f.m), ["graduated"]);
+  });
+
+  it("a failing post never throws out of the pass and is not retried (flag already saved)", async () => {
+    const h = harness(fresh(), { failOn: "filled" });
+    await h.pass(100);
+    assert.strictEqual(h.fired.length, 1);
+    await h.pass(100);
+    assert.strictEqual(h.fired.length, 1);
+  });
+
+  it("does nothing without a milestone handler (Telegram not wired)", async () => {
+    const store = { patchLaunch: async () => { throw new Error("must not be called"); } };
+    await tracker.checkMilestones({ store, logger: quietLogger }, fresh(), { progressPct: 100, migrated: true });
+  });
+
+  it("patchLaunch merges bookkeeping fields, leaves the main ledger alone, and ignores unknown mints", async () => {
+    const meta = await call("POST", "/solana/metadata", await signedMetadata());
+    const mint = randAddr();
+    assert.strictEqual((await call("POST", "/solana/launches", await signedLaunch({ mint, metadataId: meta.json.id }))).status, 200);
+    const before = (await launchStore.readLedger("robinhoodTestnet")).filter((e) => e.tokenAddress === mint);
+    const updated = await store.patchLaunch(mint, { filledAnnouncedAt: "2026-01-01T00:00:00.000Z" });
+    assert.strictEqual(updated.filledAnnouncedAt, "2026-01-01T00:00:00.000Z");
+    assert.strictEqual((await store.getLaunch(mint)).filledAnnouncedAt, "2026-01-01T00:00:00.000Z");
+    assert.strictEqual((await store.getLaunch(mint)).name, "Test Coin");
+    assert.deepStrictEqual((await launchStore.readLedger("robinhoodTestnet")).filter((e) => e.tokenAddress === mint), before);
+    assert.strictEqual(await store.patchLaunch(randAddr(), { x: 1 }), null);
+    // the public list never leaks the bookkeeping fields
+    const pubRow = (await call("GET", "/solana/launches")).json.launches.find((l) => l.mint === mint);
+    assert.ok(!("filledAnnouncedAt" in pubRow) && !("milestonesSeenAt" in pubRow));
   });
 });

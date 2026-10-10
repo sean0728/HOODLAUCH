@@ -49,7 +49,7 @@ describe("Telegram integration", function () {
       "process",
       "ROBINHOOD_NETWORKS",
       "upsertTrackedToken",
-      `${code}\nreturn { sendTelegramMessage, announceSolanaLaunchToTelegram, announceLaunchToTelegram, announceMilestoneToTelegram, buildMilestoneMessage, escapeTelegramHtml };`
+      `${code}\nreturn { sendTelegramMessage, announceSolanaLaunchToTelegram, announceSolanaMilestoneToTelegram, buildSolanaMilestoneMessage, announceLaunchToTelegram, announceMilestoneToTelegram, buildMilestoneMessage, escapeTelegramHtml };`
     );
     api = factory(
       fakeHttps,
@@ -115,6 +115,19 @@ describe("Telegram integration", function () {
     const m = received[1].body.text;
     assert.ok(m.includes("Solana mainnet") && m.includes("https://explorer.solana.com/address/MintAddr222") && !m.includes("cluster=devnet"), m);
     await api.announceSolanaLaunchToTelegram(null); // never throws on junk
+    assert.strictEqual(received.length, 2);
+  });
+
+  it("announces the Solana 'filled' and 'graduated' milestones (escaped, devnet vs mainnet link)", async () => {
+    const l = { mint: "MintAddr333", name: "Mile<Stone>", symbol: "M&S", cluster: "devnet" };
+    await api.announceSolanaMilestoneToTelegram("filled", l);
+    await api.announceSolanaMilestoneToTelegram("graduated", { ...l, cluster: "mainnet-beta" });
+    assert.strictEqual(received.length, 2);
+    const f = received[0].body.text, g = received[1].body.text;
+    assert.ok(f.startsWith("🟢 Curve filled: <b>Mile&lt;Stone&gt;</b> ($M&amp;S)") && f.includes("Meteora DAMM v2 pool") && f.includes("Solana devnet (testnet)"), f);
+    assert.ok(f.includes("<code>MintAddr333</code>") && f.includes("https://explorer.solana.com/address/MintAddr333?cluster=devnet"), f);
+    assert.ok(g.startsWith("🎓 Graduated: <b>Mile&lt;Stone&gt;</b>") && g.includes("Solana mainnet") && !g.includes("cluster=devnet"), g);
+    await api.announceSolanaMilestoneToTelegram("filled", null); // never throws on junk
     assert.strictEqual(received.length, 2);
   });
 
