@@ -1869,6 +1869,35 @@ async function announceSolanaLaunchToTelegram(launch) {
   }
 }
 
+// Solana milestones (same channel): "filled" = the curve reached its SOL target and is about to move; "graduated" =
+// it migrated to a Meteora DAMM v2 pool. Fired once each by lib/solanaTracker.js (it persists the "already sent" flag
+// first), best-effort, never throws.
+function buildSolanaMilestoneMessage(milestone, launch) {
+  const main = launch.cluster === "mainnet-beta";
+  const net = main ? "Solana mainnet" : "Solana devnet (testnet)";
+  const link = `https://explorer.solana.com/address/${launch.mint}${main ? "" : "?cluster=devnet"}`;
+  const name = escapeTelegramHtml(launch.name || "Token");
+  const sym = escapeTelegramHtml(launch.symbol || "?");
+  const head =
+    milestone === "filled"
+      ? `🟢 Curve filled: <b>${name}</b> ($${sym})\nRaised its SOL target — moving to a Meteora DAMM v2 pool. (${net})`
+      : `🎓 Graduated: <b>${name}</b> ($${sym})\nMigrated off the bonding curve — now trading on Meteora DAMM v2. (${net})`;
+  return `${head}\n<code>${escapeTelegramHtml(launch.mint)}</code>\n${link}`;
+}
+async function announceSolanaMilestoneToTelegram(milestone, launch) {
+  try {
+    if (!launch || !launch.mint) return;
+    if (!relayerSettings.telegramBotToken || !relayerSettings.telegramLaunchesChatId) {
+      console.warn(`[telegram] not announcing Solana ${milestone} milestone for $${launch.symbol}: bot token or launches chat ID not saved.`);
+      return;
+    }
+    console.log(`[telegram] announcing Solana ${milestone} milestone for $${launch.symbol} (${launch.mint}).`);
+    await sendTelegramMessage(relayerSettings.telegramLaunchesChatId, buildSolanaMilestoneMessage(milestone, launch));
+  } catch (err) {
+    console.warn(`[telegram] couldn't announce Solana ${milestone} milestone for ${launch && launch.mint}: ${err.message}`);
+  }
+}
+
 // ---- milestone Telegram announcements: "live on DEX" and "graduated" ----
 // Same public launches channel as the new-launch post. Fired from
 // pollTokenPrices at the moment it OBSERVES a status transition it persists
@@ -3901,7 +3930,7 @@ async function main() {
   // history for Meteora DBC quick launches. Write routes are admin-signed, the
   // price poller is off unless SOLANA_RPC_URL is set, and the Solana packages
   // are loaded lazily — see lib/solanaApi.js and README "Solana (devnet prototype)".
-  registerSolanaRoutes(app, { sendJson, asyncRoute, verifyAdminSignature, isFreshTimestamp, announceLaunch: announceSolanaLaunchToTelegram });
+  registerSolanaRoutes(app, { sendJson, asyncRoute, verifyAdminSignature, isFreshTimestamp, announceLaunch: announceSolanaLaunchToTelegram, announceMilestone: announceSolanaMilestoneToTelegram });
 
   app.get("/holder-distribution/:tokenAddress", async (req, res) => {
     const rows = await computeHolderDistribution(req.params.tokenAddress);
