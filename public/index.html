@@ -2413,7 +2413,38 @@
     if(views.portfolio.classList.contains("active")) renderPortfolio();
     if(views.detail.classList.contains("active") && currentDetailTokenId) openDetail(currentDetailTokenId);
   }
+  // Some wallets (Phantom is one) announce their own EVM account / a "disconnect" on the EVM provider while a
+  // SOLANA connect or signature is in progress. That must not log the EVM admin out mid-flow (it used to dump
+  // the admin back to the normal launch page), so while a Solana wallet step is running we hold the current
+  // wallet, and afterwards re-read the real accounts from the provider and apply those.
+  let solGuardUntil = 0;
+  let solGuardWallet = null;
+  let solGuardTimer = null;
+  function solGuardBegin(){
+    if(!wallet) return function(){};
+    solGuardWallet = wallet;
+    solGuardUntil = Date.now() + 120000;   // generous: the Solana wallet's approval popup is open this whole time
+    return function end(){
+      solGuardUntil = Date.now() + 2500;   // trailing events right after the popup closes
+      clearTimeout(solGuardTimer);
+      solGuardTimer = setTimeout(async function(){
+        const keep = solGuardWallet; solGuardUntil = 0; solGuardWallet = null;
+        try{
+          const p = getEth();
+          const accts = p ? await p.request({ method:"eth_accounts" }) : [];
+          if(accts && keep && accts.some(a=> String(a).toLowerCase() === String(keep).toLowerCase())) return; // nothing really changed
+          handleAccountsChanged(accts || []);   // the account genuinely changed: apply it now
+        }catch(e){ /* provider not answering — leave things as they are */ }
+      }, 2600);
+    };
+  }
   function handleAccountsChanged(accounts){
+    if(Date.now() < solGuardUntil && solGuardWallet){
+      const still = accounts && accounts.find(a=> String(a).toLowerCase() === String(solGuardWallet).toLowerCase());
+      if(still) return;                       // admin account still present: ignore the noise
+      console.warn("[solana] ignoring an EVM accountsChanged event while the Solana wallet step is running:", accounts);
+      return;                                 // resynced by solGuardBegin()'s end() once the step finishes
+    }
     wallet = accounts && accounts[0] ? accounts[0] : null;
     try{ if(wallet) localStorage.setItem("hoodlaunch_wallet", wallet); else localStorage.removeItem("hoodlaunch_wallet"); }catch(e){}
     refreshAfterWalletChange();
@@ -9548,6 +9579,9 @@
   var solDetailMint = null;
   var solDetailTimer = null;
   var solPendingRegister = null;       // a launch that landed on-chain but isn't recorded yet
+  var solSubscribed = false;
+  var solLastAddr = null;
+  var SOL_WALLET_KEY = "ignitionx_sol_wallet";   // name of the Solana wallet last used (for a silent reconnect)
   var solBusy = false;
 
   function solFetchConfig(){
@@ -9573,7 +9607,18 @@
         if(!window.IgnitionSol) throw new Error("The Solana module didn't initialise.");
         window.IgnitionSol.init({ rpcUrl: cfg.rpcUrl, cluster: "devnet", configAddress: cfg.dbcConfig || null });
         solCfgEffective = { cluster:"devnet", rpcUrl: cfg.rpcUrl, dbcConfig: cfg.dbcConfig };
-        return window.IgnitionSol;
+        const lib = window.IgnitionSol;
+        if(!solSubscribed){ solSubscribed = true; lib.onAccountChange(solOnAccountChange); }
+        // Put back the wallet the admin used last time (no popup if Phantom still trusts this site).
+        let saved = ""; try{ saved = localStorage.getItem(SOL_WALLET_KEY) || ""; }catch(e){}
+        if(saved && !lib.currentWallet() && lib.listWallets().some(w=> w.name === saved)){
+          const end = solGuardBegin();
+          try{ await Promise.race([ lib.connect(saved, { silent:true }), new Promise(r=> setTimeout(()=> r(null), 3000)) ]); }
+          catch(e){ /* needs a fresh approval — the Connect button is there */ }
+          finally{ end(); }
+        }
+        solLastAddr = (lib.currentWallet() || {}).address || null;
+        return lib;
       })().catch(err=>{ solLibPromise = null; throw err; });
     }
     return solLibPromise;
@@ -9630,6 +9675,39 @@
     return data;
   }
 
+  // The Solana wallet can change underneath the page (account switched, Phantom toggled into/out of Testnet
+  // Mode, site disconnected in the extension). Keep every wallet-dependent control in step with the real state
+  // instead of leaving a "connected" row on screen that no longer is.
+  function solOnAccountChange(info){
+    const addr = info ? info.address : null;
+    const had = solLastAddr;
+    solLastAddr = addr;
+    if(had && !addr){
+      try{ localStorage.removeItem(SOL_WALLET_KEY); }catch(e){}
+      toast("Your Solana wallet disconnected. Connect it again to continue.");
+    }else if(had && addr && had !== addr){
+      toast(`Solana account switched: ${addr.slice(0,4)}…${addr.slice(-4)}.`);
+    }
+    solRefreshWalletUi();
+  }
+  function solRefreshWalletUi(){
+    const row = document.getElementById("solWalletRow");
+    if(row){ row.innerHTML = solWalletRowHTML(); solWireWalletRow(row, renderSolanaLaunchPanel); }
+    const trow = document.getElementById("solTradeWallet");
+    if(trow){ trow.innerHTML = solWalletRowHTML(); solWireWalletRow(trow, ()=>{ solRenderTradePanel(); solRenderFeesPanel(); }); }
+  }
+  // Called when an action needs the Solana wallet and there isn't one: show the real state and say what to do.
+  function solNeedWallet(){
+    solRefreshWalletUi();
+    toast("Your Solana wallet isn't connected. Pick it in the wallet box above, approve in Phantom, then try again.");
+  }
+
+  // Runs a Solana wallet step (popup + signature) with the EVM-event guard on.
+  async function solGuarded(fn){
+    const end = solGuardBegin();
+    try{ return await fn(); } finally{ end(); }
+  }
+
   // ---- visibility (admin wallet only) ----
   function solVisible(){ return isAdminWallet(wallet); }
   function solRefreshVisibility(){
@@ -9640,7 +9718,12 @@
     if(bar) bar.hidden = !show;
     if(sect) sect.hidden = !show;
     if(!show){
-      if(solLaunchNet === "solana") solSetLaunchNet("evm");
+      if(solLaunchNet === "solana"){
+        solSetLaunchNet("evm");
+        toast(wallet
+          ? `The Solana tools need your EVM admin wallet, but the connected wallet is now ${fmtAddr(wallet)}. Reconnect the admin wallet.`
+          : "The Solana tools need your EVM admin wallet — it's no longer connected. Reconnect it to continue.");
+      }
       return;
     }
     if(!solLaunchesLoaded) solLoadLaunches();
@@ -9766,9 +9849,17 @@
       try{ await solLoadLib(); rerender(); }catch(e){ toast(solErr(e)); }
     }));
     root.querySelectorAll("[data-sol-wallet]").forEach(b=> b.addEventListener("click", async ()=>{
-      try{ await window.IgnitionSol.connect(b.dataset.solWallet); rerender(); }catch(e){ toast(solErr(e)); }
+      const end = solGuardBegin();
+      try{
+        await window.IgnitionSol.connect(b.dataset.solWallet);
+        try{ localStorage.setItem(SOL_WALLET_KEY, b.dataset.solWallet); }catch(e){}
+      }
+      catch(e){ toast(solErr(e)); }
+      finally{ end(); }
+      rerender();
     }));
     root.querySelectorAll("[data-sol-act='disconnect']").forEach(b=> b.addEventListener("click", async ()=>{
+      try{ localStorage.removeItem(SOL_WALLET_KEY); }catch(e){}
       try{ await window.IgnitionSol.disconnect(); }catch(e){}
       rerender();
     }));
@@ -9865,10 +9956,10 @@
     if(solBusy) return;
     const out = document.getElementById("solConfigResult");
     const lib = window.IgnitionSol;
-    if(!lib || !lib.currentWallet()){ toast("Connect a Solana wallet first."); return; }
+    if(!lib || !lib.currentWallet()){ solNeedWallet(); return; }
     solBusy = true; out.textContent = "Waiting for your Solana wallet…";
     try{
-      const r = await lib.createPlatformConfig();
+      const r = await solGuarded(()=> lib.createPlatformConfig());
       // make it usable straight away in this browser session; the permanent home is public/solana-config.json
       window.IgnitionSol.init({ rpcUrl: solCfgEffective.rpcUrl, cluster:"devnet", configAddress: r.config });
       solCfgEffective.dbcConfig = r.config;
@@ -9887,7 +9978,7 @@
     solCaptureDraft();
     const d = solLaunchDraft;
     const lib = window.IgnitionSol;
-    if(!lib || !lib.currentWallet()){ toast("Connect a Solana wallet first."); return; }
+    if(!lib || !lib.currentWallet()){ solNeedWallet(); return; }
     if(!d.name){ toast("Give the token a name."); return; }
     if(!/^[A-Za-z0-9]{1,10}$/.test(d.symbol)){ toast("Ticker must be 1-10 letters or digits."); return; }
     if(!/^\d*\.?\d*$/.test(d.firstBuy)){ toast("First buy must be a number."); return; }
@@ -9902,7 +9993,7 @@
         website:d.website || undefined, twitter:d.twitter || undefined, telegram:d.telegram || undefined,
       });
       solStatus("2/3 — Creating the token and curve (approve in your Solana wallet)…");
-      const res = await lib.launch({ name:d.name, symbol:d.symbol, uri: meta.uri, firstBuySol: d.firstBuy || "0" });
+      const res = await solGuarded(()=> lib.launch({ name:d.name, symbol:d.symbol, uri: meta.uri, firstBuySol: d.firstBuy || "0" }));
       solPendingRegister = { mint:res.mint, pool:res.pool, creator:res.creator, name:d.name, symbol:d.symbol, metadataId:id, txSignature:res.signature };
       solStatus("3/3 — Recording the launch (sign in your admin wallet)…");
       await solRegisterPending();
@@ -10091,12 +10182,12 @@
     const lib = window.IgnitionSol;
     const msg = document.getElementById("solTradeMsg");
     const info = solInfo[solDetailMint];
-    if(!lib || !lib.currentWallet()){ toast("Connect a Solana wallet first."); return; }
+    if(!lib || !lib.currentWallet()){ solNeedWallet(); return; }
     if(!info || !solTradeAmount){ toast("Enter an amount first."); return; }
     const btn = document.getElementById("solTradeBtn");
     solBusy = true; btn.disabled = true; msg.textContent = "Approve the transaction in your Solana wallet…";
     try{
-      const r = await lib.trade({ pool: info.pool, side: solTradeSide, amount: solTradeAmount, slippageBps: 100 });
+      const r = await solGuarded(()=> lib.trade({ pool: info.pool, side: solTradeSide, amount: solTradeAmount, slippageBps: 100 }));
       toast(solTradeSide === "buy" ? "Buy confirmed." : "Sell confirmed.");
       solTradeNote = `Confirmed · <a href="${solExplorer("tx", r.signature)}" target="_blank" rel="noopener noreferrer">view transaction</a>`;
       msg.innerHTML = solTradeNote;
@@ -10135,10 +10226,10 @@
     panel.querySelectorAll("[data-sol-claim]").forEach(b=> b.addEventListener("click", async ()=>{
       if(solBusy) return;
       const msg = document.getElementById("solClaimMsg");
-      if(!lib.currentWallet()){ toast("Connect a Solana wallet first."); return; }
+      if(!lib.currentWallet()){ solNeedWallet(); return; }
       solBusy = true; b.disabled = true; msg.textContent = "Approve the transaction in your Solana wallet…";
       try{
-        const r = await lib.claimFees({ pool: info.pool, who: b.dataset.solClaim });
+        const r = await solGuarded(()=> lib.claimFees({ pool: info.pool, who: b.dataset.solClaim }));
         msg.innerHTML = `Claimed · <a href="${solExplorer("tx", r.signature)}" target="_blank" rel="noopener noreferrer">view transaction</a>`;
         solRenderFeesPanel();
       }catch(e){ msg.textContent = solErr(e); }
