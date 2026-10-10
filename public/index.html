@@ -1076,13 +1076,6 @@
         <div class="token-grid" id="tokenGrid"></div>
       </div>
 
-      <div id="solanaExploreSection" hidden>
-        <div class="section-head">
-          <h2>Solana quick launches</h2>
-          <span class="tc-quicklaunch-badge" id="solSectionBadge">Devnet · admin preview</span>
-        </div>
-        <div class="token-grid" id="solanaGrid"></div>
-      </div>
     </section>
 
     <!-- ===================== DETAIL ===================== -->
@@ -7481,6 +7474,7 @@
     const grid = document.getElementById("tokenGrid");
     const q = searchTerm.trim().toLowerCase();
     const networkTokens = tokensForCurrentNetwork();
+    const solItems = solGridItems(q);
     const filtered = networkTokens.filter(t=>{
       if(activeFilter==="recent"){
         if(!(typeof t.createdAtMs==="number" && (Date.now()-t.createdAtMs)<=RECENT_LAUNCH_WINDOW_MS)) return false;
@@ -7494,8 +7488,8 @@
       )) return false;
       return true;
     });
-    if(!filtered.length){
-      if(networkTokens.length){
+    if(!filtered.length && !solItems.length){
+      if(networkTokens.length || solGridAll().length){
         grid.innerHTML = `<div class="empty" style="grid-column:1/-1">No launches match that filter yet.</div>`;
         return;
       }
@@ -7506,9 +7500,42 @@
       grid.querySelectorAll("[data-goto]").forEach(b=> b.addEventListener("click", ()=>showView(b.dataset.goto)) );
       return;
     }
-    grid.innerHTML = filtered.map(t=>`<button class="token-card" data-id="${t.id}">${tokenCardHTML(t)}</button>`).join("");
-    grid.querySelectorAll(".token-card").forEach(card=>{
+    // Solana launches share this grid (and its filters) with the Robinhood ones: each is slotted in by launch time
+    // without disturbing the order of the others.
+    const cards = filtered.map(t=>({ t }));
+    solItems.forEach(it=>{
+      const at = cards.findIndex(c=> !c.sol && typeof c.t.createdAtMs==="number" && c.t.createdAtMs < it.createdAtMs);
+      if(at === -1) cards.push({ sol: it }); else cards.splice(at, 0, { sol: it });
+    });
+    grid.innerHTML = cards.map(c=> c.sol
+      ? `<button class="token-card" data-solmint="${escapeHtml(c.sol.mint)}">${solCardHTML(c.sol.launch)}</button>`
+      : `<button class="token-card" data-id="${c.t.id}">${tokenCardHTML(c.t)}</button>`).join("");
+    grid.querySelectorAll(".token-card[data-id]").forEach(card=>{
       card.addEventListener("click", ()=> openDetail(card.dataset.id) );
+    });
+    grid.querySelectorAll(".token-card[data-solmint]").forEach(card=>{
+      card.addEventListener("click", ()=> openSolanaDetail(card.dataset.solmint) );
+    });
+  }
+  // The Solana launches that belong in this grid right now: only while Solana is visible to this visitor and on the
+  // network the site is showing (devnet <-> Testnet, mainnet <-> Mainnet).
+  function solGridAll(){
+    if(typeof solFeedActive !== "function" || !solFeedActive()) return [];
+    let list = [];
+    try{ list = solLaunches; }catch(e){ return []; }
+    return list.filter(l=> l && l.mint).map(l=>{
+      const info = solInfo[l.mint];
+      return { mint:l.mint, launch:l, name:l.name || "", ticker:l.symbol || "", createdAtMs: typeof l.createdAt==="number" ? l.createdAt : 0,
+               // same statuses the Robinhood Quick Launch tokens use: on the curve = "launched", moved to the DEX pool = "graduated"
+               status: (info && info.migrated) ? "graduated" : "curve-trading" };
+    }).sort((a,b)=> b.createdAtMs - a.createdAtMs);
+  }
+  function solGridItems(q){
+    return solGridAll().filter(it=>{
+      if(activeFilter==="recent"){ if(!(it.createdAtMs && (Date.now()-it.createdAtMs) <= RECENT_LAUNCH_WINDOW_MS)) return false; }
+      else if(!matchesStatusFilter(it, activeFilter)) return false;
+      if(q && !(it.name.toLowerCase().includes(q) || it.ticker.toLowerCase().includes(q) || it.mint.toLowerCase().includes(q))) return false;
+      return true;
     });
   }
   document.querySelectorAll(".chip").forEach(chip=>{
@@ -9934,7 +9961,10 @@
       <div class="tc-head">
         ${chainBadgeHTML(chainOf(l))}
         <div><div class="tc-name">${escapeHtml(l.name)}</div><div class="tc-ticker">$${escapeHtml(l.symbol)}</div></div>
-        <span class="tc-status ${grad?"graduated":"curve-trading"}">${grad?"Graduated":"Curve"}</span>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px; margin-left:auto;">
+          <span class="tc-quicklaunch-badge">⚡ Quick Launch</span>
+          <div style="display:flex; gap:6px;">${statusBadgeHTML("curve", grad ? "graduated" : "curve-trading")}</div>
+        </div>
       </div>
       <div class="tc-metrics">
         <div class="m"><div class="v">${info ? solFmtPrice(info.priceSol) : "—"}</div><div class="l">Price</div></div>
@@ -9946,21 +9976,8 @@
       </div>
       <div class="tc-quicklaunch-badge${solIsMain()?" live":""}" style="align-self:flex-start; margin-top:12px;">Solana · ${solNetWord()}</div>`;
   }
-  function renderSolanaGrid(){
-    const grid = document.getElementById("solanaGrid");
-    if(!grid) return;
-    if(!solLaunches.length){
-      grid.innerHTML = `<div class="empty" style="grid-column:1/-1; display:flex; flex-direction:column; gap:14px; align-items:center;">
-        <span>No Solana ${solNetWord()} launches yet.</span>
-        <button class="btn btn-primary" id="solFirstLaunch">Launch on Solana</button></div>`;
-      const b = document.getElementById("solFirstLaunch");
-      if(b) b.addEventListener("click", ()=>{ showView("create"); solSetLaunchNet("solana"); });
-      return;
-    }
-    const list = solLaunches.slice().sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
-    grid.innerHTML = list.map(l=>`<button class="token-card" data-solmint="${escapeHtml(l.mint)}">${solCardHTML(l)}</button>`).join("");
-    grid.querySelectorAll("[data-solmint]").forEach(c=> c.addEventListener("click", ()=> openSolanaDetail(c.dataset.solmint)));
-  }
+  // The Solana cards live in the main "Live launches" grid now (see renderGrid / solGridAll).
+  function renderSolanaGrid(){ try{ renderGrid(); }catch(e){ /* page still initialising */ } }
 
   // ---- wallet row (shared by the launch panel and the detail trade panel) ----
   function solWalletRowHTML(){
