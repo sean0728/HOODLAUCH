@@ -181,6 +181,67 @@ await t("devnet transactions get no priority-fee instruction", async () => {
   const tx = Transaction.from(conn.sent[0]);
   assert.equal(tx.instructions.filter((i) => i.programId.equals(ComputeBudgetProgram.programId)).length, 0);
 });
+await t("curve settings: validated, and 'SOL to raise' is solved into a graduation market cap", () => {
+  const d = core.previewCurve({});
+  assert.equal(d.totalSupply, 1_000_000_000); assert.ok(Math.abs(d.raiseSol - 72.08) < 0.1);
+  const low = core.previewCurve({ raiseSol: 30 });
+  assert.ok(Math.abs(low.raiseSol - 30) < 0.01, "raise " + low.raiseSol);
+  assert.ok(low.migrationMarketCapSol < 100 && low.migrationMarketCapSol > 30, "graduation mcap " + low.migrationMarketCapSol);
+  const supply = core.previewCurve({ totalSupply: 21_000_000, raiseSol: 40 });
+  assert.equal(supply.totalSupply, 21_000_000); assert.ok(Math.abs(supply.raiseSol - 40) < 0.01);
+  assert.ok(Math.abs(supply.startPriceSol - 30 / 21_000_000) < 1e-12);
+  assert.throws(() => core.previewCurve({ totalSupply: 5.5 }), /whole number/);
+  assert.throws(() => core.previewCurve({ totalSupply: 10 }), /Total supply must be between/);
+  assert.throws(() => core.previewCurve({ tradingFeeBps: 5 }), /Trading fee/);
+  assert.throws(() => core.previewCurve({ creatorFeePercent: 101 }), /Creator fee/);
+  assert.throws(() => core.previewCurve({ migrationMarketCapSol: 20 }), /larger than the starting/);
+  assert.throws(() => core.previewCurve({ raiseSol: 1 }), /can raise roughly/);
+  assert.throws(() => core.previewCurve({ raiseSol: -3 }), /positive/);
+});
+await t("createPlatformConfig honours custom curve settings (supply, raise, fees)", async () => {
+  conn.sent.length = 0;
+  const r = await core.createPlatformConfig({ totalSupply: 100_000_000, raiseSol: 40, tradingFeeBps: 200, creatorFeePercent: 20 });
+  assert.ok(Math.abs(r.migrationQuoteThresholdSol - 40) < 0.01, "threshold " + r.migrationQuoteThresholdSol);
+  assert.equal(conn.sent.length, 1);
+  await assert.rejects(core.createPlatformConfig({ totalSupply: 3 }), /Total supply must be between/);
+});
+await t("getConfigInfo reads the real numbers from the config account", async () => {
+  const info = await core.getConfigInfo(CONFIG.toBase58());
+  assert.ok(Math.abs(info.raiseSol - 72.08) < 0.1);
+  assert.equal(info.totalSupply, 1_000_000_000);
+  assert.ok(Math.abs(info.startMarketCapSol - 30) < 0.5, "start mcap " + info.startMarketCapSol);
+});
+await t("createSupplyConfig: same curve + fees as the standard config, creator's supply, platform wallet as fee claimer", async () => {
+  conn.sent.length = 0;
+  const r = await core.createSupplyConfig({ totalSupply: 21_000_000, curve: { initialMarketCapSol: 30, migrationMarketCapSol: 300, tradingFeeBps: 100, creatorFeePercent: 10 } });
+  assert.equal(conn.sent.length, 1);
+  const tx = Transaction.from(conn.sent[0]);
+  assert.ok(tx.verifySignatures());
+  assert.equal(tx.feePayer.toBase58(), user.publicKey.toBase58(), "the creator pays");
+  const ix = tx.instructions.find((i) => i.programId.equals(DBC.DYNAMIC_BONDING_CURVE_PROGRAM_ID));
+  assert.ok(ix.keys.some((k) => k.pubkey.toBase58() === feeClaimer.toBase58()), "fee claimer account in the instruction is the platform's");
+  assert.ok(Math.abs(r.migrationQuoteThresholdSol - 72.08) < 0.1);
+  await assert.rejects(core.createSupplyConfig({ totalSupply: 5 }), /Total supply/);
+});
+await t("launch({config}) launches under that config, not the standard one", async () => {
+  conn.sent.length = 0;
+  const other = Keypair.generate().publicKey;
+  const r = await core.launch({ name: "Own", symbol: "OWN", uri: "https://example.com/m.json", firstBuySol: "0", config: other.toBase58() });
+  assert.equal(r.pool, DBC.deriveDbcPoolAddress(WSOL, new PublicKey(r.mint), other).toBase58());
+  const std = await core.launch({ name: "Std", symbol: "STD", uri: "https://example.com/m.json", firstBuySol: "0" });
+  assert.equal(std.pool, DBC.deriveDbcPoolAddress(WSOL, new PublicKey(std.mint), CONFIG).toBase58());
+});
+await t("signMessage: asks the wallet for an ed25519 signature and returns it base58", async () => {
+  const calls = [];
+  const w = fakeWallet(user);
+  w.features["solana:signMessage"] = { signMessage: async ({ message, account }) => { calls.push(new TextDecoder().decode(message)); return [{ signedMessage: message, signature: new Uint8Array(64).fill(7) }]; } };
+  core._setWalletForTests(w, { address: user.publicKey.toBase58(), publicKey: user.publicKey.toBytes() });
+  const sig = await core.signMessage("hello ignitionx");
+  assert.deepEqual(calls, ["hello ignitionx"]);
+  assert.equal(bs58.decode(sig).length, 64);
+  core._setWalletForTests(fakeWallet(user), { address: user.publicKey.toBase58(), publicKey: user.publicKey.toBytes() });
+  await assert.rejects(core.signMessage("x"), /can't sign messages/);
+});
 await t("launch() needs the platform config address", async () => {
   core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "devnet" }); core._setClientForTests(conn, st.client);
   await assert.rejects(core.launch({ name: "A", symbol: "A", uri: "https://x/y.json" }), /config isn't set/);
