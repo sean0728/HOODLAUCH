@@ -9566,12 +9566,14 @@
     }
   }
 
-  /* ---------------- Solana quick launch (devnet or mainnet, admin-only) ----------------
+  /* ---------------- Solana quick launch (devnet or mainnet; admin-only or open to everyone) ----------------
      Tokens launch on Meteora's Dynamic Bonding Curve (a program that already exists on Solana — we
      deploy nothing). The browser builds + signs the Solana transactions with the user's Solana wallet
      (self-hosted bundle: vendor/ignitionx-solana.js → window.IgnitionSol, loaded only when needed);
      the relayer (lib/solanaApi.js) hosts token metadata, records launches, and samples prices.
-     Visibility: ONLY while the EVM ADMIN_WALLET is connected, same UI-gate as the admin tab.
+     Visibility: the EVM ADMIN_WALLET always sees it; everyone else only while the admin has switched
+     "Who can launch" to "Anyone" in Admin → Solana (then a visitor just needs a Solana wallet: their requests
+     are signed with it, and the relayer verifies each launch on-chain).
      Which Solana network is live (devnet or mainnet-beta), the RPC URLs and the platform config all come from
      the relayer's saved settings (Admin → Solana, GET/POST /solana/settings); solana-config.json is only a
      fallback for a relayer that has none saved. */
@@ -9676,12 +9678,15 @@
   function solApplyNetLabels(){
     const word = solNetWord();
     const badge = document.getElementById("solSectionBadge");
-    if(badge){ badge.textContent = solIsMain() ? "Mainnet · admin only" : "Devnet · admin preview"; badge.classList.toggle("live", solIsMain()); }
+    if(badge){ badge.textContent = (solIsMain() ? "Mainnet" : "Devnet") + (solPublicOn() ? (solIsMain() ? " · live" : " · public test") : (solIsMain() ? " · admin only" : " · admin preview")); badge.classList.toggle("live", solIsMain()); }
     const btn = document.getElementById("solNetBtnLabel");
     if(btn) btn.textContent = "Solana · " + word;
     const tag = document.getElementById("solNetBtnTag");
-    if(tag){ tag.textContent = solIsMain() ? "Live · admin only" : "Admin preview"; tag.classList.toggle("live", solIsMain()); }
+    if(tag){ tag.textContent = solPublicOn() ? (solIsMain() ? "Live" : "Public test") : (solIsMain() ? "Live · admin only" : "Admin preview"); tag.classList.toggle("live", solIsMain()); }
   }
+
+  // Learn right away whether launching is open to everyone, so the Solana pieces show for visitors who aren't the admin.
+  solFetchSettings().then(()=>{ solApplyNetLabels(); solRefreshVisibility(); });
 
   // ---- formatting ----
   function solDec(n){ return Math.min(12, Math.max(4, 2-Math.floor(Math.log10(n)))); }
@@ -9734,9 +9739,39 @@
     return data;
   }
 
+  // The two ways a request to the relayer is signed: the admin's EVM wallet (as before), or - when launching is
+  // open to everyone - the visitor's own Solana wallet (a free text signature, never a transaction).
+  // `kind` is "metadata" or "register"; `key` is the metadata id / the mint. Message strings MUST stay
+  // byte-identical to lib/solanaApi.js.
+  async function solSignedPost(path, kind, key, body){
+    const ts = Date.now();
+    if(isAdminWallet(wallet) && getEth()){
+      const msg = kind === "metadata" ? `IgnitionX admin: solana metadata ${key} at ${ts}` : `IgnitionX admin: register solana launch ${key} at ${ts}`;
+      return solAdminPost(path, msg, ts, body);
+    }
+    const lib = window.IgnitionSol;
+    const w = lib && lib.currentWallet();
+    if(!w) throw new Error("Connect your Solana wallet first.");
+    if(!solPublicOn()) throw new Error("Solana launching is admin-only right now.");
+    const msg = kind === "metadata"
+      ? `IgnitionX launch: solana metadata ${key} by ${w.address} at ${ts}`
+      : `IgnitionX launch: register solana launch ${key} by ${w.address} at ${ts}`;
+    let walletSignature;
+    try{ walletSignature = await solGuarded(()=> lib.signMessage(msg)); }
+    catch(e){ throw new Error(/reject|denied|declin|cancel/i.test(String(e && e.message)) ? "Signature was rejected in your Solana wallet." : solErr(e)); }
+    const res = await fetch(SOL_RELAYER+path, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(Object.assign({}, body, { wallet: w.address, timestamp: ts, walletSignature })),
+    });
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data.error || `Relayer returned ${res.status}.`);
+    return data;
+  }
+  function solSignWho(){ return (isAdminWallet(wallet) && getEth()) ? "your admin wallet" : "your Solana wallet — free, no transaction"; }
+
   // Admin → Solana settings. Key order and String() conversion MUST stay byte-identical to
   // lib/solanaSettings.js (settingsMessage), or the relayer rejects the signature.
-  var SOL_SETTING_KEYS = ["cluster","enabled","rpcUrl","serverRpcUrl","dbcConfig","mainnetRpcUrl","mainnetServerRpcUrl","mainnetDbcConfig","publicBaseUrl","pollSeconds","mainnetConfirm"];
+  var SOL_SETTING_KEYS = ["cluster","enabled","publicLaunch","customSupply","supplyMin","supplyMax","curveStartMcapSol","curveGraduationMcapSol","curveFeeBps","curveCreatorFeePercent","rpcUrl","serverRpcUrl","dbcConfig","mainnetRpcUrl","mainnetServerRpcUrl","mainnetDbcConfig","publicBaseUrl","pollSeconds","mainnetConfirm"];
   function solSettingsMessage(settings, timestamp){
     const out = {};
     SOL_SETTING_KEYS.forEach(k=>{ out[k] = (settings && settings[k] !== undefined && settings[k] !== null) ? String(settings[k]) : null; });
@@ -9783,7 +9818,8 @@
   }
 
   // ---- visibility (admin wallet only) ----
-  function solVisible(){ return isAdminWallet(wallet); }
+  function solPublicOn(){ return !!(solSettings && solSettings.settings && solSettings.settings.publicLaunch && solSettings.settings.enabled !== false); }
+  function solVisible(){ return isAdminWallet(wallet) || solPublicOn(); }
   function solRefreshVisibility(){
     if(typeof solLaunchNet === "undefined") return; // called very early, before this block initialised
     const show = solVisible();
@@ -9795,8 +9831,8 @@
       if(solLaunchNet === "solana"){
         solSetLaunchNet("evm");
         toast(wallet
-          ? `The Solana tools need your EVM admin wallet, but the connected wallet is now ${fmtAddr(wallet)}. Reconnect the admin wallet.`
-          : "The Solana tools need your EVM admin wallet — it's no longer connected. Reconnect it to continue.");
+          ? `Solana launching is admin-only right now, and the connected wallet is now ${fmtAddr(wallet)}. Reconnect the admin wallet.`
+          : "Solana launching is admin-only right now — the admin wallet is no longer connected. Reconnect it to continue.");
       }
       return;
     }
@@ -9949,7 +9985,30 @@
   }
 
   // ---- launch panel ----
-  var solLaunchDraft = { name:"", symbol:"", desc:"", website:"", twitter:"", telegram:"", firstBuy:"0", image:"" };
+  var solLaunchDraft = { name:"", symbol:"", desc:"", website:"", twitter:"", telegram:"", firstBuy:"0", image:"", supply:"" };
+  var solPendingConfig = null;         // { supply, config }: a creator's own platform config already paid for (reused on retry)
+  var solCurveInfo = {};               // config address -> getConfigInfo() result (the real on-chain curve numbers)
+  // The platform's standard curve numbers as published by the relayer (fallback: the shipped defaults).
+  function solCurvePreset(){
+    const c = solSettings && solSettings.settings && solSettings.settings.curve;
+    return { initialMarketCapSol: (c && c.initialMarketCapSol) || 30, migrationMarketCapSol: (c && c.migrationMarketCapSol) || 300,
+             tradingFeeBps: (c && c.tradingFeeBps) || 100, creatorFeePercent: c && c.creatorFeePercent != null ? c.creatorFeePercent : 10 };
+  }
+  function solSupplyRules(){
+    const sv = (solSettings && solSettings.settings) || {};
+    return { allowed: sv.customSupply !== false && !!sv.supplyMin, min: sv.supplyMin || 1000000, max: sv.supplyMax || 10000000000 };
+  }
+  function solParseSupply(text){
+    const t = String(text||"").trim().replace(/[,\s_]/g,"");
+    if(!/^\d+$/.test(t)) return NaN;
+    return Number(t);
+  }
+  function solEnsureCurveInfo(cfgAddr){
+    if(!cfgAddr || solCurveInfo[cfgAddr] !== undefined || !window.IgnitionSol) return;
+    solCurveInfo[cfgAddr] = null;   // in flight
+    window.IgnitionSol.getConfigInfo(cfgAddr).then(i=>{ solCurveInfo[cfgAddr] = i; }).catch(e=>{ solCurveInfo[cfgAddr] = false; console.error("[solana] getConfigInfo failed", e); })
+      .then(()=>{ const pnl = document.getElementById("solanaLaunchPanel"); if(pnl && !pnl.hidden && !solBusy) renderSolanaLaunchPanel(); });
+  }
   function renderSolanaLaunchPanel(){
     const panel = document.getElementById("solanaLaunchPanel");
     if(!panel || panel.hidden) return;
@@ -9967,13 +10026,23 @@
     const d = solLaunchDraft;
     const cfgAddr = solCfgEffective && solCfgEffective.dbcConfig;
     const D = window.IgnitionSol.curveDefaults;
-    const thresholdSol = Math.round(D.migrationMarketCapSol * 0.24);
+    solEnsureCurveInfo(cfgAddr);
+    const ci = cfgAddr && solCurveInfo[cfgAddr] ? solCurveInfo[cfgAddr] : null;
+    const stdSupply = ci && ci.totalSupply ? ci.totalSupply : D.totalSupply;
+    const startMc = ci && ci.startMarketCapSol ? ci.startMarketCapSol : D.initialMarketCapSol;
+    const raise = ci ? ci.raiseSol : Math.round(D.migrationMarketCapSol * 0.24);
+    const rules = solSupplyRules();
+    const canSupply = !!cfgAddr && rules.allowed;
+    const isAdminUser = isAdminWallet(wallet);
+    if(!d.supply) d.supply = String(stdSupply);
+    const who = solPublicOn() ? (solIsMain() ? "Open to anyone with a Solana wallet. Real SOL." : "Open to anyone with a Solana wallet. Devnet test SOL only.") : (solIsMain() ? "Real SOL — admin only, hidden from everyone else." : "Devnet test SOL only — admin preview, hidden from everyone else.");
     panel.innerHTML = `
       <div class="eyebrow">Quick launch · Solana ${solNetWord()}</div>${solIsMain() ? `<div class="sol-live-banner" role="alert"><b>LIVE — Solana mainnet.</b> Everything here spends real SOL. Make sure your Solana wallet is on mainnet (Phantom: Settings → Developer Settings → Testnet Mode OFF).</div>` : ""}
       <h2 style="margin:6px 0 8px; font-size:1.3rem;">Launch on a Meteora bonding curve</h2>
-      <p class="hint" style="margin:0 0 16px; max-width:70ch;">pump.fun-style: one transaction creates the token and its curve. ${D.totalSupply.toLocaleString("en-US")} supply · starts at ${D.initialMarketCapSol} SOL market cap · graduates to a Meteora DAMM v2 pool at ~${D.migrationMarketCapSol} SOL (about ${thresholdSol} SOL raised). ${solIsMain() ? "Real SOL — admin only, hidden from everyone else." : "Devnet test SOL only — admin preview, hidden from everyone else."}</p>
+      <p class="hint" style="margin:0 0 16px; max-width:70ch;">pump.fun-style: one transaction creates the token and its curve. ${stdSupply.toLocaleString("en-US")} supply (standard) · starts at about ${Number(startMc.toPrecision(3)).toLocaleString("en-US")} SOL market cap · graduates to a Meteora DAMM v2 pool after about ${Number(raise.toPrecision(3)).toLocaleString("en-US")} SOL is raised. ${who}</p>
       <div id="solWalletRow">${solWalletRowHTML()}</div>
-      ${cfgAddr ? `<div class="hint" style="margin:10px 0 0;">Platform config: <a href="${solExplorer("address", cfgAddr)}" target="_blank" rel="noopener noreferrer">${escapeHtml(cfgAddr.slice(0,6)+"…"+cfgAddr.slice(-4))}</a></div>` : `
+      ${cfgAddr ? `<div class="hint" style="margin:10px 0 0;">Platform config: <a href="${solExplorer("address", cfgAddr)}" target="_blank" rel="noopener noreferrer">${escapeHtml(cfgAddr.slice(0,6)+"…"+cfgAddr.slice(-4))}</a></div>` : !isAdminUser ? `
+        <div class="sol-config-box"><b>Solana launching isn't set up yet.</b> Check back soon.</div>` : `
         <div class="sol-config-box">
           <b>No platform config yet.</b> Meteora needs a one-time config (the curve shape and fee split every launch uses). Create it once with your Solana wallet; this wallet becomes the platform fee claimer.
           <div style="margin-top:10px"><button class="btn btn-primary btn-sm" id="solCreateConfig">Create platform config</button></div>
@@ -9997,14 +10066,38 @@
           <div class="field"><label for="solTwitter">X / Twitter</label><input id="solTwitter" value="${escapeHtml(d.twitter)}" placeholder="x.com/yourtoken"></div>
           <div class="field"><label for="solTelegram">Telegram</label><input id="solTelegram" value="${escapeHtml(d.telegram)}" placeholder="t.me/yourtoken"></div>
         </div>
+        ${canSupply ? `<div class="field" style="max-width:340px;"><label for="solSupply">Total supply (tokens)</label>
+          <input id="solSupply" inputmode="numeric" value="${escapeHtml(d.supply)}" autocomplete="off">
+          <div class="hint" id="solSupplyHint"></div></div>` : ""}
         <div class="field" style="max-width:260px;"><label for="solFirstBuy">First buy (SOL, optional)</label><input id="solFirstBuy" inputmode="decimal" value="${escapeHtml(d.firstBuy)}"><div class="hint">Bought in the same transaction, before anyone else can.</div></div>
         <button class="btn btn-primary" id="solLaunchBtn">Launch on Solana ${solNetWord()}${solIsMain() ? " (real SOL)" : ""}</button>
-        <div class="hint" style="margin-top:8px;">You'll be asked to sign twice in your EVM admin wallet (upload metadata, record the launch) and once in your Solana wallet (the launch itself).</div>
+        <div class="hint" style="margin-top:8px;">${isAdminUser ? "You'll be asked to sign twice in your EVM admin wallet (upload metadata, record the launch) and approve the launch in your Solana wallet." : "You'll sign two short messages in your Solana wallet (free — they only prove it's you) and approve the launch transaction."}</div>
       </div>
       <div id="solLaunchStatus" class="sol-status" aria-live="polite"></div>`;
     solWireWalletRow(document.getElementById("solWalletRow"), renderSolanaLaunchPanel);
     wireSolanaLaunchForm();
+    solUpdateSupplyHint(stdSupply, startMc);
     if(solPendingRegister) solShowRetryRegister();
+  }
+  // Live line under the supply box: what that supply means per token, and whether it costs an extra transaction.
+  function solUpdateSupplyHint(stdSupply, startMc){
+    const inp = document.getElementById("solSupply"), hint = document.getElementById("solSupplyHint");
+    if(!inp || !hint) return;
+    const rules = solSupplyRules();
+    const show = ()=>{
+      const n = solParseSupply(inp.value);
+      if(!Number.isFinite(n) || n < rules.min || n > rules.max){
+        hint.style.color = "var(--critical-500)";
+        hint.textContent = `Enter a whole number from ${rules.min.toLocaleString("en-US")} to ${rules.max.toLocaleString("en-US")}.`;
+        return;
+      }
+      hint.style.color = "";
+      const price = startMc / n;
+      const custom = n !== stdSupply;
+      hint.textContent = `Starting price ≈ ${price.toPrecision(3)} SOL per token (same ${Number(startMc.toPrecision(3))} SOL starting market cap and graduation target whatever the supply). ` +
+        (custom ? "A supply other than the standard one adds one extra approval: you create a small config of your own for this token (about 0.01 SOL)." : "This is the standard supply, so no extra step.");
+    };
+    inp.addEventListener("input", show); show();
   }
   function solStatus(html, kind){
     const el = document.getElementById("solLaunchStatus");
@@ -10013,7 +10106,8 @@
   function solCaptureDraft(){
     const g = id=> (document.getElementById(id)||{}).value || "";
     Object.assign(solLaunchDraft, { name:g("solName").trim(), symbol:g("solSymbol").trim(), desc:g("solDesc").trim(),
-      website:g("solWebsite").trim(), twitter:g("solTwitter").trim(), telegram:g("solTelegram").trim(), firstBuy:g("solFirstBuy").trim() || "0" });
+      website:g("solWebsite").trim(), twitter:g("solTwitter").trim(), telegram:g("solTelegram").trim(), firstBuy:g("solFirstBuy").trim() || "0",
+      supply: document.getElementById("solSupply") ? g("solSupply").trim() : solLaunchDraft.supply });
   }
   function wireSolanaLaunchForm(){
     const logoBtn = document.getElementById("solLogoBtn");
@@ -10042,11 +10136,13 @@
     if(!lib || !lib.currentWallet()){ solNeedWallet(); return; }
     solBusy = true; out.textContent = "Waiting for your Solana wallet…";
     try{
-      const r = await solGuarded(()=> lib.createPlatformConfig());
+      const r = await solGuarded(()=> lib.createPlatformConfig(solCurvePreset()));
       // make it usable straight away in this browser session; "Save it to the site" below makes it permanent
       window.IgnitionSol.init({ rpcUrl: solCfgEffective.rpcUrl, cluster: solCluster(), configAddress: r.config });
       solCfgEffective.dbcConfig = r.config;
       if(solCfgPromise) solCfgPromise = solCfgPromise.then(c=> Object.assign({}, c, { dbcConfig: r.config }));
+      // Read the new config's numbers BEFORE redrawing, so a late info-fetch can't redraw the panel and wipe the message below
+      try{ solCurveInfo[r.config] = await window.IgnitionSol.getConfigInfo(r.config); }catch(e){ solCurveInfo[r.config] = false; }
       // init() builds a fresh connection, so the wallet account stays (it lives in the bundle) — redraw
       renderSolanaLaunchPanel();
       solStatus(`<b>Platform config created.</b> Address: <code id="solCfgAddr">${escapeHtml(r.config)}</code><br>
@@ -10077,35 +10173,55 @@
     if(!d.name){ toast("Give the token a name."); return; }
     if(!/^[A-Za-z0-9]{1,10}$/.test(d.symbol)){ toast("Ticker must be 1-10 letters or digits."); return; }
     if(!/^\d*\.?\d*$/.test(d.firstBuy)){ toast("First buy must be a number."); return; }
+    // creator-chosen supply?
+    const cfgAddr = solCfgEffective && solCfgEffective.dbcConfig;
+    const ci = cfgAddr && solCurveInfo[cfgAddr] ? solCurveInfo[cfgAddr] : null;
+    const rules = solSupplyRules();
+    let supply = null;   // null = the standard config; a number = this token gets its own config
+    if(document.getElementById("solSupply")){
+      const n = solParseSupply(d.supply);
+      if(!Number.isFinite(n) || n < rules.min || n > rules.max){ toast(`Total supply must be a whole number from ${rules.min.toLocaleString("en-US")} to ${rules.max.toLocaleString("en-US")}.`); return; }
+      if(!ci || !ci.totalSupply){ toast("Still reading the platform's curve from the network — try again in a moment."); solEnsureCurveInfo(cfgAddr); return; }
+      if(n !== ci.totalSupply) supply = n;
+    }
     const btn = document.getElementById("solLaunchBtn");
+    const steps = supply ? 4 : 3;
     solBusy = true; btn.disabled = true;
     try{
-      solStatus("1/3 — Uploading token metadata (sign in your admin wallet)…");
+      solStatus(`1/${steps} — Uploading token metadata (sign in ${solSignWho()})…`);
       const id = solRandomId();
-      const ts = Date.now();
-      const meta = await solAdminPost("/solana/metadata", `IgnitionX admin: solana metadata ${id} at ${ts}`, ts, {
+      const meta = await solSignedPost("/solana/metadata", "metadata", id, {
         id, name:d.name, symbol:d.symbol, description:d.desc, image:d.image || undefined,
         website:d.website || undefined, twitter:d.twitter || undefined, telegram:d.telegram || undefined,
       });
-      solStatus("2/3 — Creating the token and curve (approve in your Solana wallet)…");
-      const res = await solGuarded(()=> lib.launch({ name:d.name, symbol:d.symbol, uri: meta.uri, firstBuySol: d.firstBuy || "0" }));
+      let config = null;
+      if(supply){
+        if(solPendingConfig && solPendingConfig.supply === supply && solPendingConfig.cluster === solCluster()) config = solPendingConfig.config;
+        else{
+          solStatus(`2/${steps} — Creating this token's own config for a supply of ${supply.toLocaleString("en-US")} (approve in your Solana wallet, about 0.01 SOL)…`);
+          const r = await solGuarded(()=> lib.createSupplyConfig({ totalSupply: supply, curve: solCurvePreset() }));
+          config = r.config;
+          solPendingConfig = { supply, config, cluster: solCluster() };
+        }
+      }
+      solStatus(`${steps-1}/${steps} — Creating the token and curve (approve in your Solana wallet)…`);
+      const res = await solGuarded(()=> lib.launch({ name:d.name, symbol:d.symbol, uri: meta.uri, firstBuySol: d.firstBuy || "0", config }));
       solPendingRegister = { mint:res.mint, pool:res.pool, creator:res.creator, name:d.name, symbol:d.symbol, metadataId:id, txSignature:res.signature, cluster: solCluster() };
-      solStatus("3/3 — Recording the launch (sign in your admin wallet)…");
+      solStatus(`${steps}/${steps} — Recording the launch (sign in ${solSignWho()})…`);
       await solRegisterPending();
     }catch(e){
       if(solPendingRegister) solShowRetryRegister(solErr(e));
-      else solStatus(escapeHtml(solErr(e)), "err");
+      else solStatus(escapeHtml(solErr(e)) + (solPendingConfig ? " <br>Your token's config was already created, so retrying won't pay for it again." : ""), "err");
     }finally{ solBusy = false; if(btn) btn.disabled = false; }
   }
   async function solRegisterPending(){
     const p = solPendingRegister;
     if(!p) return;
-    const ts = Date.now();
-    await solAdminPost("/solana/launches", `IgnitionX admin: register solana launch ${p.mint} at ${ts}`, ts, {
+    await solSignedPost("/solana/launches", "register", p.mint, {
       mint:p.mint, pool:p.pool, creator:p.creator, name:p.name, symbol:p.symbol, metadataId:p.metadataId, txSignature:p.txSignature, cluster: p.cluster || solCluster(),
     });
-    solPendingRegister = null;
-    Object.assign(solLaunchDraft, { name:"", symbol:"", desc:"", website:"", twitter:"", telegram:"", firstBuy:"0", image:"" });
+    solPendingRegister = null; solPendingConfig = null;
+    Object.assign(solLaunchDraft, { name:"", symbol:"", desc:"", website:"", twitter:"", telegram:"", firstBuy:"0", image:"", supply:"" });
     toast(`$${p.symbol} launched on Solana ${p.cluster === "mainnet-beta" ? "mainnet" : "devnet"}.`);
     solLaunchesLoaded = false;
     await solLoadLaunches();
@@ -10158,12 +10274,13 @@
       <div style="display:flex; flex-direction:column; gap:20px;">
         <div class="panel" id="solTradePanel"></div>
         <div class="panel" id="solFeesPanel"></div>
-        <button class="btn btn-ghost btn-sm" id="solRemoveBtn" style="align-self:flex-start">Remove from site list</button>
+        ${isAdminWallet(wallet) ? `<button class="btn btn-ghost btn-sm" id="solRemoveBtn" style="align-self:flex-start">Remove from site list</button>` : ""}
       </div>`;
     showView("detail");
     solRenderTradePanel();
     solRenderFeesPanel();
-    document.getElementById("solRemoveBtn").addEventListener("click", ()=> solRemoveLaunch(l));
+    const rmBtn = document.getElementById("solRemoveBtn");
+    if(rmBtn) rmBtn.addEventListener("click", ()=> solRemoveLaunch(l));
     solLoadHistoryChart(l);
     solLoadLib().then(()=> solRefreshPools()).catch(err=> toast(solErr(err)));
     if(solDetailTimer) clearInterval(solDetailTimer);
@@ -14573,6 +14690,9 @@
     saLiveCluster = sv.cluster === "mainnet-beta" ? "mainnet-beta" : "devnet";
     saCluster = saLiveCluster;
     const live = saLiveCluster === "mainnet-beta";
+    const cvs = sv.curve || {};
+    const cv = { supply: 1000000000, initialMarketCapSol: cvs.initialMarketCapSol || 30, migrationMarketCapSol: cvs.migrationMarketCapSol || 300,
+                 feePct: (cvs.tradingFeeBps || 100) / 100, creatorFeePercent: cvs.creatorFeePercent != null ? cvs.creatorFeePercent : 10 };
     const trackerLine = (()=>{
       if(sv.enabled === false) return `<b>Off</b> — Solana is switched off, so launches are refused and prices aren't sampled.`;
       if(status.running) return `<b>Running</b> on ${escapeHtml(status.rpcHost || "the server RPC")} every ${Math.round((status.pollMs||0)/1000)}s · last pass ${saAgo(status.lastRunAt)} (${Number(status.lastSampled||0)} sampled, ${Number(status.lastFailed||0)} failed)${status.source ? ` · packages: ${escapeHtml(status.source)}` : ""}`;
@@ -14601,7 +14721,9 @@
           <div class="admin-cfg-label">Platform config</div>
           <div style="grid-column:2 / -1;">
             <button class="btn btn-ghost btn-sm" type="button" data-sa-create="${cl}">Create a new ${cl === "mainnet-beta" ? "mainnet" : "devnet"} platform config…</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-sa-check="${cl}">Check it matches the numbers above</button>
             <span class="help-text" id="sa_create_${cl}" style="margin-left:8px;"></span>
+            <div class="help-text" id="sa_check_${cl}" style="margin-top:6px;" aria-live="polite"></div>
           </div>
         </div>`;
     return `
@@ -14625,6 +14747,45 @@
             </div>
           </div>
           <div id="sa_golive" hidden></div>
+
+          ${sect("Who can launch", "admin only, or anyone with a Solana wallet")}
+          <div class="admin-cfg-row">
+            <div class="admin-cfg-label">Launching <span class="info-dot" title="Admin only: just your admin wallet. Anyone: any visitor with a Solana wallet can launch a token. Their requests are signed with their wallet, the relayer verifies every launch on-chain, and uploads are rate-limited. Needs a server RPC URL saved for the live network.">?</span></div>
+            <div class="field" style="grid-column:2 / -1;">
+              <select id="sa_publicLaunch" aria-label="Who can launch">
+                <option value="false"${sv.publicLaunch ? "" : " selected"}>Admin only</option>
+                <option value="true"${sv.publicLaunch ? " selected" : ""}>Anyone with a Solana wallet</option>
+              </select>
+              <div class="help-text sa-note" id="sa_publicNote" style="margin-top:6px;"></div>
+            </div>
+          </div>
+
+          ${sect("Token supply and curve", "applies to NEW tokens only")}
+          <div class="admin-cfg-row">
+            <div class="admin-cfg-label">Creators pick their supply <span class="info-dot" title="On: the launch form has a Total supply box. A supply other than the standard one makes the creator pay (about 0.01 SOL) for a small config of their own, which the relayer checks on-chain matches your curve and fee numbers exactly before listing the token.">?</span></div>
+            <div class="field" style="grid-column:2 / -1;">
+              <select id="sa_customSupply" aria-label="Creators pick their supply">
+                <option value="true"${sv.customSupply === false ? "" : " selected"}>Yes — creators choose their own total supply</option>
+                <option value="false"${sv.customSupply === false ? " selected" : ""}>No — every token uses the standard supply</option>
+              </select>
+            </div>
+          </div>
+          ${field("sa_supplyMin", "Smallest supply allowed", "Whole tokens. 1,000,000 or more.", String(sv.supplyMin || 1000000), { inputmode:"numeric" })}
+          ${field("sa_supplyMax", "Largest supply allowed", "Whole tokens. Up to 1,000,000,000,000.", String(sv.supplyMax || 10000000000), { inputmode:"numeric" })}
+          <div class="admin-cfg-row admin-cfg-head" style="margin-top:6px;"><div class="admin-cfg-col-head" style="grid-column:1 / -1; font-weight:400; color:var(--paper-500);">The standard curve. Tokens already launched keep the numbers they were created with — a token's supply and graduation size are fixed on-chain when it launches. To change them for new tokens: edit, press Preview, create a new platform config below, then Save.</div></div>
+          ${field("sa_curveSupply", "Standard token supply", "Used when you create a new standard platform config (not saved by itself; each token's supply is read from its own config).", String(cv.supply), { inputmode:"numeric" })}
+          ${field("sa_curveStart", "Starting market cap (SOL)", "Market cap at the start of the curve. A lower start means a lower price per token and a smaller graduation raise.", String(cv.initialMarketCapSol))}
+          ${field("sa_curveGrad", "Graduation market cap (SOL)", "Market cap at which the curve graduates to a Meteora DAMM v2 pool. Lower = graduates sooner and raises less SOL.", String(cv.migrationMarketCapSol))}
+          ${field("sa_curveRaise", "…or: SOL to raise before graduating", "Optional shortcut: type how many SOL buyers must put in before the token graduates, then press Preview — it works out the graduation market cap for you and fills it in above.", "", { placeholder:"leave blank to use the graduation market cap above", inputmode:"decimal" })}
+          ${field("sa_curveFee", "Trading fee (%)", "Charged on every buy and sell. 0.25–10.", String(cv.feePct), { inputmode:"decimal" })}
+          ${field("sa_curveCreator", "Creator's share of fees (%)", "Share of the fees (after Meteora's cut) that goes to the token's creator; the rest goes to you. 0–100.", String(cv.creatorFeePercent), { inputmode:"numeric" })}
+          <div class="admin-cfg-row">
+            <div class="admin-cfg-label">Preview</div>
+            <div style="grid-column:2 / -1;">
+              <button class="btn btn-ghost btn-sm" type="button" id="saCurvePreviewBtn">Preview these numbers</button>
+              <div class="help-text" id="sa_curveResult" style="margin-top:6px;" aria-live="polite"></div>
+            </div>
+          </div>
 
           ${sect("Devnet (test network)")}
           ${field("sa_rpcUrl", "Browser RPC URL", "The RPC the admin's browser uses on devnet. Visible to anyone who opens the network tab — use a key restricted to your domain. Its host must be allowed by the page's Content-Security-Policy.", dn.rpcUrl || st.rpcUrl || "https://api.devnet.solana.com")}
@@ -14709,6 +14870,17 @@
       if(bad && !/server/i.test(id)) w.textContent = "The browser will block this address: add its host to connect-src in the Content-Security-Policy <meta> near the top of public/index.html (and redeploy), or use a provider that is already listed.";
       else w.hidden = true;
     });
+    const pn = document.getElementById("sa_publicNote");
+    if(pn){
+      const open = saVal("sa_publicLaunch") === "true";
+      const willBeMain = saCluster === "mainnet-beta";
+      pn.style.color = open && willBeMain ? "var(--critical-500)" : "";
+      pn.textContent = !open
+        ? "Only your admin wallet sees and uses the Solana launch screens."
+        : (willBeMain
+          ? "Anyone can launch with real SOL. Launches are verified on-chain and uploads are rate-limited, but strangers are now using your platform: you earn the platform share of fees, and you are responsible for what gets launched. Remove a token from the site list any time from its page (the token itself stays on-chain)."
+          : "Anyone with a Solana wallet can launch a devnet test token. Launches are verified on-chain and uploads are rate-limited. Needs a server RPC URL saved for this network.");
+    }
     const live = document.getElementById("sa_golive");
     const btn = document.getElementById("solanaSettingsSaveBtn");
     document.querySelectorAll("[data-sa-cluster]").forEach(b=> b.setAttribute("aria-pressed", String(b.dataset.saCluster === saCluster)));
@@ -14722,7 +14894,7 @@
         live.hidden = false;
         live.innerHTML = `
           <div class="sol-live-banner" role="alert" style="margin:10px 0;">
-            <b>You're about to put the Solana quick-launch on mainnet.</b> Launches, buys and fees will use <b>real SOL</b>. Devnet tokens stay on devnet and won't appear on mainnet. Solana stays admin-only — the public can't see or use it.
+            <b>You're about to put the Solana quick-launch on mainnet.</b> Launches, buys and fees will use <b>real SOL</b>. Devnet tokens stay on devnet and won't appear on mainnet. ${saVal("sa_publicLaunch") === "true" ? "<b>Launching is set to Anyone — real visitors will be spending real SOL on your platform.</b>" : "Solana stays admin-only — the public can't see or use it."}
             <ul style="margin:8px 0 8px 18px; padding:0; list-style:none;">
               ${checks.map(c=> `<li>${c.ok ? "✓" : "✗"} ${escapeHtml(c.text)}</li>`).join("")}
             </ul>
@@ -14744,6 +14916,69 @@
         }
       }
     }
+  }
+  // The curve numbers in the form, as the bundle's previewCurve/createPlatformConfig want them.
+  function saCurveOpts(){
+    const feePct = Number(saVal("sa_curveFee"));
+    const opts = {
+      totalSupply: Number(saVal("sa_curveSupply").replace(/[,\s_]/g, "")),
+      initialMarketCapSol: Number(saVal("sa_curveStart")),
+      tradingFeeBps: Math.round(feePct * 100),
+      creatorFeePercent: Number(saVal("sa_curveCreator")),
+    };
+    const want = saVal("sa_curveRaise");
+    if(want) opts.raiseSol = Number(want); else opts.migrationMarketCapSol = Number(saVal("sa_curveGrad"));
+    return opts;
+  }
+  const saFmt = n=> Number(Number(n).toPrecision(4)).toLocaleString("en-US");
+  // Works out the curve for the form's numbers (solving "SOL to raise" into a graduation market cap) and writes the
+  // result back into the form, so what gets created and what gets saved are the exact same numbers.
+  async function saPreviewCurve(){
+    const out = document.getElementById("sa_curveResult");
+    const say = (t, bad)=>{ if(out){ out.textContent = t; out.style.color = bad ? "var(--critical-500)" : ""; } };
+    try{
+      const lib = await saEnsureLib();
+      const r = lib.previewCurve(saCurveOpts());
+      const g = document.getElementById("sa_curveGrad"); if(g) g.value = String(r.migrationMarketCapSol);
+      const w = document.getElementById("sa_curveRaise"); if(w) w.value = "";
+      say(`A token on this curve starts at ${saFmt(r.initialMarketCapSol)} SOL market cap (${r.startPriceSol.toPrecision(3)} SOL per token at ${r.totalSupply.toLocaleString("en-US")} supply), graduates at ${saFmt(r.migrationMarketCapSol)} SOL market cap after buyers put in about ${saFmt(r.raiseSol)} SOL. Fee ${r.tradingFeeBps/100}%, creator gets ${r.creatorFeePercent}% of fees.`);
+      return r;
+    }catch(e){ say(solErr(e), true); return null; }
+  }
+  // Runs `fn(lib)` with the bundle pointed at cluster `cl` and that cluster's form RPC, then puts it back.
+  async function saWithCluster(cl, fn, cfgAddr){
+    const rpc = saVal(cl === "mainnet-beta" ? "sa_mainnetRpcUrl" : "sa_rpcUrl");
+    if(!rpc) throw new Error(`Enter the ${cl === "mainnet-beta" ? "mainnet" : "devnet"} browser RPC URL first.`);
+    if(!saCspAllows(rpc)) throw new Error("The browser would block that RPC address — see the warning under it.");
+    const lib = await saEnsureLib();
+    try{
+      lib.init({ rpcUrl: rpc, cluster: cl, configAddress: cfgAddr || null });
+      return await fn(lib);
+    }finally{
+      try{ if(solCfgEffective) lib.init({ rpcUrl: solCfgEffective.rpcUrl, cluster: solCfgEffective.cluster, configAddress: solCfgEffective.dbcConfig || null }); }catch(e){}
+    }
+  }
+  // Reads a platform config from the chain and says whether it matches the curve numbers in the form.
+  async function saCheckConfig(cl){
+    const out = document.getElementById("sa_check_"+cl);
+    const say = (t, bad)=>{ if(out){ out.textContent = t; out.style.color = bad ? "var(--critical-500)" : "var(--good-500)"; } };
+    const addr = saVal(cl === "mainnet-beta" ? "sa_mainnetDbcConfig" : "sa_dbcConfig");
+    if(!saLooksLikeAddress(addr)){ say("Enter this network's platform config address first.", true); return; }
+    say("Reading it from the network…"); if(out) out.style.color = "";
+    try{
+      const info = await saWithCluster(cl, lib=> lib.getConfigInfo(addr), addr);
+      const lib = window.IgnitionSol;
+      const o = saCurveOpts(); o.totalSupply = info.totalSupply;
+      const exp = lib.previewCurve(Object.assign({}, o, { raiseSol: undefined, migrationMarketCapSol: Number(saVal("sa_curveGrad")) }));
+      const problems = [];
+      if(Math.abs(info.raiseSol - exp.raiseSol) > 0.01) problems.push(`raises ${saFmt(info.raiseSol)} SOL (form: ${saFmt(exp.raiseSol)})`);
+      if(info.startMarketCapSol && Math.abs(info.startMarketCapSol - exp.initialMarketCapSol) / exp.initialMarketCapSol > 0.005) problems.push(`starts at ${saFmt(info.startMarketCapSol)} SOL (form: ${saFmt(exp.initialMarketCapSol)})`);
+      if(info.tradingFeeBps != null && Math.abs(info.tradingFeeBps - exp.tradingFeeBps) > 0.5) problems.push(`fee ${info.tradingFeeBps/100}% (form: ${exp.tradingFeeBps/100}%)`);
+      if(info.creatorFeePercent != null && info.creatorFeePercent !== exp.creatorFeePercent) problems.push(`creator share ${info.creatorFeePercent}% (form: ${exp.creatorFeePercent}%)`);
+      const facts = `${info.totalSupply.toLocaleString("en-US")} supply · starts ${saFmt(info.startMarketCapSol)} SOL · raises ${saFmt(info.raiseSol)} SOL${info.tradingFeeBps != null ? ` · fee ${info.tradingFeeBps/100}%` : ""}${info.creatorFeePercent != null ? ` · creator ${info.creatorFeePercent}%` : ""}`;
+      if(problems.length) say(`That config is ${facts}. It does NOT match the numbers above: ${problems.join("; ")}. Creator-chosen supplies would be refused until they match — either put the config's real numbers in the form, or create a new config from these numbers.`, true);
+      else say(`✓ Matches. That config is ${facts}.`);
+    }catch(e){ say(solErr(e), true); }
   }
   async function saCreateConfig(cl, btnEl){
     const out = document.getElementById("sa_create_"+cl);
@@ -14767,12 +15002,15 @@
     if(solBusy) return;
     solBusy = true; btnEl.disabled = true; say("Waiting for your Solana wallet…");
     try{
+      const pv = await saPreviewCurve();            // validates the numbers and fixes the graduation market cap
+      if(!pv) throw new Error("Fix the curve numbers first (see the message under Preview).");
       lib.init({ rpcUrl: rpc, cluster: cl, configAddress: null });
-      const r = await solGuarded(()=> lib.createPlatformConfig());
+      const r = await solGuarded(()=> lib.createPlatformConfig({ totalSupply: pv.totalSupply, initialMarketCapSol: pv.initialMarketCapSol,
+        migrationMarketCapSol: pv.migrationMarketCapSol, tradingFeeBps: pv.tradingFeeBps, creatorFeePercent: pv.creatorFeePercent }));
       const input = document.getElementById(cl === "mainnet-beta" ? "sa_mainnetDbcConfig" : "sa_dbcConfig");
       if(input) input.value = r.config;
       const url = `https://explorer.solana.com/tx/${encodeURIComponent(r.signature)}${cl === "mainnet-beta" ? "" : "?cluster=devnet"}`;
-      if(out){ out.style.color = "var(--good-500)"; out.innerHTML = `Created <code>${escapeHtml(r.config)}</code> and filled in above — now press <b>Save Solana settings</b> to keep it. <a href="${url}" target="_blank" rel="noopener noreferrer">View transaction</a>`; }
+      if(out){ out.style.color = "var(--good-500)"; out.innerHTML = `Created <code>${escapeHtml(r.config)}</code> (${pv.totalSupply.toLocaleString("en-US")} supply, raises ${saFmt(r.migrationQuoteThresholdSol)} SOL) and filled in above — now press <b>Save Solana settings</b> to keep it and the curve numbers. <a href="${url}" target="_blank" rel="noopener noreferrer">View transaction</a>`; }
       saUpdateForm();
     }catch(e){
       say(solErr(e), true);
@@ -14798,6 +15036,11 @@
     wrap.innerHTML = solanaAdminPanelHTML(data, st);
     wrap.querySelectorAll("[data-sa-cluster]").forEach(b=> b.addEventListener("click", ()=>{ saCluster = b.dataset.saCluster; saUpdateForm(); }));
     wrap.querySelectorAll("[data-sa-create]").forEach(b=> b.addEventListener("click", ()=> saCreateConfig(b.dataset.saCreate, b)));
+    wrap.querySelectorAll("[data-sa-check]").forEach(b=> b.addEventListener("click", async ()=>{ b.disabled = true; try{ await saCheckConfig(b.dataset.saCheck); } finally{ b.disabled = false; } }));
+    const pvb = document.getElementById("saCurvePreviewBtn");
+    if(pvb) pvb.addEventListener("click", async ()=>{ pvb.disabled = true; try{ await saPreviewCurve(); } finally{ pvb.disabled = false; } });
+    const pubSel = document.getElementById("sa_publicLaunch");
+    if(pubSel) pubSel.addEventListener("change", saUpdateForm);
     wrap.querySelectorAll("input").forEach(i=> i.addEventListener("input", saUpdateForm));
     const save = document.getElementById("solanaSettingsSaveBtn");
     if(save) save.addEventListener("click", ()=> runSolanaSettingsSave(save));
@@ -14811,6 +15054,11 @@
     const settings = {
       cluster: saCluster,
       enabled: saVal("sa_enabled") || "true",
+      publicLaunch: saVal("sa_publicLaunch") || "false",
+      customSupply: saVal("sa_customSupply") || "true",
+      supplyMin: saVal("sa_supplyMin").replace(/[,\s_]/g, ""), supplyMax: saVal("sa_supplyMax").replace(/[,\s_]/g, ""),
+      curveStartMcapSol: saVal("sa_curveStart"), curveGraduationMcapSol: saVal("sa_curveGrad"),
+      curveFeeBps: String(Math.round(Number(saVal("sa_curveFee")) * 100)), curveCreatorFeePercent: saVal("sa_curveCreator"),
       rpcUrl: saVal("sa_rpcUrl"), serverRpcUrl: saVal("sa_serverRpcUrl"), dbcConfig: saVal("sa_dbcConfig"),
       mainnetRpcUrl: saVal("sa_mainnetRpcUrl"), mainnetServerRpcUrl: saVal("sa_mainnetServerRpcUrl"), mainnetDbcConfig: saVal("sa_mainnetDbcConfig"),
       publicBaseUrl: saVal("sa_publicBaseUrl"), pollSeconds: saVal("sa_pollSeconds"),
@@ -14818,6 +15066,7 @@
     };
     const result = document.getElementById("sa_result");
     const say = (t, bad)=>{ if(result){ result.textContent = t; result.style.color = bad ? "var(--critical-500)" : "var(--good-500)"; } };
+    if(saVal("sa_curveRaise")){ say("You typed a \"SOL to raise\" target — press Preview first so it's turned into a graduation market cap.", true); return; }
     const label = btnEl.textContent;
     btnEl.disabled = true; btnEl.textContent = "Waiting for signature…";
     try{
