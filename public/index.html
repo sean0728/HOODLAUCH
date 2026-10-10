@@ -19,7 +19,7 @@
   add `Content-Security-Policy: frame-ancestors 'none'` (or 'self') there
   too, to stop this page from being framed by another site.
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.devnet.solana.com https://api.coingecko.com https://rpc.testnet.chain.robinhood.com https://rpc.mainnet.chain.robinhood.com https://explorer.testnet.chain.robinhood.com https://robinhoodchain.blockscout.com wss://relay.walletconnect.org wss://relay.walletconnect.com https://rpc.walletconnect.org https://rpc.walletconnect.com https://verify.walletconnect.org https://verify.walletconnect.com https://pulse.walletconnect.org; frame-src https://verify.walletconnect.org https://verify.walletconnect.com; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.devnet.solana.com https://api.mainnet-beta.solana.com https://*.helius-rpc.com https://*.quiknode.pro https://*.rpcpool.com https://*.alchemy.com https://api.coingecko.com https://rpc.testnet.chain.robinhood.com https://rpc.mainnet.chain.robinhood.com https://explorer.testnet.chain.robinhood.com https://robinhoodchain.blockscout.com wss://relay.walletconnect.org wss://relay.walletconnect.com https://rpc.walletconnect.org https://rpc.walletconnect.com https://verify.walletconnect.org https://verify.walletconnect.com https://pulse.walletconnect.org; frame-src https://verify.walletconnect.org https://verify.walletconnect.com; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>IgnitionX</title>
 <meta name="description" content="IgnitionX — launch, create and trade tokens on Robinhood Chain.">
 <meta name="theme-color" content="#050505">
@@ -410,6 +410,11 @@
   .sol-dot{width:8px; height:8px; border-radius:50%; background:var(--paper-700); flex:none;}
   .sol-dot.ok{background:var(--good-500);}
   .sol-config-box{margin-top:14px; padding:14px 16px; border:1px dashed rgba(255,160,58,.5); border-radius:var(--radius-md); background:rgba(255,160,58,.06); font-size:.88rem;}
+  .sa-status{margin:0 0 14px; padding:12px 14px; background:var(--ink-850); border:1px solid var(--line); border-radius:var(--radius-md); font-size:.84rem; line-height:1.5;}
+  .sa-warn[hidden]{display:none !important;}
+  #sa_golive[hidden]{display:none !important;}
+  .sol-live-banner{margin:12px 0 4px; padding:10px 14px; border:1px solid rgba(255,90,90,.6); background:rgba(255,60,60,.1); border-radius:var(--radius-md); font-size:.86rem; line-height:1.5;}
+  .tc-quicklaunch-badge.live{background:rgba(255,60,60,.16); color:#ff8a8a; border-color:rgba(255,90,90,.5);}
   .sol-form-row{display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px;}
   .sol-status{margin-top:16px; font-size:.86rem; line-height:1.5; word-break:break-word;}
   .sol-status:empty{display:none;}
@@ -1071,7 +1076,7 @@
       <div id="solanaExploreSection" hidden>
         <div class="section-head">
           <h2>Solana quick launches</h2>
-          <span class="tc-quicklaunch-badge">Devnet · admin preview</span>
+          <span class="tc-quicklaunch-badge" id="solSectionBadge">Devnet · admin preview</span>
         </div>
         <div class="token-grid" id="solanaGrid"></div>
       </div>
@@ -1088,7 +1093,7 @@
       <div class="launch-netbar" id="launchNetBar" hidden>
         <span class="eyebrow">Launch on</span>
         <button class="netchoice" aria-pressed="true" data-launchnet="evm">Robinhood Chain</button>
-        <button class="netchoice" aria-pressed="false" data-launchnet="solana">Solana · devnet <span class="tc-quicklaunch-badge">Admin preview</span></button>
+        <button class="netchoice" aria-pressed="false" data-launchnet="solana"><span id="solNetBtnLabel">Solana · devnet</span> <span class="tc-quicklaunch-badge" id="solNetBtnTag">Admin preview</span></button>
       </div>
       <div class="panel" id="solanaLaunchPanel" hidden></div>
       <div class="wizard-wrap">
@@ -9561,13 +9566,15 @@
     }
   }
 
-  /* ---------------- Solana quick launch (devnet, admin-only prototype) ----------------
+  /* ---------------- Solana quick launch (devnet or mainnet, admin-only) ----------------
      Tokens launch on Meteora's Dynamic Bonding Curve (a program that already exists on Solana — we
      deploy nothing). The browser builds + signs the Solana transactions with the user's Solana wallet
      (self-hosted bundle: vendor/ignitionx-solana.js → window.IgnitionSol, loaded only when needed);
      the relayer (lib/solanaApi.js) hosts token metadata, records launches, and samples prices.
-     Visibility: ONLY while the EVM ADMIN_WALLET is connected, same UI-gate as the admin tab — and
-     there is no mainnet code path (the bundle and the relayer both refuse anything but devnet). */
+     Visibility: ONLY while the EVM ADMIN_WALLET is connected, same UI-gate as the admin tab.
+     Which Solana network is live (devnet or mainnet-beta), the RPC URLs and the platform config all come from
+     the relayer's saved settings (Admin → Solana, GET/POST /solana/settings); solana-config.json is only a
+     fallback for a relayer that has none saved. */
   var SOL_RELAYER = location.origin;
   var solCfgPromise = null;
   var solLibPromise = null;
@@ -9579,22 +9586,50 @@
   var solDetailMint = null;
   var solDetailTimer = null;
   var solPendingRegister = null;       // a launch that landed on-chain but isn't recorded yet
+  var solInfoErr = {};                 // mint -> why the pool couldn't be read (shown on the token page)
+  var solLibErr = "";
   var solSubscribed = false;
   var solLastAddr = null;
   var SOL_WALLET_KEY = "ignitionx_sol_wallet";   // name of the Solana wallet last used (for a silent reconnect)
   var solBusy = false;
 
+  var solSettings = null;              // last GET /solana/settings payload ({settings,status,...}) or null
+  var solStaticCfg = null;
+  function solFetchStatic(){
+    if(!solStaticCfg){
+      solStaticCfg = fetch("solana-config.json", { cache:"no-store" })
+        .then(r=> r.ok ? r.json() : {}).catch(()=> ({}))
+        .then(c=> ({ rpcUrl: (c && typeof c.rpcUrl==="string") ? c.rpcUrl.trim() : "", dbcConfig: (c && typeof c.dbcConfig==="string") ? c.dbcConfig.trim() : "", enabled: !(c && c.enabled === false) }));
+    }
+    return solStaticCfg;
+  }
+  // Always fetched fresh when force is set (the admin tab does that); otherwise cached for the page's life.
+  function solFetchSettings(force){
+    if(force || !solSettingsPromise){
+      solSettingsPromise = fetch(SOL_RELAYER+"/solana/settings", { cache:"no-store" })
+        .then(r=> r.ok ? r.json() : null).catch(()=> null)
+        .then(d=>{ solSettings = d && d.settings ? d : null; return solSettings; });
+    }
+    return solSettingsPromise;
+  }
+  var solSettingsPromise = null;
+  // The network the site is on right now. Defaults to devnet until the relayer says otherwise.
+  function solCluster(){ return (solSettings && solSettings.settings && solSettings.settings.cluster === "mainnet-beta") ? "mainnet-beta" : "devnet"; }
+  function solIsMain(){ return solCluster() === "mainnet-beta"; }
+  function solNetWord(){ return solIsMain() ? "mainnet" : "devnet"; }
   function solFetchConfig(){
     if(!solCfgPromise){
-      solCfgPromise = fetch("solana-config.json", { cache:"no-store" })
-        .then(r=> r.ok ? r.json() : {})
-        .catch(()=> ({}))
-        .then(c=> ({
-          enabled: !!(c && c.enabled !== false && c.rpcUrl),
-          cluster: "devnet",
-          rpcUrl: (c && typeof c.rpcUrl==="string") ? c.rpcUrl : "",
-          dbcConfig: (c && typeof c.dbcConfig==="string") ? c.dbcConfig.trim() : "",
-        }));
+      solCfgPromise = Promise.all([ solFetchSettings(), solFetchStatic() ]).then(([d, st])=>{
+        const cl = solCluster();
+        const sv = (d && d.settings) || {};
+        // Devnet falls back to the old solana-config.json / the public devnet RPC; mainnet never falls back —
+        // it only ever runs on values an admin saved on purpose.
+        const rpcUrl = sv.rpcUrl || (cl === "devnet" ? (st.rpcUrl || "https://api.devnet.solana.com") : "");
+        const dbcConfig = sv.dbcConfig || (cl === "devnet" ? st.dbcConfig : "");
+        const enabled = sv.enabled !== false && st.enabled && !!rpcUrl;
+        solApplyNetLabels();
+        return { enabled, cluster: cl, rpcUrl, dbcConfig };
+      });
     }
     return solCfgPromise;
   }
@@ -9602,11 +9637,13 @@
     if(!solLibPromise){
       solLibPromise = (async ()=>{
         const cfg = await solFetchConfig();
-        if(!cfg.enabled) throw new Error("Solana isn't configured on this site (public/solana-config.json → rpcUrl).");
+        if(!cfg.enabled) throw new Error(solSettings && solSettings.settings && solSettings.settings.enabled === false
+          ? "Solana is switched off (Admin → Solana)."
+          : `Solana isn't configured for ${solNetWord()} yet — set an RPC URL in Admin → Solana.`);
         if(!window.IgnitionSol) await loadScriptOnce("vendor/ignitionx-solana.js", "Solana module");
         if(!window.IgnitionSol) throw new Error("The Solana module didn't initialise.");
-        window.IgnitionSol.init({ rpcUrl: cfg.rpcUrl, cluster: "devnet", configAddress: cfg.dbcConfig || null });
-        solCfgEffective = { cluster:"devnet", rpcUrl: cfg.rpcUrl, dbcConfig: cfg.dbcConfig };
+        window.IgnitionSol.init({ rpcUrl: cfg.rpcUrl, cluster: cfg.cluster, configAddress: cfg.dbcConfig || null });
+        solCfgEffective = { cluster: cfg.cluster, rpcUrl: cfg.rpcUrl, dbcConfig: cfg.dbcConfig };
         const lib = window.IgnitionSol;
         if(!solSubscribed){ solSubscribed = true; lib.onAccountChange(solOnAccountChange); }
         // Put back the wallet the admin used last time (no popup if Phantom still trusts this site).
@@ -9622,6 +9659,28 @@
       })().catch(err=>{ solLibPromise = null; throw err; });
     }
     return solLibPromise;
+  }
+  // Settings changed (network switched, RPC/config edited): forget everything learned about the old setup.
+  function solResetAll(){
+    solSettings = null; solSettingsPromise = null; solCfgPromise = null; solLibPromise = null; solCfgEffective = null;
+    solLaunches = []; solInfo = {}; solInfoErr = {}; solLibErr = ""; solLaunchesLoaded = false; solPendingRegister = null;
+    if(solDetailTimer){ clearInterval(solDetailTimer); solDetailTimer = null; }
+    if(solDetailMint){
+      solDetailMint = null;
+      const v = document.getElementById("view-detail");
+      if(v && v.classList.contains("active")) showView("explore");
+    }
+    renderSolanaGrid();
+  }
+  // Text that names the network: the static bits of the page get their words here once the cluster is known.
+  function solApplyNetLabels(){
+    const word = solNetWord();
+    const badge = document.getElementById("solSectionBadge");
+    if(badge){ badge.textContent = solIsMain() ? "Mainnet · admin only" : "Devnet · admin preview"; badge.classList.toggle("live", solIsMain()); }
+    const btn = document.getElementById("solNetBtnLabel");
+    if(btn) btn.textContent = "Solana · " + word;
+    const tag = document.getElementById("solNetBtnTag");
+    if(tag){ tag.textContent = solIsMain() ? "Live · admin only" : "Admin preview"; tag.classList.toggle("live", solIsMain()); }
   }
 
   // ---- formatting ----
@@ -9639,7 +9698,7 @@
     return v.toFixed(dec);
   }
   function solFmtSol(n, d){ return (n==null || !isFinite(n)) ? "—" : Number(n).toFixed(d==null?3:d)+" SOL"; }
-  function solExplorer(kind, id){ return `https://explorer.solana.com/${kind}/${encodeURIComponent(id)}?cluster=devnet`; }
+  function solExplorer(kind, id){ return `https://explorer.solana.com/${kind}/${encodeURIComponent(id)}${solIsMain() ? "" : "?cluster=devnet"}`; }
   // Only same-origin metadata images are ever rendered (the page CSP is img-src 'self' data:). Whatever
   // base URL the relayer wrote into a record, keep just the path.
   function solSafeImg(u){
@@ -9675,6 +9734,20 @@
     return data;
   }
 
+  // Admin → Solana settings. Key order and String() conversion MUST stay byte-identical to
+  // lib/solanaSettings.js (settingsMessage), or the relayer rejects the signature.
+  var SOL_SETTING_KEYS = ["cluster","enabled","rpcUrl","serverRpcUrl","dbcConfig","mainnetRpcUrl","mainnetServerRpcUrl","mainnetDbcConfig","publicBaseUrl","pollSeconds","mainnetConfirm"];
+  function solSettingsMessage(settings, timestamp){
+    const out = {};
+    SOL_SETTING_KEYS.forEach(k=>{ out[k] = (settings && settings[k] !== undefined && settings[k] !== null) ? String(settings[k]) : null; });
+    return `IgnitionX admin: update solana settings to ${JSON.stringify(out)} at ${timestamp}`;
+  }
+  // `settings` may be partial (keys left out are left unchanged on the server) or the whole admin form.
+  function solPostSettings(settings){
+    const ts = Date.now();
+    return solAdminPost("/solana/settings", solSettingsMessage(settings, ts), ts, { settings });
+  }
+
   // The Solana wallet can change underneath the page (account switched, Phantom toggled into/out of Testnet
   // Mode, site disconnected in the extension). Keep every wallet-dependent control in step with the real state
   // instead of leaving a "connected" row on screen that no longer is.
@@ -9691,6 +9764,7 @@
     solRefreshWalletUi();
   }
   function solRefreshWalletUi(){
+    if(document.getElementById("saWalletRow") && typeof saRefreshWalletRow === "function") saRefreshWalletRow();
     const row = document.getElementById("solWalletRow");
     if(row){ row.innerHTML = solWalletRowHTML(); solWireWalletRow(row, renderSolanaLaunchPanel); }
     const trow = document.getElementById("solTradeWallet");
@@ -9726,6 +9800,7 @@
       }
       return;
     }
+    solFetchConfig();   // learn which network the site is on so the labels are right
     if(!solLaunchesLoaded) solLoadLaunches();
   }
   function solSetLaunchNet(which){
@@ -9760,16 +9835,23 @@
   async function solRefreshPools(){
     if(!solLaunches.length || !solVisible()) return;
     let lib;
-    try{ lib = await solLoadLib(); }catch(e){ return; }
+    try{ lib = await solLoadLib(); solLibErr = ""; }
+    catch(e){ solLibErr = solErr(e); console.error("[solana] module failed to load", e); solShowDetailError(); return; }
     await Promise.all(solLaunches.slice(0, 24).map(async l=>{
       try{
         const info = await lib.getPoolInfo(l.pool);
         info._at = Date.now();
         solInfo[l.mint] = info;
-      }catch(e){ /* pool not readable right now — leave the card without live numbers */ }
+        delete solInfoErr[l.mint];
+      }catch(e){
+        // Not readable right now (RPC rate limit / blocked host / pool not found yet). Keep the last good numbers,
+        // but say what happened instead of leaving the page silently dead.
+        solInfoErr[l.mint] = solErr(e);
+        console.error("[solana] getPoolInfo failed for", l.mint, e);
+      }
     }));
     renderSolanaGrid();
-    if(solDetailMint) solUpdateDetailStats();
+    if(solDetailMint){ solUpdateDetailStats(); solShowDetailError(); }
   }
 
   // ---- explore: card grid ----
@@ -9799,14 +9881,14 @@
         <div class="bond-labels"><span>Curve progress</span><span>${info ? pct.toFixed(1)+"%" : "—"}</span></div>
         <div class="bond-track"><div class="bond-fill" style="width:${pct}%"></div><div class="bond-ticks"></div></div>
       </div>
-      <div class="tc-quicklaunch-badge" style="align-self:flex-start; margin-top:12px;">Solana · devnet</div>`;
+      <div class="tc-quicklaunch-badge${solIsMain()?" live":""}" style="align-self:flex-start; margin-top:12px;">Solana · ${solNetWord()}</div>`;
   }
   function renderSolanaGrid(){
     const grid = document.getElementById("solanaGrid");
     if(!grid) return;
     if(!solLaunches.length){
       grid.innerHTML = `<div class="empty" style="grid-column:1/-1; display:flex; flex-direction:column; gap:14px; align-items:center;">
-        <span>No Solana devnet launches yet.</span>
+        <span>No Solana ${solNetWord()} launches yet.</span>
         <button class="btn btn-primary" id="solFirstLaunch">Launch on Solana</button></div>`;
       const b = document.getElementById("solFirstLaunch");
       if(b) b.addEventListener("click", ()=>{ showView("create"); solSetLaunchNet("solana"); });
@@ -9829,7 +9911,7 @@
     const ws = lib ? lib.listWallets() : [];
     if(!lib) return `<div class="sol-wallet-row"><span class="sol-dot"></span><span>Solana wallet not connected</span>
         <button class="btn btn-primary btn-sm" data-sol-act="load" style="margin-left:auto">Connect Solana wallet</button></div>`;
-    if(!ws.length) return `<div class="sol-wallet-row"><span class="sol-dot"></span><span>No Solana wallet detected. Install Phantom, Solflare or Backpack, switch it to <b>devnet</b>, then reload.</span></div>`;
+    if(!ws.length) return `<div class="sol-wallet-row"><span class="sol-dot"></span><span>No Solana wallet detected. Install Phantom, Solflare or Backpack, switch it to <b>${solNetWord()}</b>, then reload.</span></div>`;
     return `<div class="sol-wallet-row"><span class="sol-dot"></span><span>Connect a wallet:</span>
       <span class="sol-wallet-list">${ws.map(w=>`<button class="btn btn-ghost btn-sm" data-sol-wallet="${escapeHtml(w.name)}">${w.icon && /^data:image\//.test(w.icon) ? `<img src="${escapeHtml(w.icon)}" alt="" width="16" height="16" style="vertical-align:-3px; margin-right:6px">` : ""}${escapeHtml(w.name)}</button>`).join("")}</span></div>`;
   }
@@ -9871,11 +9953,12 @@
   function renderSolanaLaunchPanel(){
     const panel = document.getElementById("solanaLaunchPanel");
     if(!panel || panel.hidden) return;
-    // The wallet list can only be shown once the bundle is loaded, so start loading it right away.
-    if(!window.IgnitionSol){
+    // The wallet list can only be shown once the bundle is loaded AND set up for the current network
+    // (the Admin → Solana tab can load the bundle without that), so start that right away.
+    if(!window.IgnitionSol || !solCfgEffective){
       panel.innerHTML = `<div class="hint">Loading the Solana module…</div>`;
       solLoadLib().then(renderSolanaLaunchPanel).catch(err=>{
-        panel.innerHTML = `<div class="eyebrow">Solana · devnet</div><p style="color:var(--critical-500)">${escapeHtml(solErr(err))}</p>
+        panel.innerHTML = `<div class="eyebrow">Solana · ${solNetWord()}</div><p style="color:var(--critical-500)">${escapeHtml(solErr(err))}</p>
           <button class="btn btn-ghost btn-sm" id="solRetryLoad">Try again</button>`;
         document.getElementById("solRetryLoad").addEventListener("click", renderSolanaLaunchPanel);
       });
@@ -9886,9 +9969,9 @@
     const D = window.IgnitionSol.curveDefaults;
     const thresholdSol = Math.round(D.migrationMarketCapSol * 0.24);
     panel.innerHTML = `
-      <div class="eyebrow">Quick launch · Solana devnet</div>
+      <div class="eyebrow">Quick launch · Solana ${solNetWord()}</div>${solIsMain() ? `<div class="sol-live-banner" role="alert"><b>LIVE — Solana mainnet.</b> Everything here spends real SOL. Make sure your Solana wallet is on mainnet (Phantom: Settings → Developer Settings → Testnet Mode OFF).</div>` : ""}
       <h2 style="margin:6px 0 8px; font-size:1.3rem;">Launch on a Meteora bonding curve</h2>
-      <p class="hint" style="margin:0 0 16px; max-width:70ch;">pump.fun-style: one transaction creates the token and its curve. ${D.totalSupply.toLocaleString("en-US")} supply · starts at ${D.initialMarketCapSol} SOL market cap · graduates to a Meteora DAMM v2 pool at ~${D.migrationMarketCapSol} SOL (about ${thresholdSol} SOL raised). Devnet test SOL only — admin preview, hidden from everyone else.</p>
+      <p class="hint" style="margin:0 0 16px; max-width:70ch;">pump.fun-style: one transaction creates the token and its curve. ${D.totalSupply.toLocaleString("en-US")} supply · starts at ${D.initialMarketCapSol} SOL market cap · graduates to a Meteora DAMM v2 pool at ~${D.migrationMarketCapSol} SOL (about ${thresholdSol} SOL raised). ${solIsMain() ? "Real SOL — admin only, hidden from everyone else." : "Devnet test SOL only — admin preview, hidden from everyone else."}</p>
       <div id="solWalletRow">${solWalletRowHTML()}</div>
       ${cfgAddr ? `<div class="hint" style="margin:10px 0 0;">Platform config: <a href="${solExplorer("address", cfgAddr)}" target="_blank" rel="noopener noreferrer">${escapeHtml(cfgAddr.slice(0,6)+"…"+cfgAddr.slice(-4))}</a></div>` : `
         <div class="sol-config-box">
@@ -9915,7 +9998,7 @@
           <div class="field"><label for="solTelegram">Telegram</label><input id="solTelegram" value="${escapeHtml(d.telegram)}" placeholder="t.me/yourtoken"></div>
         </div>
         <div class="field" style="max-width:260px;"><label for="solFirstBuy">First buy (SOL, optional)</label><input id="solFirstBuy" inputmode="decimal" value="${escapeHtml(d.firstBuy)}"><div class="hint">Bought in the same transaction, before anyone else can.</div></div>
-        <button class="btn btn-primary" id="solLaunchBtn">Launch on Solana devnet</button>
+        <button class="btn btn-primary" id="solLaunchBtn">Launch on Solana ${solNetWord()}${solIsMain() ? " (real SOL)" : ""}</button>
         <div class="hint" style="margin-top:8px;">You'll be asked to sign twice in your EVM admin wallet (upload metadata, record the launch) and once in your Solana wallet (the launch itself).</div>
       </div>
       <div id="solLaunchStatus" class="sol-status" aria-live="polite"></div>`;
@@ -9960,15 +10043,27 @@
     solBusy = true; out.textContent = "Waiting for your Solana wallet…";
     try{
       const r = await solGuarded(()=> lib.createPlatformConfig());
-      // make it usable straight away in this browser session; the permanent home is public/solana-config.json
-      window.IgnitionSol.init({ rpcUrl: solCfgEffective.rpcUrl, cluster:"devnet", configAddress: r.config });
+      // make it usable straight away in this browser session; "Save it to the site" below makes it permanent
+      window.IgnitionSol.init({ rpcUrl: solCfgEffective.rpcUrl, cluster: solCluster(), configAddress: r.config });
       solCfgEffective.dbcConfig = r.config;
+      if(solCfgPromise) solCfgPromise = solCfgPromise.then(c=> Object.assign({}, c, { dbcConfig: r.config }));
       // init() builds a fresh connection, so the wallet account stays (it lives in the bundle) — redraw
       renderSolanaLaunchPanel();
       solStatus(`<b>Platform config created.</b> Address: <code id="solCfgAddr">${escapeHtml(r.config)}</code><br>
-        To keep it after a reload, put it in <code>public/solana-config.json</code> as <code>"dbcConfig"</code> and redeploy.
+        It only lives in this browser tab until you save it to the site. 
+        <button class="btn btn-primary btn-sm" id="solSaveCfg" style="margin:6px 0">Save it to the site</button> (you sign once in your admin wallet)<br>
         Curve graduates after ~${r.migrationQuoteThresholdSol.toFixed(1)} SOL raised.
         <a href="${solExplorer("tx", r.signature)}" target="_blank" rel="noopener noreferrer">View transaction</a>`, "ok");
+      const sv = document.getElementById("solSaveCfg");
+      if(sv) sv.addEventListener("click", async ()=>{
+        sv.disabled = true;
+        try{
+          await solPostSettings(solIsMain() ? { mainnetDbcConfig: r.config } : { dbcConfig: r.config });
+          await solFetchSettings(true);
+          sv.textContent = "Saved ✓";
+          toast("Platform config saved to the site.");
+        }catch(e){ sv.disabled = false; toast(solErr(e)); }
+      });
     }catch(e){
       out.textContent = solErr(e);
     }finally{ solBusy = false; }
@@ -9994,7 +10089,7 @@
       });
       solStatus("2/3 — Creating the token and curve (approve in your Solana wallet)…");
       const res = await solGuarded(()=> lib.launch({ name:d.name, symbol:d.symbol, uri: meta.uri, firstBuySol: d.firstBuy || "0" }));
-      solPendingRegister = { mint:res.mint, pool:res.pool, creator:res.creator, name:d.name, symbol:d.symbol, metadataId:id, txSignature:res.signature };
+      solPendingRegister = { mint:res.mint, pool:res.pool, creator:res.creator, name:d.name, symbol:d.symbol, metadataId:id, txSignature:res.signature, cluster: solCluster() };
       solStatus("3/3 — Recording the launch (sign in your admin wallet)…");
       await solRegisterPending();
     }catch(e){
@@ -10007,11 +10102,11 @@
     if(!p) return;
     const ts = Date.now();
     await solAdminPost("/solana/launches", `IgnitionX admin: register solana launch ${p.mint} at ${ts}`, ts, {
-      mint:p.mint, pool:p.pool, creator:p.creator, name:p.name, symbol:p.symbol, metadataId:p.metadataId, txSignature:p.txSignature, cluster:"devnet",
+      mint:p.mint, pool:p.pool, creator:p.creator, name:p.name, symbol:p.symbol, metadataId:p.metadataId, txSignature:p.txSignature, cluster: p.cluster || solCluster(),
     });
     solPendingRegister = null;
     Object.assign(solLaunchDraft, { name:"", symbol:"", desc:"", website:"", twitter:"", telegram:"", firstBuy:"0", image:"" });
-    toast(`$${p.symbol} launched on Solana devnet.`);
+    toast(`$${p.symbol} launched on Solana ${p.cluster === "mainnet-beta" ? "mainnet" : "devnet"}.`);
     solLaunchesLoaded = false;
     await solLoadLaunches();
     showView("explore");
@@ -10042,11 +10137,12 @@
         <div class="detail-head">
           <div class="tc-mark" style="background:#ffa03a">${img ? `<img src="${img}" alt="">` : escapeHtml((l.symbol||"?").slice(0,1))}</div>
           ${chainBadgeHTML(chainOf(l))}
-          <div><div class="tc-name" style="font-size:1.25rem">${escapeHtml(l.name)}</div><div class="tc-ticker">$${escapeHtml(l.symbol)} · Solana devnet</div></div>
+          <div><div class="tc-name" style="font-size:1.25rem">${escapeHtml(l.name)}</div><div class="tc-ticker">$${escapeHtml(l.symbol)} · Solana ${solNetWord()}</div></div>
           <span class="tc-status curve-trading" id="solDStatus" style="margin-left:auto">Curve</span>
         </div>
         <div class="detail-by">Mint <a href="${solExplorer("address", mint)}" target="_blank" rel="noopener noreferrer">${escapeHtml(mint.slice(0,6)+"…"+mint.slice(-4))}</a> · Pool <a href="${solExplorer("address", l.pool)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.pool.slice(0,6)+"…"+l.pool.slice(-4))}</a></div>
         <div class="detail-price num" id="solDPrice">—</div>
+        <div class="sol-status err" id="solDError"></div>
         <div class="chart-wrap" id="chartWrap"></div>
         <div class="bond-gauge" style="margin-top:20px;">
           <div class="bond-labels"><span id="solDGaugeLabel">Curve progress</span><span id="solDGaugePct">—</span></div>
@@ -10089,6 +10185,19 @@
     if(!wrap || solDetailMint !== l.mint) return;
     mountCandleChart(wrap, { livePriceHistory: hist }, { fmtPrice:n=> solFmtPrice(n), fmtAxis: solFmtAxis });
   }
+  function solShowDetailError(){
+    const el = document.getElementById("solDError");
+    if(!el || !solDetailMint) return;
+    const msg = solLibErr || solInfoErr[solDetailMint] || "";
+    el.innerHTML = msg
+      ? `Couldn't read this token from Solana ${solNetWord()}: ${escapeHtml(msg)} <button class="btn btn-ghost btn-sm" id="solRetryPool" style="margin-left:8px">Retry</button>`
+      : "";
+    const b = document.getElementById("solRetryPool");
+    if(b) b.addEventListener("click", ()=>{ el.textContent = "Retrying…"; solRefreshPools().then(solShowDetailError); });
+    if(solDetailMint) solRenderTradePanelSoon();
+  }
+  let solTradeRenderTimer = null;
+  function solRenderTradePanelSoon(){ clearTimeout(solTradeRenderTimer); solTradeRenderTimer = setTimeout(solRenderTradePanel, 0); }
   function solUpdateDetailStats(){
     const root = document.getElementById("solDetailRoot");
     if(!root) return;
@@ -10139,8 +10248,8 @@
       <div class="field" style="margin-top:14px;"><label for="solTradeAmount">${buy ? "You pay (SOL)" : "You sell (tokens)"}</label>
         <input id="solTradeAmount" inputmode="decimal" value="${escapeHtml(solTradeAmount)}" placeholder="0.0" autocomplete="off"></div>
       <div class="hint" id="solQuoteOut" style="min-height:2.6em">Enter an amount to see a quote.</div>
-      <button class="btn btn-primary" id="solTradeBtn" style="width:100%; margin-top:10px;" ${info ? "" : "disabled"}>${buy ? "Buy" : "Sell"}</button>
-      <div class="hint" id="solTradeMsg" style="margin-top:8px;">${solTradeNote}</div>`;
+      <button class="btn btn-primary" id="solTradeBtn" style="width:100%; margin-top:10px;">${buy ? "Buy" : "Sell"}</button>
+      <div class="hint" id="solTradeMsg" style="margin-top:8px;">${solTradeNote || (info ? "" : escapeHtml(solLibErr || solInfoErr[solDetailMint] ? "Pool data isn't available: "+(solLibErr || solInfoErr[solDetailMint]) : "Loading pool data…"))}</div>`;
     panel.querySelectorAll("[data-sol-side]").forEach(b=> b.addEventListener("click", ()=>{ solTradeSide = b.dataset.solSide; solTradeAmount = ""; solTradeNote = ""; solRenderTradePanel(); }));
     solWireWalletRow(document.getElementById("solTradeWallet"), ()=>{ solRenderTradePanel(); solRenderFeesPanel(); });
     const inp = document.getElementById("solTradeAmount");
@@ -10182,8 +10291,18 @@
     const lib = window.IgnitionSol;
     const msg = document.getElementById("solTradeMsg");
     const info = solInfo[solDetailMint];
-    if(!lib || !lib.currentWallet()){ solNeedWallet(); return; }
-    if(!info || !solTradeAmount){ toast("Enter an amount first."); return; }
+    if(!lib || !lib.currentWallet()){ solNeedWallet(); if(msg) msg.textContent = "Connect your Solana wallet first."; return; }
+    if(!info){
+      const why = solLibErr || solInfoErr[solDetailMint];
+      if(msg) msg.textContent = why ? `Can't trade yet — the pool couldn't be read: ${why}` : "Pool data is still loading — try again in a moment.";
+      solRefreshPools();
+      return;
+    }
+    if(!solTradeAmount || !/^\d*\.?\d+$/.test(solTradeAmount) || Number(solTradeAmount) <= 0){
+      if(msg) msg.textContent = solTradeSide === "buy" ? "Type how much SOL you want to spend first." : "Type how many tokens you want to sell first.";
+      const inp = document.getElementById("solTradeAmount"); if(inp) inp.focus();
+      return;
+    }
     const btn = document.getElementById("solTradeBtn");
     solBusy = true; btn.disabled = true; msg.textContent = "Approve the transaction in your Solana wallet…";
     try{
@@ -13919,6 +14038,7 @@
     { key: "deployed", label: "Deployed contracts" },
     { key: "rewards", label: "Rewards" },
     { key: "relayer", label: "Relayer settings" },
+    { key: "solana", label: "Solana" },
     { key: "deploy", label: "Deploy" },
   ];
   function switchAdminTab(key){
@@ -14411,6 +14531,308 @@
     }finally{
       btnEl.disabled = false;
       btnEl.textContent = originalLabel;
+    }
+  }
+
+  // ---------------- Admin → Solana (network switch + settings) ----------------
+  // Everything here is saved on the relayer (POST /solana/settings, signed by the admin wallet like the relayer
+  // settings above) and applies immediately: no redeploy, no restart. See lib/solanaSettings.js for the rules.
+  // The page's CSP <meta> is fixed text, so an RPC host that is not in connect-src would be silently blocked by the
+  // browser; this reads the policy and warns before you save such a URL.
+  function saCspAllows(url){
+    let u; try{ u = new URL(url); }catch(e){ return true; }   // a malformed URL is reported by the normal validation
+    let srcs = [];
+    try{
+      const m = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+      const d = ((m && m.content) || "").split(";").map(x=> x.trim()).find(x=> /^connect-src\s/.test(x)) || "";
+      srcs = d.split(/\s+/).slice(1);
+    }catch(e){ return true; }
+    const scheme = u.protocol.slice(0,-1);
+    return srcs.some(src=>{
+      if(src === "'self'") return u.origin === location.origin;
+      const m = /^(https?):\/\/(\*\.)?([^/:]+)/.exec(src);
+      if(!m || m[1] !== scheme) return false;
+      return m[2] ? u.hostname.endsWith("."+m[3]) : u.hostname === m[3];
+    });
+  }
+  var SA_PHRASE = "GO LIVE ON MAINNET";
+  var saCluster = "devnet";          // which network the form currently has selected
+  var saLiveCluster = "devnet";      // which network the site is on right now
+  var saConfigConfirm = {};          // "create config" two-step confirm timers, by cluster
+  function saAgo(ms){
+    if(!ms) return "never";
+    const s = Math.max(0, Math.round((Date.now()-ms)/1000));
+    if(s < 90) return s+"s ago";
+    if(s < 5400) return Math.round(s/60)+" min ago";
+    return Math.round(s/3600)+" h ago";
+  }
+  function solanaAdminPanelHTML(data, st){
+    const sv = data.settings || {};
+    const dn = sv.devnet || {}, mn = sv.mainnet || {};
+    const status = data.status || {};
+    saLiveCluster = sv.cluster === "mainnet-beta" ? "mainnet-beta" : "devnet";
+    saCluster = saLiveCluster;
+    const live = saLiveCluster === "mainnet-beta";
+    const trackerLine = (()=>{
+      if(sv.enabled === false) return `<b>Off</b> — Solana is switched off, so launches are refused and prices aren't sampled.`;
+      if(status.running) return `<b>Running</b> on ${escapeHtml(status.rpcHost || "the server RPC")} every ${Math.round((status.pollMs||0)/1000)}s · last pass ${saAgo(status.lastRunAt)} (${Number(status.lastSampled||0)} sampled, ${Number(status.lastFailed||0)} failed)${status.source ? ` · packages: ${escapeHtml(status.source)}` : ""}`;
+      if(status.lastError) return `<b>Not running</b> — ${escapeHtml(status.lastError)}`;
+      return `<b>Not running</b> — no server RPC URL for ${live ? "mainnet" : "devnet"} yet (set one below; price charts need it).`;
+    })();
+    const errLine = (status.running && status.lastError) ? `<div class="help-text" style="margin-top:4px; color:var(--critical-500);">Last error ${saAgo(status.lastErrorAt)}: ${escapeHtml(status.lastError)}</div>` : "";
+    const field = (id, label, help, value, opts)=>{
+      opts = opts || {};
+      const ph = opts.placeholder ? ` placeholder="${escapeHtml(opts.placeholder)}"` : "";
+      const type = opts.password ? "password" : "text";
+      const extra = opts.inputmode ? ` inputmode="${opts.inputmode}"` : "";
+      return `
+        <div class="admin-cfg-row">
+          <div class="admin-cfg-label">${escapeHtml(label)} <span class="info-dot" title="${escapeHtml(help)}">?</span></div>
+          <div class="field" style="grid-column:2 / -1;">
+            <input type="${type}" id="${id}" value="${escapeHtml(value||"")}"${ph}${extra} autocomplete="off" spellcheck="false" aria-label="${escapeHtml(label)}" title="${escapeHtml(help)}">
+            <div class="help-text sa-warn" id="${id}_warn" style="margin-top:4px; color:var(--critical-500);" hidden></div>
+          </div>
+        </div>`;
+    };
+    const srvPh = (set, host)=> set ? `✓ set${host ? " ("+host+")" : ""} — paste a new URL to replace it, or type - to remove it` : "Not set — falls back to the browser RPC URL above";
+    const sect = (t, note)=> `<div class="admin-cfg-row admin-cfg-head" style="margin-top:10px;"><div class="admin-cfg-col-head" style="grid-column:1 / -1;">${escapeHtml(t)}${note ? ` <span style="font-weight:400; color:var(--paper-500);">— ${escapeHtml(note)}</span>` : ""}</div></div>`;
+    const cfgBtn = (cl)=> `
+        <div class="admin-cfg-row">
+          <div class="admin-cfg-label">Platform config</div>
+          <div style="grid-column:2 / -1;">
+            <button class="btn btn-ghost btn-sm" type="button" data-sa-create="${cl}">Create a new ${cl === "mainnet-beta" ? "mainnet" : "devnet"} platform config…</button>
+            <span class="help-text" id="sa_create_${cl}" style="margin-left:8px;"></span>
+          </div>
+        </div>`;
+    return `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3>Solana</h3>
+          <span class="tc-quicklaunch-badge${live ? " live" : ""}" id="sa_livePill">${live ? "Mainnet · live" : "Devnet · test"}</span></div>
+        <p class="help-text" style="margin:2px 0 14px; font-size:.8rem; color:var(--paper-500); line-height:1.5;">Controls the Solana quick-launch (admin-only). Saved on the relayer, signed with your admin wallet, applied right away — no redeploy or restart. Devnet and mainnet keep separate RPC URLs, platform configs, launch lists and price history, so switching never mixes test and real tokens.</p>
+        <div class="sa-status" id="sa_status">
+          <div>Network: <b>${live ? "Solana mainnet (real SOL)" : "Solana devnet (test SOL)"}</b></div>
+          <div style="margin-top:4px;">Price tracking: ${trackerLine}</div>
+          ${errLine}
+        </div>
+
+        <div class="admin-cfg-table">
+          ${sect("Network", "which Solana network the site uses")}
+          <div class="admin-cfg-row">
+            <div class="admin-cfg-label">Live network</div>
+            <div style="grid-column:2 / -1; display:flex; gap:10px; flex-wrap:wrap;">
+              <button class="netchoice" type="button" data-sa-cluster="devnet" aria-pressed="${!live}">Devnet · test SOL</button>
+              <button class="netchoice" type="button" data-sa-cluster="mainnet-beta" aria-pressed="${live}">Mainnet · real SOL</button>
+            </div>
+          </div>
+          <div id="sa_golive" hidden></div>
+
+          ${sect("Devnet (test network)")}
+          ${field("sa_rpcUrl", "Browser RPC URL", "The RPC the admin's browser uses on devnet. Visible to anyone who opens the network tab — use a key restricted to your domain. Its host must be allowed by the page's Content-Security-Policy.", dn.rpcUrl || st.rpcUrl || "https://api.devnet.solana.com")}
+          ${field("sa_serverRpcUrl", "Server RPC URL", "The RPC the relayer's price sampler uses on devnet. May contain an API key, so it is never shown again after saving. Blank = leave unchanged; - = remove (use the browser RPC).", "", { password:true, placeholder: srvPh(dn.serverRpcUrlSet, dn.serverRpcHost) })}
+          ${field("sa_dbcConfig", "Platform config address", "The Meteora config every devnet launch uses (curve shape + fee split).", dn.dbcConfig || st.dbcConfig || "")}
+          ${cfgBtn("devnet")}
+
+          ${sect("Mainnet (live network)", "real SOL")}
+          ${field("sa_mainnetRpcUrl", "Browser RPC URL", "The RPC the admin's browser uses on mainnet. Use your own provider (Helius, QuickNode, Triton, Alchemy…): the free public mainnet RPC blocks browser traffic. Must be allowed by the page's Content-Security-Policy.", mn.rpcUrl || "", { placeholder:"https://your-name.helius-rpc.com/?api-key=…" })}
+          ${field("sa_mainnetServerRpcUrl", "Server RPC URL", "The RPC the relayer's price sampler uses on mainnet. Never shown again after saving. Blank = leave unchanged; - = remove (use the browser RPC).", "", { password:true, placeholder: srvPh(mn.serverRpcUrlSet, mn.serverRpcHost) })}
+          ${field("sa_mainnetDbcConfig", "Platform config address", "The Meteora config every mainnet launch uses. Create it below BEFORE going live — the wallet that creates it becomes the permanent platform fee claimer.", mn.dbcConfig || "")}
+          ${cfgBtn("mainnet-beta")}
+
+          ${sect("Site")}
+          ${field("sa_publicBaseUrl", "Public base URL", "Your site's public address, like https://ignitionx.example.com. Token metadata and logo links are written on-chain from this, so it must be reachable from the internet.", sv.publicBaseUrl || "", { placeholder:"https://your-site.example" })}
+          ${field("sa_pollSeconds", "Price sampling interval (s)", "How often the relayer samples each Solana pool's price for the chart. 15–3600; blank = default (60).", sv.pollSeconds ? String(sv.pollSeconds) : "", { inputmode:"numeric" })}
+          <div class="admin-cfg-row">
+            <div class="admin-cfg-label">Solana feature <span class="info-dot" title="Off = launches and registrations are refused and price sampling stops. Nothing is deleted.">?</span></div>
+            <div class="field" style="grid-column:2 / -1;">
+              <select id="sa_enabled" aria-label="Solana feature">
+                <option value="true"${sv.enabled === false ? "" : " selected"}>On</option>
+                <option value="false"${sv.enabled === false ? " selected" : ""}>Off (paused)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="admin-cfg-row" style="border:0;">
+          <div class="admin-cfg-label">Solana wallet <span class="info-dot" title="Only needed to create a platform config. It must be on the network that config is for.">?</span></div>
+          <div style="grid-column:2 / -1;" id="saWalletRow">${saWalletRowHTML()}</div>
+        </div>
+
+        <button class="btn btn-primary" id="solanaSettingsSaveBtn" style="margin-top:6px;">Save Solana settings</button>
+        <div class="help-text" id="sa_result" style="margin-top:10px;" aria-live="polite"></div>
+      </div>`;
+  }
+  function saWalletRowHTML(){
+    if(!window.IgnitionSol) return `<div class="sol-wallet-row"><span class="sol-dot"></span><span>Not loaded</span><button class="btn btn-ghost btn-sm" type="button" data-sa-loadlib style="margin-left:auto">Load Solana wallet tools</button></div>`;
+    return solWalletRowHTML();
+  }
+  async function saEnsureLib(){
+    if(!window.IgnitionSol) await loadScriptOnce("vendor/ignitionx-solana.js", "Solana module");
+    const lib = window.IgnitionSol;
+    if(!lib) throw new Error("The Solana module didn't initialise.");
+    // Normal setup for the network the site is on (silent wallet reconnect etc). It may legitimately fail here
+    // (e.g. mainnet chosen but no RPC saved yet) — this tab must still work, so that's not an error.
+    if(!solCfgEffective){ try{ await solLoadLib(); }catch(e){} }
+    if(!solSubscribed){ solSubscribed = true; lib.onAccountChange(solOnAccountChange); }
+    return lib;
+  }
+  function saRefreshWalletRow(){
+    const row = document.getElementById("saWalletRow");
+    if(!row) return;
+    row.innerHTML = saWalletRowHTML();
+    solWireWalletRow(row, saRefreshWalletRow);
+    row.querySelectorAll("[data-sa-loadlib]").forEach(b=> b.addEventListener("click", async ()=>{
+      b.disabled = true;
+      try{ await saEnsureLib(); }catch(e){ toast(solErr(e)); }
+      saRefreshWalletRow();
+    }));
+  }
+  const saVal = id=> ((document.getElementById(id)||{}).value || "").trim();
+  // Live checks: CSP warnings under the RPC fields, and the go-live checklist.
+  function saLooksLikeAddress(v){ return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v); }
+  function saMainnetChecks(){
+    const rpc = saVal("sa_mainnetRpcUrl");
+    return [
+      { ok: !!rpc && /^https:\/\//.test(rpc), text:"A mainnet RPC URL is entered (https)" },
+      { ok: !!rpc && !/api\.mainnet-beta\.solana\.com/.test(rpc), text:"It is your own provider, not the free public RPC (which blocks browsers)" },
+      { ok: !rpc || saCspAllows(rpc), text:"Its host is allowed by the page's Content-Security-Policy" },
+      { ok: saLooksLikeAddress(saVal("sa_mainnetDbcConfig")), text:"A mainnet platform config address is entered" },
+      { ok: /^https:\/\/[^/]+$/.test(saVal("sa_publicBaseUrl")), text:"The public base URL is your real https site" },
+    ];
+  }
+  function saUpdateForm(){
+    ["sa_rpcUrl","sa_mainnetRpcUrl","sa_serverRpcUrl","sa_mainnetServerRpcUrl"].forEach(id=>{
+      const w = document.getElementById(id+"_warn"); if(!w) return;
+      const v = saVal(id);
+      const bad = v && v !== "-" && !saCspAllows(v);
+      w.hidden = !bad;
+      // server-side RPCs are called by the relayer, not the browser, so the CSP does not apply to them
+      if(bad && !/server/i.test(id)) w.textContent = "The browser will block this address: add its host to connect-src in the Content-Security-Policy <meta> near the top of public/index.html (and redeploy), or use a provider that is already listed.";
+      else w.hidden = true;
+    });
+    const live = document.getElementById("sa_golive");
+    const btn = document.getElementById("solanaSettingsSaveBtn");
+    document.querySelectorAll("[data-sa-cluster]").forEach(b=> b.setAttribute("aria-pressed", String(b.dataset.saCluster === saCluster)));
+    const goingLive = saCluster === "mainnet-beta" && saLiveCluster !== "mainnet-beta";
+    if(live){
+      if(goingLive){
+        const checks = saMainnetChecks();
+        const phraseOk = saVal("sa_confirm") === SA_PHRASE;
+        const prev = document.getElementById("sa_confirm");
+        const had = prev ? prev.value : "";
+        live.hidden = false;
+        live.innerHTML = `
+          <div class="sol-live-banner" role="alert" style="margin:10px 0;">
+            <b>You're about to put the Solana quick-launch on mainnet.</b> Launches, buys and fees will use <b>real SOL</b>. Devnet tokens stay on devnet and won't appear on mainnet. Solana stays admin-only — the public can't see or use it.
+            <ul style="margin:8px 0 8px 18px; padding:0; list-style:none;">
+              ${checks.map(c=> `<li>${c.ok ? "✓" : "✗"} ${escapeHtml(c.text)}</li>`).join("")}
+            </ul>
+            <label for="sa_confirm" style="display:block; font-size:.8rem;">Type <code>${SA_PHRASE}</code> to confirm:</label>
+            <input id="sa_confirm" type="text" autocomplete="off" spellcheck="false" style="margin-top:4px; width:100%; max-width:320px;" value="${escapeHtml(had)}">
+          </div>`;
+        const c = document.getElementById("sa_confirm");
+        if(c){ c.addEventListener("input", saUpdateForm); if(had) { c.focus(); try{ c.setSelectionRange(had.length, had.length); }catch(e){} } }
+        if(btn){
+          const ready = checks.every(x=> x.ok) && phraseOk;
+          btn.disabled = !ready;
+          btn.textContent = "Go live on mainnet";
+        }
+      }else{
+        live.hidden = true; live.innerHTML = "";
+        if(btn){
+          btn.disabled = false;
+          btn.textContent = (saCluster === "devnet" && saLiveCluster === "mainnet-beta") ? "Switch back to devnet" : "Save Solana settings";
+        }
+      }
+    }
+  }
+  async function saCreateConfig(cl, btnEl){
+    const out = document.getElementById("sa_create_"+cl);
+    const say = (t, bad)=>{ if(out){ out.textContent = t; out.style.color = bad ? "var(--critical-500)" : ""; } };
+    const rpcId = cl === "mainnet-beta" ? "sa_mainnetRpcUrl" : "sa_rpcUrl";
+    const rpc = saVal(rpcId);
+    if(!rpc){ say(`Enter the ${cl === "mainnet-beta" ? "mainnet" : "devnet"} browser RPC URL first.`, true); return; }
+    if(!saCspAllows(rpc)){ say("The browser would block that RPC address — see the warning under it.", true); return; }
+    if(cl === "mainnet-beta" && /api\.mainnet-beta\.solana\.com/.test(rpc)){ say("Use your own mainnet RPC provider — the public one blocks browsers.", true); return; }
+    let lib;
+    try{ lib = await saEnsureLib(); }catch(e){ say(solErr(e), true); return; }
+    if(!lib.currentWallet()){ say("Connect your Solana wallet below first.", true); saRefreshWalletRow(); return; }
+    if(cl === "mainnet-beta" && !saConfigConfirm[cl]){
+      // two-step: it spends real SOL and fixes who collects platform fees
+      say("Click again to confirm: this spends ~0.01 real SOL, and the connected wallet becomes the permanent platform fee claimer.");
+      btnEl.textContent = "Confirm: create on mainnet";
+      saConfigConfirm[cl] = setTimeout(()=>{ saConfigConfirm[cl] = null; btnEl.textContent = "Create a new mainnet platform config…"; say(""); }, 8000);
+      return;
+    }
+    if(saConfigConfirm[cl]){ clearTimeout(saConfigConfirm[cl]); saConfigConfirm[cl] = null; }
+    if(solBusy) return;
+    solBusy = true; btnEl.disabled = true; say("Waiting for your Solana wallet…");
+    try{
+      lib.init({ rpcUrl: rpc, cluster: cl, configAddress: null });
+      const r = await solGuarded(()=> lib.createPlatformConfig());
+      const input = document.getElementById(cl === "mainnet-beta" ? "sa_mainnetDbcConfig" : "sa_dbcConfig");
+      if(input) input.value = r.config;
+      const url = `https://explorer.solana.com/tx/${encodeURIComponent(r.signature)}${cl === "mainnet-beta" ? "" : "?cluster=devnet"}`;
+      if(out){ out.style.color = "var(--good-500)"; out.innerHTML = `Created <code>${escapeHtml(r.config)}</code> and filled in above — now press <b>Save Solana settings</b> to keep it. <a href="${url}" target="_blank" rel="noopener noreferrer">View transaction</a>`; }
+      saUpdateForm();
+    }catch(e){
+      say(solErr(e), true);
+    }finally{
+      // put the module back on the network the site is actually using
+      try{
+        if(solCfgEffective && window.IgnitionSol) window.IgnitionSol.init({ rpcUrl: solCfgEffective.rpcUrl, cluster: solCfgEffective.cluster, configAddress: solCfgEffective.dbcConfig || null });
+      }catch(e){}
+      solBusy = false; btnEl.disabled = false;
+      btnEl.textContent = `Create a new ${cl === "mainnet-beta" ? "mainnet" : "devnet"} platform config…`;
+    }
+  }
+  async function renderSolanaAdminPanel(){
+    const wrap = document.getElementById("solanaAdminWrap");
+    if(!wrap) return;
+    const data = await solFetchSettings(true);
+    const st = await solFetchStatic();
+    if(!data){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Couldn't load Solana settings from the relayer. Make sure the relayer has been updated with the Solana files (lib/solanaApi.js, lib/solanaSettings.js) and restarted.</p></div>`;
+      return;
+    }
+    if(!isAdminWallet(wallet) || !views.admin.classList.contains("active")) return;
+    wrap.innerHTML = solanaAdminPanelHTML(data, st);
+    wrap.querySelectorAll("[data-sa-cluster]").forEach(b=> b.addEventListener("click", ()=>{ saCluster = b.dataset.saCluster; saUpdateForm(); }));
+    wrap.querySelectorAll("[data-sa-create]").forEach(b=> b.addEventListener("click", ()=> saCreateConfig(b.dataset.saCreate, b)));
+    wrap.querySelectorAll("input").forEach(i=> i.addEventListener("input", saUpdateForm));
+    const save = document.getElementById("solanaSettingsSaveBtn");
+    if(save) save.addEventListener("click", ()=> runSolanaSettingsSave(save));
+    saRefreshWalletRow();
+    saUpdateForm();
+  }
+  async function runSolanaSettingsSave(btnEl){
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
+    const goingLive = saCluster === "mainnet-beta" && saLiveCluster !== "mainnet-beta";
+    const settings = {
+      cluster: saCluster,
+      enabled: saVal("sa_enabled") || "true",
+      rpcUrl: saVal("sa_rpcUrl"), serverRpcUrl: saVal("sa_serverRpcUrl"), dbcConfig: saVal("sa_dbcConfig"),
+      mainnetRpcUrl: saVal("sa_mainnetRpcUrl"), mainnetServerRpcUrl: saVal("sa_mainnetServerRpcUrl"), mainnetDbcConfig: saVal("sa_mainnetDbcConfig"),
+      publicBaseUrl: saVal("sa_publicBaseUrl"), pollSeconds: saVal("sa_pollSeconds"),
+      mainnetConfirm: goingLive ? saVal("sa_confirm") : "",
+    };
+    const result = document.getElementById("sa_result");
+    const say = (t, bad)=>{ if(result){ result.textContent = t; result.style.color = bad ? "var(--critical-500)" : "var(--good-500)"; } };
+    const label = btnEl.textContent;
+    btnEl.disabled = true; btnEl.textContent = "Waiting for signature…";
+    try{
+      const data = await solPostSettings(settings);
+      const nowLive = data.settings && data.settings.cluster === "mainnet-beta";
+      toast(data.warning || (goingLive ? "Solana is now LIVE on mainnet." : "Solana settings saved."));
+      solResetAll();
+      await solFetchConfig();      // re-reads the saved settings and refreshes the labels
+      await renderSolanaAdminPanel();
+      const r2 = document.getElementById("sa_result");
+      if(r2){ r2.style.color = data.warning ? "var(--critical-500)" : "var(--good-500)"; r2.textContent = data.warning || (nowLive ? "Saved. The site is on Solana mainnet." : "Saved. The site is on Solana devnet."); }
+      if(solVisible()) solLoadLaunches();
+    }catch(e){
+      say(solErr(e), true);
+      btnEl.disabled = false; btnEl.textContent = label;
     }
   }
 
@@ -15616,6 +16038,13 @@
         </div>
       </div>
 
+      <div class="admin-tab-panel" data-admin-panel="solana" ${adminTab==="solana"?"":"hidden"}>
+        <div class="section-head"><h2>Solana</h2></div>
+        <div id="solanaAdminWrap">
+          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+        </div>
+      </div>
+
       <div class="admin-tab-panel" data-admin-panel="deploy" ${adminTab==="deploy"?"":"hidden"}>
         <div data-admin-proto="v2">
         <div class="section-head"><h2>Deploy contracts</h2></div>
@@ -15660,6 +16089,7 @@
     // panels' initial GETs are plain server reads that work with no wallet
     // connected at all (same reasoning as "Platform contracts" above).
     renderRelayerSettingsPanel();
+    renderSolanaAdminPanel();
     renderDeployPanel();
     renderDeployedContractsPanel();
     renderV4AdminSections();
