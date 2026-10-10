@@ -2,7 +2,7 @@
 // Wallet Standard wallet signs with a throwaway keypair. Checks that the transactions we build are
 // well-formed, correctly signed and aimed at the right program/accounts.
 import assert from "node:assert/strict";
-import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction, ComputeBudgetProgram } from "@solana/web3.js";
 import bs58 from "bs58";
 import BN from "bn.js";
 import * as DBC from "@meteora-ag/dynamic-bonding-curve-sdk";
@@ -35,6 +35,7 @@ class FakeConn extends Connection {
   async getBalance() { return 5_000_000_000; }
   async getParsedTokenAccountsByOwner() { return { value: [{ account: { data: { parsed: { info: { tokenAmount: { uiAmount: 1234.5 } } } } } }] }; }
 }
+let EXPECT_CHAIN = "solana:devnet";
 function fakeWallet(kp, { feature = "solana:signTransaction" } = {}) {
   const account = { address: kp.publicKey.toBase58(), publicKey: kp.publicKey.toBytes() };
   const features = {
@@ -43,12 +44,12 @@ function fakeWallet(kp, { feature = "solana:signTransaction" } = {}) {
   };
   if (feature === "solana:signTransaction") {
     features[feature] = { signTransaction: async ({ transaction, chain }) => {
-      assert.equal(chain, "solana:devnet");
+      assert.equal(chain, EXPECT_CHAIN);
       const tx = Transaction.from(transaction); tx.partialSign(kp);
       return [{ signedTransaction: tx.serialize({ requireAllSignatures: false }) }];
     } };
   }
-  return { name: "Fake", chains: ["solana:devnet"], features, accounts: [account] };
+  return { name: "Fake", chains: ["solana:devnet", "solana:mainnet"], features, accounts: [account] };
 }
 
 // ---- config + fabricated on-chain state ----
@@ -120,8 +121,13 @@ core._setClientForTests(conn, st.client);
 core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "devnet", configAddress: CONFIG.toBase58() });
 core._setClientForTests(conn, st.client); // init() creates its own; put ours back
 
-await t("only devnet is accepted by init()", () => {
-  assert.throws(() => core.init({ rpcUrl: "http://x", cluster: "mainnet-beta" }), /devnet/);
+await t("init() accepts devnet and mainnet-beta, rejects anything else", () => {
+  assert.throws(() => core.init({ rpcUrl: "http://x", cluster: "testnet" }), /Unknown Solana cluster/);
+  assert.throws(() => core.init({ rpcUrl: "http://x", cluster: "mainnet" }), /Unknown Solana cluster/);
+  assert.throws(() => core.init({ rpcUrl: "", cluster: "devnet" }), /RPC URL missing/);
+  core.init({ rpcUrl: "http://x", cluster: "mainnet-beta" });
+  core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "devnet", configAddress: CONFIG.toBase58() });
+  core._setClientForTests(conn, st.client);
 });
 await t("actions refuse to run without a connected wallet", async () => {
   await assert.rejects(core.launch({ name: "A", symbol: "A", uri: "https://x/y.json" }), /Connect a Solana wallet/);
@@ -150,6 +156,30 @@ await t("launch() with no first buy is a single create-pool instruction", async 
   const tx = Transaction.from(conn.sent[0]);
   const dbcIxs = tx.instructions.filter((i) => i.programId.equals(DBC.DYNAMIC_BONDING_CURVE_PROGRAM_ID));
   assert.equal(dbcIxs.length, 1);
+});
+await t("mainnet-beta: wallet is asked for chain solana:mainnet and a priority fee is added", async () => {
+  EXPECT_CHAIN = "solana:mainnet";
+  core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "mainnet-beta", configAddress: CONFIG.toBase58() });
+  core._setClientForTests(conn, st.client);
+  try {
+    conn.sent.length = 0;
+    await core.launch({ name: "Live", symbol: "LIVE", uri: "https://example.com/m.json", firstBuySol: "0" });
+    const tx = Transaction.from(conn.sent[0]);
+    const cb = tx.instructions.filter((i) => i.programId.equals(ComputeBudgetProgram.programId));
+    assert.equal(cb.length, 1, "exactly one compute-budget instruction");
+    assert.equal(tx.instructions[0].programId.toBase58(), ComputeBudgetProgram.programId.toBase58(), "it comes first");
+    assert.ok(tx.verifySignatures());
+  } finally {
+    EXPECT_CHAIN = "solana:devnet";
+    core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "devnet", configAddress: CONFIG.toBase58() });
+    core._setClientForTests(conn, st.client);
+  }
+});
+await t("devnet transactions get no priority-fee instruction", async () => {
+  conn.sent.length = 0;
+  await core.launch({ name: "Dev", symbol: "DEV", uri: "https://example.com/m.json", firstBuySol: "0" });
+  const tx = Transaction.from(conn.sent[0]);
+  assert.equal(tx.instructions.filter((i) => i.programId.equals(ComputeBudgetProgram.programId)).length, 0);
 });
 await t("launch() needs the platform config address", async () => {
   core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "devnet" }); core._setClientForTests(conn, st.client);
