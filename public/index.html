@@ -9599,6 +9599,7 @@
   var solLastAddr = null;
   var SOL_WALLET_KEY = "ignitionx_sol_wallet";   // name of the Solana wallet last used (for a silent reconnect)
   var solBusy = false;
+  var solLaunchMsg = null;             // the launch progress / error line; survives the wizard being redrawn mid-launch
 
   var solSettings = null;              // last GET /solana/settings payload ({settings,status,...}) or null
   var solStaticCfg = null;
@@ -9755,16 +9756,14 @@
   // open to everyone - the visitor's own Solana wallet (a free text signature, never a transaction).
   // `kind` is "metadata" or "register"; `key` is the metadata id / the mint. Message strings MUST stay
   // byte-identical to lib/solanaApi.js.
+  // Every launch request is signed by the SOLANA wallet that is launching (free message signature, no transaction).
+  // The Robinhood/EVM wallet is never asked for anything during a Solana launch. The relayer decides who may launch:
+  // anyone while public launching is on, otherwise only the platform wallet (the one that created the config).
   async function solSignedPost(path, kind, key, body){
     const ts = Date.now();
-    if(isAdminWallet(wallet) && getEth()){
-      const msg = kind === "metadata" ? `IgnitionX admin: solana metadata ${key} at ${ts}` : `IgnitionX admin: register solana launch ${key} at ${ts}`;
-      return solAdminPost(path, msg, ts, body);
-    }
     const lib = window.IgnitionSol;
     const w = lib && lib.currentWallet();
     if(!w) throw new Error("Connect your Solana wallet first.");
-    if(!solPublicOn()) throw new Error("Solana launching is admin-only right now.");
     const msg = kind === "metadata"
       ? `IgnitionX launch: solana metadata ${key} by ${w.address} at ${ts}`
       : `IgnitionX launch: register solana launch ${key} by ${w.address} at ${ts}`;
@@ -9779,7 +9778,7 @@
     if(!res.ok) throw new Error(data.error || `Relayer returned ${res.status}.`);
     return data;
   }
-  function solSignWho(){ return (isAdminWallet(wallet) && getEth()) ? "your admin wallet" : "your Solana wallet — free, no transaction"; }
+  function solSignWho(){ return "your Solana wallet — free, no transaction"; }
 
   // Admin → Solana settings. Key order and String() conversion MUST stay byte-identical to
   // lib/solanaSettings.js (settingsMessage), or the relayer rejects the signature.
@@ -10169,7 +10168,7 @@
           <div class="review-row"><span class="k">Creator's share of fees</span><span class="v num">${solNum(s.creatorPct)}% (after Meteora's cut)</span></div>
           ${custom ? `<div class="review-row"><span class="k">Extra approval</span><span class="v num">your own config, about 0.01 SOL</span></div>` : ""}
         </div>
-        <div class="hint" style="margin-top:8px;">${solSettings && solSettings.settings && solSettings.settings.publicLaunch && !isAdminWallet(wallet) ? "You'll sign two short messages in your Solana wallet (free — they only prove it's you) and approve the launch transaction." : "You'll be asked to sign twice in your EVM admin wallet (upload metadata, record the launch) and approve the launch in your Solana wallet."}</div>
+        <div class="hint" style="margin-top:8px;">Everything is done in your Solana wallet: you sign two short messages (free — they only prove it's you) and approve the launch transaction. Nothing is asked of your Robinhood wallet.</div>
         <div class="wizard-actions">${back}<button class="btn btn-primary" id="wizNext">Continue</button></div>`;
     }
     // step 4
@@ -10191,8 +10190,8 @@
         <div class="review-row"><span class="k">Launching wallet</span><span class="v">${cur ? escapeHtml((cur.name||"Solana wallet")+" · "+cur.address.slice(0,4)+"…"+cur.address.slice(-4)) : "Not connected — connect your Solana wallet in the box above"}</span></div>
         <div class="review-row" style="background:var(--ink-850);"><span class="k" style="color:var(--paper-100); font-weight:600;">Platform fee</span><span class="v num" style="color:var(--signal-300);">none (network cost about ${custom ? "0.03" : "0.02"} SOL${fb && Number(fb) > 0 ? " + your first buy" : ""})</span></div>
       </div>
-      ${ready ? `<label class="agree-row"><input type="checkbox" id="fAgree"><span><strong>This sends real transactions</strong> from your Solana wallet on Solana ${solNetWord()}${solIsMain() ? ", spending real SOL" : " (test SOL)"}. I've reviewed the details and want to launch.</span></label>
-      <div class="wizard-actions">${back}<button class="btn btn-primary" id="wizLaunch">🚀 Launch on Solana ${solNetWord()}${solIsMain() ? " (real SOL)" : ""}</button></div>`
+      ${ready ? `<label class="agree-row"><input type="checkbox" id="fAgree" ${solBusy ? "checked disabled" : ""}><span><strong>This sends real transactions</strong> from your Solana wallet on Solana ${solNetWord()}${solIsMain() ? ", spending real SOL" : " (test SOL)"}. I've reviewed the details and want to launch.</span></label>
+      <div class="wizard-actions">${back}<button class="btn btn-primary" id="wizLaunch" ${solBusy ? "disabled" : ""}>${solBusy ? "Launching…" : `🚀 Launch on Solana ${solNetWord()}${solIsMain() ? " (real SOL)" : ""}`}</button></div>`
         : `<div class="hint" role="alert" style="border-left:2px solid var(--critical-500); padding-left:10px; margin:14px 0;"><strong>Solana launching isn't set up yet.</strong> ${isAdminWallet(wallet) ? "Create the platform config in the box above first." : "Check back soon."}</div>
       <div class="wizard-actions">${back}<button class="btn btn-primary" id="wizLaunch" disabled>🚀 Launch unavailable</button></div>`}
       <div id="solLaunchStatus" class="sol-status" aria-live="polite"></div>`;
@@ -10201,7 +10200,9 @@
     const byId = id=> document.getElementById(id);
     if(byId("fSolFirstBuy")) byId("fSolFirstBuy").addEventListener("input", e=>{ draft.solFirstBuy = e.target.value.trim(); });
     solUpdateSupplyHint();
-    if(wizStep === 4 && solPendingRegister) solShowRetryRegister();
+    // A redraw (wallet event, balance refresh...) must never wipe the launch progress: put the line back.
+    if(wizStep === 4){ if(solPendingRegister) solShowRetryRegister(); else solPaintStatus(); }
+    else if(!solBusy) solLaunchMsg = null;
   }
   function solPreviewCardHTML(){
     const sym = draft.ticker || "TICK";
@@ -10220,8 +10221,12 @@
       <div class="tc-quicklaunch-badge${solIsMain()?" live":""}" style="align-self:flex-start; margin-top:12px;">Solana · ${solNetWord()}</div>`;
   }
   function solStatus(html, kind){
+    solLaunchMsg = { html, kind };
+    solPaintStatus();
+  }
+  function solPaintStatus(){
     const el = document.getElementById("solLaunchStatus");
-    if(el){ el.className = "sol-status" + (kind ? " "+kind : ""); el.innerHTML = html; }
+    if(el && solLaunchMsg){ el.className = "sol-status" + (solLaunchMsg.kind ? " "+solLaunchMsg.kind : ""); el.innerHTML = solLaunchMsg.html; }
   }
   async function solCreateConfig(){
     if(solBusy) return;
@@ -10295,7 +10300,18 @@
     }catch(e){
       if(solPendingRegister) solShowRetryRegister(solErr(e));
       else solStatus(escapeHtml(solErr(e)) + (solPendingConfig ? " <br>Your token's config was already created, so retrying won't pay for it again." : ""), "err");
-    }finally{ solBusy = false; const b = document.getElementById("wizLaunch"), a = document.getElementById("fAgree"); if(b) b.disabled = !(a && a.checked); }
+    }finally{
+      solBusy = false;
+      // Put the Review step back to "ready" (it showed "Launching…" while busy). The box they ticked to start stays ticked.
+      try{
+        if(wizStep === 4){
+          renderWizardStepOnly();
+          const b = document.getElementById("wizLaunch"), a = document.getElementById("fAgree");
+          if(a) a.checked = true;
+          if(b) b.disabled = !a;
+        }
+      }catch(e){ /* wizard not on screen */ }
+    }
   }
   async function solRegisterPending(){
     const p = solPendingRegister;
@@ -10303,7 +10319,7 @@
     await solSignedPost("/solana/launches", "register", p.mint, {
       mint:p.mint, pool:p.pool, creator:p.creator, name:p.name, symbol:p.symbol, metadataId:p.metadataId, txSignature:p.txSignature, cluster: p.cluster || solCluster(), totalSupply: p.totalSupply || undefined,
     });
-    solPendingRegister = null; solPendingConfig = null;
+    solPendingRegister = null; solPendingConfig = null; solLaunchMsg = null;
     draft = { name:"", ticker:"", desc:"", supply:solStdInfo().supply, protocol:"v2", mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"", solFirstBuy:"" };
     wizStep = 1;
     toast(`$${p.symbol} launched on Solana ${p.cluster === "mainnet-beta" ? "mainnet" : "devnet"}.`);
