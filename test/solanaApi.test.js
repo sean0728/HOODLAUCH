@@ -866,7 +866,7 @@ describe("lib/solanaSettings", () => {
     const m = settingsLib.settingsMessage({ dbcConfig: "X", cluster: "devnet", enabled: true }, 123);
     assert.strictEqual(
       m,
-      'IgnitionX admin: update solana settings to {"cluster":"devnet","enabled":"true","rpcUrl":null,"serverRpcUrl":null,"dbcConfig":"X","mainnetRpcUrl":null,"mainnetServerRpcUrl":null,"mainnetDbcConfig":null,"publicBaseUrl":null,"pollSeconds":null,"mainnetConfirm":null} at 123'
+      'IgnitionX admin: update solana settings to {"cluster":"devnet","enabled":"true","publicLaunch":null,"customSupply":null,"supplyMin":null,"supplyMax":null,"curveStartMcapSol":null,"curveGraduationMcapSol":null,"curveFeeBps":null,"curveCreatorFeePercent":null,"rpcUrl":null,"serverRpcUrl":null,"dbcConfig":"X","mainnetRpcUrl":null,"mainnetServerRpcUrl":null,"mainnetDbcConfig":null,"publicBaseUrl":null,"pollSeconds":null,"mainnetConfirm":null} at 123'
     );
   });
 
