@@ -453,7 +453,7 @@ describe("POST /solana/launches, GET /solana/launches, POST /solana/launches/del
     assert.strictEqual(list.json.cluster, "devnet");
     const mine = list.json.launches.filter((l) => l.mint === mint || l.mint === other);
     assert.deepStrictEqual(mine.map((l) => l.mint), [other, mint]); // newest first, one row per mint
-    assert.deepStrictEqual(Object.keys(mine[1]).sort(), ["chain", "cluster", "createdAt", "creator", "image", "metadataId", "mint", "name", "pool", "symbol"]);
+    assert.deepStrictEqual(Object.keys(mine[1]).sort(), ["banner", "chain", "cluster", "createdAt", "creator", "image", "metadataId", "mint", "name", "pool", "symbol"]);
     assert.strictEqual(mine[1].name, "Renamed");
     assert.strictEqual(mine[1].symbol, "TWO");
 
@@ -1111,5 +1111,199 @@ describe("tracker status + cluster awareness", () => {
     assert.ok(out.some((m) => /mainnet-beta/.test(m)), out.join("|"));
     tracker.stopSolanaTracker();
     assert.strictEqual(tracker.getTrackerStatus().running, false);
+  });
+});
+
+// ---- the platform's one ledger / activity store, banners, trade detection --------------------------
+describe("Solana tokens in the platform's own ledger and activity store", () => {
+  const launchStore = require("../lib/launchStore");
+  const activityStore = require("../lib/activityStore");
+  const { mergeV2KeeperTokens } = require("../lib/keeperTokens");
+
+  async function register(over = {}) {
+    const meta = await call("POST", "/solana/metadata", await signedMetadata({ image: PNG_URL, banner: PNG_URL, ...(over.meta || {}) }));
+    assert.strictEqual(meta.status, 200, JSON.stringify(meta.json));
+    const mint = randAddr();
+    const r = await call("POST", "/solana/launches", await signedLaunch({ mint, pool: randAddr(), creator: randAddr(), name: "Led Ger", symbol: "LEDG", metadataId: meta.json.id, txSignature: randTxSig(), totalSupply: 1_000_000_000, ...(over.launch || {}) }));
+    assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    return { mint, meta: meta.json, launch: r.json.launch };
+  }
+
+  it("platformNetworkFor: devnet = the platform's testnet, mainnet-beta = its mainnet", () => {
+    assert.strictEqual(store.platformNetworkFor("solana-devnet"), "robinhoodTestnet");
+    assert.strictEqual(store.platformNetworkFor("solana-mainnet"), "robinhoodMainnet");
+    assert.strictEqual(store.platformNetworkFor(undefined), "robinhoodTestnet");
+  });
+
+  it("a registered Solana launch lands in the same ledger as Robinhood launches, labelled chain solana, on the testnet key", async () => {
+    const { mint, launch } = await register();
+    const ledger = await launchStore.readLedger("robinhoodTestnet");
+    const row = ledger.find((e) => e.tokenAddress === mint);
+    assert.ok(row, "the launch is in the testnet ledger");
+    assert.strictEqual(row.chain, "solana");
+    assert.strictEqual(row.network, "robinhoodTestnet");
+    assert.strictEqual(row.symbol, "LEDG");
+    assert.strictEqual(row.mode, "curve");
+    assert.strictEqual(row.pairAddress, launch.pool);
+    assert.strictEqual(row.creator, launch.creator);
+    assert.strictEqual(String(row.totalSupply), "1000000000");
+    assert.match(row.explorerUrl, /explorer\.solana\.com\/address\/.+\?cluster=devnet/);
+    // and NOT under the Solana-only key, nor on the mainnet ledger
+    assert.ok(!(await launchStore.readLedger("solana-devnet")).some((e) => e.tokenAddress === mint));
+    assert.ok(!(await launchStore.readLedger("robinhoodMainnet")).some((e) => e.tokenAddress === mint));
+  });
+
+  it("re-registering the same mint doesn't duplicate the ledger row", async () => {
+    const { mint, meta, launch } = await register();
+    await call("POST", "/solana/launches", await signedLaunch({ mint, pool: launch.pool, creator: launch.creator, name: "Led Ger", symbol: "LEDG", metadataId: meta.id }));
+    assert.strictEqual((await launchStore.readLedger("robinhoodTestnet")).filter((e) => e.tokenAddress === mint).length, 1);
+  });
+
+  it("a standard-config launch records the supply the page sent (within limits) in the ledger", async () => {
+    const ok = await register({ launch: { totalSupply: 1_000_000_000 } });
+    const row = (await launchStore.readLedger("robinhoodTestnet")).find((e) => e.tokenAddress === ok.mint);
+    assert.strictEqual(String(row.totalSupply), "1000000000");
+  });
+
+  it("deleting a launch removes its ledger row too", async () => {
+    const { mint } = await register();
+    assert.ok((await launchStore.readLedger("robinhoodTestnet")).some((e) => e.tokenAddress === mint));
+    const timestamp = Date.now();
+    const r = await call("POST", "/solana/launches/delete", { mint, timestamp, signature: await sign(admin, api.deleteLaunchMessage(mint, timestamp)) });
+    assert.strictEqual(r.status, 200);
+    assert.ok(!(await launchStore.readLedger("robinhoodTestnet")).some((e) => e.tokenAddress === mint));
+  });
+
+  it("the EVM keepers never see a Solana ledger row", () => {
+    const evm = "0xAaaa000000000000000000000000000000000001";
+    const rows = [{ tokenAddress: evm, chain: "robinhood" }, { tokenAddress: evm.replace("Aaaa", "Bbbb") }, { tokenAddress: randAddr(), chain: "solana" }, { tokenAddress: randAddr(), protocol: "meteora-dbc" }];
+    assert.deepStrictEqual(mergeV2KeeperTokens(rows, {}), [evm, evm.replace("Aaaa", "Bbbb")]);
+  });
+
+  it("activity rows: Solana ones are labelled chain solana, Robinhood ones chain robinhood, in one store", async () => {
+    const mint = randAddr();
+    const sig = randTxSig();
+    await store.appendActivity({ t: Date.now(), txHash: sig, logIndex: 0, tokenAddress: mint, symbol: "LEDG", side: "buy", wallet: randAddr(), tokenAmount: "12.5" });
+    const evmTx = "0x" + "ab".repeat(32);
+    await activityStore.appendActivity("robinhoodTestnet", { t: Date.now(), txHash: evmTx, logIndex: 3, tokenAddress: "0x" + "12".repeat(20), symbol: "EVM", side: "sell", wallet: "0x" + "34".repeat(20), tokenAmount: "1" });
+    const all = await activityStore.readActivity("robinhoodTestnet");
+    assert.strictEqual(all.find((e) => e.txHash === sig).chain, "solana");
+    assert.strictEqual(all.find((e) => e.txHash === evmTx).chain, "robinhood");
+    const solOnly = await store.readActivity();
+    assert.ok(solOnly.some((e) => e.txHash === sig));
+    assert.ok(!solOnly.some((e) => e.txHash === evmTx));
+    assert.strictEqual(activityStore.chainOf({ txHash: sig }), "solana");
+    assert.strictEqual(activityStore.chainOf({ txHash: evmTx }), "robinhood");
+    assert.strictEqual(activityStore.chainOf({ txHash: sig, chain: "robinhood" }), "robinhood"); // an explicit label wins
+  });
+
+  it("GET /solana/activity is public and returns only Solana rows", async () => {
+    const sig = randTxSig();
+    await store.appendActivity({ t: Date.now(), txHash: sig, logIndex: 0, tokenAddress: randAddr(), symbol: "PUB", side: "buy", wallet: randAddr(), tokenAmount: "1" });
+    const r = await call("GET", "/solana/activity");
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.cluster, "devnet");
+    assert.ok(r.json.activity.some((e) => e.txHash === sig));
+    assert.ok(r.json.activity.every((e) => e.chain === "solana"));
+  });
+});
+
+describe("launch banner", () => {
+  it("is optional, validated, stored, served and linked from the public launch", async () => {
+    const withBanner = await call("POST", "/solana/metadata", await signedMetadata({ image: PNG_URL, banner: PNG_URL }));
+    assert.strictEqual(withBanner.status, 200);
+    const noBanner = await call("POST", "/solana/metadata", await signedMetadata({ image: PNG_URL }));
+    assert.strictEqual(noBanner.status, 200);
+    const got = await fetch(`${base}/solana/metadata/${withBanner.json.id}/banner.png`);
+    assert.strictEqual(got.status, 200);
+    assert.match(got.headers.get("content-type"), /image\/png/);
+    assert.deepStrictEqual(Buffer.from(await got.arrayBuffer()), PNG_BYTES);
+    assert.strictEqual((await fetch(`${base}/solana/metadata/${noBanner.json.id}/banner.png`)).status, 404);
+
+    const mint = randAddr();
+    const reg = await call("POST", "/solana/launches", await signedLaunch({ mint, metadataId: withBanner.json.id }));
+    assert.strictEqual(reg.status, 200);
+    assert.match(reg.json.launch.banner, /\/solana\/metadata\/[a-f0-9]+\/banner\.png$/);
+    const reg2 = await call("POST", "/solana/launches", await signedLaunch({ metadataId: noBanner.json.id }));
+    assert.strictEqual(reg2.json.launch.banner, null);
+  });
+
+  it("rejects a banner that isn't an image data URL, or is too big", async () => {
+    for (const banner of ["https://example.com/b.png", "data:text/html;base64,PGI+", "data:image/png;base64,@@@@", `data:image/png;base64,${pngOfSize(api.MAX_BANNER_BYTES + 10).toString("base64")}`]) {
+      const r = await call("POST", "/solana/metadata", await signedMetadata({ image: PNG_URL, banner }));
+      assert.strictEqual(r.status, 400, banner.slice(0, 40));
+    }
+  });
+});
+
+describe("trade detection from a pool's vaults (swapFromTransaction / sampleTradesOnce)", () => {
+  const POOL = { baseVault: randAddr(), quoteVault: randAddr() };
+  const TRADER = randAddr(), OTHER = randAddr();
+  const bal = (idx, amount) => ({ accountIndex: idx, uiTokenAmount: { amount: String(amount) } });
+  function fakeTx({ baseDelta, quoteDelta, err = null, blockTime = 1_700_000_000 }) {
+    const keys = [TRADER, POOL.baseVault, POOL.quoteVault, OTHER];
+    const pre = [bal(1, 5_000_000_000), bal(2, 1_000_000_000)];
+    const post = [bal(1, 5_000_000_000 + baseDelta), bal(2, 1_000_000_000 + quoteDelta)];
+    return {
+      blockTime,
+      meta: { err, preTokenBalances: pre, postTokenBalances: post },
+      transaction: { message: { accountKeys: keys.map((k, i) => ({ pubkey: { toBase58: () => k }, signer: i === 0 })) } },
+    };
+  }
+
+  it("quote in + base out = a buy by the signer; quote out + base in = a sell", () => {
+    const buy = tracker.swapFromTransaction(fakeTx({ baseDelta: -2_500_000, quoteDelta: 250_000_000 }), POOL, 6);
+    assert.deepStrictEqual({ side: buy.side, wallet: buy.wallet, tokenAmount: buy.tokenAmount }, { side: "buy", wallet: TRADER, tokenAmount: 2.5 });
+    assert.strictEqual(buy.solAmount, 0.25);
+    const sell = tracker.swapFromTransaction(fakeTx({ baseDelta: 1_000_000, quoteDelta: -90_000_000 }), POOL, 6);
+    assert.strictEqual(sell.side, "sell");
+  });
+
+  it("ignores failed transactions, unrelated ones and a one-sided move", () => {
+    assert.strictEqual(tracker.swapFromTransaction(fakeTx({ baseDelta: -1, quoteDelta: 1, err: { InstructionError: [0, "x"] } }), POOL), null);
+    assert.strictEqual(tracker.swapFromTransaction(fakeTx({ baseDelta: 0, quoteDelta: 0 }), POOL), null);
+    assert.strictEqual(tracker.swapFromTransaction(fakeTx({ baseDelta: 0, quoteDelta: 5 }), POOL), null);
+    assert.strictEqual(tracker.swapFromTransaction(null, POOL), null);
+  });
+
+  it("sampleTradesOnce writes each new buy/sell once, skips the launch tx, and resumes where it stopped", async () => {
+    const mint = randAddr();
+    const poolAddr = randAddr();
+    const launchSig = randTxSig(), buySig = randTxSig(), sellSig = randTxSig(), failSig = randTxSig();
+    const txs = {
+      [buySig]: fakeTx({ baseDelta: -3_000_000, quoteDelta: 300_000_000, blockTime: 1_700_000_100 }),
+      [sellSig]: fakeTx({ baseDelta: 1_000_000, quoteDelta: -100_000_000, blockTime: 1_700_000_200 }),
+    };
+    let listing = [
+      { signature: sellSig, blockTime: 1_700_000_200, err: null },
+      { signature: failSig, blockTime: 1_700_000_150, err: { x: 1 } },
+      { signature: buySig, blockTime: 1_700_000_100, err: null },
+      { signature: launchSig, blockTime: 1_700_000_000, err: null },
+    ];
+    const seenUntil = [];
+    const connection = {
+      getSignaturesForAddress: async (_pk, opts) => { seenUntil.push(opts.until); return opts.until ? listing.slice(0, listing.findIndex((s) => s.signature === opts.until)) : listing; },
+      getParsedTransaction: async (sig) => txs[sig] || null,
+    };
+    const written = [];
+    const fakeStore = {
+      readActivity: async () => written.slice(),
+      appendActivity: async (e, net) => { written.push({ ...e, net }); },
+    };
+    const launch = { mint, pool: poolAddr, symbol: "TRD", txSignature: launchSig, createdAt: 1_700_000_000_000 };
+    const ctx = { connection, PublicKey: function (a) { this.a = a; }, store: fakeStore, network: "solana-devnet", cursors: new Map(), decimals: 6 };
+    assert.strictEqual(await tracker.sampleTradesOnce(ctx, launch, POOL), 2);
+    assert.deepStrictEqual(written.map((w) => [w.side, w.txHash, w.wallet, w.symbol, w.tokenAddress]), [["buy", buySig, TRADER, "TRD", mint], ["sell", sellSig, TRADER, "TRD", mint]]);
+    assert.strictEqual(written[0].tokenAmount, "3");
+    assert.strictEqual(written[0].net, "solana-devnet");
+    // second pass: nothing new, and it asks only for what came after the newest signature it handled
+    listing = [{ signature: sellSig, blockTime: 1_700_000_200, err: null }];
+    assert.strictEqual(await tracker.sampleTradesOnce(ctx, launch, POOL), 0);
+    assert.strictEqual(seenUntil[1], sellSig);
+    // after a restart (no in-memory cursor) it resumes from the last stored row, not from scratch
+    const ctx2 = { ...ctx, cursors: new Map() };
+    assert.strictEqual(await tracker.sampleTradesOnce(ctx2, launch, POOL), 0);
+    assert.strictEqual(seenUntil[2], sellSig);
+    assert.strictEqual(written.length, 2);
   });
 });

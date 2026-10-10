@@ -33,4 +33,8 @@ describe("V2 keeper token list", () => {
     assert.deepStrictEqual(mergeV2KeeperTokens(undefined, undefined), []);
     assert.deepStrictEqual(mergeV2KeeperTokens([null, {}], { x: null }), []);
   });
+  it("skips Solana launches that share the ledger (chain solana / Meteora protocol)", () => {
+    const sol = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+    assert.deepStrictEqual(mergeV2KeeperTokens([{ tokenAddress: sol, chain: "solana" }, { tokenAddress: sol, protocol: "meteora-dbc" }, { tokenAddress: A, chain: "robinhood" }], {}), [A]);
+  });
 });
