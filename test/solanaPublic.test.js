@@ -231,6 +231,7 @@ describe("public launching over HTTP", () => {
   const admin = Wallet.createRandom();
   const CFG = randAddr();
   let mem, srv, base, calls, verifyLaunchResult, verifySupplyResult;
+  let claimerResult = { ok: false, retryable: false, reason: "no platform config on this test network" };
   const sendJson = (res, status, body) => res.status(status).type("application/json").send(JSON.stringify(body));
   const pre = "publictest-solana-devnet";
   const testStore = {
@@ -249,6 +250,7 @@ describe("public launching over HTTP", () => {
     api.registerSolanaRoutes(a, {
       sendJson, verifyAdminSignature: (m, s) => verifySignatureFrom(m, s, admin.address), isFreshTimestamp,
       logger: { log() {}, warn() {}, error() {} }, env: { PUBLIC_BASE_URL: "https://ix.example" }, startTracker: false, store: testStore, limits,
+      readPlatformClaimer: async (args) => { calls.push(["readPlatformClaimer", args]); return claimerResult; },
       verifyLaunch: async (args) => { calls.push(["verifyLaunch", args]); return verifyLaunchResult; },
       verifySupplyConfig: async (args) => { calls.push(["verifySupply", args]); return verifySupplyResult; },
     });
@@ -428,6 +430,55 @@ describe("public launching over HTTP", () => {
       assert.strictEqual(ok.status, 200);
       assert.strictEqual((await store.readMetadata(id)).uploader, undefined);
     } finally { base = prev; await new Promise((r) => sv.close(r)); }
+  });
+
+  it("while public launching is OFF the platform wallet (the config's fee claimer) can still launch with its Solana signature alone, unrationed", async () => {
+    const { sv, base: b2 } = await boot({ dbcConfig: CFG, rpcUrl: "https://rpc.example" }, { metadataPerWalletPerHour: 1 });
+    const prev = base; base = b2;
+    try {
+      const w = makeSolWallet(), stranger = makeSolWallet();
+      claimerResult = { ok: true, claimer: w.address };
+      calls = [];
+      for (let i = 0; i < 3; i++) assert.strictEqual((await call("POST", "/solana/metadata", await metaBody(w))).status, 200, `upload ${i + 1}: the platform wallet isn't rate limited`);
+      assert.strictEqual(calls.filter((c) => c[0] === "readPlatformClaimer").length, 1, "the claimer is read once and cached");
+      assert.strictEqual(calls.find((c) => c[0] === "readPlatformClaimer")[1].configAddress, CFG);
+      // a stranger is refused, and a bad signature is refused before anything is looked up
+      const r = await call("POST", "/solana/metadata", await metaBody(stranger));
+      assert.strictEqual(r.status, 403);
+      assert.match(r.json.error, /only the platform wallet/);
+      assert.strictEqual((await call("POST", "/solana/metadata", await metaBody(w, { walletSignature: stranger.sign("x") }))).status, 401);
+      // registering works through the same path, and the pool is still verified on-chain
+      const m = await metaBody(w, { name: "Admin Coin", symbol: "ADMC" });
+      assert.strictEqual((await call("POST", "/solana/metadata", m)).status, 200);
+      verifyLaunchResult = { ok: true, config: CFG, standard: true };
+      const reg = await call("POST", "/solana/launches", await regBody(w, m.id));
+      assert.strictEqual(reg.status, 200, JSON.stringify(reg.json));
+      assert.strictEqual(reg.json.launch.symbol, "ADMC");
+      assert.ok(calls.some((c) => c[0] === "verifyLaunch"));
+      verifyLaunchResult = { ok: true, config: CFG, standard: true };
+      assert.strictEqual((await call("POST", "/solana/launches", await regBody(stranger, m.id))).status, 403);
+    } finally { claimerResult = { ok: false, retryable: false, reason: "no platform config on this test network" }; base = prev; await new Promise((r) => sv.close(r)); }
+  });
+
+  it("OFF: if the platform wallet can't be read right now the request is refused (503 when retryable) — never let through", async () => {
+    const { sv, base: b2 } = await boot({ dbcConfig: CFG, rpcUrl: "https://rpc.example" });
+    const prev = base; base = b2;
+    try {
+      const w = makeSolWallet();
+      claimerResult = { ok: false, retryable: true, reason: "rpc down" };
+      const r = await call("POST", "/solana/metadata", await metaBody(w));
+      assert.strictEqual(r.status, 503);
+      assert.strictEqual(await store.readMetadata((await metaBody(w)).id), null);
+    } finally { claimerResult = { ok: false, retryable: false, reason: "no platform config on this test network" }; base = prev; await new Promise((r) => sv.close(r)); }
+  });
+
+  it("readPlatformClaimer reads the fee claimer from the config account", async () => {
+    const claimer = randAddr();
+    const loadSdk = () => ({ web3: { Connection: function () {} }, sdk: { DynamicBondingCurveClient: { create: () => ({ state: { getPoolConfig: async (a) => (a === CFG ? { feeClaimer: { toBase58: () => claimer } } : null) } }) } } });
+    assert.deepStrictEqual(await pub.readPlatformClaimer({ configAddress: CFG, rpcUrl: "https://r", loadSdk }), { ok: true, claimer });
+    assert.strictEqual((await pub.readPlatformClaimer({ configAddress: randAddr(), rpcUrl: "https://r", loadSdk })).ok, false);
+    assert.strictEqual((await pub.readPlatformClaimer({ configAddress: CFG, rpcUrl: "", loadSdk })).ok, false);
+    assert.strictEqual((await pub.readPlatformClaimer({ configAddress: CFG, rpcUrl: "https://r", loadSdk: () => { throw new Error("boom"); } })).retryable, true);
   });
 
   it("rate limits: per wallet and per connection (429), checked only after the signature is good", async () => {
