@@ -1,4 +1,4 @@
-// Tests for the Solana (devnet) prototype backend: lib/solanaApi.js,
+// Tests for the Solana (devnet + mainnet switch) backend: lib/solanaApi.js,
 // lib/solanaStore.js, lib/solanaTracker.js.
 //
 // Plain Node: `node --test test/solanaApi.test.js`. (It also runs under
@@ -407,15 +407,15 @@ describe("POST /solana/launches, GET /solana/launches, POST /solana/launches/del
     }
   });
 
-  it("rejects mainnet-beta with 403 (and stores nothing)", async () => {
+  it("refuses a mainnet launch while the site is on devnet (400, stores nothing)", async () => {
     const body = await signedLaunch({ cluster: "mainnet-beta" });
     const r = await call("POST", "/solana/launches", body);
-    assert.strictEqual(r.status, 403);
-    assert.strictEqual(r.json.error, "Solana mainnet is not enabled");
+    assert.strictEqual(r.status, 400);
+    assert.match(r.json.error, /on Solana devnet right now/);
     assert.strictEqual(await store.getLaunch(body.mint), null);
   });
 
-  it("mainnet is still rejected after the signature check, not before it", async () => {
+  it("a cluster mismatch is still rejected after the signature check, not before it", async () => {
     assert.strictEqual((await call("POST", "/solana/launches", await signedLaunch({ cluster: "mainnet-beta" }, stranger))).status, 401);
   });
 
@@ -714,7 +714,7 @@ describe("pollAllOnce / start / stop", () => {
     const out = [];
     const logger = { log: (m) => out.push(["log", m]), warn: (m) => out.push(["warn", m]) };
     assert.strictEqual(tracker.startSolanaTracker({ env: {}, logger }), false);
-    assert.deepStrictEqual(out, [["log", "Solana tracking disabled (SOLANA_RPC_URL not set)"]]);
+    assert.deepStrictEqual(out, [["log", "Solana tracking disabled (no RPC URL set — Admin → Solana, or SOLANA_RPC_URL)"]]);
   });
 
   it("warns once with the install command, and stays off, when the packages are missing", () => {
@@ -800,5 +800,316 @@ describe("chain field (network family of a launched token)", () => {
     const list = await call("GET", "/solana/launches");
     const row = list.json.launches.find((l) => l.mint === mint);
     assert.strictEqual(row.chain, "solana");
+  });
+});
+
+// =====================================================================
+// Admin -> Solana settings + the devnet/mainnet switch (lib/solanaSettings.js, /solana/settings routes)
+// =====================================================================
+const settingsLib = require("../lib/solanaSettings");
+
+describe("lib/solanaSettings", () => {
+  it("validates and normalises every field", () => {
+    const ok = settingsLib.validateSettings({
+      cluster: "mainnet-beta", enabled: "false", rpcUrl: "https://rpc.example/x?k=1", serverRpcUrl: "https://srv.example/",
+      dbcConfig: randAddr(), publicBaseUrl: "https://site.example/", pollSeconds: "30", mainnetConfirm: "GO LIVE ON MAINNET",
+    });
+    assert.deepStrictEqual(ok.errors, []);
+    assert.strictEqual(ok.patch.cluster, "mainnet-beta");
+    assert.strictEqual(ok.patch.enabled, false);
+    assert.strictEqual(ok.patch.publicBaseUrl, "https://site.example"); // origin only
+    assert.strictEqual(ok.patch.pollSeconds, 30);
+    for (const bad of [
+      { cluster: "testnet" }, { enabled: "maybe" }, { rpcUrl: "http://insecure.example" }, { rpcUrl: "https://user:pw@x.example" },
+      { rpcUrl: "ftp://x" }, { dbcConfig: "nope" }, { dbcConfig: randTxSig() }, { publicBaseUrl: "https://x.example/path" },
+      { pollSeconds: "5" }, { pollSeconds: "100000" }, { pollSeconds: "1.5" }, { mainnetConfirm: "go live" },
+    ]) assert.ok(settingsLib.validateSettings(bad).errors.length, JSON.stringify(bad));
+    // http is only OK for a local node
+    assert.deepStrictEqual(settingsLib.validateSettings({ rpcUrl: "http://127.0.0.1:8899" }).errors, []);
+  });
+
+  it("blank = unset; a blank server RPC means unchanged and - clears it", () => {
+    const r = settingsLib.validateSettings({ rpcUrl: "", dbcConfig: "", serverRpcUrl: "", mainnetServerRpcUrl: "-", pollSeconds: "" });
+    assert.strictEqual(r.patch.rpcUrl, "");
+    assert.strictEqual(r.patch.dbcConfig, "");
+    assert.ok(!("serverRpcUrl" in r.patch));
+    assert.strictEqual(r.patch.mainnetServerRpcUrl, "");
+    assert.strictEqual(r.patch.pollSeconds, null);
+  });
+
+  it("environment variables fill in, saved settings win, and mainnet can ONLY come from a saved setting", () => {
+    const env = { SOLANA_RPC_URL: "https://env.example", PUBLIC_BASE_URL: "https://env-site.example/", SOLANA_POLL_MS: "90000", SOLANA_CLUSTER: "mainnet-beta" };
+    const e1 = settingsLib.effectiveSettings({}, env);
+    assert.strictEqual(e1.cluster, "devnet");
+    assert.strictEqual(e1.rpcUrl, "https://env.example");
+    assert.strictEqual(e1.publicBaseUrl, "https://env-site.example");
+    assert.strictEqual(e1.pollSeconds, 90);
+    const e2 = settingsLib.effectiveSettings({ rpcUrl: "https://saved.example", pollSeconds: 20, cluster: "mainnet-beta", mainnetRpcUrl: "https://m.example" }, env);
+    assert.strictEqual(e2.devnet.rpcUrl, "https://saved.example");
+    assert.strictEqual(e2.cluster, "mainnet-beta");
+    assert.strictEqual(e2.rpcUrl, "https://m.example"); // active = mainnet
+    assert.strictEqual(e2.pollSeconds, 20);
+    assert.strictEqual(settingsLib.networkKeyFor("mainnet-beta"), "solana-mainnet");
+    assert.strictEqual(settingsLib.networkKeyFor("devnet"), "solana-devnet");
+  });
+
+  it("the public view never contains a server RPC URL, only whether/where it is set", () => {
+    const stored = { serverRpcUrl: "https://secret.example/rpc?key=SECRET123", mainnetServerRpcUrl: "https://secret2.example/?api-key=SECRET456" };
+    const pub = settingsLib.publicSettings(settingsLib.effectiveSettings(stored, {}), stored);
+    const text = JSON.stringify(pub);
+    assert.ok(!text.includes("SECRET123") && !text.includes("SECRET456") && !text.includes("/rpc?key"));
+    assert.strictEqual(pub.devnet.serverRpcUrlSet, true);
+    assert.strictEqual(pub.devnet.serverRpcHost, "secret.example");
+  });
+
+  it("the signed message is canonical: fixed key order, null for missing, strings only", () => {
+    const m = settingsLib.settingsMessage({ dbcConfig: "X", cluster: "devnet", enabled: true }, 123);
+    assert.strictEqual(
+      m,
+      'IgnitionX admin: update solana settings to {"cluster":"devnet","enabled":"true","rpcUrl":null,"serverRpcUrl":null,"dbcConfig":"X","mainnetRpcUrl":null,"mainnetServerRpcUrl":null,"mainnetDbcConfig":null,"publicBaseUrl":null,"pollSeconds":null,"mainnetConfirm":null} at 123'
+    );
+  });
+
+  it("mainnet readiness: needs own RPC, platform config and public base URL", () => {
+    const eff = (o) => settingsLib.effectiveSettings(o, {});
+    assert.strictEqual(settingsLib.mainnetReadinessProblems(eff({})).length, 3);
+    assert.ok(settingsLib.mainnetReadinessProblems(eff({ mainnetRpcUrl: "https://api.mainnet-beta.solana.com", mainnetDbcConfig: randAddr(), publicBaseUrl: "https://s.example" })).some((p) => /public mainnet RPC/.test(p)));
+    assert.deepStrictEqual(settingsLib.mainnetReadinessProblems(eff({ mainnetRpcUrl: "https://m.helius-rpc.com/?k=1", mainnetDbcConfig: randAddr(), publicBaseUrl: "https://s.example" })), []);
+  });
+});
+
+describe("Solana settings routes + network switch", () => {
+  const PHRASE = "GO LIVE ON MAINNET";
+  const MAIN_CFG = randAddr();
+  const DEV_CFG = randAddr();
+  let app2, srv2, base2, mem = {}, writes = 0;
+  const pre = (n) => "settingstest-" + (n || "solana-devnet");
+  const testStore = {
+    ...store,
+    readSettings: async () => JSON.parse(JSON.stringify(mem)),
+    writeSettings: async (st) => { mem = JSON.parse(JSON.stringify(st)); writes++; },
+    upsertLaunch: (r, n) => store.upsertLaunch(r, pre(n)),
+    listLaunches: (n) => store.listLaunches(pre(n)),
+    getLaunch: (m, n) => store.getLaunch(m, pre(n)),
+    deleteLaunch: (m, n) => store.deleteLaunch(m, pre(n)),
+    readPriceHistory: (m, n) => store.readPriceHistory(m, pre(n)),
+  };
+  const sendJson = (res, status, body) => res.status(status).type("application/json").send(JSON.stringify(body));
+  async function boot(envOver = {}) {
+    const a = express();
+    a.use(express.json({ limit: "2mb" }));
+    api.registerSolanaRoutes(a, {
+      sendJson, verifyAdminSignature: (m, s) => verifySignatureFrom(m, s, admin.address), isFreshTimestamp,
+      logger: quietLogger, env: { ...envOver }, startTracker: false, store: testStore,
+    });
+    const sv = http.createServer(a);
+    await new Promise((r) => sv.listen(0, "127.0.0.1", r));
+    return { sv, base: `http://127.0.0.1:${sv.address().port}` };
+  }
+  async function c2(method, p, body) {
+    const res = await fetch(base2 + p, { method, headers: body === undefined ? {} : { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    let json = null; try { json = await res.json(); } catch (_) {}
+    return { status: res.status, json };
+  }
+  async function saveSettings(settings, over = {}, wallet = admin) {
+    const timestamp = over.timestamp !== undefined ? over.timestamp : Date.now();
+    const signedFor = over.signedSettings || settings;
+    const signature = over.signature || (await wallet.signMessage(settingsLib.settingsMessage(signedFor, timestamp)));
+    return c2("POST", "/solana/settings", { settings, timestamp, signature });
+  }
+  const mainnetReady = { mainnetRpcUrl: "https://mainnet.helius-rpc.com/?api-key=k", mainnetDbcConfig: MAIN_CFG, publicBaseUrl: "https://ix.example" };
+
+  before(async () => { ({ sv: srv2, base: base2 } = await boot()); });
+  after(async () => { await new Promise((r) => srv2.close(r)); });
+
+  it("GET is public, starts on devnet/enabled, exposes the phrase and what is missing for mainnet", async () => {
+    const r = await c2("GET", "/solana/settings");
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.settings.cluster, "devnet");
+    assert.strictEqual(r.json.settings.enabled, true);
+    assert.strictEqual(r.json.mainnetConfirmPhrase, PHRASE);
+    assert.strictEqual(r.json.mainnetProblems.length, 3);
+    assert.ok("running" in r.json.status);
+  });
+
+  it("POST needs the admin wallet: stranger 401, stale timestamp 400, tampered body 401, nothing saved", async () => {
+    const before = writes;
+    assert.strictEqual((await saveSettings({ pollSeconds: "30" }, {}, stranger)).status, 401);
+    assert.strictEqual((await saveSettings({ pollSeconds: "30" }, { timestamp: Date.now() - 3600 * 1000 })).status, 400);
+    // signed one thing, sent another
+    assert.strictEqual((await saveSettings({ pollSeconds: "999" }, { signedSettings: { pollSeconds: "30" } })).status, 401);
+    assert.strictEqual((await c2("POST", "/solana/settings", { timestamp: Date.now() })).status, 400);
+    assert.strictEqual(writes, before);
+  });
+
+  it("saves devnet values (partial updates allowed), applies them at once, and never echoes the server RPC", async () => {
+    const r = await saveSettings({ rpcUrl: "https://devnet.helius-rpc.com/?api-key=k", dbcConfig: DEV_CFG, serverRpcUrl: "https://srv.example/rpc?key=SECRETX", publicBaseUrl: "https://ix.example", pollSeconds: "45" });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    assert.strictEqual(r.json.settings.rpcUrl, "https://devnet.helius-rpc.com/?api-key=k");
+    assert.strictEqual(r.json.settings.dbcConfig, DEV_CFG);
+    assert.strictEqual(r.json.settings.pollSeconds, 45);
+    assert.strictEqual(r.json.settings.serverRpcUrlSet, true);
+    assert.ok(!JSON.stringify(r.json).includes("SECRETX"));
+    const g = await c2("GET", "/solana/settings");
+    assert.ok(!JSON.stringify(g.json).includes("SECRETX"));
+    assert.strictEqual(g.json.settings.devnet.serverRpcHost, "srv.example");
+    // the secret is on disk (so it survives a restart) ...
+    assert.strictEqual(mem.serverRpcUrl, "https://srv.example/rpc?key=SECRETX");
+    // ... a blank value leaves it alone, "-" removes it
+    await saveSettings({ serverRpcUrl: "" });
+    assert.strictEqual(mem.serverRpcUrl, "https://srv.example/rpc?key=SECRETX");
+    await saveSettings({ serverRpcUrl: "-" });
+    assert.strictEqual(mem.serverRpcUrl, "");
+    // a one-field partial save (what the launch screen's "Save it to the site" does) leaves the rest alone
+    await saveSettings({ dbcConfig: DEV_CFG });
+    assert.strictEqual(mem.rpcUrl, "https://devnet.helius-rpc.com/?api-key=k");
+  });
+
+  it("rejects bad values with 400 and saves nothing", async () => {
+    const snap = JSON.stringify(mem);
+    for (const bad of [{ rpcUrl: "http://insecure.example" }, { dbcConfig: "not-an-address" }, { pollSeconds: "3" }, { publicBaseUrl: "https://x.example/deep/path" }, { cluster: "testnet" }]) {
+      const r = await saveSettings(bad);
+      assert.strictEqual(r.status, 400, JSON.stringify(bad));
+    }
+    assert.strictEqual(JSON.stringify(mem), snap);
+  });
+
+  it("going to mainnet needs the exact phrase AND the readiness items, each reported", async () => {
+    let r = await saveSettings({ cluster: "mainnet-beta" });
+    assert.strictEqual(r.status, 400);
+    assert.match(r.json.error, /GO LIVE ON MAINNET/);
+    r = await saveSettings({ cluster: "mainnet-beta", mainnetConfirm: "go live on mainnet" });
+    assert.strictEqual(r.status, 400);
+    r = await saveSettings({ cluster: "mainnet-beta", mainnetConfirm: PHRASE });
+    assert.strictEqual(r.status, 400);
+    assert.match(r.json.error, /Not ready for mainnet/);
+    assert.match(r.json.error, /mainnet RPC/);
+    assert.match(r.json.error, /platform config/);
+    r = await saveSettings({ cluster: "mainnet-beta", mainnetConfirm: PHRASE, ...mainnetReady, mainnetRpcUrl: "https://api.mainnet-beta.solana.com" });
+    assert.strictEqual(r.status, 400);
+    assert.match(r.json.error, /public mainnet RPC/);
+    assert.strictEqual((await c2("GET", "/solana/settings")).json.settings.cluster, "devnet");
+    assert.ok(!mem.cluster || mem.cluster === "devnet");
+  });
+
+  it("with devnet launches on file, the mainnet switch keeps the two lists completely apart", async () => {
+    const devMint = randAddr();
+    assert.strictEqual((await c2("POST", "/solana/launches", await signedLaunch({ mint: devMint, name: "Dev One", symbol: "DEV" }))).status, 200);
+    const sw = await saveSettings({ cluster: "mainnet-beta", mainnetConfirm: PHRASE, ...mainnetReady });
+    assert.strictEqual(sw.status, 200, JSON.stringify(sw.json));
+    assert.strictEqual(sw.json.settings.cluster, "mainnet-beta");
+    assert.strictEqual(sw.json.settings.rpcUrl, mainnetReady.mainnetRpcUrl); // active values are the mainnet ones
+    assert.strictEqual(sw.json.settings.dbcConfig, MAIN_CFG);
+    assert.strictEqual(mem.mainnetConfirm, undefined, "the one-time phrase is never stored");
+    assert.strictEqual(mem.cluster, "mainnet-beta");
+
+    let list = await c2("GET", "/solana/launches");
+    assert.strictEqual(list.json.cluster, "mainnet-beta");
+    assert.deepStrictEqual(list.json.launches, [], "the devnet token does not show up on mainnet");
+
+    // a client still on devnet can't register there; the right cluster is accepted
+    const stale = await c2("POST", "/solana/launches", await signedLaunch({ cluster: "devnet" }));
+    assert.strictEqual(stale.status, 400);
+    assert.match(stale.json.error, /mainnet-beta right now|on Solana mainnet-beta/);
+    const mainMint = randAddr();
+    const made = await c2("POST", "/solana/launches", await signedLaunch({ mint: mainMint, name: "Live One", symbol: "LIVE", cluster: "mainnet-beta" }));
+    assert.strictEqual(made.status, 200);
+    assert.strictEqual(made.json.launch.cluster, "mainnet-beta");
+    // omitted cluster follows the site
+    assert.strictEqual((await c2("POST", "/solana/launches", await signedLaunch({ name: "Live Two", symbol: "LV2" }))).json.launch.cluster, "mainnet-beta");
+    list = await c2("GET", "/solana/launches");
+    assert.strictEqual(list.json.launches.length, 2);
+    assert.ok(list.json.launches.every((l) => l.mint !== devMint));
+
+    // price history is per cluster too
+    await store.appendPricePoint(mainMint, { t: Date.now(), p: 1.5 }, pre("solana-mainnet"));
+    assert.strictEqual((await c2("GET", `/solana/price-history/${mainMint}`)).json.history.length, 1);
+
+    // back to devnet is one signed call, no phrase; the mainnet values are remembered
+    const back = await saveSettings({ cluster: "devnet" });
+    assert.strictEqual(back.status, 200);
+    assert.strictEqual(back.json.settings.cluster, "devnet");
+    assert.strictEqual(back.json.settings.mainnet.dbcConfig, MAIN_CFG);
+    list = await c2("GET", "/solana/launches");
+    assert.deepStrictEqual(list.json.launches.map((l) => l.mint), [devMint]);
+    assert.strictEqual((await c2("GET", `/solana/price-history/${mainMint}`)).json.history.length, 0, "mainnet price history is not visible on devnet");
+  });
+
+  it("the Solana feature switch refuses admin writes while off, and reads keep working", async () => {
+    assert.strictEqual((await saveSettings({ enabled: "false" })).status, 200);
+    assert.strictEqual((await c2("POST", "/solana/launches", await signedLaunch())).status, 403);
+    assert.strictEqual((await c2("POST", "/solana/metadata", await signedMetadata())).status, 403);
+    assert.strictEqual((await c2("GET", "/solana/launches")).status, 200);
+    assert.strictEqual((await c2("GET", "/solana/settings")).json.settings.enabled, false);
+    // the settings route itself must stay usable, or you could never switch it back on
+    assert.strictEqual((await saveSettings({ enabled: "true" })).status, 200);
+    assert.strictEqual((await c2("POST", "/solana/launches", await signedLaunch())).status, 200);
+  });
+
+  it("settings survive a restart (a fresh server over the same store), including being on mainnet", async () => {
+    assert.strictEqual((await saveSettings({ cluster: "mainnet-beta", mainnetConfirm: PHRASE, ...mainnetReady })).status, 200);
+    const second = await boot();
+    try {
+      const res = await fetch(second.base + "/solana/settings");
+      const j = await res.json();
+      assert.strictEqual(j.settings.cluster, "mainnet-beta");
+      assert.strictEqual(j.settings.dbcConfig, MAIN_CFG);
+      assert.strictEqual(j.settings.pollSeconds, 45);
+    } finally {
+      await new Promise((r) => second.sv.close(r));
+    }
+    assert.strictEqual((await saveSettings({ cluster: "devnet" })).status, 200);
+  });
+
+  it("an environment variable can never put a fresh install on mainnet", async () => {
+    const saved = mem; mem = {};
+    const fresh = await boot({ SOLANA_CLUSTER: "mainnet-beta", SOLANA_RPC_URL: "https://env-dev.example" });
+    try {
+      const j = await (await fetch(fresh.base + "/solana/settings")).json();
+      assert.strictEqual(j.settings.cluster, "devnet");
+      assert.strictEqual(j.settings.rpcUrl, "https://env-dev.example"); // env still seeds the devnet RPC
+    } finally {
+      await new Promise((r) => fresh.sv.close(r));
+      mem = saved;
+    }
+  });
+
+  it("a corrupt or unreadable settings store falls back to defaults instead of crashing", async () => {
+    const broken = { ...testStore, readSettings: async () => { throw new Error("disk on fire"); } };
+    const a = express(); a.use(express.json());
+    api.registerSolanaRoutes(a, { sendJson, verifyAdminSignature: () => true, isFreshTimestamp, logger: quietLogger, env: {}, startTracker: false, store: broken });
+    const sv = http.createServer(a); await new Promise((r) => sv.listen(0, "127.0.0.1", r));
+    try {
+      const j = await (await fetch(`http://127.0.0.1:${sv.address().port}/solana/settings`)).json();
+      assert.strictEqual(j.settings.cluster, "devnet");
+    } finally { await new Promise((r) => sv.close(r)); }
+  });
+});
+
+describe("tracker status + cluster awareness", () => {
+  it("reports what the admin panel needs, and only samples launches of its own cluster", async () => {
+    tracker.stopSolanaTracker();
+    const out = [];
+    const logger = { log: (m) => out.push(m), warn: (m) => out.push(m) };
+    const fakeStore = {
+      listLaunches: async (net) => (net === "solana-mainnet" ? [{ mint: "M1", pool: "P1", symbol: "M", cluster: "mainnet-beta" }] : []),
+      appendPricePoint: async () => true,
+    };
+    const loadSdk = () => ({
+      sdk: { DynamicBondingCurveClient: { create: () => ({ state: { getPool: async () => null, getPoolConfig: async () => null } }) }, getPriceFromSqrtPrice: () => 1 },
+      web3: { Connection: function () {} },
+    });
+    const ok = tracker.startSolanaTracker({ env: { SOLANA_RPC_URL: "https://mainnet.helius-rpc.com/?api-key=SECRETZ", SOLANA_POLL_MS: "30000" }, logger, loadSdk, store: fakeStore, cluster: "mainnet-beta", network: "solana-mainnet" });
+    assert.strictEqual(ok, true);
+    await new Promise((r) => setTimeout(r, 30));
+    const st = tracker.getTrackerStatus();
+    assert.strictEqual(st.running, true);
+    assert.strictEqual(st.cluster, "mainnet-beta");
+    assert.strictEqual(st.rpcHost, "mainnet.helius-rpc.com");
+    assert.strictEqual(st.pollMs, 30000);
+    assert.ok(!JSON.stringify(st).includes("SECRETZ"), "the API key never reaches the status object");
+    assert.ok(out.some((m) => /mainnet-beta/.test(m)), out.join("|"));
+    tracker.stopSolanaTracker();
+    assert.strictEqual(tracker.getTrackerStatus().running, false);
   });
 });
