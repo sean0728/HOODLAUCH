@@ -1,4 +1,4 @@
-// Self-hosted Solana bundle for IgnitionX (devnet prototype). Exposes window.IgnitionSol.
+// Self-hosted Solana bundle for IgnitionX. Exposes window.IgnitionSol.
 // Only downloaded when an admin opens the Solana launch flow — see public/index.html.
 import * as core from "./core.js";
 
@@ -20,4 +20,9 @@ window.IgnitionSol = {
   trade: core.trade,
   getFeeBreakdown: core.getFeeBreakdown,
   claimFees: core.claimFees,
+  previewCurve: core.previewCurve,
+  createSupplyConfig: core.createSupplyConfig,
+  getConfigInfo: core.getConfigInfo,
+  signMessage: core.signMessage,
+  curveLimits: core.CURVE_LIMITS,
 };

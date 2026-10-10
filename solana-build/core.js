@@ -15,78 +15,8 @@ import * as DBC from "@meteora-ag/dynamic-bonding-curve-sdk";
 export const WSOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
-// ---- platform curve defaults (pump.fun-style) -------------------------------------------------------
-// All market caps are in SOL. 1B supply, 6 decimals. A flat 1% trading fee; 10% of the post-protocol fee goes
-// to the creator, the rest to the platform's fee claimer (partner). On graduation the pool migrates to a
-// Meteora DAMM v2 pool; 90% of the LP is permanently locked to the platform and 10% to the creator.
-export const CURVE_DEFAULTS = Object.freeze({
-  totalSupply: 1_000_000_000,
-  tokenDecimals: 6,
-  initialMarketCapSol: 30,
-  migrationMarketCapSol: 300,
-  tradingFeeBps: 100,
-  creatorFeePercent: 10,
-  partnerLockedLpPercent: 90,
-  creatorLockedLpPercent: 10,
-});
-
-export function buildCurveParams(opts = {}) {
-  const o = { ...CURVE_DEFAULTS, ...opts };
-  return DBC.buildCurveWithMarketCap({
-    token: {
-      tokenType: DBC.TokenType.SPLToken,
-      tokenBaseDecimal: o.tokenDecimals === 9 ? DBC.TokenDecimal.NINE : DBC.TokenDecimal.SIX,
-      tokenQuoteDecimal: 9,
-      tokenAuthorityOption: DBC.TokenAuthorityOption.Immutable,
-      totalTokenSupply: o.totalSupply,
-      leftover: 0,
-    },
-    fee: {
-      baseFeeParams: {
-        baseFeeMode: DBC.BaseFeeMode.FeeSchedulerLinear,
-        feeSchedulerParam: { startingFeeBps: o.tradingFeeBps, endingFeeBps: o.tradingFeeBps, numberOfPeriod: 0, totalDuration: 0 },
-      },
-      dynamicFeeEnabled: false,
-      collectFeeMode: DBC.CollectFeeMode.QuoteToken,
-      creatorTradingFeePercentage: o.creatorFeePercent,
-      poolCreationFee: 0,
-      enableFirstSwapWithMinFee: false,
-    },
-    migration: {
-      migrationOption: DBC.MigrationOption.MET_DAMM_V2,
-      migrationFeeOption: DBC.MigrationFeeOption.FixedBps100,
-      migrationFee: { feePercentage: 0, creatorFeePercentage: 0 },
-    },
-    liquidityDistribution: {
-      partnerPermanentLockedLiquidityPercentage: o.partnerLockedLpPercent,
-      partnerLiquidityPercentage: 0,
-      creatorPermanentLockedLiquidityPercentage: o.creatorLockedLpPercent,
-      creatorLiquidityPercentage: 0,
-    },
-    lockedVesting: { totalLockedVestingAmount: 0, numberOfVestingPeriod: 0, cliffUnlockAmount: 0, totalVestingDuration: 0, cliffDurationFromMigrationTime: 0 },
-    activationType: DBC.ActivationType.Timestamp,
-    initialMarketCap: o.initialMarketCapSol,
-    migrationMarketCap: o.migrationMarketCapSol,
-  });
-}
-
-// ---- small helpers ----------------------------------------------------------------------------------
-// Decimal string -> BN in base units, without floating point.
-export function parseUnits(text, decimals) {
-  const s = String(text).trim();
-  if (!/^\d*\.?\d*$/.test(s) || s === "" || s === ".") throw new Error("Enter a valid amount.");
-  const [whole, frac = ""] = s.split(".");
-  const fracPadded = (frac + "0".repeat(decimals)).slice(0, decimals);
-  return new BN((whole || "0") + fracPadded, 10);
-}
-export function formatUnits(bn, decimals, maxFrac = 6) {
-  const neg = bn.isNeg();
-  let s = (neg ? bn.neg() : bn).toString(10).padStart(decimals + 1, "0");
-  const whole = s.slice(0, s.length - decimals);
-  let frac = s.slice(s.length - decimals).slice(0, maxFrac).replace(/0+$/, "");
-  return (neg ? "-" : "") + whole + (frac ? "." + frac : "");
-}
-const toNum = (bn, decimals) => Number(formatUnits(bn, decimals, decimals));
+import { CURVE_DEFAULTS, CURVE_LIMITS, resolveCurveOpts, buildCurveParams, previewCurve, parseUnits, formatUnits, toNum } from "./curve.js";
+export { CURVE_DEFAULTS, CURVE_LIMITS, resolveCurveOpts, buildCurveParams, previewCurve, parseUnits, formatUnits };
 
 // ---- state ------------------------------------------------------------------------------------------
 const S = {
@@ -193,6 +123,17 @@ function owner() {
   return new PublicKey(S.account.address);
 }
 
+// Signs a short text message with the connected Solana wallet (free, no transaction). Used by the public
+// launch flow: the relayer verifies the ed25519 signature instead of an admin's EVM signature.
+export async function signMessage(text) {
+  if (!S.account || !S.wallet) throw new Error("Connect a Solana wallet first.");
+  const f = S.wallet.features["solana:signMessage"];
+  if (!f) throw new Error(`${S.wallet.name} can't sign messages. Try Phantom, Solflare or Backpack.`);
+  const out = await f.signMessage({ account: S.account, message: new TextEncoder().encode(String(text)) });
+  const sig = Array.isArray(out) ? out[0].signature : out.signature;
+  return bs58.encode(sig);
+}
+
 // Signs `tx` (legacy Transaction from the SDK) with the wallet, sends it, and waits for confirmation.
 // `extraSigners` are Keypairs that must co-sign (a new mint, a new config key).
 // On mainnet a transaction with no priority fee can sit unprocessed when the network is busy, so one is added
@@ -268,11 +209,27 @@ export async function createPlatformConfig(opts = {}) {
   };
 }
 
+// A creator who wants their own total supply pays for a platform config of their own: the SAME curve and fee
+// settings as the site's standard config (`curve` = { initialMarketCapSol, migrationMarketCapSol, tradingFeeBps,
+// creatorFeePercent }, which the relayer publishes), only with their supply, and with the PLATFORM's wallet as
+// the fee claimer (read from the standard config). The relayer re-checks all of that on-chain before it lists
+// the token, so a creator can't quietly change the fees.
+export async function createSupplyConfig({ totalSupply, curve = {} }) {
+  const { client, configAddress } = need();
+  if (!configAddress) throw new Error("The platform's standard config isn't set yet (Admin → Solana).");
+  const tmpl = await client.state.getPoolConfig(configAddress);
+  if (!tmpl) throw new Error("The platform's standard config wasn't found on this network.");
+  return createPlatformConfig({ ...curve, totalSupply, feeClaimer: tmpl.feeClaimer, leftoverReceiver: tmpl.leftoverReceiver });
+}
+
 // ---- launch -----------------------------------------------------------------------------------------
 // Creates the token mint + bonding-curve pool, and (optionally) the creator's first buy, in ONE transaction.
-export async function launch({ name, symbol, uri, firstBuySol = "0", slippageBps = 1000 }) {
-  const { client, configAddress } = need();
-  if (!configAddress) throw new Error("The Solana launch config isn't set yet (public/solana-config.json → dbcConfig).");
+// `config` (optional) launches under a different platform config than the site's standard one — used for tokens
+// with a creator-chosen supply (see createSupplyConfig).
+export async function launch({ name, symbol, uri, firstBuySol = "0", slippageBps = 1000, config = null }) {
+  const { client, configAddress: standardConfig } = need();
+  const configAddress = config ? pk(config) : standardConfig;
+  if (!configAddress) throw new Error("The Solana launch config isn't set yet (Admin → Solana → platform config address).");
   const me = owner();
   if (!name || !symbol || !uri) throw new Error("Name, symbol and metadata URL are required.");
   const baseMint = Keypair.generate();
@@ -287,6 +244,36 @@ export async function launch({ name, symbol, uri, firstBuySol = "0", slippageBps
   const pool = DBC.deriveDbcPoolAddress(WSOL_MINT, baseMint.publicKey, configAddress);
   const signature = await signSendConfirm(tx, [baseMint]);
   return { signature, mint: baseMint.publicKey.toBase58(), pool: pool.toBase58(), creator: me.toBase58() };
+}
+
+// ---- config reads -----------------------------------------------------------------------------------
+// The real numbers of a platform config on-chain (so the UI describes what a launch will actually do).
+export async function getConfigInfo(configAddress) {
+  const { client } = need();
+  const config = await client.state.getPoolConfig(pk(configAddress));
+  if (!config) throw new Error("That platform config wasn't found on this network.");
+  const dec = config.tokenDecimal;
+  const supplyRaw = config.preMigrationTokenSupply || config.postMigrationTokenSupply;
+  const supply = supplyRaw ? Number(formatUnits(new BN(supplyRaw.toString()), dec, 0)) : null;
+  const startPrice = DBC.getPriceFromSqrtPrice(config.sqrtStartPrice, dec, 9).toNumber();
+  const out = {
+    config: pk(configAddress).toBase58(),
+    totalSupply: supply,
+    startPriceSol: startPrice,
+    startMarketCapSol: supply ? startPrice * supply : null,
+    raiseSol: toNum(config.migrationQuoteThreshold, 9),
+    tokenDecimals: dec,
+    feeClaimer: config.feeClaimer ? config.feeClaimer.toBase58() : null,
+  };
+  try { // cliff fee numerator is out of 1e9 (1% = 10,000,000)
+    const num = config.poolFees.baseFee.cliffFeeNumerator;
+    out.tradingFeeBps = Number(num.toString()) / 100_000;
+  } catch (e) { /* older/odd config shape: leave unset */ }
+  if (config.creatorTradingFeePercentage !== undefined) out.creatorFeePercent = Number(config.creatorTradingFeePercentage);
+  if (config.migrationSqrtPrice && supply) {
+    out.graduationMarketCapSol = DBC.getPriceFromSqrtPrice(config.migrationSqrtPrice, dec, 9).toNumber() * supply;
+  }
+  return out;
 }
 
 // ---- pool reads -------------------------------------------------------------------------------------
