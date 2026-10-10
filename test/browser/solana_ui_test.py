@@ -61,7 +61,7 @@ MOCK_LIB = r"""
       st.wallet = { name: n, address: "%(CREATOR)s" }; st.calls.push(["connect", n]); st.listeners.forEach(f => f(st.wallet)); return st.wallet; },
     disconnect: async () => { st.wallet = null; st.calls.push(["disconnect"]); st.listeners.forEach(f => f(null)); },
     createPlatformConfig: async () => { st.calls.push(["createPlatformConfig"]); return { config: "%(CONFIG)s", signature: "%(SIG)s", migrationQuoteThresholdSol: 72 }; },
-    launch: async (a) => { st.calls.push(["launch", a]); if (window.__launchFail) { window.__launchFail = false; throw new Error("launch tx failed"); } return { signature: "%(SIG)s", mint: "%(MINT)s", pool: "%(POOL)s", creator: "%(CREATOR)s" }; },
+    launch: async (a) => { st.calls.push(["launch", a]); if (window.__launchDelay) await new Promise(r => setTimeout(r, window.__launchDelay)); if (window.__launchFail) { window.__launchFail = false; throw new Error("launch tx failed"); } return { signature: "%(SIG)s", mint: "%(MINT)s", pool: "%(POOL)s", creator: "%(CREATOR)s" }; },
     getPoolInfo: async () => { if (window.__poolFail) throw new Error('RPC 429: Too many requests'); return { ...info }; },
     getBalances: async () => ({ sol: 4.2, token: 1234 }),
     quote: async (a) => { st.calls.push(["quote", a]); return a.side === "buy"
@@ -348,8 +348,10 @@ with sync_playwright() as p:
     check("5c2 the banner travels with the metadata (a JPEG data URL within the cap)", str(mb.get("banner", "")).startswith("data:image/jpeg;base64,") and len(mb["banner"]) <= 400000, str(mb.get("banner", ""))[:40])
     check("5d metadata image is a PNG data URL within the size cap", str(mb.get("image", "")).startswith("data:image/png;base64,") and len(mb["image"]) <= 273087)
     signed = pg.evaluate("window.__signed")
-    check("5e metadata signed with the exact server message", signed and signed[0] == f"IgnitionX admin: solana metadata {mb.get('id')} at {mb.get('timestamp')}", signed)
-    check("5f signature forwarded", mb.get("signature") == "0x" + "ab" * 65)
+    sm = [c[1] for c in pg.evaluate("window.__solCalls") if c[0] == "signMessage"]
+    check("5e metadata is signed in the SOLANA wallet with the exact server message", sm and sm[0] == f"IgnitionX launch: solana metadata {mb.get('id')} by {CREATOR} at {mb.get('timestamp')}", sm)
+    check("5e2 the Robinhood (EVM) wallet is never asked to sign anything during a Solana launch", signed == [], signed)
+    check("5f wallet + walletSignature forwarded, no EVM signature", mb.get("wallet") == CREATOR and str(mb.get("walletSignature", "")).startswith("SIG") and "signature" not in mb, list(mb.keys()))
     launch_call = [c for c in pg.evaluate("window.__solCalls") if c[0] == "launch"]
     check("5g on-chain launch called with metadata uri + first buy", launch_call and launch_call[0][1]["uri"].endswith(f"/solana/metadata/{mb.get('id')}.json") and launch_call[0][1]["firstBuySol"] == "0.5" and launch_call[0][1]["symbol"] == "IGCAT", launch_call)
     check("5h register failure keeps the on-chain result and offers a retry", pg.locator("#solRetryRegister").count() == 1 and "isn't recorded" in pg.inner_text("#solLaunchStatus"), pg.inner_text("#solLaunchStatus"))
@@ -360,7 +362,7 @@ with sync_playwright() as p:
     check("5j register retried (2 attempts total)", len(regs) == 2)
     rb = regs[-1][1] if regs else {}
     check("5k register body", rb.get("mint") == MINT and rb.get("pool") == POOL and rb.get("symbol") == "IGCAT" and rb.get("cluster") == "devnet" and rb.get("metadataId") == mb.get("id"), rb)
-    check("5l register signed with exact message", f"IgnitionX admin: register solana launch {MINT} at {rb.get('timestamp')}" in pg.evaluate("window.__signed"), pg.evaluate("window.__signed"))
+    check("5l register signed in the Solana wallet with the exact message", f"IgnitionX launch: register solana launch {MINT} by {CREATOR} at {rb.get('timestamp')}" in [c[1] for c in pg.evaluate("window.__solCalls") if c[0] == "signMessage"] and pg.evaluate("window.__signed") == [] and rb.get("wallet") == CREATOR, rb)
     check("5m lands on the Solana token page", pg.locator("#solDetailRoot").count() == 1 and "Ignition Cat" in pg.inner_text("#solDetailRoot"), pg.inner_text("#detailContent")[:200])
 
     # ---------- 6. detail page ----------
@@ -784,8 +786,23 @@ with sync_playwright() as p:
     wiz_launch(pg)
     meta = [x for x in S.posts if x[0] == "/solana/metadata"]
     mb = meta[0][1] if meta else {}
-    check("16z1 admin requests are still EVM-signed (no wallet fields)", mb.get("signature") == "0x" + "ab" * 65 and "wallet" not in mb and not sol_calls(pg, "signMessage"), mb.keys())
+    check("16z1 the admin launches with the Solana wallet only: wallet signatures, nothing sent to the EVM wallet", mb.get("wallet") == CREATOR and str(mb.get("walletSignature", "")).startswith("SIG") and "signature" not in mb and len(sol_calls(pg, "signMessage")) == 2 and pg.evaluate("window.__signed") == [], (list(mb.keys()), pg.evaluate("window.__signed")))
     check("16z2 admin keeps the remove button", pg.locator("#solRemoveBtn").count() == 1)
+    pg.context.close()
+
+    # 16z3: the wizard being redrawn in the middle of a launch must not wipe the progress or re-arm the button
+    pub_state(public=False)
+    pg = new_page(b, ADMIN); connect_evm(pg); open_launch(pg)
+    pg.evaluate("window.__launchDelay = 2500")
+    wiz_identity(pg, name="Redraw Cat", ticker="RCAT")
+    wiz_launch(pg, wait=700)
+    pg.click("[data-launchnet='solana']"); pg.wait_for_timeout(300)           # redraws the wizard mid-launch
+    pg.evaluate("window.__emitNoise(['0x' + '77'.repeat(20)])")                 # a stray EVM wallet event too
+    pg.evaluate("window.__solExternalChange({name:'MockSol', address: '%s'})" % CREATOR); pg.wait_for_timeout(300)
+    check("16z3 a redraw mid-launch keeps the progress line and the button on 'Launching…'", "Creating the token" in pg.inner_text("#solLaunchStatus") and pg.is_disabled("#wizLaunch") and "Launching" in pg.inner_text("#wizLaunch"), (pg.inner_text("#solLaunchStatus"), pg.inner_text("#wizLaunch")))
+    pg.wait_for_timeout(3500)
+    check("16z4 ...and the launch still completes and is recorded", pg.locator("#solDetailRoot").count() == 1 and any(x[0] == "/solana/launches" for x in S.posts), [x[0] for x in S.posts])
+    check("16z5 an EVM wallet event during it didn't log the admin out or send them back to the Robinhood flow", "0x64" in pg.inner_text("#walletBtn").lower(), pg.inner_text("#walletBtn"))
     pg.context.close()
 
     # ---------- 17. Admin -> Solana: who can launch, supply, curve ----------
