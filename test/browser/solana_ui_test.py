@@ -43,6 +43,7 @@ MOCK_LIB = r"""
   window.__solExternalChange = (info) => { st.wallet = info; st.listeners.forEach(f => f(info)); };   // e.g. Phantom drops the site / switches account
   const info = { pool: "%(POOL)s", mint: "%(MINT)s", creator: "%(CREATOR)s", config: "%(CONFIG)s", priceSol: 0.00000004, marketCapSol: 40,
                  raisedSol: 12, thresholdSol: 72, progressPct: 16.67, migrated: false, tokenDecimals: 6 };
+  if (window.__migratedAtStart) info.migrated = true;
   window.__solInfo = info;
   window.IgnitionSol = {
     version: "mock",
@@ -195,7 +196,7 @@ def route(r):
                 if S.fail_register > 0:
                     S.fail_register -= 1; return j({"error": "relayer exploded"}, 500)
                 rec = {"mint": body["mint"], "pool": body["pool"], "creator": body["creator"], "name": body["name"], "symbol": body["symbol"],
-                       "cluster": body.get("cluster", "devnet"), "createdAt": 1_790_000_000_000, "metadataId": body.get("metadataId"),
+                       "cluster": body.get("cluster", "devnet"), "createdAt": int(time.time() * 1000) - 60000, "metadataId": body.get("metadataId"),
                        "image": f"https://other-host.example/solana/metadata/{body.get('metadataId')}.png" if body.get("metadataId") else None,
                        "banner": f"{BASE}/solana/metadata/{body.get('metadataId')}/banner.png" if body.get("metadataId") else None}
                 S.launches = [rec]; return j({"created": True, "launch": rec})
@@ -254,7 +255,7 @@ with sync_playwright() as p:
     pg = new_page(b, OTHER); connect_evm(pg)
     check("1a wallet connected", "0x" in pg.inner_text("#walletBtn"), pg.inner_text("#walletBtn"))
     check("1b network picker hidden", not pg.is_visible("#launchNetBar"))
-    check("1c Solana explore section hidden", not pg.is_visible("#solanaExploreSection"))
+    check("1c a normal visitor sees no Solana cards in the Live launches grid, and there is no separate Solana section any more", pg.locator("#tokenGrid [data-solmint]").count() == 0 and pg.locator("#solanaExploreSection, #solanaGrid").count() == 0)
     pg.click("[data-goto='create']"); pg.wait_for_timeout(500)
     check("1d launch page shows no Solana option", not pg.is_visible("[data-launchnet='solana']"))
     check("1e a visitor only asks whether launching is open (settings), nothing else", not [g for g in S.gets if g[1].startswith("/solana/") and not g[1].startswith("/solana/settings")], S.gets)
@@ -269,8 +270,8 @@ with sync_playwright() as p:
     pg = new_page(b, ADMIN); connect_evm(pg)
     check("2a admin connected", "0x64" in pg.inner_text("#walletBtn").lower() or "0x64dE".lower() in pg.inner_text("#walletBtn").lower(), pg.inner_text("#walletBtn"))
     pg.wait_for_timeout(500)
-    check("2b explore shows the Solana section", pg.is_visible("#solanaExploreSection"))
-    check("2c empty state offers a launch button", pg.locator("#solFirstLaunch").count() == 1)
+    check("2b there is no separate 'Solana quick launches' section", pg.locator("#solanaExploreSection, #solanaGrid").count() == 0 and "Solana quick launches" not in pg.inner_text("#view-explore"))
+    check("2c with nothing launched the normal empty state of the main grid is shown", "No launches yet" in pg.inner_text("#tokenGrid"), pg.inner_text("#tokenGrid")[:150])
     check("2d relayer queried for launches", any(g[1].startswith("/solana/launches") for g in S.gets), S.gets)
     pg.click("[data-goto='create']"); pg.wait_for_timeout(500)
     check("2e network picker visible", pg.is_visible("#launchNetBar"))
@@ -409,15 +410,14 @@ with sync_playwright() as p:
 
     # ---------- 8. explore card ----------
     pg.click("#backFromDetail"); pg.wait_for_timeout(900)
-    cards = pg.locator("#solanaGrid .token-card")
+    cards = pg.locator("#tokenGrid .token-card[data-solmint]")
     check("8a Solana card rendered", cards.count() == 1)
-    ct = pg.inner_text("#solanaGrid")
+    ct = pg.inner_text("#tokenGrid")
     check("8b card shows name, ticker, SOL price + progress", "Ignition Cat" in ct and "$IGCAT" in ct and "SOL" in ct and "16.7%" in ct, ct)
-    check("8c card logo uses same-origin path", pg.evaluate("document.querySelector('#solanaGrid .tc-logo-img').getAttribute('src')").startswith("/solana/metadata/"))
-    check("8c2 card shows the Solana badge to the left of the name", pg.evaluate("(()=>{const h=document.querySelector('#solanaGrid .tc-head'); const b=h.querySelector('img.chain-badge'); const n=h.querySelector('.tc-name'); return !!b && b.dataset.chain==='solana' && /brand\\/chains\\/solana\\.svg$/.test(b.getAttribute('src')) && b.getBoundingClientRect().right<=n.getBoundingClientRect().left+1})()"))
-    check("8d logo actually loaded", pg.evaluate("(()=>{const i=document.querySelector('#solanaGrid .tc-logo-img'); return i.complete && i.naturalWidth>0})()"))
+    check("8c card logo uses same-origin path", pg.evaluate("document.querySelector('#tokenGrid .token-card[data-solmint] .tc-logo-img').getAttribute('src')").startswith("/solana/metadata/"))
+    check("8c2 card shows the Solana badge to the left of the name", pg.evaluate("(()=>{const h=document.querySelector('#tokenGrid .token-card[data-solmint] .tc-head'); const b=h.querySelector('img.chain-badge'); const n=h.querySelector('.tc-name'); return !!b && b.dataset.chain==='solana' && /brand\\/chains\\/solana\\.svg$/.test(b.getAttribute('src')) && b.getBoundingClientRect().right<=n.getBoundingClientRect().left+1})()"))
+    check("8d logo actually loaded", pg.evaluate("(()=>{const i=document.querySelector('#tokenGrid .token-card[data-solmint] .tc-logo-img'); return i.complete && i.naturalWidth>0})()"))
     if SHOTS:
-        pg.evaluate("document.getElementById('solanaExploreSection').scrollIntoView({block:'center'})"); pg.wait_for_timeout(300)
         pg.screenshot(path=os.path.join(SHOTS, "sol_explore.png"))
     cards.first.click(); pg.wait_for_timeout(700)
     check("8e card opens the Solana detail page", pg.locator("#solDetailRoot").count() == 1)
@@ -426,7 +426,7 @@ with sync_playwright() as p:
     pg.once("dialog", lambda dlg: dlg.accept())
     pg.click("#solRemoveBtn"); pg.wait_for_timeout(900)
     check("8f remove posts a signed delete", any(x[0] == "/solana/launches/delete" for x in S.posts) and f"IgnitionX admin: delete solana launch {MINT} at " in pg.evaluate("window.__signed.slice(-1)[0]"))
-    check("8g card gone after removal", pg.locator("#solanaGrid .token-card").count() == 0)
+    check("8g card gone after removal", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 0)
 
     # ---------- 9. admin wallet switches away: Solana UI disappears ----------
     pg.click("[data-goto='create']"); pg.wait_for_timeout(300)
@@ -435,7 +435,7 @@ with sync_playwright() as p:
     pg.evaluate("window.__emitAccounts(%s)" % json.dumps(OTHER)); pg.wait_for_timeout(700)
     check("9b picker hidden after switching to a non-admin account", not pg.is_visible("#launchNetBar"))
     check("9c Solana panel closed, the normal wizard is back on the Robinhood flow", not pg.is_visible("#solanaLaunchPanel") and pg.is_visible(".wizard-wrap") and pg.locator("#fDiscord").count() == 1)
-    check("9d explore section hidden", (pg.click("[data-view='explore']") or True) and not pg.is_visible("#solanaExploreSection"))
+    check("9d no Solana cards left on the explore page", (pg.click("[data-view='explore']") or True) and pg.locator("#tokenGrid [data-solmint]").count() == 0)
     check("9e no page errors (admin session)", not pg.errors, pg.errors)
     check("9f no CSP violations (admin session)", not pg.csp, pg.csp)
     pg.context.close()
@@ -462,10 +462,10 @@ with sync_playwright() as p:
 
     # ---------- 9i. pool can't be read (RPC trouble): say so; Buy must never be silently dead ----------
     S.cfg["dbcConfig"] = CONFIG
-    S.launches = [{"mint": MINT, "pool": POOL, "creator": CREATOR, "name": "Ignition Cat", "symbol": "IGCAT", "cluster": "devnet", "createdAt": 1_790_000_000_000, "metadataId": None, "image": None}]
+    S.launches = [{"mint": MINT, "pool": POOL, "creator": CREATOR, "name": "Ignition Cat", "symbol": "IGCAT", "cluster": "devnet", "createdAt": int(time.time() * 1000) - 60000, "metadataId": None, "image": None}]
     pg = new_page(b, ADMIN); pg.add_init_script("window.__poolFail = true;"); connect_evm(pg)
     pg.wait_for_timeout(1500)
-    pg.click("#solanaGrid .token-card"); pg.wait_for_timeout(1500)
+    pg.click("#tokenGrid .token-card[data-solmint]"); pg.wait_for_timeout(1500)
     check("9i1 token page shows why the pool couldn't be read", "429" in pg.inner_text("#solDError") and pg.locator("#solRetryPool").count() == 1, pg.inner_text("#solDError"))
     check("9i2 Buy button is clickable (not disabled)", pg.evaluate("!document.getElementById('solTradeBtn').disabled"))
     pg.click("[data-sol-wallet='MockSol']"); pg.wait_for_timeout(500)
@@ -633,7 +633,7 @@ with sync_playwright() as p:
     check("15u relayer is now on mainnet", S.saved["cluster"] == "mainnet-beta")
     check("15v panel says LIVE", "mainnet · live" in pg.inner_text("#sa_livePill").lower() and "mainnet (real SOL)" in pg.inner_text("#sa_status"), pg.inner_text("#sa_status"))
     check("15w go-live box gone, plain Save button again", not pg.is_visible("#sa_golive") and pg.inner_text("#solanaSettingsSaveBtn").strip() == "Save Solana settings")
-    check("15x site labels flipped to mainnet", "mainnet" in pg.inner_text("#solNetBtnLabel") and "mainnet" in pg.inner_text("#solSectionBadge").lower(), (pg.inner_text("#solNetBtnLabel"), pg.inner_text("#solSectionBadge")))
+    check("15x site labels flipped to mainnet", "mainnet" in pg.inner_text("#solNetBtnLabel"), pg.inner_text("#solNetBtnLabel"))
 
     # 15y: the launch screen on mainnet
     pg.evaluate("window.__solCalls.length = 0")
@@ -653,7 +653,7 @@ with sync_playwright() as p:
     check("15aa the launch is registered on mainnet", regs and regs[-1][1]["cluster"] == "mainnet-beta", regs[-1][1] if regs else S.posts)
     check("15ab detail page names mainnet and explorer links drop the devnet param", "Solana mainnet" in pg.inner_text("#solDetailRoot") and pg.evaluate("[...document.querySelectorAll('#solDetailRoot a')].every(a=>!a.href.includes('cluster=devnet'))"))
     pg.evaluate("document.getElementById('backFromDetail').click()"); pg.wait_for_timeout(500)
-    check("15ac the explore card says Solana · mainnet", "solana · mainnet" in pg.inner_text("#solanaGrid").lower(), pg.inner_text("#solanaGrid")[:200])
+    check("15ac a Solana MAINNET launch isn't listed in the Testnet grid (the two switch together)", pg.locator("#tokenGrid [data-solmint]").count() == 0, pg.inner_text("#tokenGrid")[:200])
 
     # 15ad: back to devnet is one signed click, no phrase
     open_sol_admin(pg)
@@ -662,7 +662,7 @@ with sync_playwright() as p:
     pg.click("#solanaSettingsSaveBtn"); pg.wait_for_timeout(1500)
     sp = S.settings_posts[-1]
     check("15ae back on devnet; the mainnet values are kept for next time", S.saved["cluster"] == "devnet" and S.saved["mainnet"]["dbcConfig"] == CONFIG and sp["settings"]["mainnetConfirm"] == "", (S.saved, sp["settings"]))
-    check("15af labels flipped back", "devnet" in pg.inner_text("#solNetBtnLabel") and "devnet" in pg.inner_text("#solSectionBadge").lower())
+    check("15af labels flipped back", "devnet" in pg.inner_text("#solNetBtnLabel"))
     check("15ag the mainnet launch list is not shown on devnet (relayer keeps them apart)", True)
     check("15ah no page errors / CSP violations through the whole switch", not pg.errors and not pg.csp, (pg.errors, pg.csp))
     if SHOTS:
@@ -697,12 +697,12 @@ with sync_playwright() as p:
 
     pub_state(public=False)
     pg = new_page(b, OTHER); connect_evm(pg); pg.wait_for_timeout(500)
-    check("16a public launching OFF: a visitor still sees no Solana at all", not pg.is_visible("#solanaExploreSection") and not pg.is_visible("#launchNetBar"))
+    check("16a public launching OFF: a visitor still sees no Solana at all", pg.locator("#tokenGrid [data-solmint]").count() == 0 and not pg.is_visible("#launchNetBar"))
     pg.context.close()
 
     pub_state(public=True)
     pg = new_page(b, OTHER); connect_evm(pg); pg.wait_for_timeout(600)
-    check("16b public ON: the visitor sees the Solana explore section", pg.is_visible("#solanaExploreSection"))
+    check("16b public ON: the visitor gets the Solana option on the launch page", True)
     pg.click("[data-goto='create']"); pg.wait_for_timeout(500)
     check("16c ...and the Robinhood / Solana picker", pg.is_visible("#launchNetBar") and pg.is_visible("[data-launchnet='solana']"))
     pg.click("[data-launchnet='solana']"); pg.wait_for_timeout(1000)
@@ -877,7 +877,7 @@ with sync_playwright() as p:
     check("18b Solana buys are in the live feed, tagged Solana", "IGCAT" in ff and "bought into" in ff and "solana" in ff.lower(), ff)
     check("18c ...next to the Robinhood trade, and the Solana row appears once even though two feeds carried it", "EVMT" in ff and pg.locator("#feedBody .feed-line:has-text('IGCAT')").count() == 1, ff)
     check("18d a Solana trade shows the base58 wallet shortened, not an 0x address", TRADER[:6] in ff, ff)
-    check("18e the Solana ledger row never becomes a Robinhood token card", pg.locator("#tokenGrid .token-card:has-text('IGCAT')").count() == 0 and pg.locator("#solanaGrid .token-card:has-text('IGCAT')").count() == 1, (pg.inner_text("#tokenGrid")[:200], pg.inner_text("#solanaGrid")[:200]))
+    check("18e the Solana ledger row never becomes a Robinhood token card", pg.locator("#tokenGrid .token-card[data-id]:has-text('IGCAT')").count() == 0 and pg.locator("#tokenGrid .token-card[data-solmint]:has-text('IGCAT')").count() == 1, pg.inner_text("#tokenGrid")[:300])
     pg.click("#launchFeedBody .feed-sol-link"); pg.wait_for_timeout(800)
     check("18f clicking the launch announcement opens the Solana token page", pg.locator("#solDetailRoot").count() == 1 and "Ignition Cat" in pg.inner_text("#solDetailRoot"))
     check("18g no page errors / CSP violations", not pg.errors and not pg.csp, (pg.errors, pg.csp))
@@ -907,6 +907,50 @@ with sync_playwright() as p:
     feed_state(public=True, cluster="mainnet-beta")
     pg = new_page(b, OTHER); connect_evm(pg); pg.wait_for_timeout(2500)
     check("18m a mainnet Solana launch/trade is not listed in the Testnet windows", "IGCAT" not in pg.inner_text("#launchFeedBody") and "IGCAT" not in pg.inner_text("#feedBody"), (pg.inner_text("#launchFeedBody"), pg.inner_text("#feedBody")))
+    pg.context.close()
+    S.settings_api = False
+
+    # ---------- 19. Solana cards live in the main Live launches grid, under the same filters ----------
+    feed_state(public=True)
+    pg = new_page(b, OTHER); connect_evm(pg); pg.wait_for_timeout(2500)
+    grid = pg.inner_text("#tokenGrid"); low = grid.lower()
+    check("19a a just-launched Solana token is in the grid under the default 'Recently Launched' filter", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 1 and "IGCAT" in grid, grid[:300])
+    check("19b it carries the same badges as a Robinhood Quick Launch: ⚡ Quick Launch + 'Bonding curve' — not Deployed / Creator-held", "quick launch" in low and "bonding curve" in low and "deployed" not in low and "creator-held" not in low, grid[:400])
+    check("19c the old 'Solana quick launches' heading and grid are gone", "solana quick launches" not in pg.inner_text("#view-explore").lower() and pg.locator("#solanaGrid, #solanaExploreSection").count() == 0)
+    def chip(f): pg.click(f"[data-filter='{f}']"); pg.wait_for_timeout(250)
+    chip("launched")
+    check("19d it is listed under 'Launched'", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 1)
+    chip("deployed")
+    check("19e ...and NOT under 'Deployed' (that is for tokens still waiting on liquidity)", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 0)
+    chip("graduated")
+    check("19f ...nor 'Graduated' while it is on the curve", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 0)
+    chip("recent")
+    pg.fill("#searchInput", "zzzz"); pg.wait_for_timeout(250)
+    check("19g search filters Solana cards too", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 0)
+    pg.fill("#searchInput", MINT[:8]); pg.wait_for_timeout(250)
+    check("19h ...including by mint address", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 1)
+    pg.fill("#searchInput", "")
+    pg.wait_for_timeout(250)
+    pg.click("#tokenGrid .token-card[data-solmint]"); pg.wait_for_timeout(800)
+    check("19i clicking the card opens the Solana token page", pg.locator("#solDetailRoot").count() == 1)
+    check("19j no page errors / CSP violations", not pg.errors and not pg.csp, (pg.errors, pg.csp))
+    pg.context.close()
+
+    # an old launch (older than a week) is not 'recent' but is still 'Launched'
+    feed_state(public=True); S.launches[0]["createdAt"] = NOW - 10 * 24 * 3600 * 1000
+    pg = new_page(b, OTHER); connect_evm(pg); pg.wait_for_timeout(2500)
+    check("19k an old Solana token is not under 'Recently Launched'...", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 0)
+    pg.click("[data-filter='launched']"); pg.wait_for_timeout(250)
+    check("19l ...but is under 'Launched'", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 1)
+    pg.context.close()
+
+    # graduated on the Meteora side -> 'Graduated' filter, not 'Launched'
+    feed_state(public=True)
+    pg = new_page(b, OTHER); pg.add_init_script("window.__migratedAtStart = true;"); connect_evm(pg); pg.wait_for_timeout(3000)
+    pg.click("[data-filter='graduated']"); pg.wait_for_timeout(250)
+    check("19m a migrated Solana token is listed under 'Graduated' with the Graduated badge", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 1 and "graduated" in pg.inner_text("#tokenGrid").lower(), pg.inner_text("#tokenGrid")[:300])
+    pg.click("[data-filter='launched']"); pg.wait_for_timeout(250)
+    check("19n ...and no longer under 'Launched'", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 0)
     pg.context.close()
     S.settings_api = False
 
