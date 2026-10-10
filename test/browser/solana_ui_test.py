@@ -59,7 +59,7 @@ MOCK_LIB = r"""
       st.wallet = { name: n, address: "%(CREATOR)s" }; st.calls.push(["connect", n]); st.listeners.forEach(f => f(st.wallet)); return st.wallet; },
     disconnect: async () => { st.wallet = null; st.calls.push(["disconnect"]); st.listeners.forEach(f => f(null)); },
     createPlatformConfig: async () => { st.calls.push(["createPlatformConfig"]); return { config: "%(CONFIG)s", signature: "%(SIG)s", migrationQuoteThresholdSol: 72 }; },
-    launch: async (a) => { st.calls.push(["launch", a]); return { signature: "%(SIG)s", mint: "%(MINT)s", pool: "%(POOL)s", creator: "%(CREATOR)s" }; },
+    launch: async (a) => { st.calls.push(["launch", a]); if (window.__launchFail) { window.__launchFail = false; throw new Error("launch tx failed"); } return { signature: "%(SIG)s", mint: "%(MINT)s", pool: "%(POOL)s", creator: "%(CREATOR)s" }; },
     getPoolInfo: async () => { if (window.__poolFail) throw new Error('RPC 429: Too many requests'); return { ...info }; },
     getBalances: async () => ({ sol: 4.2, token: 1234 }),
     quote: async (a) => { st.calls.push(["quote", a]); return a.side === "buy"
@@ -67,9 +67,20 @@ MOCK_LIB = r"""
     trade: async (a) => { st.calls.push(["trade", a]); return { signature: "%(SIG)s", out: 1 }; },
     getFeeBreakdown: async () => ({ creatorUnclaimedSol: 0.0123, creatorTotalSol: 0.02, partnerUnclaimedSol: 0.0456, partnerTotalSol: 0.06 }),
     claimFees: async (a) => { st.calls.push(["claimFees", a]); return { signature: "%(SIG)s" }; },
+    previewCurve: (o) => {
+      st.calls.push(["previewCurve", o]);
+      if (o.totalSupply < 1000000) throw new Error("Total supply must be between 1,000,000 and 1,000,000,000,000.");
+      const grad = o.raiseSol ? Math.round(o.raiseSol * 3.6 * 100) / 100 : o.migrationMarketCapSol;
+      return { totalSupply: o.totalSupply, initialMarketCapSol: o.initialMarketCapSol, migrationMarketCapSol: grad, raiseSol: o.raiseSol || grad * 0.24,
+               startPriceSol: o.initialMarketCapSol / o.totalSupply, tradingFeeBps: o.tradingFeeBps, creatorFeePercent: o.creatorFeePercent };
+    },
+    getConfigInfo: async (a) => { st.calls.push(["getConfigInfo", a]); if (window.__cfgInfoFail) throw new Error("config read failed");
+      return window.__cfgInfo || { config: a, totalSupply: 1000000000, startPriceSol: 3e-8, startMarketCapSol: 30, raiseSol: 72, graduationMarketCapSol: 300, tradingFeeBps: 100, creatorFeePercent: 10 }; },
+    signMessage: async (t) => { st.calls.push(["signMessage", t]); if (window.__signReject) throw new Error("User rejected the request"); return "SIG" + btoa(t).slice(0, 20); },
+    createSupplyConfig: async (a) => { st.calls.push(["createSupplyConfig", a]); if (window.__cfgFail) throw new Error("config tx failed"); return { config: "%(CONFIG2)s", signature: "%(SIG)s", migrationQuoteThresholdSol: 72 }; },
   };
 })();
-""" % dict(POOL=POOL, MINT=MINT, CREATOR=CREATOR, CONFIG=CONFIG, SIG=SIG)
+""" % dict(POOL=POOL, MINT=MINT, CREATOR=CREATOR, CONFIG=CONFIG, SIG=SIG, CONFIG2=addr(77))
 
 MOCK_ETH = """
 (() => {
@@ -110,22 +121,28 @@ httpd = socketserver.TCPServer(("127.0.0.1", 0), functools.partial(Q, directory=
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 BASE = f"http://127.0.0.1:{port}"
 
+def fresh_saved_dict():
+    return dict(cluster="devnet", enabled=True, publicLaunch=False, customSupply=True, supplyMin=1000000, supplyMax=10000000000,
+                curve=dict(initialMarketCapSol=30, migrationMarketCapSol=300, tradingFeeBps=100, creatorFeePercent=10),
+                devnet=dict(rpcUrl="", dbcConfig="", serverRpcUrlSet=False, serverRpcHost=None),
+                mainnet=dict(rpcUrl="", dbcConfig="", serverRpcUrlSet=False, serverRpcHost=None), publicBaseUrl="", pollSeconds=60)
+
 class State:
     def __init__(self):
         self.launches = []; self.posts = []; self.fail_register = 0; self.gets = []; self.cfg = {"enabled": True, "cluster": "devnet", "rpcUrl": "https://api.devnet.solana.com", "dbcConfig": ""}
         self.settings_api = False      # when True the mock relayer serves /solana/settings
-        self.saved = dict(cluster="devnet", enabled=True, devnet=dict(rpcUrl="", dbcConfig="", serverRpcUrlSet=False, serverRpcHost=None),
-                          mainnet=dict(rpcUrl="", dbcConfig="", serverRpcUrlSet=False, serverRpcHost=None), publicBaseUrl="", pollSeconds=60)
+        self.saved = fresh_saved_dict()
         self.status = dict(running=True, rpcHost="api.devnet.solana.com", pollMs=60000, lastRunAt=None, lastSampled=2, lastFailed=0, lastError=None, source="vendor bundle")
         self.settings_posts = []
 S = State()
 
-SA_KEYS = ["cluster","enabled","rpcUrl","serverRpcUrl","dbcConfig","mainnetRpcUrl","mainnetServerRpcUrl","mainnetDbcConfig","publicBaseUrl","pollSeconds","mainnetConfirm"]
+SA_KEYS = ["cluster","enabled","publicLaunch","customSupply","supplyMin","supplyMax","curveStartMcapSol","curveGraduationMcapSol","curveFeeBps","curveCreatorFeePercent","rpcUrl","serverRpcUrl","dbcConfig","mainnetRpcUrl","mainnetServerRpcUrl","mainnetDbcConfig","publicBaseUrl","pollSeconds","mainnetConfirm"]
 PHRASE = "GO LIVE ON MAINNET"
 def settings_payload():
     sv = S.saved
     cl = sv["cluster"]; act = sv["mainnet"] if cl == "mainnet-beta" else sv["devnet"]
-    return {"settings": {"enabled": sv["enabled"], "cluster": cl, "rpcUrl": act["rpcUrl"], "dbcConfig": act["dbcConfig"], "publicBaseUrl": sv["publicBaseUrl"],
+    return {"settings": {"enabled": sv["enabled"], "cluster": cl, "publicLaunch": sv["publicLaunch"], "customSupply": sv["customSupply"],
+                         "supplyMin": sv["supplyMin"], "supplyMax": sv["supplyMax"], "curve": sv["curve"], "rpcUrl": act["rpcUrl"], "dbcConfig": act["dbcConfig"], "publicBaseUrl": sv["publicBaseUrl"],
                          "pollSeconds": sv["pollSeconds"], "serverRpcUrlSet": act["serverRpcUrlSet"], "serverRpcHost": act["serverRpcHost"], "devnet": sv["devnet"], "mainnet": sv["mainnet"]},
             "status": S.status, "bounds": {}, "mainnetConfirmPhrase": PHRASE, "mainnetProblems": []}
 def expected_message(settings, ts):
@@ -155,6 +172,12 @@ def route(r):
                 sv = S.saved
                 if st.get("cluster") in ("devnet", "mainnet-beta"): sv["cluster"] = st["cluster"]
                 if st.get("enabled") in ("true", "false"): sv["enabled"] = st["enabled"] == "true"
+                if st.get("publicLaunch") in ("true", "false"): sv["publicLaunch"] = st["publicLaunch"] == "true"
+                if st.get("customSupply") in ("true", "false"): sv["customSupply"] = st["customSupply"] == "true"
+                for k, f in [("supplyMin", "supplyMin"), ("supplyMax", "supplyMax")]:
+                    if st.get(k) not in (None, ""): sv[f] = int(st[k])
+                for k, f, conv in [("curveStartMcapSol", "initialMarketCapSol", float), ("curveGraduationMcapSol", "migrationMarketCapSol", float), ("curveFeeBps", "tradingFeeBps", int), ("curveCreatorFeePercent", "creatorFeePercent", int)]:
+                    if st.get(k) not in (None, ""): sv["curve"][f] = conv(st[k])
                 for k, tgt, f in [("rpcUrl", "devnet", "rpcUrl"), ("dbcConfig", "devnet", "dbcConfig"), ("mainnetRpcUrl", "mainnet", "rpcUrl"), ("mainnetDbcConfig", "mainnet", "dbcConfig")]:
                     if st.get(k) is not None: sv[tgt][f] = st[k]
                 for k, tgt in [("serverRpcUrl", "devnet"), ("mainnetServerRpcUrl", "mainnet")]:
@@ -205,7 +228,7 @@ with sync_playwright() as p:
     check("1c Solana explore section hidden", not pg.is_visible("#solanaExploreSection"))
     pg.click("[data-goto='create']"); pg.wait_for_timeout(500)
     check("1d launch page shows no Solana option", not pg.is_visible("[data-launchnet='solana']"))
-    check("1e no Solana requests made", not [g for g in S.gets if g[1].startswith("/solana/")], S.gets)
+    check("1e a visitor only asks whether launching is open (settings), nothing else", not [g for g in S.gets if g[1].startswith("/solana/") and not g[1].startswith("/solana/settings")], S.gets)
     check("1f bundle never loaded", pg.evaluate("typeof window.IgnitionSol") == "undefined")
     # forcing it from the console still can't open the panel
     pg.evaluate("document.getElementById('solanaLaunchPanel').hidden")
@@ -453,8 +476,7 @@ with sync_playwright() as p:
 
     # ---------- 14. Admin -> Solana tab (devnet) ----------
     def fresh_saved():
-        S.saved = dict(cluster="devnet", enabled=True, devnet=dict(rpcUrl="", dbcConfig="", serverRpcUrlSet=False, serverRpcHost=None),
-                       mainnet=dict(rpcUrl="", dbcConfig="", serverRpcUrlSet=False, serverRpcHost=None), publicBaseUrl="", pollSeconds=60)
+        S.saved = fresh_saved_dict()
         S.settings_posts.clear()
     def open_sol_admin(pg):
         pg.click("#adminTabBtn"); pg.wait_for_timeout(1200)
@@ -612,6 +634,166 @@ with sync_playwright() as p:
     pg.context.close()
     S.settings_api = False
 
+    # ---------- 16. anyone can launch (public mode): a non-admin visitor ----------
+    CONFIG2 = addr(77)
+    def pub_state(public=True, custom=True):
+        fresh_saved(); S.settings_api = True
+        S.saved["publicLaunch"] = public; S.saved["customSupply"] = custom
+        S.saved["devnet"].update(rpcUrl="https://api.devnet.solana.com", dbcConfig=CONFIG, serverRpcUrlSet=True, serverRpcHost="mock.example")
+        S.launches = []; S.posts.clear(); S.gets.clear()
+    def open_launch(pg, connect=True):
+        pg.click("[data-goto='create']"); pg.wait_for_timeout(500)
+        pg.click("[data-launchnet='solana']"); pg.wait_for_timeout(1000)
+        if connect:
+            pg.click("[data-sol-wallet='MockSol']"); pg.wait_for_timeout(700)
+    def sol_calls(pg, name): return [c for c in pg.evaluate("window.__solCalls") if c[0] == name]
+
+    pub_state(public=False)
+    pg = new_page(b, OTHER); connect_evm(pg); pg.wait_for_timeout(500)
+    check("16a public launching OFF: a visitor still sees no Solana at all", not pg.is_visible("#solanaExploreSection") and not pg.is_visible("#launchNetBar"))
+    pg.context.close()
+
+    pub_state(public=True)
+    pg = new_page(b, OTHER); connect_evm(pg); pg.wait_for_timeout(600)
+    check("16b public ON: the visitor sees the Solana explore section", pg.is_visible("#solanaExploreSection"))
+    pg.click("[data-goto='create']"); pg.wait_for_timeout(500)
+    check("16c ...and the Robinhood / Solana picker", pg.is_visible("#launchNetBar") and pg.is_visible("[data-launchnet='solana']"))
+    pg.click("[data-launchnet='solana']"); pg.wait_for_timeout(1000)
+    panel = pg.inner_text("#solanaLaunchPanel")
+    check("16d panel says it is open to anyone, with no admin-only wording", "Open to anyone" in panel and "admin preview" not in panel and "hidden from everyone" not in panel, panel[:300])
+    check("16e no create-config box for a visitor, form unlocked", pg.locator("#solCreateConfig").count() == 0 and pg.evaluate("getComputedStyle(document.querySelector('.sol-form')).pointerEvents") != "none")
+    check("16f supply box shown, defaulting to the standard supply", pg.locator("#solSupply").count() == 1 and pg.input_value("#solSupply").replace(",", "") == "1000000000", pg.input_value("#solSupply") if pg.locator("#solSupply").count() else None)
+    check("16g copy tells them they sign messages in their Solana wallet (not an EVM wallet)", "Solana wallet" in panel and "EVM admin wallet" not in panel)
+    pg.click("[data-sol-wallet='MockSol']"); pg.wait_for_timeout(700)
+    pg.fill("#solName", "Public Cat"); pg.fill("#solSymbol", "PCAT"); pg.fill("#solDesc", "Anyone can launch.")
+    pg.click("#solLaunchBtn"); pg.wait_for_timeout(1800)
+    meta = [x for x in S.posts if x[0] == "/solana/metadata"]
+    mb = meta[0][1] if meta else {}
+    check("16h metadata upload is signed by the Solana wallet: wallet + walletSignature, no admin signature",
+          mb.get("wallet") == CREATOR and str(mb.get("walletSignature", "")).startswith("SIG") and "signature" not in mb, mb.keys())
+    sm = [c[1] for c in sol_calls(pg, "signMessage")]
+    check("16i it signed exactly the messages the server verifies",
+          len(sm) == 2 and sm[0] == f"IgnitionX launch: solana metadata {mb.get('id')} by {CREATOR} at {mb.get('timestamp')}" and sm[1].startswith(f"IgnitionX launch: register solana launch {MINT} by {CREATOR} at "), sm)
+    check("16j the EVM wallet was never asked to sign anything", pg.evaluate("window.__signed") == [], pg.evaluate("window.__signed"))
+    regs = [x for x in S.posts if x[0] == "/solana/launches"]
+    rb = regs[-1][1] if regs else {}
+    check("16k register body carries wallet + walletSignature, creator is that wallet", rb.get("wallet") == CREATOR and rb.get("creator") == CREATOR and str(rb.get("walletSignature", "")).startswith("SIG") and "signature" not in rb, rb)
+    check("16l standard supply: no extra config transaction and the shared config is used", not sol_calls(pg, "createSupplyConfig") and not sol_calls(pg, "launch")[0][1].get("config"), sol_calls(pg, "launch"))
+    check("16m lands on the token page; a visitor has no remove button", pg.locator("#solDetailRoot").count() == 1 and pg.locator("#solRemoveBtn").count() == 0)
+    check("16n no page errors / CSP violations", not pg.errors and not pg.csp, (pg.errors, pg.csp))
+    pg.context.close()
+
+    # 16o-: creator-chosen supply (extra config, retry reuses it)
+    pub_state(public=True)
+    pg = new_page(b, OTHER); connect_evm(pg); open_launch(pg)
+    pg.fill("#solName", "Big Supply"); pg.fill("#solSymbol", "BIGS")
+    pg.fill("#solSupply", "21,000,000"); pg.wait_for_timeout(150)
+    hint = pg.inner_text("#solSupplyHint")
+    check("16o hint prices the supply and warns about the extra approval", "SOL per token" in hint and "extra approval" in hint and "0.01 SOL" in hint, hint)
+    pg.fill("#solSupply", "1000000000"); pg.wait_for_timeout(100)
+    check("16p the standard supply says no extra step", "no extra step" in pg.inner_text("#solSupplyHint"))
+    pg.fill("#solSupply", "21000000")
+    pg.evaluate("window.__launchFail = true")
+    pg.click("#solLaunchBtn"); pg.wait_for_timeout(1800)
+    cs = sol_calls(pg, "createSupplyConfig")
+    check("16q a non-standard supply creates the creator's own config first, with the platform's curve numbers",
+          len(cs) == 1 and cs[0][1]["totalSupply"] == 21000000 and cs[0][1]["curve"] == {"initialMarketCapSol": 30, "migrationMarketCapSol": 300, "tradingFeeBps": 100, "creatorFeePercent": 10}, cs)
+    lc = sol_calls(pg, "launch")
+    check("16r the launch uses that config", len(lc) == 1 and lc[0][1].get("config") == CONFIG2, lc)
+    check("16s a failed launch is reported and nothing was registered", "launch tx failed" in (pg.inner_text("#solLaunchStatus") + pg.inner_text("#toastStack")) and not [x for x in S.posts if x[0] == "/solana/launches"])
+    pg.click("#solLaunchBtn"); pg.wait_for_timeout(1800)
+    check("16t retrying does NOT pay for a second config", len(sol_calls(pg, "createSupplyConfig")) == 1 and len(sol_calls(pg, "launch")) == 2 and sol_calls(pg, "launch")[1][1].get("config") == CONFIG2)
+    regs = [x for x in S.posts if x[0] == "/solana/launches"]
+    check("16u the launch is then registered", len(regs) == 1 and regs[0][1]["creator"] == CREATOR, S.posts)
+    pg.context.close()
+
+    # 16v-: supply validation, config failure, signature refusal
+    pub_state(public=True)
+    pg = new_page(b, OTHER); connect_evm(pg); open_launch(pg)
+    pg.fill("#solName", "Bad Supply"); pg.fill("#solSymbol", "BADS")
+    for bad in ["5000", "20000000000000", "12.5", "abc"]:
+        pg.fill("#solSupply", bad); pg.wait_for_timeout(100)
+        t = pg.inner_text("#solSupplyHint")
+        pg.click("#solLaunchBtn"); pg.wait_for_timeout(300)
+        check(f"16v supply {bad!r} is refused inline and nothing is sent", "Enter a whole number" in t and not S.posts and not sol_calls(pg, "createSupplyConfig") and not sol_calls(pg, "launch"), (t, S.posts))
+    pg.fill("#solSupply", "21000000"); pg.evaluate("window.__cfgFail = true")
+    pg.click("#solLaunchBtn"); pg.wait_for_timeout(1500)
+    check("16w if the creator's config transaction fails, nothing is launched or registered", "config tx failed" in (pg.inner_text("#solLaunchStatus") + pg.inner_text("#toastStack")) and not sol_calls(pg, "launch") and not [x for x in S.posts if x[0] == "/solana/launches"])
+    pg.evaluate("window.__cfgFail = false; window.__signReject = true")
+    pg.fill("#solSupply", "1000000000")
+    S.posts.clear()
+    pg.click("#solLaunchBtn"); pg.wait_for_timeout(1200)
+    check("16x refusing the wallet signature stops the launch before anything is sent", not S.posts and not sol_calls(pg, "launch") and "rejected" in (pg.inner_text("#solLaunchStatus") + pg.inner_text("#toastStack")).lower(), (S.posts, pg.inner_text("#toastStack")))
+    pg.context.close()
+
+    # 16y: creator-chosen supply switched off -> no supply box
+    pub_state(public=True, custom=False)
+    pg = new_page(b, OTHER); connect_evm(pg); open_launch(pg, connect=False)
+    check("16y customSupply off: no supply box, standard supply copy only", pg.locator("#solSupply").count() == 0 and "1,000,000,000 supply (standard)" in pg.inner_text("#solanaLaunchPanel"))
+    pg.context.close()
+
+    # 16z: the admin, with public launching on, still signs with the EVM wallet and keeps the remove button
+    pub_state(public=True)
+    pg = new_page(b, ADMIN); connect_evm(pg); open_launch(pg)
+    pg.fill("#solName", "Admin Cat"); pg.fill("#solSymbol", "ACAT")
+    pg.click("#solLaunchBtn"); pg.wait_for_timeout(1800)
+    meta = [x for x in S.posts if x[0] == "/solana/metadata"]
+    mb = meta[0][1] if meta else {}
+    check("16z1 admin requests are still EVM-signed (no wallet fields)", mb.get("signature") == "0x" + "ab" * 65 and "wallet" not in mb and not sol_calls(pg, "signMessage"), mb.keys())
+    check("16z2 admin keeps the remove button", pg.locator("#solRemoveBtn").count() == 1)
+    pg.context.close()
+
+    # ---------- 17. Admin -> Solana: who can launch, supply, curve ----------
+    pub_state(public=False)
+    pg = new_page(b, ADMIN); connect_evm(pg); open_sol_admin(pg)
+    check("17a 'Who can launch' defaults to Admin only", pg.input_value("#sa_publicLaunch") == "false" and "Only your admin wallet" in pg.inner_text("#sa_publicNote"))
+    pg.select_option("#sa_publicLaunch", "true"); pg.wait_for_timeout(150)
+    check("17b choosing Anyone explains what that means", "devnet test token" in pg.inner_text("#sa_publicNote"), pg.inner_text("#sa_publicNote"))
+    check("17c curve fields are prefilled from the saved settings",
+          pg.input_value("#sa_curveStart") == "30" and pg.input_value("#sa_curveGrad") == "300" and pg.input_value("#sa_curveFee") == "1" and pg.input_value("#sa_curveCreator") == "10" and pg.input_value("#sa_supplyMin") == "1000000",
+          [pg.input_value(i) for i in ("#sa_curveStart", "#sa_curveGrad", "#sa_curveFee", "#sa_curveCreator", "#sa_supplyMin")])
+    pg.fill("#sa_curveRaise", "50"); pg.click("#saCurvePreviewBtn"); pg.wait_for_timeout(600)
+    check("17d 'SOL to raise' is turned into a graduation market cap and the form is updated", pg.input_value("#sa_curveGrad") == "180" and pg.input_value("#sa_curveRaise") == "" and "graduates at" in pg.inner_text("#sa_curveResult"), (pg.input_value("#sa_curveGrad"), pg.inner_text("#sa_curveResult")))
+    pg.fill("#sa_curveSupply", "5"); pg.click("#saCurvePreviewBtn"); pg.wait_for_timeout(400)
+    check("17e a supply the curve can't take is explained, not swallowed", "Total supply" in pg.inner_text("#sa_curveResult"), pg.inner_text("#sa_curveResult"))
+    pg.fill("#sa_curveSupply", "1000000000")
+    pg.fill("#sa_dbcConfig", CONFIG)
+    pg.click("[data-sa-check='devnet']"); pg.wait_for_timeout(700)
+    check("17f the on-chain config is compared with the form (180 vs 72-SOL config = mismatch)", "does NOT match" in pg.inner_text("#sa_check_devnet"), pg.inner_text("#sa_check_devnet"))
+    pg.fill("#sa_curveGrad", "300")
+    pg.click("[data-sa-check='devnet']"); pg.wait_for_timeout(700)
+    check("17g ...and matches once the numbers agree", "Matches" in pg.inner_text("#sa_check_devnet"), pg.inner_text("#sa_check_devnet"))
+    # a typed-but-unpreviewed raise target must not be saved silently
+    pg.fill("#sa_curveRaise", "40"); S.settings_posts.clear()
+    pg.click("#solanaSettingsSaveBtn"); pg.wait_for_timeout(500)
+    check("17h a 'SOL to raise' that wasn't previewed blocks the save", not S.settings_posts and "Preview" in pg.inner_text("#sa_result"), pg.inner_text("#sa_result"))
+    pg.fill("#sa_curveRaise", "")
+    pg.select_option("#sa_customSupply", "false")
+    pg.fill("#sa_supplyMin", "2,000,000"); pg.fill("#sa_supplyMax", "5000000000")
+    pg.fill("#sa_curveStart", "20"); pg.fill("#sa_curveGrad", "150"); pg.fill("#sa_curveFee", "1.5"); pg.fill("#sa_curveCreator", "20")
+    pg.click("#solanaSettingsSaveBtn"); pg.wait_for_timeout(1500)
+    sp = S.settings_posts[-1] if S.settings_posts else {}
+    st = sp.get("settings", {})
+    check("17i save posts the new fields in the server's format", st.get("publicLaunch") == "true" and st.get("customSupply") == "false" and st.get("supplyMin") == "2000000" and st.get("supplyMax") == "5000000000"
+          and st.get("curveStartMcapSol") == "20" and st.get("curveGraduationMcapSol") == "150" and st.get("curveFeeBps") == "150" and st.get("curveCreatorFeePercent") == "20", st)
+    check("17j the exact canonical message was signed", sp and pg.evaluate("window.__signed.slice(-1)[0]") == sp.get("_msg"), (pg.evaluate("window.__signed.slice(-1)[0]"), sp.get("_msg")))
+    check("17k relayer applied them and the panel re-rendered from the server",
+          S.saved["publicLaunch"] is True and S.saved["customSupply"] is False and S.saved["curve"]["tradingFeeBps"] == 150 and pg.input_value("#sa_publicLaunch") == "true" and pg.input_value("#sa_curveFee") == "1.5",
+          (S.saved, pg.input_value("#sa_curveFee")))
+    pg.click("[data-sa-cluster='mainnet-beta']"); pg.wait_for_timeout(300)
+    check("17l the go-live box warns that real visitors will spend real SOL when Anyone is selected", "Anyone" in pg.inner_text("#sa_golive") and "real visitors" in pg.inner_text("#sa_golive"), pg.inner_text("#sa_golive"))
+    check("17m no page errors / CSP violations in the admin tab", not pg.errors and not pg.csp, (pg.errors, pg.csp))
+    pg.context.close()
+    # mobile: the new sections don't overflow
+    pub_state(public=False)
+    pg = new_page(b, ADMIN, {"width": 390, "height": 900}); connect_evm(pg)
+    pg.evaluate("document.getElementById('adminTabBtn').click()"); pg.wait_for_timeout(1000)
+    pg.evaluate("document.querySelector('[data-admin-tab=solana]').click()"); pg.wait_for_timeout(700)
+    over = pg.evaluate("[...document.querySelectorAll('[data-admin-panel=solana] *')].filter(e=>{const r=e.getBoundingClientRect(); return r.width>0 && r.right>document.documentElement.clientWidth+1}).map(e=>e.tagName+'#'+e.id)")
+    check("17n nothing in the new admin sections overflows a phone screen", not over, over)
+    pg.context.close()
+    S.settings_api = False
+
     # ---------- 13. the REAL bundle under the real CSP ----------
     USE_MOCK_LIB = False
     pg = new_page(b, ADMIN)
@@ -629,12 +811,13 @@ with sync_playwright() as p:
     pg.click("[data-launchnet='solana']"); pg.wait_for_timeout(5000)
     keys = pg.evaluate("window.IgnitionSol ? Object.keys(window.IgnitionSol).sort() : null")
     want = sorted(["version", "init", "curveDefaults", "listWallets", "onWalletsChange", "onAccountChange", "currentWallet", "connect", "disconnect",
-                   "createPlatformConfig", "launch", "getPoolInfo", "getBalances", "quote", "trade", "getFeeBreakdown", "claimFees"])
+                   "createPlatformConfig", "launch", "getPoolInfo", "getBalances", "quote", "trade", "getFeeBreakdown", "claimFees",
+                   "previewCurve", "createSupplyConfig", "getConfigInfo", "signMessage", "curveLimits"])
     check("13a real bundle loads under the page CSP and exposes the API", keys == want, keys)
     panel = pg.inner_text("#solanaLaunchPanel")
     check("13b real bundle renders the launch panel", "Launch on a Meteora bonding curve" in panel, panel[:200])
     check("13c real bundle discovers a Wallet Standard wallet", "StdMock" in panel, panel[:300])
-    check("13d bundle's curve defaults reach the copy (1B supply, 30 → 300 SOL)", "1,000,000,000" in panel and "30 SOL" in panel and "300 SOL" in panel, panel[:400])
+    check("13d bundle's curve defaults reach the copy (1B supply, 30 SOL start, ~72 SOL raise)", "1,000,000,000" in panel and "30 SOL" in panel and "72 SOL" in panel, panel[:400])
     check("13e no page errors with the real bundle", not pg.errors, pg.errors)
     check("13f no CSP violations with the real bundle", not pg.csp, pg.csp)
     pg.context.close()
