@@ -286,11 +286,11 @@ It's a long-lived process — run it under a process manager (or your PaaS's own
 
 A missing/misconfigured factory address only ever disables gasless relaying (and tracking) for that one launch type — the site, wallet-paid launches, and every other configured factory all start up normally regardless.
 
-## Solana (admin-only; devnet, switchable to mainnet)
+## Solana (admin-only by default; optionally open to anyone; devnet, switchable to mainnet)
 
 Setup, front-end wiring and troubleshooting: see [SOLANA_SETUP.md](SOLANA_SETUP.md). Browser module source: `solana-build/` (`npm run build` -> `public/vendor/ignitionx-solana.js`); runtime settings: **Admin → Solana** (`public/solana-config.json` is only a fallback); browser tests: `python3 test/browser/solana_ui_test.py`.
 
-An admin-only prototype of Solana quick launches on Meteora's Dynamic Bonding Curve. The browser builds and signs the launch transactions with the user's Solana wallet; the relayer only hosts token metadata, registers launches, and samples pool prices into the existing price-history store (network key `solana-devnet`) so the chart works. Code: `lib/solanaApi.js`, `lib/solanaStore.js`, `lib/solanaTracker.js`; tests: `node --test test/solanaApi.test.js`. Solana mainnet is rejected (403).
+A prototype of Solana quick launches (admin-only until you switch **Admin → Solana → Who can launch** to *Anyone with a Solana wallet*) on Meteora's Dynamic Bonding Curve. The browser builds and signs the launch transactions with the user's Solana wallet; the relayer only hosts token metadata, registers launches, and samples pool prices into the existing price-history store (network key `solana-devnet`) so the chart works. Code: `lib/solanaApi.js`, `lib/solanaStore.js`, `lib/solanaTracker.js`; tests: `node --test test/solanaApi.test.js`. Solana mainnet is rejected (403).
 
 **Packages:** none to install. Price tracking falls back to `lib/vendor/solana-node.js`, a bundled build of `@meteora-ag/dynamic-bonding-curve-sdk` + `@solana/web3.js` (rebuild with `cd solana-build && npm run build:node`). Installing the real packages also works and takes precedence.
 
@@ -308,15 +308,15 @@ An admin-only prototype of Solana quick launches on Meteora's Dynamic Bonding Cu
 
 | Route | Auth / signed message |
 |---|---|
-| `POST /solana/metadata` `{id, name, symbol, description?, image?, website?, twitter?, telegram?}` -> `{id, uri}` | `IgnitionX admin: solana metadata ${id} at ${timestamp}` |
+| `POST /solana/metadata` `{id, name, symbol, description?, image?, website?, twitter?, telegram?}` -> `{id, uri}` | admin: `IgnitionX admin: solana metadata ${id} at ${timestamp}` (EVM signature). **Public mode** (body has `wallet`, `walletSignature`, `timestamp`): Solana wallet signature over `IgnitionX launch: solana metadata ${id} by ${wallet} at ${timestamp}`; only when public launching is on; rate-limited; the record remembers the uploader |
 | `GET /solana/metadata/:id.json` | public (Metaplex-style JSON) |
 | `GET /solana/metadata/:id.png` | public (image bytes) |
-| `POST /solana/launches` `{mint, pool, creator, name, symbol, metadataId?, cluster?, txSignature?}` (upsert by mint) | `IgnitionX admin: register solana launch ${mint} at ${timestamp}` |
+| `POST /solana/launches` `{mint, pool, creator, name, symbol, metadataId?, cluster?, txSignature?}` (upsert by mint) | admin: `IgnitionX admin: register solana launch ${mint} at ${timestamp}`. **Public mode** (`wallet` + `walletSignature`): signature over `IgnitionX launch: register solana launch ${mint} by ${wallet} at ${timestamp}`; the creator must be the signing wallet, the metadata must have been uploaded by it, name/symbol come from that metadata, the pool is verified on-chain (real pool, that mint, that creator, under the platform config — or a creator-made config that exactly matches the platform's curve/fees), an already-listed mint is never changed, rate-limited |
 | `GET /solana/launches` | public (prototype only) |
 | `GET /solana/price-history/:mint` | public |
 | `GET /solana/settings` | public; secret server-RPC URLs are redacted (only "is set" + host) |
-| `POST /solana/settings` `{settings}` (all or some of cluster, enabled, rpcUrl, serverRpcUrl, dbcConfig, mainnetRpcUrl, mainnetServerRpcUrl, mainnetDbcConfig, publicBaseUrl, pollSeconds, mainnetConfirm) | `IgnitionX admin: update solana settings to ${canonicalJSON} at ${timestamp}` (see `lib/solanaSettings.js`). Going to mainnet also needs `mainnetConfirm: "GO LIVE ON MAINNET"` and a saved mainnet RPC + config + public base URL |
-| `POST /solana/launches/delete` `{mint}` (keeps price history) | `IgnitionX admin: delete solana launch ${mint} at ${timestamp}` |
+| `POST /solana/settings` `{settings}` (all or some of cluster, enabled, publicLaunch, customSupply, supplyMin, supplyMax, curveStartMcapSol, curveGraduationMcapSol, curveFeeBps, curveCreatorFeePercent, rpcUrl, serverRpcUrl, dbcConfig, mainnetRpcUrl, mainnetServerRpcUrl, mainnetDbcConfig, publicBaseUrl, pollSeconds, mainnetConfirm) | `IgnitionX admin: update solana settings to ${canonicalJSON} at ${timestamp}` (see `lib/solanaSettings.js`). Going to mainnet also needs `mainnetConfirm: "GO LIVE ON MAINNET"` and a saved mainnet RPC + config + public base URL |
+| `POST /solana/launches/delete` `{mint}` (keeps price history; **always admin-only**) | `IgnitionX admin: delete solana launch ${mint} at ${timestamp}` |
 
 Metadata `id` is client-generated (`/^[a-f0-9]{16,32}$/`), images are png/jpeg/webp/gif data URLs of at most 200 KB, and a metadata id is write-once. Settings are saved in `solana-settings.json` beside them. Launch records and price history are kept per network (`solana-devnet` / `solana-mainnet`); metadata is shared so on-chain token URIs always resolve. Records live under `deployed-contracts/solana-devnet/` (`solana-metadata/`, `solana-launches.json`, `price-history/`).
 
