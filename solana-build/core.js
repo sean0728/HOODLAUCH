@@ -1,4 +1,4 @@
-// IgnitionX — Solana helpers (devnet prototype). Built on Meteora's Dynamic Bonding Curve (DBC) program.
+// IgnitionX — Solana helpers (devnet + mainnet-beta, switchable from Admin → Solana). Built on Meteora's Dynamic Bonding Curve (DBC) program.
 // Kept free of `window` so it can be unit-tested in Node (see test/core.test.mjs); entry.js attaches it to the page.
 //
 // What lives here:
@@ -6,7 +6,7 @@
 //   - launch (create pool + optional first buy in ONE transaction), buy/sell, quotes, pool info, fee claims
 //   - createPlatformConfig: the one-time admin transaction that creates the platform's DBC config
 //     (curve shape, 1% fee, creator share, migration settings). Every launch then points at that config.
-import { Connection, PublicKey, Keypair } from "@solana/web3.js";
+import { Connection, PublicKey, Keypair, ComputeBudgetProgram } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
 import { getWallets } from "@wallet-standard/app";
@@ -103,9 +103,14 @@ const S = {
 export function _setClientForTests(conn, client) { S.conn = conn; S.client = client; }
 export function _setWalletForTests(wallet, account) { S.wallet = wallet; S.account = account; }
 
+// Wallet Standard names the networks "solana:devnet" / "solana:mainnet" (NOT "mainnet-beta").
+export const CLUSTERS = Object.freeze({ "devnet": "solana:devnet", "mainnet-beta": "solana:mainnet" });
+const walletChain = () => CLUSTERS[S.cluster];
+const clusterLabel = () => (S.cluster === "mainnet-beta" ? "mainnet" : "devnet");
+
 export function init({ rpcUrl, cluster = "devnet", configAddress = null } = {}) {
-  if (cluster !== "devnet") throw new Error("Only Solana devnet is enabled in this prototype.");
-  if (!rpcUrl) throw new Error("Solana RPC URL missing (public/solana-config.json).");
+  if (!CLUSTERS[cluster]) throw new Error(`Unknown Solana cluster "${cluster}" (expected devnet or mainnet-beta).`);
+  if (!rpcUrl) throw new Error("Solana RPC URL missing (Admin → Solana).");
   S.cluster = cluster;
   S.rpcUrl = rpcUrl;
   S.configAddress = configAddress ? new PublicKey(configAddress) : null;
@@ -143,16 +148,27 @@ function emit() { const info = currentWallet(); S.listeners.forEach((cb) => { tr
 export function currentWallet() {
   return S.account ? { name: S.wallet && S.wallet.name, address: S.account.address } : null;
 }
-export async function connect(walletName) {
+// `silent: true` re-attaches a wallet the user already approved for this site, without a popup. It resolves to
+// null (instead of throwing) when the wallet wants the user to approve again.
+export async function connect(walletName, { silent = false } = {}) {
   const w = getWallets().get().find((x) => x.name === walletName);
   if (!w) throw new Error("That wallet isn't available in this browser.");
-  const chain = `solana:${S.cluster}`;
+  const chain = walletChain();
   if (w.chains && w.chains.length && !w.chains.includes(chain)) {
-    throw new Error(`${w.name} doesn't list Solana ${S.cluster}. Switch the wallet to ${S.cluster} (Settings → Developer settings) and try again.`);
+    throw new Error(`${w.name} doesn't list Solana ${clusterLabel()}. Switch the wallet to ${clusterLabel()} (Settings → Developer settings) and try again.`);
   }
-  const res = await w.features["standard:connect"].connect();
-  const account = (res.accounts && res.accounts[0]) || (w.accounts && w.accounts[0]);
-  if (!account) throw new Error("The wallet didn't share an account.");
+  let res;
+  try {
+    res = await w.features["standard:connect"].connect(silent ? { silent: true } : undefined);
+  } catch (e) {
+    if (silent) return null;
+    throw e;
+  }
+  const account = (res && res.accounts && res.accounts[0]) || (silent ? null : (w.accounts && w.accounts[0]));
+  if (!account) {
+    if (silent) return null;
+    throw new Error("The wallet didn't share an account.");
+  }
   if (S.offEvents) { try { S.offEvents(); } catch (e) {} S.offEvents = null; }
   S.wallet = w; S.account = account;
   const ev = w.features["standard:events"];
@@ -179,14 +195,20 @@ function owner() {
 
 // Signs `tx` (legacy Transaction from the SDK) with the wallet, sends it, and waits for confirmation.
 // `extraSigners` are Keypairs that must co-sign (a new mint, a new config key).
+// On mainnet a transaction with no priority fee can sit unprocessed when the network is busy, so one is added
+// (devnet doesn't need it). 50,000 micro-lamports per compute unit is ~0.00002 SOL for a typical launch.
+export const MAINNET_PRIORITY_MICROLAMPORTS = 50_000;
 export async function signSendConfirm(tx, extraSigners = []) {
   const { conn } = need();
   const payer = owner();
+  if (S.cluster === "mainnet-beta" && !tx.instructions.some((ix) => ix.programId.equals(ComputeBudgetProgram.programId))) {
+    tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: MAINNET_PRIORITY_MICROLAMPORTS }));
+  }
   const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
   tx.feePayer = payer;
   tx.recentBlockhash = blockhash;
   if (extraSigners.length) tx.partialSign(...extraSigners);
-  const chain = `solana:${S.cluster}`;
+  const chain = walletChain();
   const feats = S.wallet.features;
   let signature;
   if (feats["solana:signTransaction"]) {
