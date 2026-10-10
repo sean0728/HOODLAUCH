@@ -1,6 +1,6 @@
-# Hood Launch
+# IgnitionX
 
-Hood Launch is a token-launchpad platform for **Robinhood Chain**. It lets anyone deploy an ERC-20 token in a few different ways — a plain no-frills deploy, a token launched straight into a real DEX pool, a fully configurable "advanced" tax token, or a pump.fun-style bonding curve that graduates into a real pool once it hits a funding target — all from a single-page front end, with an optional gasless relayer so a creator never has to hold ETH just to pay for the launch transaction itself.
+IgnitionX (formerly Hood Launch) is a token-launchpad platform for **Robinhood Chain**. It lets anyone deploy an ERC-20 token in a few different ways — a plain no-frills deploy, a token launched straight into a real DEX pool, a fully configurable "advanced" tax token, or a pump.fun-style bonding curve that graduates into a real pool once it hits a funding target — all from a single-page front end, with an optional gasless relayer so a creator never has to hold ETH just to pay for the launch transaction itself.
 
 The project has three parts that all live in this one repository:
 
@@ -286,6 +286,40 @@ It's a long-lived process — run it under a process manager (or your PaaS's own
 
 A missing/misconfigured factory address only ever disables gasless relaying (and tracking) for that one launch type — the site, wallet-paid launches, and every other configured factory all start up normally regardless.
 
+## Solana (admin-only; devnet, switchable to mainnet)
+
+Setup, front-end wiring and troubleshooting: see [SOLANA_SETUP.md](SOLANA_SETUP.md). Browser module source: `solana-build/` (`npm run build` -> `public/vendor/ignitionx-solana.js`); runtime settings: **Admin → Solana** (`public/solana-config.json` is only a fallback); browser tests: `python3 test/browser/solana_ui_test.py`.
+
+An admin-only prototype of Solana quick launches on Meteora's Dynamic Bonding Curve. The browser builds and signs the launch transactions with the user's Solana wallet; the relayer only hosts token metadata, registers launches, and samples pool prices into the existing price-history store (network key `solana-devnet`) so the chart works. Code: `lib/solanaApi.js`, `lib/solanaStore.js`, `lib/solanaTracker.js`; tests: `node --test test/solanaApi.test.js`. Solana mainnet is rejected (403).
+
+**Packages:** none to install. Price tracking falls back to `lib/vendor/solana-node.js`, a bundled build of `@meteora-ag/dynamic-bonding-curve-sdk` + `@solana/web3.js` (rebuild with `cd solana-build && npm run build:node`). Installing the real packages also works and takes precedence.
+
+**Environment variables:**
+
+| Variable | Purpose |
+|---|---|
+| `SOLANA_RPC_URL` | Default devnet RPC endpoint (Admin → Solana overrides it). Unset = price tracking is off until an RPC is saved (the routes still work) |
+| `SOLANA_POLL_MS` | Default pool sampling interval in ms (`60000`; Admin → Solana overrides it; minimum `15000`) |
+| `PUBLIC_BASE_URL` | Default public origin used in metadata/image URLs (e.g. `https://ignitionx.example`; Admin → Solana overrides it); if unset it is derived from `X-Forwarded-Proto`/`X-Forwarded-Host`/`Host` |
+
+`SOLANA_CLUSTER` is no longer read: the devnet/mainnet switch lives in **Admin → Solana** (saved on the relayer, admin-signed, typed confirmation to go live) and a fresh install is always on devnet.
+
+**Routes** (JSON). Admin routes need `timestamp` (ms, within 5 minutes) and an EVM `signature` (`personal_sign`, admin wallet) over the quoted message:
+
+| Route | Auth / signed message |
+|---|---|
+| `POST /solana/metadata` `{id, name, symbol, description?, image?, website?, twitter?, telegram?}` -> `{id, uri}` | `IgnitionX admin: solana metadata ${id} at ${timestamp}` |
+| `GET /solana/metadata/:id.json` | public (Metaplex-style JSON) |
+| `GET /solana/metadata/:id.png` | public (image bytes) |
+| `POST /solana/launches` `{mint, pool, creator, name, symbol, metadataId?, cluster?, txSignature?}` (upsert by mint) | `IgnitionX admin: register solana launch ${mint} at ${timestamp}` |
+| `GET /solana/launches` | public (prototype only) |
+| `GET /solana/price-history/:mint` | public |
+| `GET /solana/settings` | public; secret server-RPC URLs are redacted (only "is set" + host) |
+| `POST /solana/settings` `{settings}` (all or some of cluster, enabled, rpcUrl, serverRpcUrl, dbcConfig, mainnetRpcUrl, mainnetServerRpcUrl, mainnetDbcConfig, publicBaseUrl, pollSeconds, mainnetConfirm) | `IgnitionX admin: update solana settings to ${canonicalJSON} at ${timestamp}` (see `lib/solanaSettings.js`). Going to mainnet also needs `mainnetConfirm: "GO LIVE ON MAINNET"` and a saved mainnet RPC + config + public base URL |
+| `POST /solana/launches/delete` `{mint}` (keeps price history) | `IgnitionX admin: delete solana launch ${mint} at ${timestamp}` |
+
+Metadata `id` is client-generated (`/^[a-f0-9]{16,32}$/`), images are png/jpeg/webp/gif data URLs of at most 200 KB, and a metadata id is write-once. Settings are saved in `solana-settings.json` beside them. Launch records and price history are kept per network (`solana-devnet` / `solana-mainnet`); metadata is shared so on-chain token URIs always resolve. Records live under `deployed-contracts/solana-devnet/` (`solana-metadata/`, `solana-launches.json`, `price-history/`).
+
 ## Scripts reference
 
 | Command | What it does |
@@ -328,3 +362,7 @@ This is experimental software interacting with real funds once deployed to mainn
 ## License
 
 Every Solidity file in `contracts/` carries an `SPDX-License-Identifier: MIT` header. Add a repository-wide `LICENSE` file with the MIT license text if one isn't already present.
+
+## Branding (IgnitionX)
+
+The platform is branded IgnitionX. Logo files live in `public/brand/` (`ignitionx-hero.png`, `ignitionx-mark.png`, `ignitionx-wordmark.png`, `ignitionx-badge.png`, favicons, `og-image.png`). Colors are CSS variables at the top of `public/index.html` and `public/docs.html` (`--signal-*` is the fire red, `--cyan-*` now carries the amber secondary). Deliberately unchanged: the text wallets sign for admin/profile/social actions (the relayer checks it byte for byte), the on-chain EIP-712 domain names, and browser storage keys, so nothing on-chain or already saved breaks.
