@@ -1842,6 +1842,33 @@ async function announceLaunchToTelegram(network, kind, { token, name, symbol, pa
   );
 }
 
+// Same public launches channel, for a Solana Quick Launch (Meteora bonding curve). Called by lib/solanaApi.js the
+// moment a launch is recorded for the first time (never for a re-registration), so it can't double-post. Best-effort:
+// never throws, and the registration response doesn't wait for it.
+async function announceSolanaLaunchToTelegram(launch) {
+  try {
+    if (!launch || !launch.mint) return;
+    if (!relayerSettings.telegramBotToken || !relayerSettings.telegramLaunchesChatId) {
+      console.warn(
+        `[telegram] not announcing Solana $${launch.symbol}: ` +
+          `${!relayerSettings.telegramBotToken ? "no bot token saved" : "no launches chat ID saved"} (Admin → Relayer settings).`
+      );
+      return;
+    }
+    const main = launch.cluster === "mainnet-beta";
+    const link = `https://explorer.solana.com/address/${launch.mint}${main ? "" : "?cluster=devnet"}`;
+    console.log(`[telegram] announcing Solana $${launch.symbol} (${launch.mint}) to chat ${relayerSettings.telegramLaunchesChatId}.`);
+    await sendTelegramMessage(
+      relayerSettings.telegramLaunchesChatId,
+      `🚀 New launch: <b>${escapeTelegramHtml(launch.name)}</b> ($${escapeTelegramHtml(launch.symbol)})\n` +
+        `⚡ Quick Launch on Solana ${main ? "mainnet" : "devnet (testnet)"} via Meteora\n` +
+        `<code>${escapeTelegramHtml(launch.mint)}</code>\n${link}`
+    );
+  } catch (err) {
+    console.warn(`[telegram] couldn't announce Solana launch ${launch && launch.mint}: ${err.message}`);
+  }
+}
+
 // ---- milestone Telegram announcements: "live on DEX" and "graduated" ----
 // Same public launches channel as the new-launch post. Fired from
 // pollTokenPrices at the moment it OBSERVES a status transition it persists
@@ -3874,7 +3901,7 @@ async function main() {
   // history for Meteora DBC quick launches. Write routes are admin-signed, the
   // price poller is off unless SOLANA_RPC_URL is set, and the Solana packages
   // are loaded lazily — see lib/solanaApi.js and README "Solana (devnet prototype)".
-  registerSolanaRoutes(app, { sendJson, asyncRoute, verifyAdminSignature, isFreshTimestamp });
+  registerSolanaRoutes(app, { sendJson, asyncRoute, verifyAdminSignature, isFreshTimestamp, announceLaunch: announceSolanaLaunchToTelegram });
 
   app.get("/holder-distribution/:tokenAddress", async (req, res) => {
     const rows = await computeHolderDistribution(req.params.tokenAddress);
