@@ -1024,7 +1024,7 @@
           <img class="hero-logo" src="brand/ignitionx-hero.png" alt="IgnitionX — Launch, Create, Trade" width="1000" height="402">
           <div class="hero-eyebrow"><span class="rule"></span><span class="eyebrow">Built on Robinhood Chain</span></div>
           <h1 class="hero-h">Ignite a token.<br>Track its <em>trajectory</em>.</h1>
-          <p class="hero-sub">IgnitionX is a mission-control panel for launching community tokens on Robinhood Chain. Deploy Token puts 100% of the supply straight in your wallet — no pool, no tax, liquidity is on you. Or Deploy and Add Liquidity (Launch): pair your own ETH into a live pool atomically, with a 1.00% tax funding the climb to a fixed $50,000 market cap before it shuts off for good.</p>
+          <p class="hero-sub">IgnitionX is a mission-control panel for launching community tokens on Robinhood Chain. Launch with liquidity: pair your own ETH into a live pool atomically, with a 1.00% tax funding the climb to a fixed $50,000 market cap before it shuts off for good. Or Quick Launch: no liquidity to provide, your token trades on a bonding curve from the first block and graduates to a locked pool.</p>
           <div class="hero-cta">
             <button class="btn btn-primary" data-goto="create">Launch a token</button>
             <button class="btn btn-ghost" data-goto-scroll="market">View live launches</button>
@@ -1847,7 +1847,7 @@
   // ---- Uniswap V4 (the platform's only EVM protocol) ----
   // The V2 contracts are gone: every Robinhood-chain launch is V4. Gasless launches
   // go through the shared V4LaunchRelay (custom/curve) or V4TokenFactory's own relay.
-  const V4_MODES = ["just", "liquidity", "custom", "curve", "customCurve"]; // "customDeploy" (deploy-only custom tax) has no V4 version and is gone
+  const V4_MODES = ["liquidity", "custom", "curve", "customCurve"]; // deploy-only modes ("just", "customDeploy") are no longer offered for new launches; existing deploy-only tokens still display
   function v4TokenFactoryAddress(mode){ return (platformConfig.v4TokenFactory && platformConfig.v4TokenFactory[mode || appMode]) || null; }
   function v4SwapRouterAddress(mode){ return (platformConfig.v4SwapRouter && platformConfig.v4SwapRouter[mode || appMode]) || null; }
   function v4CustomTokenFactoryAddress(mode){ return (platformConfig.v4CustomTokenFactory && platformConfig.v4CustomTokenFactory[mode || appMode]) || null; }
@@ -4868,7 +4868,7 @@
     };
   }
   function resetLaunchDraft(){
-    draft = { name:"", ticker:"", desc:"", supply:1000000000, protocol:"v2", mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
+    draft = { name:"", ticker:"", desc:"", supply:1000000000, protocol:"v2", mode:"liquidity", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
     wizStep = 1;
   }
   // Every contract address actually touched by this launch, in one place —
@@ -10533,7 +10533,7 @@
       mint:p.mint, pool:p.pool, creator:p.creator, name:p.name, symbol:p.symbol, metadataId:p.metadataId, txSignature:p.txSignature, cluster: p.cluster || solCluster(), totalSupply: p.totalSupply || undefined,
     });
     solPendingRegister = null; solPendingConfig = null; solLaunchMsg = null;
-    draft = { name:"", ticker:"", desc:"", supply:solStdInfo().supply, protocol:"v2", mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"", solFirstBuy:"" };
+    draft = { name:"", ticker:"", desc:"", supply:solStdInfo().supply, protocol:"v2", mode:"liquidity", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"", solFirstBuy:"" };
     wizStep = 1;
     toast(`$${p.symbol} launched on Solana ${p.cluster === "mainnet-beta" ? "mainnet" : "devnet"}.`);
     solLaunchesLoaded = false;
@@ -10803,7 +10803,7 @@
 
   /* ---------------- create wizard ---------------- */
   let wizStep = 1;
-  let draft = { name:"", ticker:"", desc:"", supply:1000000000, protocol:"v2", mode:"just", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
+  let draft = { name:"", ticker:"", desc:"", supply:1000000000, protocol:"v2", mode:"liquidity", liquidityEth:0.01, buyInEth:0, customFees: defaultCustomFees(), socials:{website:"",twitter:"",telegram:"",discord:""}, logo:"", banner:"" };
 
   // ---- Custom Tax Token fee configuration (step 3 when draft.mode==="custom") ----
   const FEE_ROWS = [["reflectionBps","Reflections"],["marketingBps","Marketing"],["liquidityBps","Liquidity"],["burnBps","Burn"]];
@@ -11023,11 +11023,6 @@
         <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 6px;">Every launch is verified before anything else happens. What comes next — and what it costs — depends on which mode you pick; nothing here is reversible after you launch.</p>
         <p class="hint" style="margin:0 0 18px;">${ethPriceNote()}</p>
         <div class="curve-options">
-          <div class="curve-card ${draft.mode==='just'?'selected':''} ${lockCls('just')}" data-mode="just" style="text-align:left; padding:16px;">
-            <div class="name" style="margin-bottom:6px;">🚀 Deploy 0% Tax Token Only</div>
-            <div class="desc">Create and verify — nothing else. 100% of supply goes straight to your wallet. No pool, no tax, no further involvement from IgnitionX. Adding liquidity anywhere, any time, is entirely on you.</div>
-            <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("just")}</div>
-          </div>
           <div class="curve-card ${draft.mode==='liquidity'?'selected':''} ${lockCls('liquidity')}" data-mode="liquidity" style="text-align:left; padding:16px;">
             <div class="name" style="margin-bottom:6px;">🔒 Launch 0% Tax Token</div>
             <div class="desc">Creation and liquidity happen atomically, in one transaction. A live pool exists immediately, taxed 1.00% on buys &amp; sells until market cap hits $50,000 — then the tax shuts off for good. LP locked to you for 15 days. 0% creator tax — you don't configure a rate here.</div>
@@ -11648,7 +11643,7 @@
     // V4 is the only protocol for EVM launches. There is deliberately no
     // fallback to a simulated or legacy flow: with no factory configured the
     // creator is told so, instead of being shown a fake "launch".
-    if(!V4_MODES.includes(draft.mode)){ toast("That mode isn't available."); draft.mode = "just"; renderWizard(); return; }
+    if(!V4_MODES.includes(draft.mode)){ toast("That mode isn't available."); draft.mode = "liquidity"; renderWizard(); return; }
     const v4Address = v4FactoryForMode(draft.mode);
     if(!v4Address){ toast(`${v4FactoryNameForMode(draft.mode)} not configured — save its address in Admin first.`); return; }
     if(draft.mode==="custom" || draft.mode==="customCurve"){
