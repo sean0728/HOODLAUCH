@@ -667,6 +667,8 @@
   /* ---------------- Wallet profiles ---------------- */
   .pf-av{display:inline-flex; align-items:center; justify-content:center; border-radius:50%; overflow:hidden; flex:none; font-family:var(--font-mono); font-weight:700; color:#0d0b0b; vertical-align:middle; object-fit:cover;}
   img.pf-av{display:inline-block;}
+  .pf-linkrow{display:flex; align-items:center; gap:8px; padding:6px 0; font-size:.82rem;}
+  .pf-via{font-family:var(--font-mono); font-size:.58rem; letter-spacing:.06em; color:var(--paper-500); border:1px solid currentColor; border-radius:4px; padding:0 4px; opacity:.85;}
   .pf-chip{display:inline-flex; align-items:center; gap:6px; font-family:var(--font-mono); font-size:.76rem; color:var(--paper-300); text-decoration:none; background:none; border:0; padding:0; cursor:default;}
   .pf-chip.link{cursor:pointer;}
   .pf-chip.link:hover .pf-chip-name{text-decoration:underline;}
@@ -1420,10 +1422,10 @@
   // localStorage so they survive a reload).
   const tokens = [];
   // Wallet profiles (name + picture per wallet), fetched from the relayer — see the "Wallet profiles" section.
-  const profileCache = { map: {}, loaded: false };
+  const profileCache = { map: {}, links: {}, loaded: false }; // links: Solana wallet -> the account (Robinhood wallet) it is linked to
   let profileViewAddr = null; // null = the connected wallet's own profile
   const followState = { forWallet: null, following: new Set() }; // who the connected wallet follows (lowercase addresses)
-  function isFollowing(addr){ return !!addr && followState.following.has(String(addr).toLowerCase()); }
+  function isFollowing(addr){ const a = resolveAccount(addr); return !!a && followState.following.has(a); }
   const LP_LOCK_DAYS = 15;
 
   // load any locally-created demo tokens
@@ -2359,6 +2361,7 @@
     refreshAdminTabVisibility();
     if(views.portfolio.classList.contains("active")) renderPortfolio();
     if(views.detail.classList.contains("active") && currentDetailTokenId) openDetail(currentDetailTokenId);
+    else if(views.detail.classList.contains("active") && typeof solDetailMint !== "undefined" && solDetailMint && typeof solRefreshSocial === "function") solRefreshSocial();
   }
   // Some wallets (Phantom is one) announce their own EVM account / a "disconnect" on the EVM provider while a
   // SOLANA connect or signature is in progress. That must not log the EVM admin out mid-flow (it used to dump
@@ -10037,6 +10040,9 @@
     if(row){ row.innerHTML = solWalletRowHTML(); solWireWalletRow(row, renderSolanaLaunchPanel); }
     const trow = document.getElementById("solTradeWallet");
     if(trow){ trow.innerHTML = solWalletRowHTML(); solWireWalletRow(trow, ()=>{ solRenderTradePanel(); solRenderFeesPanel(); }); }
+    if(solDetailMint && typeof solRefreshSocial === "function") solRefreshSocial();   // a connected, linked Solana wallet can comment
+    const pl = document.getElementById("pfLinkRow");
+    if(pl && typeof pfRefreshLinkRow === "function") pfRefreshLinkRow();
   }
   // Called when an action needs the Solana wallet and there isn't one: show the real state and say what to do.
   function solNeedWallet(){
@@ -10553,6 +10559,19 @@
   }
 
   // ---- detail page ----
+  // Comments and the callout box on a Solana token. They use the same relayer routes and the same code as a Robinhood
+  // token's page; the "token" is just the mint, and the signer is the connected Robinhood wallet (the account) or a
+  // linked Solana wallet. `chain:"solana"` tells the callout box not to wait for a USD price.
+  function solSocialToken(l){
+    return { id:"sol:"+l.mint, tokenAddress:l.mint, onChain:true, chain:"solana", networkMode:appMode, ticker:l.symbol, symbol:l.symbol, name:l.name };
+  }
+  function solRefreshSocial(){
+    const l = solLaunches.find(x=> x.mint===solDetailMint);
+    if(!l || !document.getElementById("commentsMount")) return;
+    const t = solSocialToken(l);
+    initComments(t);
+    initCalloutBox(t);
+  }
   function openSolanaDetail(mint){
     const l = solLaunches.find(x=>x.mint===mint);
     if(!l) return;
@@ -10569,7 +10588,7 @@
           <div><div class="tc-name" style="font-size:1.25rem">${escapeHtml(l.name)}</div><div class="tc-ticker">$${escapeHtml(l.symbol)} · Solana ${solNetWord()}</div></div>
           <span class="tc-status curve-trading" id="solDStatus" style="margin-left:auto">Curve</span>
         </div>
-        <div class="detail-by">Mint <a href="${solExplorer("address", mint)}" target="_blank" rel="noopener noreferrer">${escapeHtml(mint.slice(0,6)+"…"+mint.slice(-4))}</a> · Pool <a href="${solExplorer("address", l.pool)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.pool.slice(0,6)+"…"+l.pool.slice(-4))}</a></div>
+        <div class="detail-by">${l.creator ? `Created by ${profileChipHTML(l.creator, {link:true, size:20})} · ` : ""}Mint <a href="${solExplorer("address", mint)}" target="_blank" rel="noopener noreferrer">${escapeHtml(mint.slice(0,6)+"…"+mint.slice(-4))}</a> · Pool <a href="${solExplorer("address", l.pool)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.pool.slice(0,6)+"…"+l.pool.slice(-4))}</a></div>
         <div class="detail-price num" id="solDPrice">—</div>
         <div class="sol-status err" id="solDError"></div>
         <div class="chart-wrap" id="chartWrap"></div>
@@ -10587,11 +10606,20 @@
       <div style="display:flex; flex-direction:column; gap:20px;">
         <div class="panel" id="solTradePanel"></div>
         <div class="panel" id="solFeesPanel"></div>
+        <div class="panel" id="calloutPanel">
+          <div class="eyebrow" style="margin-bottom:10px;">Callout</div>
+          <div id="calloutMount"></div>
+        </div>
+        <div class="panel" id="commentsPanel">
+          <div class="eyebrow" style="margin-bottom:12px;">Comments <span id="commentCount"></span></div>
+          <div id="commentsMount"></div>
+        </div>
         ${isAdminWallet(wallet) ? `<button class="btn btn-ghost btn-sm" id="solRemoveBtn" style="align-self:flex-start">Remove from site list</button>` : ""}
       </div>`;
     showView("detail");
     solRenderTradePanel();
     solRenderFeesPanel();
+    solRefreshSocial();
     const rmBtn = document.getElementById("solRemoveBtn");
     if(rmBtn) rmBtn.addEventListener("click", ()=> solRemoveLaunch(l));
     solLoadHistoryChart(l);
@@ -17009,32 +17037,47 @@
     return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
   }
   const isAddrLike = a => /^0x[0-9a-fA-F]{40}$/.test(String(a||""));
+  const isSolAddrLike = a => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(a||""));
+  // An account is its Robinhood (EVM) wallet. A Solana wallet linked to it resolves to that account, so it shows the
+  // account's name and picture everywhere. Returns the lowercase account address, or null (unlinked Solana / junk).
+  function resolveAccount(addr){
+    const a = String(addr||"");
+    if(isAddrLike(a)) return a.toLowerCase();
+    if(isSolAddrLike(a) && profileCache.links && profileCache.links[a]) return String(profileCache.links[a]).toLowerCase();
+    return null;
+  }
+  const isSolOnly = a => !isAddrLike(a) && isSolAddrLike(a);
 
-  function profileOf(addr){ return isAddrLike(addr) ? (profileCache.map[String(addr).toLowerCase()] || null) : null; }
+  function profileOf(addr){ const a = resolveAccount(addr); return a ? (profileCache.map[a] || null) : null; }
   function profileNameOf(addr){ const p = profileOf(addr); return p && p.name ? p.name : null; }
   function profileAvatarSrc(addr){
+    const a = resolveAccount(addr);
     const p = profileOf(addr);
-    return (p && p.avatarV) ? `${location.origin}/profile-avatar/${String(addr).toLowerCase()}?v=${encodeURIComponent(p.avatarV)}` : "";
+    return (a && p && p.avatarV) ? `${location.origin}/profile-avatar/${a}?v=${encodeURIComponent(p.avatarV)}` : "";
   }
   // Round avatar: the picture if there is one, else a coloured disc derived from the address.
   function profileAvatarHTML(addr, size){
     const px = size || 20;
     const src = profileAvatarSrc(addr);
     if(src) return `<img class="pf-av" src="${escapeHtml(src)}" alt="" width="${px}" height="${px}" style="width:${px}px;height:${px}px;" loading="lazy">`;
-    const a = isAddrLike(addr) ? String(addr).toLowerCase() : "0x00";
-    let h = 0; for(let i=2;i<a.length;i++) h = (h*31 + a.charCodeAt(i)) % 360;
+    const seed = resolveAccount(addr) || (isSolOnly(addr) ? String(addr) : "0x00");
+    const from = seed.startsWith("0x") ? 2 : 0;
+    let h = 0; for(let i=from;i<seed.length;i++) h = (h*31 + seed.charCodeAt(i)) % 360;
     const name = profileNameOf(addr);
-    const letter = name ? Array.from(name)[0].toUpperCase() : a.slice(2,4);
+    const letter = name ? Array.from(name)[0].toUpperCase() : seed.slice(from, from+2);
     return `<span class="pf-av" style="width:${px}px;height:${px}px;font-size:${Math.max(8,Math.round(px*0.42))}px;background:hsl(${h} 55% 55%);">${escapeHtml(letter)}</span>`;
   }
-  // Avatar + name (or short wallet) — a link to the profile page when {link:true}.
+  // Avatar + name (or short wallet) — a link to the profile page when {link:true}. A Solana wallet linked to an
+  // account shows the account's name/picture (with a small SOL tag); an unlinked one shows its short address.
   function profileChipHTML(addr, {link=false, size=20}={}){
     if(!addr) return "";
     const name = profileNameOf(addr);
+    const acct = resolveAccount(addr);
     const label = name ? escapeHtml(name) : escapeHtml(fmtAddr(String(addr)));
-    const inner = `${isFollowing(addr) ? `<span class="pf-star" title="You follow this member">★</span>` : ""}${profileAvatarHTML(addr,size)}<span class="${name?"pf-chip-name":""}">${label}</span>`;
-    return link ? `<button type="button" class="pf-chip link" data-open-profile="${escapeHtml(String(addr))}" title="View profile">${inner}</button>`
-                : `<span class="pf-chip">${inner}</span>`;
+    const via = isSolOnly(addr) ? `<span class="pf-via" title="Solana wallet">SOL</span>` : "";
+    const inner = `${isFollowing(addr) ? `<span class="pf-star" title="You follow this member">★</span>` : ""}${profileAvatarHTML(addr,size)}<span class="${name?"pf-chip-name":""}">${label}</span>${via}`;
+    return (link && acct) ? `<button type="button" class="pf-chip link" data-open-profile="${escapeHtml(acct)}" title="View profile">${inner}</button>`
+                          : `<span class="pf-chip">${inner}</span>`;
   }
   // The "who" part of a live-feed line: the profile name (with picture) or "Wallet 0xabcd…".
   function feedWhoHTML(addr){
@@ -17055,11 +17098,13 @@
       if(!res.ok) return;
       const data = await res.json();
       const map = (data && data.profiles && typeof data.profiles==="object") ? data.profiles : {};
-      const sig = JSON.stringify(map);
+      const links = (data && data.links && typeof data.links==="object") ? data.links : {};
+      const sig = JSON.stringify([map, links]);
       profileCache.loaded = true;
       if(sig===profilesSig) return;
       profilesSig = sig;
       profileCache.map = map;
+      profileCache.links = links;
       onProfilesChanged();
     }catch(e){ /* offline or relayer not reachable — names just stay as wallet addresses */ }
   }
@@ -17078,8 +17123,9 @@
     renderProfile();
   }
   function openProfile(addr){
-    if(!isAddrLike(addr)) return;
-    profileViewAddr = addr;
+    const acct = resolveAccount(addr);
+    if(!acct) return;                       // an unlinked Solana wallet has no profile to open
+    profileViewAddr = isAddrLike(addr) ? addr : acct;
     showView("profile");
   }
   document.addEventListener("click", (e)=>{
@@ -17154,8 +17200,13 @@
     }
     const shownName = own ? draftName : savedName;
     const myTokens = tokens.filter(t=> t.creatorWallet && t.creatorWallet.toLowerCase()===addr.toLowerCase() && (t.networkMode||"demo")===appMode);
-    const tokensHTML = myTokens.length
+    // Solana launches made with any Solana wallet linked to this account count as this account's launches.
+    const linkedSolSet = linkedSolanaOf(addr);
+    if(linkedSolSet.size && !solLaunchesLoaded && solVisible()) solLoadLaunches().then(()=> renderProfileIfActive());
+    const mySolTokens = solLaunches.filter(l=> linkedSolSet.has(l.creator));
+    const tokensHTML = (myTokens.length || mySolTokens.length)
       ? myTokens.map(t=>`<button type="button" class="pf-token-row" data-pf-token="${escapeHtml(t.id)}"><span style="font-weight:600;">${escapeHtml(t.name)}</span><span class="tc-ticker">$${escapeHtml(t.ticker)}</span> ${protoBadgeHTML(t)}</button>`).join("")
+        + mySolTokens.map(l=>`<button type="button" class="pf-token-row" data-pf-sol="${escapeHtml(l.mint)}"><span style="font-weight:600;">${escapeHtml(l.name)}</span><span class="tc-ticker">$${escapeHtml(l.symbol)}</span> ${chainBadgeHTML("solana")}</button>`).join("")
       : `<p class="pf-soon">No tokens launched from this wallet on ${escapeHtml(net.label)} yet.</p>`;
     const adminRemove = (!own && isAdminWallet(wallet) && saved)
       ? `<button class="btn btn-ghost" id="pfAdminRemove" style="color:var(--critical-500); border-color:rgba(240,64,95,.4);">Remove profile (admin)</button>` : "";
@@ -17187,6 +17238,14 @@
         <button class="btn btn-primary" id="pfSave" style="margin-top:12px;">Save profile</button>
         <p class="pf-soon" style="margin-top:12px;">Saving asks your wallet to sign a message. It's free and sends no transaction. Your name and picture are public.</p>
       </div>` : ""}
+      <div class="panel" style="margin-bottom:20px;" id="pfLinksPanel">
+        <div class="eyebrow" style="margin-bottom:6px;">Linked Solana wallets</div>
+        <div id="pfLinks"><p class="pf-soon">Loading…</p></div>
+        ${own ? `
+        <div id="pfLinkRow" style="margin-top:12px;"></div>
+        <div class="pf-form-msg" id="pfLinkMsg"></div>
+        <p class="pf-soon" style="margin-top:10px;">Link a Solana wallet and anything you do with it — Solana launches, trades, comments and callouts — shows under ${shownName ? escapeHtml(shownName) : "this account"}. Linking asks <b>both</b> wallets for a free signature and sends no transaction. <b>Links are public:</b> anyone can see which Solana wallets belong to this name. You can unlink at any time.</p>` : ""}
+      </div>
       <div class="panel" style="margin-bottom:20px;">
         <div class="eyebrow" style="margin-bottom:6px;">${own ? "Your callouts" : "Callouts"}</div>
         <div id="pfCallouts"><p class="pf-soon">Loading…</p></div>
@@ -17215,11 +17274,14 @@
       <div class="panel">
         <div class="eyebrow" style="margin-bottom:10px;">Trading activity</div>
         <div id="pfTrading"><p class="pf-soon">Loading…</p></div>
+        <div id="pfSolTrades"></div>
       </div>`;
 
     wrap.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
     fillProfileSocial(addr);
     fillProfileTrading(addr);
+    fillProfileSolTrades(addr);
+    fillProfileLinks(addr, own);
     const rm = document.getElementById("pfAdminRemove");
     if(rm) rm.addEventListener("click", ()=> adminRemoveProfile(addr, rm));
     if(!own) return;
@@ -17263,6 +17325,129 @@
       if(sb && !sb.disabled) sb.click();
     });
     saveBtn.addEventListener("click", ()=> saveMyProfile(nameInput, setMsg, saveBtn));
+  }
+
+  /* ---- linked Solana wallets (profile page) ---- */
+  // The Solana wallets linked to an account, as a Set (read from the profile cache — no request needed).
+  function linkedSolanaOf(account){
+    const a = String(account||"").toLowerCase();
+    const out = new Set();
+    const links = profileCache.links || {};
+    Object.keys(links).forEach(sol=>{ if(String(links[sol]).toLowerCase()===a) out.add(sol); });
+    return out;
+  }
+  let pfLinked = { account: null, wallets: [] };
+  async function fillProfileLinks(addr, own){
+    const box = document.getElementById("pfLinks");
+    if(!box) return;
+    let wallets = [];
+    try{
+      const res = await fetch(`${location.origin}/wallet-links/${encodeURIComponent(addr)}`, { cache:"no-store" });
+      if(res.ok) wallets = (await res.json()).wallets || [];
+    }catch(e){}
+    if(!document.getElementById("pfLinks")) return;
+    pfLinked = { account: String(addr).toLowerCase(), wallets };
+    document.getElementById("pfLinks").innerHTML = wallets.length
+      ? wallets.map(w=>`<div class="pf-linkrow"><a href="${escapeHtml(solExplorer("address", w.address))}" target="_blank" rel="noopener noreferrer" class="num">${escapeHtml(w.address.slice(0,6)+"…"+w.address.slice(-6))}</a><span class="pf-via">SOL</span>${own ? `<button type="button" class="cm-del" data-pf-unlink="${escapeHtml(w.address)}" style="margin-left:auto;">Unlink</button>` : ""}</div>`).join("")
+      : `<p class="pf-soon">${own ? "No Solana wallet linked yet." : "No Solana wallets linked."}</p>`;
+    box.querySelectorAll("[data-pf-unlink]").forEach(b=> b.addEventListener("click", ()=> pfUnlinkSolana(b.dataset.pfUnlink, b)));
+    if(own) pfRefreshLinkRow();
+  }
+  function pfLinkMsg(text, cls){
+    const m = document.getElementById("pfLinkMsg");
+    if(m){ m.textContent = text||""; m.className = "pf-form-msg"+(cls?" "+cls:""); }
+  }
+  // The Solana wallet connect row + the "Link this wallet" button on your own profile.
+  function pfRefreshLinkRow(){
+    const row = document.getElementById("pfLinkRow");
+    if(!row) return;
+    const lib = window.IgnitionSol;
+    const cur = lib && lib.currentWallet && lib.currentWallet();
+    let html = lib ? solWalletRowHTML()
+      : `<div class="sol-wallet-row"><span class="sol-dot"></span><span>Solana wallet not connected</span><button class="btn btn-primary btn-sm" type="button" data-pf-loadlib style="margin-left:auto">Connect a Solana wallet</button></div>`;
+    if(cur){
+      const already = pfLinked.wallets.some(w=> w.address===cur.address);
+      const elsewhere = !already && resolveAccount(cur.address) && resolveAccount(cur.address)!==(wallet||"").toLowerCase();
+      html += already ? `<p class="pf-soon" style="margin-top:8px;">This wallet is already linked to your account.</p>`
+        : elsewhere ? `<p class="pf-soon" style="margin-top:8px;">This Solana wallet is linked to a different account. Unlink it there first.</p>`
+        : `<button class="btn btn-primary" id="pfLinkBtn" type="button" style="margin-top:10px;">Link ${escapeHtml(cur.address.slice(0,4)+"…"+cur.address.slice(-4))} to my account</button>`;
+    }
+    row.innerHTML = html;
+    solWireWalletRow(row, pfRefreshLinkRow);
+    row.querySelectorAll("[data-pf-loadlib]").forEach(b=> b.addEventListener("click", async ()=>{
+      b.disabled = true;
+      try{ await saEnsureLib(); }catch(e){ toast(solErr(e)); }
+      pfRefreshLinkRow();
+    }));
+    const lb = document.getElementById("pfLinkBtn");
+    if(lb) lb.addEventListener("click", ()=> pfLinkSolana(lb));
+  }
+  async function pfLinkSolana(btn){
+    const lib = window.IgnitionSol;
+    const cur = lib && lib.currentWallet && lib.currentWallet();
+    if(!wallet || !getEth()){ toast("Connect your Robinhood wallet first."); return; }
+    if(!cur){ toast("Connect your Solana wallet first."); return; }
+    const owner = wallet, sol = cur.address, ts = Date.now();
+    const message = linkMessage(sol, owner, ts);
+    btn.disabled = true;
+    pfLinkMsg("Step 1 of 2: sign with your Robinhood wallet…");
+    const ownerSignature = await signWith(message);
+    if(!ownerSignature){ pfLinkMsg("Nothing was linked.", "err"); btn.disabled = false; return; }
+    pfLinkMsg("Step 2 of 2: sign with your Solana wallet…");
+    let solanaSignature;
+    try{ solanaSignature = await solGuarded(()=> lib.signMessage(message)); }
+    catch(e){ pfLinkMsg("The Solana signature was rejected — nothing was linked.", "err"); btn.disabled = false; return; }
+    pfLinkMsg("Linking…");
+    try{
+      const res = await fetch(`${location.origin}/wallet-links`, { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ solana: sol, owner, timestamp: ts, ownerSignature, solanaSignature }) });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ pfLinkMsg(data.error || "Couldn't link that wallet.", "err"); btn.disabled = false; return; }
+      pfLinkMsg("");
+      toast("Solana wallet linked.");
+      await fetchProfiles();
+      renderProfile();
+    }catch(e){ pfLinkMsg("Couldn't link — check your connection.", "err"); btn.disabled = false; }
+  }
+  async function pfUnlinkSolana(sol, btn){
+    if(btn.dataset.confirming!=="1"){
+      btn.dataset.confirming = "1"; btn.textContent = "Confirm?";
+      setTimeout(()=>{ if(btn.isConnected){ btn.dataset.confirming = ""; btn.textContent = "Unlink"; } }, 4000);
+      return;
+    }
+    if(!wallet) return;
+    const ts = Date.now();
+    const signature = await signWith(unlinkMessage(sol, wallet, ts));
+    if(!signature) return;
+    try{
+      const res = await fetch(`${location.origin}/wallet-links/remove`, { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ solana: sol, owner: wallet, timestamp: ts, signature }) });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't unlink that wallet."); return; }
+      toast("Solana wallet unlinked.");
+      await fetchProfiles();
+      renderProfile();
+    }catch(e){ toast("Couldn't unlink that wallet."); }
+  }
+  // Recent Solana buys/sells by the Solana wallets linked to this account (no PNL for Solana yet).
+  async function fillProfileSolTrades(addr){
+    const box = document.getElementById("pfSolTrades");
+    if(!box) return;
+    const set = linkedSolanaOf(addr);
+    if(!set.size){ box.innerHTML = ""; return; }
+    let rows = [];
+    try{
+      const res = await fetch(`${SOL_RELAYER}/solana/activity`, { cache:"no-store" });
+      if(res.ok) rows = ((await res.json()).activity || []).filter(e=> set.has(e.wallet));
+    }catch(e){}
+    const again = document.getElementById("pfSolTrades");
+    if(!again) return;
+    rows.sort((a,b)=> b.t-a.t);
+    const top = rows.slice(0,10);
+    again.innerHTML = `<div class="eyebrow" style="margin:18px 0 4px;">Recent Solana trades</div>` + (top.length
+      ? `<div class="pnl-trades">${top.map(tr=>`<div class="tr"><span class="side ${tr.side==="sell"?"sell":"buy"}">${tr.side==="sell"?"Sell":"Buy"}</span>${socialTokenChip(tr.tokenAddress, tr.symbol)} <span>${escapeHtml(fmtQty(Number(tr.tokenAmount)||0))} tokens</span><span class="when">${escapeHtml(agoShort(tr.t))}</span></div>`).join("")}</div>
+         <p class="pnl-note">Solana trades are listed, not yet counted in profit &amp; loss.</p>`
+      : `<p class="pf-soon">No Solana trades recorded for your linked wallets yet.</p>`);
   }
 
   async function saveMyProfile(nameInput, setMsg, saveBtn){
@@ -17347,8 +17532,13 @@
     if(len>COMMENT_MAX) return `Comments are limited to ${COMMENT_MAX} characters.`;
     return null;
   }
-  const commentMessage = (token, author, text, ts)=> `Hood Launch: comment on ${String(token).toLowerCase()} as ${String(author).toLowerCase()}: ${JSON.stringify(text)} at ${ts}`;
-  const deleteCommentMessage = (id, requester, ts)=> `Hood Launch: delete comment ${id} as ${String(requester).toLowerCase()} at ${ts}`;
+  // EVM addresses are lowercased inside a signed message; Solana addresses (case-sensitive base58) are left as they are.
+  // Must match canonId in lib/social.js.
+  const canonId = a => isAddrLike(a) ? String(a).toLowerCase() : String(a);
+  const commentMessage = (token, author, text, ts)=> `Hood Launch: comment on ${canonId(token)} as ${canonId(author)}: ${JSON.stringify(text)} at ${ts}`;
+  const deleteCommentMessage = (id, requester, ts)=> `Hood Launch: delete comment ${id} as ${canonId(requester)} at ${ts}`;
+  const linkMessage = (solana, account, ts)=> `IgnitionX: link Solana wallet ${canonId(solana)} to account ${canonId(account)} at ${ts}`;
+  const unlinkMessage = (solana, account, ts)=> `IgnitionX: unlink Solana wallet ${canonId(solana)} from account ${canonId(account)} at ${ts}`;
   const followMessage = (follow, followee, follower, ts)=> `Hood Launch: ${follow?"follow":"unfollow"} ${String(followee).toLowerCase()} as ${String(follower).toLowerCase()} at ${ts}`;
 
   async function signWith(message){
@@ -17357,6 +17547,41 @@
     try{ return await getEth().request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] }); }
     catch(e){ toast("Signature was rejected — nothing was changed."); return null; }
   }
+  // Who is acting on the social features: the Robinhood wallet (the account) when it's connected, otherwise a
+  // connected Solana wallet that is linked to an account. Comments and callouts are stored under the ACCOUNT.
+  function solConnectedAddr(){ const lib = window.IgnitionSol; const w = lib && lib.currentWallet && lib.currentWallet(); return w ? w.address : null; }
+  function myAccount(){ return wallet ? wallet.toLowerCase() : resolveAccount(solConnectedAddr()); }
+  // `msgFor(signerAddress)` builds the exact message to sign. Returns { signer, signature } or null (already toasted).
+  async function socialSign(msgFor){
+    if(wallet) {
+      const signature = await signWith(msgFor(wallet));
+      return signature ? { signer: wallet, signature } : null;
+    }
+    const sol = solConnectedAddr();
+    if(sol && resolveAccount(sol)){
+      try{
+        const signature = await solGuarded(()=> window.IgnitionSol.signMessage(msgFor(sol)));
+        return { signer: sol, signature };
+      }catch(e){ toast("Signature was rejected in your Solana wallet — nothing was changed."); return null; }
+    }
+    toast("Connect your wallet first.");
+    return null;
+  }
+  // A token's chip in a comment / callout line: EVM tokens open their page, Solana tokens open the Solana page.
+  function socialTokenChip(addr, symbol){
+    const t = tokenByAddress(addr);
+    if(t) return `<button type="button" class="pf-chip link" data-pf-token="${escapeHtml(t.id)}"><span class="pf-chip-name">$${escapeHtml(t.ticker)}</span></button>`;
+    if(isSolOnly(addr)){
+      const l = solLaunches.find(x=> x.mint===addr);
+      if(l) return `<button type="button" class="pf-chip link" data-pf-sol="${escapeHtml(addr)}"><span class="pf-chip-name">$${escapeHtml(l.symbol)}</span></button>`;
+    }
+    if(symbol) return `<span class="pf-chip-name">$${escapeHtml(symbol)}</span>`;
+    return escapeHtml(fmtAddr(String(addr)));
+  }
+  document.addEventListener("click", (e)=>{
+    const el = e.target.closest && e.target.closest("[data-pf-sol]");
+    if(el){ e.preventDefault(); openSolanaDetail(el.dataset.pfSol); }
+  });
   function agoShort(ms){
     const s = Math.max(0, Math.round((Date.now()-ms)/1000));
     if(s<60) return "just now";
@@ -17420,7 +17645,8 @@
   function commentApi(t){ const u = relayerApiUrl(t.networkMode); return u; }
 
   function commentRowHTML(c){
-    const mine = wallet && c.author.toLowerCase()===wallet.toLowerCase();
+    const me = myAccount();
+    const mine = !!me && c.author.toLowerCase()===me;
     const canDelete = mine || isAdminWallet(wallet);
     return `<div class="cm" data-cm-id="${escapeHtml(c.id)}">
       <div class="cm-head">${profileChipHTML(c.author, {link:true, size:22})}<span class="cm-time">${escapeHtml(agoShort(c.createdAt))}</span>
@@ -17450,12 +17676,14 @@
   function renderCommentComposer(t){
     const box = document.getElementById("commentComposer");
     if(!box) return;
-    if(!wallet){
-      box.innerHTML = `<p class="pf-soon" style="margin:0 0 10px;">Connect your wallet to join the conversation.</p><button class="btn btn-ghost" id="cmConnect">Connect Wallet</button>`;
+    const acct = myAccount();
+    if(!acct){
+      const solUnlinked = !wallet && solConnectedAddr();
+      box.innerHTML = `<p class="pf-soon" style="margin:0 0 10px;">${solUnlinked ? "This Solana wallet isn't linked to an account yet. Connect your Robinhood wallet and link it from your Profile to comment." : "Connect your wallet to join the conversation."}</p><button class="btn btn-ghost" id="cmConnect">Connect Wallet</button>`;
       document.getElementById("cmConnect").addEventListener("click", ()=> walletBtn.click());
       return;
     }
-    if(!profileNameOf(wallet)){
+    if(!profileNameOf(acct)){
       box.innerHTML = `<p class="pf-soon" style="margin:0 0 10px;">Set a display name in your profile to comment.</p><button class="btn btn-ghost" id="cmGoProfile">Open Profile</button>`;
       document.getElementById("cmGoProfile").addEventListener("click", ()=>{ profileViewAddr = null; showView("profile"); });
       return;
@@ -17481,12 +17709,12 @@
       if(!api){ setMsg("No relayer is configured for this network.", "err"); return; }
       post.disabled = true; setMsg("Waiting for your wallet to sign…");
       const ts = Date.now();
-      const signature = await signWith(commentMessage(t.tokenAddress, wallet, text, ts));
-      if(!signature){ setMsg("Not posted.", "err"); post.disabled = false; return; }
+      const signed = await socialSign(w=> commentMessage(t.tokenAddress, w, text, ts));
+      if(!signed){ setMsg("Not posted.", "err"); post.disabled = false; return; }
       setMsg("Posting…");
       try{
         const res = await fetch(`${api}/comments`, { method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ token: t.tokenAddress, author: wallet, text, timestamp: ts, signature }) });
+          body: JSON.stringify({ token: t.tokenAddress, author: signed.signer, text, timestamp: ts, signature: signed.signature }) });
         const data = await res.json().catch(()=>({}));
         if(!res.ok){ setMsg(data.error || "Couldn't post your comment.", "err"); post.disabled = false; return; }
         input.value = ""; count.textContent = `0/${COMMENT_MAX}`; setMsg("");
@@ -17503,11 +17731,11 @@
     const t = currentCommentToken; const api = t && commentApi(t);
     if(!api) return;
     const ts = Date.now();
-    const signature = await signWith(deleteCommentMessage(id, wallet, ts));
-    if(!signature) return;
+    const signed = await socialSign(w=> deleteCommentMessage(id, w, ts));
+    if(!signed) return;
     try{
       const res = await fetch(`${api}/comments/delete`, { method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ id, requester: wallet, timestamp: ts, signature }) });
+        body: JSON.stringify({ id, requester: signed.signer, timestamp: ts, signature: signed.signature }) });
       const data = await res.json().catch(()=>({}));
       if(!res.ok){ toast(data.error || "Couldn't delete that comment."); return; }
       commentRows = commentRows.filter(c=>c.id!==id);
@@ -17563,8 +17791,7 @@
           const d = res.ok ? await res.json() : { comments: [] };
           const rows = d.comments||[];
           cm.innerHTML = rows.length ? rows.map(c=>{
-            const t = tokenByAddress(c.token);
-            return `<div class="cm"><div class="cm-head"><span class="cm-on">on ${t ? `<button type="button" class="pf-chip link" data-pf-token="${escapeHtml(t.id)}"><span class="pf-chip-name">$${escapeHtml(t.ticker)}</span></button>` : escapeHtml(fmtAddr(c.token))}</span><span class="cm-time">${escapeHtml(agoShort(c.createdAt))}</span></div><div class="cm-text">${escapeHtml(c.text)}</div></div>`;
+            return `<div class="cm"><div class="cm-head"><span class="cm-on">on ${socialTokenChip(c.token)}</span><span class="cm-time">${escapeHtml(agoShort(c.createdAt))}</span></div><div class="cm-text">${escapeHtml(c.text)}</div></div>`;
           }).join("") : `<p class="pf-soon">No comments yet.</p>`;
           cm.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
         }catch(e){ cm.innerHTML = `<p class="pf-soon">Couldn't load comments.</p>`; }
@@ -17588,8 +17815,7 @@
       const top = items.slice(0,25);
       feed.innerHTML = top.length ? top.map(it=>{
         if(it.kind==="launch") return `<div class="cm"><div class="cm-head">${profileChipHTML(it.who,{link:true,size:22})}<span class="cm-on">launched <button type="button" class="pf-chip link" data-pf-token="${escapeHtml(it.token.id)}"><span class="pf-chip-name">$${escapeHtml(it.token.ticker)}</span></button></span><span class="cm-time">${escapeHtml(agoShort(it.t))}</span></div></div>`;
-        const t = tokenByAddress(it.c.token);
-        return `<div class="cm"><div class="cm-head">${profileChipHTML(it.who,{link:true,size:22})}<span class="cm-on">commented on ${t ? `<button type="button" class="pf-chip link" data-pf-token="${escapeHtml(t.id)}"><span class="pf-chip-name">$${escapeHtml(t.ticker)}</span></button>` : escapeHtml(fmtAddr(it.c.token))}</span><span class="cm-time">${escapeHtml(agoShort(it.t))}</span></div><div class="cm-text">${escapeHtml(it.c.text)}</div></div>`;
+        return `<div class="cm"><div class="cm-head">${profileChipHTML(it.who,{link:true,size:22})}<span class="cm-on">commented on ${socialTokenChip(it.c.token)}</span><span class="cm-time">${escapeHtml(agoShort(it.t))}</span></div><div class="cm-text">${escapeHtml(it.c.text)}</div></div>`;
       }).join("") : `<p class="pf-soon">Nothing yet from the members you follow.</p>`;
       feed.querySelectorAll("[data-pf-token]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.pfToken)));
     }
@@ -17602,8 +17828,8 @@
      token, 10 per day, and the token needs a live price. A member's callouts
      are listed on their profile; your own profile also lists callouts from
      the members you follow. See lib/social.js and scripts/relayer.js. */
-  const calloutMessage = (token, caller, reason, ts)=> `Hood Launch: call out ${String(token).toLowerCase()} as ${String(caller).toLowerCase()}: ${JSON.stringify(reason)} at ${ts}`;
-  const deleteCalloutMessage = (id, requester, ts)=> `Hood Launch: delete callout ${id} as ${String(requester).toLowerCase()} at ${ts}`;
+  const calloutMessage = (token, caller, reason, ts)=> `Hood Launch: call out ${canonId(token)} as ${canonId(caller)}: ${JSON.stringify(reason)} at ${ts}`;
+  const deleteCalloutMessage = (id, requester, ts)=> `Hood Launch: delete callout ${id} as ${canonId(requester)} at ${ts}`;
   function fmtMultiple(m){
     if(!(m>0)) return "—";
     return (m>=10 ? m.toFixed(1) : m.toFixed(2)) + "x";
@@ -17616,17 +17842,15 @@
     return `<span class="co-mult ${up?"up":"down"}">${escapeHtml(fmtMultiple(c.multiple))}</span> <span class="co-pct ${up?"up":"down"}">${up?"+":""}${pct.toFixed(0)}%</span>${peak}`;
   }
   function calloutRowHTML(c, {showCaller=false, canDelete=false}={}){
-    const t = tokenByAddress(c.token);
-    const sym = t ? t.ticker : (c.symbol || null);
-    const tokenLabel = sym
-      ? (t ? `<button type="button" class="pf-chip link" data-pf-token="${escapeHtml(t.id)}"><span class="pf-chip-name">$${escapeHtml(sym)}</span></button>` : `<span class="pf-chip-name">$${escapeHtml(sym)}</span>`)
-      : escapeHtml(fmtAddr(c.token));
+    const tokenLabel = socialTokenChip(c.token, c.symbol);
+    // Solana tokens are priced in SOL, Robinhood tokens in USD (the callout row says which).
+    const fp = c.priceUnit==="SOL" ? (n=> solFmtPrice(n)) : (n=> fmtUSD(n));
     return `<div class="cm co" data-co-id="${escapeHtml(c.id)}">
       <div class="cm-head">${showCaller ? profileChipHTML(c.caller,{link:true,size:22}) + `<span class="cm-on">called</span>` : `<span class="cm-on">Called</span>`} ${tokenLabel}
         <span class="cm-time">${escapeHtml(agoShort(c.createdAt))}</span>
         ${canDelete ? `<button type="button" class="cm-del" data-co-delete="${escapeHtml(c.id)}">Delete</button>` : ""}</div>
       <div class="co-perf">${calloutPerfHTML(c)}</div>
-      <div class="co-detail">at ${escapeHtml(fmtUSD(c.priceAtCall))}${c.mcapAtCall ? ` · ${escapeHtml(fmtUSD(c.mcapAtCall))} mcap` : ""}${c.currentPrice ? ` → now ${escapeHtml(fmtUSD(c.currentPrice))}${c.currentMcap ? ` · ${escapeHtml(fmtUSD(c.currentMcap))} mcap` : ""}` : ""}</div>
+      <div class="co-detail">at ${escapeHtml(fp(c.priceAtCall))}${c.mcapAtCall ? ` · ${escapeHtml(fmtUSD(c.mcapAtCall))} mcap` : ""}${c.currentPrice ? ` → now ${escapeHtml(fp(c.currentPrice))}${c.currentMcap ? ` · ${escapeHtml(fmtUSD(c.currentMcap))} mcap` : ""}` : ""}</div>
       ${c.reason ? `<div class="cm-text">${escapeHtml(c.reason)}</div>` : ""}
     </div>`;
   }
@@ -17648,11 +17872,11 @@
     }
     const api = relayerApiUrl(appMode); if(!api) return;
     const ts = Date.now();
-    const signature = await signWith(deleteCalloutMessage(id, wallet, ts));
-    if(!signature) return;
+    const signed = await socialSign(w=> deleteCalloutMessage(id, w, ts));
+    if(!signed) return;
     try{
       const res = await fetch(`${api}/callouts/delete`, { method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ id, requester: wallet, timestamp: ts, signature }) });
+        body: JSON.stringify({ id, requester: signed.signer, timestamp: ts, signature: signed.signature }) });
       const data = await res.json().catch(()=>({}));
       if(!res.ok){ toast(data.error || "Couldn't delete that callout."); return; }
       toast("Callout deleted. You can call this token again after 24 hours.");
@@ -17673,7 +17897,7 @@
       if(rows===null) mine.innerHTML = `<p class="pf-soon">Callouts aren't available — no relayer is configured for this network.</p>`;
       else{
         mine.innerHTML = rows.length
-          ? rows.map(c=> calloutRowHTML(c, { canDelete: !!wallet && (c.caller.toLowerCase()===wallet.toLowerCase() || isAdminWallet(wallet)) })).join("")
+          ? rows.map(c=> calloutRowHTML(c, { canDelete: !!myAccount() && (c.caller.toLowerCase()===myAccount() || isAdminWallet(wallet)) })).join("")
           : `<p class="pf-soon">No callouts yet. Open a token and hit "Call out this token".</p>`;
         wireCalloutDeletes(mine, ()=> fillProfileCallouts(addr, following));
       }
@@ -17807,12 +18031,14 @@
     const render = (html)=>{ if(document.getElementById("calloutMount")) document.getElementById("calloutMount").innerHTML = html; };
     const api = relayerApiUrl(t.networkMode);
     if(!api){ render(`<p class="pf-soon" style="margin:0;">Callouts aren't available — no relayer is configured for this network.</p>`); return; }
-    if(!wallet){
-      render(`<p class="pf-soon" style="margin:0 0 10px;">Connect your wallet to call out this token.</p><button class="btn btn-ghost" id="coConnect">Connect Wallet</button>`);
+    const acct = myAccount();
+    if(!acct){
+      const solUnlinked = !wallet && solConnectedAddr();
+      render(`<p class="pf-soon" style="margin:0 0 10px;">${solUnlinked ? "This Solana wallet isn't linked to an account yet. Connect your Robinhood wallet and link it from your Profile to make callouts." : "Connect your wallet to call out this token."}</p><button class="btn btn-ghost" id="coConnect">Connect Wallet</button>`);
       document.getElementById("coConnect").addEventListener("click", ()=> walletBtn.click());
       return;
     }
-    if(!profileNameOf(wallet)){
+    if(!profileNameOf(acct)){
       render(`<p class="pf-soon" style="margin:0 0 10px;">Set a display name in your profile to make callouts.</p><button class="btn btn-ghost" id="coGoProfile">Open Profile</button>`);
       document.getElementById("coGoProfile").addEventListener("click", ()=>{ profileViewAddr = null; showView("profile"); });
       return;
@@ -17820,7 +18046,7 @@
     render(`<p class="pf-soon" style="margin:0;">Checking…</p>`);
     let rows;
     try{
-      const res = await fetch(`${api}/callouts?token=${encodeURIComponent(t.tokenAddress)}&caller=${encodeURIComponent(wallet)}&limit=1`, { cache:"no-store" });
+      const res = await fetch(`${api}/callouts?token=${encodeURIComponent(t.tokenAddress)}&caller=${encodeURIComponent(acct)}&limit=1`, { cache:"no-store" });
       rows = res.ok ? ((await res.json()).callouts||[]) : [];
     }catch(e){ rows = []; }
     if(calloutBoxToken!==t) return;
@@ -17831,7 +18057,8 @@
       wireCalloutDeletes(root, ()=> initCalloutBox(t));
       return;
     }
-    if(!(t.price>0)){
+    // Solana tokens: the relayer checks for a recent price sample itself (it says so if there isn't one).
+    if(t.chain!=="solana" && !(t.price>0)){
       render(`<p class="pf-soon" style="margin:0;">Callouts open once this token has a live price.</p>`);
       return;
     }
@@ -17857,12 +18084,12 @@
       if(Array.from(text).length>COMMENT_MAX){ setMsg(`Keep it under ${COMMENT_MAX} characters.`, "err"); return; }
       post.disabled = true; setMsg("Waiting for your wallet to sign…");
       const ts = Date.now();
-      const signature = await signWith(calloutMessage(t.tokenAddress, wallet, text, ts));
-      if(!signature){ setMsg("Not posted.", "err"); post.disabled = false; return; }
+      const signed = await socialSign(w=> calloutMessage(t.tokenAddress, w, text, ts));
+      if(!signed){ setMsg("Not posted.", "err"); post.disabled = false; return; }
       setMsg("Posting…");
       try{
         const res = await fetch(`${api}/callouts`, { method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ token: t.tokenAddress, caller: wallet, reason: text, timestamp: ts, signature }) });
+          body: JSON.stringify({ token: t.tokenAddress, caller: signed.signer, reason: text, timestamp: ts, signature: signed.signature }) });
         const data = await res.json().catch(()=>({}));
         if(!res.ok){ setMsg(data.error || "Couldn't post your callout.", "err"); post.disabled = false; return; }
         toast("Callout posted.");
