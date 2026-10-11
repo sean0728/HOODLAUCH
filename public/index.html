@@ -4195,13 +4195,12 @@
     if(factoryAddress && getEth()){
       reads.push((async()=>{
         try{
-          const [deployFeeHex, launchFeeHex, lockHex, maxBuyBpsHex] = await Promise.all([
-            ethCall(factoryAddress, "0x"+DEPLOY_FEE_SELECTOR),
+          // V4TokenFactory has no deployFee() any more (deploy-only launches were removed).
+          const [launchFeeHex, lockHex, maxBuyBpsHex] = await Promise.all([
             ethCall(factoryAddress, "0x"+LAUNCH_FEE_SELECTOR),
             ethCall(factoryAddress, "0x"+LP_LOCK_DURATION_SELECTOR),
             ethCall(factoryAddress, "0x"+MAX_CREATOR_BUY_BPS_SELECTOR),
           ]);
-          liveDeployFeeEth = Number(weiToEtherString(decodeUint256(deployFeeHex), 6));
           liveLaunchFeeEth = Number(weiToEtherString(decodeUint256(launchFeeHex), 6));
           liveLpLockDays = Math.round(Number(decodeUint256(lockHex)) / 86400);
           liveMaxCreatorBuyBps = Number(decodeUint256(maxBuyBpsHex));
@@ -12598,14 +12597,13 @@
 
   async function loadFactoryAdminState(address){
     const [
-      ownerHex, pendingOwnerHex, deployFeeHex, launchFeeHex, feeTreasuryHex, lpLockDurationHex,
+      ownerHex, pendingOwnerHex, launchFeeHex, feeTreasuryHex, lpLockDurationHex,
       maxCreatorBuyBpsHex, platformFeeWalletHex, feeBpsHex, priceFeedHex, graduationTargetUsdHex, maxOracleStalenessHex,
       rewardsDistributorHex, rewardBpsHex, creatorRewardsDistributorHex, creatorRewardBpsHex,
       feeWalletDistributorHex, relayerHex, maxRelayerGasReimbursementWeiHex,
     ] = await Promise.all([
       ethCall(address, "0x"+OWNER_SELECTOR),
       ethCall(address, "0x"+PENDING_OWNER_SELECTOR),
-      ethCall(address, "0x"+DEPLOY_FEE_SELECTOR),
       ethCall(address, "0x"+LAUNCH_FEE_SELECTOR),
       ethCall(address, "0x"+FEE_TREASURY_SELECTOR),
       ethCall(address, "0x"+LP_LOCK_DURATION_SELECTOR),
@@ -12626,7 +12624,6 @@
     return {
       owner: decodeAddress(ownerHex),
       pendingOwner: decodeAddress(pendingOwnerHex),
-      deployFeeWei: decodeUint256(deployFeeHex),
       launchFeeWei: decodeUint256(launchFeeHex),
       feeTreasury: decodeAddress(feeTreasuryHex),
       lpLockDurationSeconds: decodeUint256(lpLockDurationHex),
@@ -12712,7 +12709,6 @@
         <div class="admin-readout-grid">
           <div class="admin-readout"><div class="l">Owner</div><div class="v">${escapeHtml(state.owner)}</div></div>
           <div class="admin-readout"><div class="l">Pending owner</div><div class="v">${pendingIsZero ? "None" : escapeHtml(state.pendingOwner)}</div></div>
-          <div class="admin-readout"><div class="l">Deploy fee</div><div class="v">${weiToEtherString(state.deployFeeWei,6)} ETH</div></div>
           <div class="admin-readout"><div class="l">Launch fee</div><div class="v">${weiToEtherString(state.launchFeeWei,6)} ETH</div></div>
           <div class="admin-readout"><div class="l">Fee treasury</div><div class="v">${escapeHtml(state.feeTreasury)}</div></div>
           <div class="admin-readout"><div class="l">LP lock duration</div><div class="v">${fmtInt(Number(state.lpLockDurationSeconds)/86400)} days</div></div>
@@ -12734,10 +12730,6 @@
         </div>
 
         <div class="admin-section-label">Update fees</div>
-        <div class="admin-action-row">
-          <div class="field"><label>Deploy fee (ETH)</label><input type="number" step="any" min="0" id="admin_${key}_deployFee" placeholder="${weiToEtherString(state.deployFeeWei,6)}"></div>
-          <button class="btn btn-primary btn-sm" data-admin-action="deployFee" data-factory-key="${key}">Update</button>
-        </div>
         <div class="admin-action-row">
           <div class="field"><label>Launch fee (ETH)</label><input type="number" step="any" min="0" id="admin_${key}_launchFee" placeholder="${weiToEtherString(state.launchFeeWei,6)}"></div>
           <button class="btn btn-primary btn-sm" data-admin-action="launchFee" data-factory-key="${key}">Update</button>
@@ -16565,12 +16557,7 @@
     const field = (suffix) => document.getElementById(`admin_${key}_${suffix}`);
     let data, successMsg;
     try{
-      if(action==="deployFee"){
-        const v = field("deployFee").value;
-        if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid ETH amount.");
-        data = encodeUint256Calldata(SET_DEPLOY_FEE_SELECTOR, parseEtherToWei(v));
-        successMsg = "Deploy fee updated.";
-      } else if(action==="launchFee"){
+      if(action==="launchFee"){
         const v = field("launchFee").value;
         if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid ETH amount.");
         data = encodeUint256Calldata(SET_LAUNCH_FEE_SELECTOR, parseEtherToWei(v));
