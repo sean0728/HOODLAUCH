@@ -61,7 +61,10 @@ interface IV4CreatorDeposit {
 /// recover. Pausing stops everything that puts new ETH on a curve (buy, launching
 /// a curve, the creator buy-in); sell() is never pausable and graduate() stays open.
 ///
-/// Not included (compared with V2): gasless relayed curve launches.
+/// Gasless launches go through the platform's V4LaunchRelay (see V4PoolLauncher
+/// _creator): the relay verifies the creator's signature, keeps the launch fee
+/// itself, and calls the ordinary createCurveToken / createCustomCurveToken with the
+/// creator's address appended, so those calls carry only the creator's buy-in.
 contract V4CurveFactory is V4PoolLauncher, Pausable {
     using SafeERC20 for IERC20;
 
@@ -289,8 +292,8 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         uint256 salt
     ) external payable nonReentrant whenNotPaused returns (address token, uint256 creatorTokensBought) {
         _checkLaunch(name_, symbol_, totalSupply_, creatorBuyEthAmount);
-        token = Clones.cloneDeterministic(plainTokenImplementation, _deriveTokenSalt(msg.sender, salt));
-        V4LaunchedToken(token).initialize(name_, symbol_, totalSupply_, msg.sender, address(this), address(this));
+        token = Clones.cloneDeterministic(plainTokenImplementation, _deriveTokenSalt(_creator(), salt));
+        V4LaunchedToken(token).initialize(name_, symbol_, totalSupply_, _creator(), address(this), address(this));
         V4TaxHook.CustomFees memory none;
         _registerCurve(token, name_, symbol_, totalSupply_, false, none);
         creatorTokensBought = _creatorBuy(token, totalSupply_, creatorBuyEthAmount, minCreatorTokensOut);
@@ -311,9 +314,9 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         uint256 salt
     ) external payable nonReentrant whenNotPaused returns (address token, uint256 creatorTokensBought) {
         _checkLaunch(name_, symbol_, totalSupply_, creatorBuyEthAmount);
-        token = Clones.cloneDeterministic(customTokenImplementation, _deriveTokenSalt(msg.sender, salt));
+        token = Clones.cloneDeterministic(customTokenImplementation, _deriveTokenSalt(_creator(), salt));
         V4CustomToken(token).initialize(
-            name_, symbol_, totalSupply_, msg.sender, address(this), address(this), marketingWallet, buyFees, sellFees, _infra()
+            name_, symbol_, totalSupply_, _creator(), address(this), address(this), marketingWallet, buyFees, sellFees, _infra()
         );
         V4TaxHook.CustomFees memory f = V4TaxHook.CustomFees({
             buyReflectionBps: buyFees.reflectionBps,
@@ -344,7 +347,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         require(bytes(name_).length > 0, "V4CurveFactory: name required");
         require(bytes(symbol_).length > 0, "V4CurveFactory: symbol required");
         require(totalSupply_ > 0, "V4CurveFactory: supply must be > 0");
-        require(msg.value == curveLaunchFee + creatorBuyEthAmount, "V4CurveFactory: incorrect ETH sent");
+        require(msg.value == _feeDue(curveLaunchFee) + creatorBuyEthAmount, "V4CurveFactory: incorrect ETH sent");
         TaxTerms memory t = _currentTerms();
         _requireTermsReady(t);
         _requireReachableTarget(totalSupply_);
@@ -452,8 +455,8 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         _initCurveStorage(token, totalSupply_, isCustom);
         _storeTerms(token);
         if (isCustom) _storeFees(token, fees);
-        creatorOf[token] = msg.sender;
-        _tokensByCreator[msg.sender].push(token);
+        creatorOf[token] = _creator();
+        _tokensByCreator[_creator()].push(token);
         _tokenList.push(token);
         _emitCreated(token, name_, symbol_);
     }
@@ -462,7 +465,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         uint256 curveSupply = (totalSupply_ * curveSupplyBps) / 10_000;
         require(curveSupply > 0, "V4CurveFactory: curve supply rounds to zero");
         Curve storage curve = curves[token];
-        curve.creator = msg.sender;
+        curve.creator = _creator();
         curve.totalSupply = totalSupply_;
         curve.curveSupply = curveSupply;
         curve.tokensRemaining = curveSupply;
@@ -514,17 +517,17 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     {
         Curve storage curve = curves[token];
         if (ethAmount > 0) {
-            (tokensBought,) = _executeBuy(token, curve, msg.sender, ethAmount, minTokensOut);
+            (tokensBought,) = _executeBuy(token, curve, _creator(), ethAmount, minTokensOut);
             require(
                 tokensBought <= (totalSupply_ * maxCreatorBuyBps) / 10_000,
                 "V4CurveFactory: creator buy-in exceeds max allowed share of supply"
             );
-            emit CreatorBought(token, msg.sender, ethAmount, tokensBought);
+            emit CreatorBought(token, _creator(), ethAmount, tokensBought);
             if (curve.realEthReserve >= curve.poolSeedTargetWei) {
                 try this._attemptGraduate(token) returns (bytes32) {} catch {}
             }
         }
-        _distributeEthFee(curveLaunchFee);
+        _distributeEthFee(_feeDue(curveLaunchFee));
     }
 
     // ---------------------------------------------------------------

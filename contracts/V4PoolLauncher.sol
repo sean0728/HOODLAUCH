@@ -78,6 +78,11 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
     mapping(address => address) public creatorOf;
     mapping(address => bytes32) public poolIdOf;
 
+    /// @notice The gasless launch relay (V4LaunchRelay): the only caller whose
+    /// launch calls are made on someone else's behalf. Zero = gasless launches off.
+    address public launchRelay;
+    event LaunchRelayUpdated(address newRelay);
+
     /// @dev Platform tax terms for one pool, snapshotted from the tax source.
     struct TaxTerms {
         address feeWallet;
@@ -115,6 +120,37 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
         locker = V4LiquidityLocker(locker_);
         hook = V4TaxHook(hook_);
         lpLockDuration = lpLockDuration_;
+    }
+
+    /// @dev True when the current call comes from the launch relay.
+    function _isRelayed() internal view returns (bool) {
+        return msg.sender == launchRelay && msg.sender != address(0);
+    }
+
+    /// @dev Who a launch call is for. A direct caller launches for themselves. The
+    /// launch relay (a trusted contract that has verified the creator's EIP-712
+    /// signature and holds the launch fee) appends the creator's address to the
+    /// calldata, the same convention as ERC-2771 forwarders; nobody else can take
+    /// this branch, so a direct caller cannot name another creator.
+    function _creator() internal view returns (address c) {
+        c = msg.sender;
+        if (_isRelayed()) {
+            require(msg.data.length >= 20, "V4PoolLauncher: relayed call without creator");
+            c = address(bytes20(msg.data[msg.data.length - 20:]));
+            require(c != address(0), "V4PoolLauncher: invalid creator");
+        }
+    }
+
+    /// @dev The launch fee this call must carry: the relay keeps the fee itself,
+    /// so a relayed call carries none.
+    function _feeDue(uint256 fee) internal view returns (uint256) {
+        return _isRelayed() ? 0 : fee;
+    }
+
+    /// @notice Sets (or, with address(0), turns off) the gasless launch relay.
+    function setLaunchRelay(address newRelay) external onlyOwner {
+        launchRelay = newRelay;
+        emit LaunchRelayUpdated(newRelay);
     }
 
     function _checkLockDuration(uint256 d) private pure {

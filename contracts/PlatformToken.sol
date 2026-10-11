@@ -15,9 +15,9 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 ///
 /// The one thing it adds on top of a stock ERC20Burnable is a live,
 /// enumerable holder registry, maintained automatically in _update below,
-/// because PlatformRewardsDistributor needs to be able to walk "every
+/// because V4PlatformTokenRewards needs to be able to walk "every
 /// current holder" on-chain, in a deterministic order, to push out batched
-/// airdrops — see PlatformRewardsDistributor.processAirdropBatch. Nothing
+/// airdrops — see V4PlatformTokenRewards.processAirdropBatch. Nothing
 /// about the registry affects transfers, balances, or supply; it's pure
 /// bookkeeping alongside the ERC20 state OpenZeppelin already tracks.
 ///
@@ -33,18 +33,18 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 /// remove) is the exact same approach EnumerableSet itself uses
 /// internally.
 ///
-/// burn()/burnFrom() (via ERC20Burnable) are what PlatformRewardsDistributor
+/// burn()/burnFrom() (via ERC20Burnable) are what V4PlatformTokenRewards
 /// calls on its own balance after every buyback, to actually destroy the
-/// "burn" half of each round — see PlatformRewardsDistributor._splitAndProcess.
+/// "burn" half of each round — see V4PlatformTokenRewards._splitAndProcess.
 ///
 /// Alongside the registry itself, holderGeneration/holderGenerationCounter
 /// stamp each holder with WHEN it most recently entered the registry. This
-/// exists purely so PlatformRewardsDistributor's airdrop rounds can tell a
+/// exists purely so V4PlatformTokenRewards's airdrop rounds can tell a
 /// genuine round-start holder apart from one that entered (or re-entered)
 /// after a round had already started, even when that address happens to
 /// land at a registry index the round would otherwise have treated as
 /// "safe" — see holderGenerationCounter's own comment and
-/// PlatformRewardsDistributor.processAirdropBatch for the full mechanics.
+/// V4PlatformTokenRewards.processAirdropBatch for the full mechanics.
 contract PlatformToken is ERC20, ERC20Burnable, Ownable2Step {
     address[] private _holderList;
     mapping(address => uint256) private _holderIndex; // 1-based index into _holderList; 0 means "not currently a holder"
@@ -54,13 +54,13 @@ contract PlatformToken is ERC20, ERC20Burnable, Ownable2Step {
     /// time _addHolder actually registers someone new, whether for the
     /// first time ever or re-entering after a previous exit) — see
     /// holderGeneration below and _addHolder. Added specifically so
-    /// PlatformRewardsDistributor's airdrop rounds can tell a genuine
+    /// V4PlatformTokenRewards's airdrop rounds can tell a genuine
     /// round-start holder apart from an address that only entered (or
     /// re-entered) the registry after a round had already started, even
     /// when that address happens to land at a registry INDEX that existed
     /// at round start (which can happen because _removeHolder's swap-and-pop
     /// can hand a freshly-vacated low index to a brand-new holder — see
-    /// PlatformRewardsDistributor.processAirdropBatch's own comment on
+    /// V4PlatformTokenRewards.processAirdropBatch's own comment on
     /// roundGenerationAtStart for the full reasoning). Starts at 0 (no
     /// holder has ever been registered); the first holder ever added gets
     /// generation 1, matching this file's own existing 1-based
@@ -109,9 +109,9 @@ contract PlatformToken is ERC20, ERC20Burnable, Ownable2Step {
     /// NOT stable across calls that change the registry (removal is
     /// swap-and-pop, same as OpenZeppelin's EnumerableSet) — callers that
     /// need to walk the whole set across multiple transactions, like
-    /// PlatformRewardsDistributor's batched airdrop, must tolerate that a
+    /// V4PlatformTokenRewards's batched airdrop, must tolerate that a
     /// holder's index can shift if someone else's balance hits zero in
-    /// between. See PlatformRewardsDistributor.processAirdropBatch for how
+    /// between. See V4PlatformTokenRewards.processAirdropBatch for how
     /// that tradeoff is handled.
     function holderAt(uint256 index) external view returns (address) {
         return _holderList[index];

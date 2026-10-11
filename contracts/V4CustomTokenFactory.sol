@@ -30,8 +30,12 @@ import {V4LiquidityCompounder} from "./V4LiquidityCompounder.sol";
 /// V4TokenFactory's launch. The platform's tax terms and distributor slots are
 /// read from V4TokenFactory (the "tax source"), so they are configured once.
 ///
-/// Not included (compared with V2): a gasless relayed launch for this mode,
-/// and a "deploy token only" option.
+/// Gasless launches go through the platform's V4LaunchRelay (see V4PoolLauncher
+/// _creator): the relay verifies the creator's signature, keeps the launch fee
+/// itself, and calls createCustomToken with the creator's address appended, so
+/// that call carries only the liquidity and buy-in ETH.
+///
+/// Not included (compared with V2): a "deploy token only" option.
 contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
     address public immutable tokenImplementation;
     V4LiquidityCompounder public immutable compounder;
@@ -79,7 +83,8 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         return keccak256(abi.encode(creator_, salt));
     }
 
-    /// @notice msg.value must equal launchFee + liquidityEthAmount + creatorBuyEthAmount.
+    /// @notice msg.value must equal launchFee + liquidityEthAmount + creatorBuyEthAmount
+    /// (a relayed launch carries no launch fee: the relay already holds it).
     function createCustomToken(
         string calldata name_,
         string calldata symbol_,
@@ -91,33 +96,65 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         uint256 creatorBuyEthAmount,
         uint256 minCreatorTokensOut,
         uint256 salt
-    ) external payable nonReentrant returns (address token, uint256 liquidity, uint256 lockId, uint256 creatorTokensBought) {
+    ) external payable nonReentrant {
+        address token;
+        uint256 liquidity;
+        uint256 lockId;
+        uint256 creatorTokensBought;
         require(bytes(name_).length > 0, "V4CustomTokenFactory: name required");
         require(bytes(symbol_).length > 0, "V4CustomTokenFactory: symbol required");
         require(totalSupply_ > 0, "V4CustomTokenFactory: supply must be > 0");
         require(liquidityEthAmount > 0, "V4CustomTokenFactory: no ETH sent for liquidity");
-        require(msg.value >= launchFee, "V4CustomTokenFactory: launch fee not met");
+        uint256 fee = _feeDue(launchFee);
+        require(msg.value >= fee, "V4CustomTokenFactory: launch fee not met");
         require(
-            msg.value - launchFee == liquidityEthAmount + creatorBuyEthAmount,
+            msg.value - fee == liquidityEthAmount + creatorBuyEthAmount,
             "V4CustomTokenFactory: msg.value doesn't match liquidity + buy-in"
         );
         TaxTerms memory terms = _currentTerms();
         _requireTermsReady(terms);
 
-        token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(msg.sender, salt));
-        V4CustomToken(token).initialize(
-            name_, symbol_, totalSupply_, msg.sender, address(this), address(this), marketingWallet, buyFees, sellFees, _infra()
-        );
+        token = _deployToken(name_, symbol_, totalSupply_, marketingWallet, buyFees, sellFees, salt);
 
         bytes32 poolId;
         (liquidity, lockId, creatorTokensBought, poolId) =
             _launch(token, totalSupply_, liquidityEthAmount, creatorBuyEthAmount, minCreatorTokensOut, terms, buyFees, sellFees);
 
-        creatorOf[token] = msg.sender;
-        _tokensByCreator[msg.sender].push(token);
+        creatorOf[token] = _creator();
+        _tokensByCreator[_creator()].push(token);
         _tokenList.push(token);
-        _payLaunchFee();
-        emit CustomTokenCreated(token, msg.sender, name_, symbol_, totalSupply_, poolId, marketingWallet, buyFees, sellFees);
+        _payLaunchFee(fee);
+        _emitCreated(token, name_, symbol_, totalSupply_, poolId, marketingWallet, buyFees, sellFees);
+    }
+
+    /// @dev Split out of createCustomToken purely to keep its stack shallow
+    /// enough for the production compiler settings (0.8.24, via-IR).
+    function _deployToken(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address marketingWallet,
+        V4CustomToken.FeeSet calldata buyFees,
+        V4CustomToken.FeeSet calldata sellFees,
+        uint256 salt
+    ) private returns (address token) {
+        token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(_creator(), salt));
+        V4CustomToken(token).initialize(
+            name_, symbol_, totalSupply_, _creator(), address(this), address(this), marketingWallet, buyFees, sellFees, _infra()
+        );
+    }
+
+    function _emitCreated(
+        address token,
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        bytes32 poolId,
+        address marketingWallet,
+        V4CustomToken.FeeSet calldata buyFees,
+        V4CustomToken.FeeSet calldata sellFees
+    ) private {
+        emit CustomTokenCreated(token, _creator(), name_, symbol_, totalSupply_, poolId, marketingWallet, buyFees, sellFees);
     }
 
     /// @dev Everything that never earns reflections on this token from day one.
@@ -158,7 +195,7 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
 
         uint256 ethUsed;
         uint256 tokenUsed;
-        (lockId, liquidity, ethUsed, tokenUsed) = _seed(key, msg.sender, totalSupply_, liquidityEthAmount);
+        (lockId, liquidity, ethUsed, tokenUsed) = _seed(key, _creator(), totalSupply_, liquidityEthAmount);
 
         if (creatorBuyEthAmount > 0) {
             creatorTokensBought =
@@ -166,8 +203,8 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         }
     }
 
-    function _payLaunchFee() private {
-        (bool ok,,) = _splitFee(launchFee);
+    function _payLaunchFee(uint256 fee) private {
+        (bool ok,,) = _splitFee(fee);
         require(ok, "V4CustomTokenFactory: fee transfer failed");
     }
 
@@ -184,8 +221,9 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         uint256 callerMinOut,
         V4CustomToken.FeeSet calldata buyFees
     ) private returns (uint256 tokensOut) {
+        address creator_ = _creator();
         uint256 minOut = _effectiveMinBuyOut(ethIn, ethReserve, tokenReserve, callerMinOut, buyFees);
-        bytes memory result = poolManager.unlock(abi.encode(key, ethIn, msg.sender));
+        bytes memory result = poolManager.unlock(abi.encode(key, ethIn, creator_));
         uint256 ethSpent;
         (ethSpent, tokensOut) = abi.decode(result, (uint256, uint256));
 
@@ -194,8 +232,8 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
             tokensOut <= (totalSupply_ * maxCreatorBuyBps) / 10_000,
             "V4CustomTokenFactory: creator buy-in exceeds max allowed share of supply"
         );
-        if (ethIn > ethSpent) _sendEth(msg.sender, ethIn - ethSpent);
-        emit CreatorBought(Currency.unwrap(key.currency1), msg.sender, ethSpent, tokensOut);
+        if (ethIn > ethSpent) _sendEth(creator_, ethIn - ethSpent);
+        emit CreatorBought(Currency.unwrap(key.currency1), creator_, ethSpent, tokensOut);
     }
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
