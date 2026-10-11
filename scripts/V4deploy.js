@@ -56,8 +56,8 @@
 //   DEPLOY_TAX_DISTRIBUTOR     "false" to skip the 0.30% tax collector.
 //   DEPLOY_PLATFORM_REWARDS    "false" to skip the platform rewards distributor (default true; it is
 //                              skipped with a warning if DEX_ROUTER_ADDRESS is not set).
-//   DEPLOY_FEE_WEI / LAUNCH_FEE_WEI / CURVE_LAUNCH_FEE_WEI   Fees in wei (default: $50 / $100 / $25 at a
-//                              live ETH price, or $3000 if no price can be fetched).
+//   LAUNCH_FEE_WEI / CURVE_LAUNCH_FEE_WEI   Fees in wei (default: $100 / $25 at a live ETH price, or $3000
+//                              if no price can be fetched). There is no deploy-only fee any more.
 //   LP_LOCK_DURATION_SECONDS   LP lock (default 15 days; 1 second to 10 years).
 //   SNIPE_START_BPS            anti-snipe surcharge on buys at launch (default 2500 = 25%, max 7000; 0 = off).
 //   SNIPE_DURATION_SECONDS     how long it takes to fall to zero (default 180, max 3600; 0 = off).
@@ -86,7 +86,6 @@ const KNOWN_POOL_MANAGERS = { robinhoodMainnet: "0x8366a39cc670b4001a1121b8f6a44
 // Chainlink ETH/USD "Standard Proxy" feed, confirmed for mainnet (see scripts/deploy.js).
 const KNOWN_PRICE_FEEDS = { robinhoodMainnet: "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9" };
 
-const DEPLOY_FEE_USD = 50;
 const LAUNCH_FEE_USD = 100;
 const CURVE_LAUNCH_FEE_USD = 25;
 const FALLBACK_ETH_USD = 3000;
@@ -163,22 +162,20 @@ async function main() {
   // Saving them matters: a resumed run (or a VERIFY run) must use the same constructor
   // arguments the contracts were really deployed with, not a freshly converted price.
   const sm = state.summary || {};
-  const saved = state.fees || (sm.deployFeeWei ? { deployFee: sm.deployFeeWei, launchFee: sm.launchFeeWei, curveFee: sm.curveLaunchFeeWei } : {});
-  let deployFee = process.env.DEPLOY_FEE_WEI ? BigInt(process.env.DEPLOY_FEE_WEI) : saved.deployFee ? BigInt(saved.deployFee) : null;
+  const saved = state.fees || (sm.launchFeeWei ? { launchFee: sm.launchFeeWei, curveFee: sm.curveLaunchFeeWei } : {});
   let launchFee = process.env.LAUNCH_FEE_WEI ? BigInt(process.env.LAUNCH_FEE_WEI) : saved.launchFee ? BigInt(saved.launchFee) : null;
   let curveFee = process.env.CURVE_LAUNCH_FEE_WEI ? BigInt(process.env.CURVE_LAUNCH_FEE_WEI) : saved.curveFee ? BigInt(saved.curveFee) : null;
-  if (deployFee == null || launchFee == null || curveFee == null) {
+  if (launchFee == null || curveFee == null) {
     const live = await fetchEthUsdPrice();
     const px = live || FALLBACK_ETH_USD;
     console.log(live ? `Live ETH price $${live}.` : `No live ETH price; using $${FALLBACK_ETH_USD}. Set the *_FEE_WEI vars or change fees later.`);
     const toWei = (usd) => ethers.parseEther((usd / px).toFixed(18));
-    if (deployFee == null) deployFee = toWei(DEPLOY_FEE_USD);
     if (launchFee == null) launchFee = toWei(LAUNCH_FEE_USD);
     if (curveFee == null) curveFee = toWei(CURVE_LAUNCH_FEE_USD);
   } else if (state.fees) {
     console.log("Using the fees saved by the earlier run.");
   }
-  state.fees = { deployFee: deployFee.toString(), launchFee: launchFee.toString(), curveFee: curveFee.toString() };
+  state.fees = { launchFee: launchFee.toString(), curveFee: curveFee.toString() };
   save();
 
   // ---- PoolManager + price feed ---------------------------------------
@@ -230,7 +227,7 @@ async function main() {
   console.log(`  Price feed         ${priceFeed}`);
   console.log(`  Fee treasury       ${treasury}`);
   console.log(`  Platform fee wallet ${platformFeeWallet}`);
-  console.log(`  Fees (wei)         deploy ${deployFee}  launch ${launchFee}  curve ${curveFee}`);
+  console.log(`  Fees (wei)         launch ${launchFee}  curve ${curveFee}`);
   console.log(`  LP lock            ${lpLock} s`);
   console.log(`  Distributors       ${withDistributors ? "yes (no platform token / no buyback)" : "skipped"}`);
   console.log(`  Platform rewards   ${withPlatformRewards ? `yes (router ${v2Router}, no platform token; 50% of launch fees will be sent to it)` : "skipped"}`);
@@ -297,7 +294,7 @@ async function main() {
   // ---- 5-7: factories, router, compounder -----------------------------
   const factory = await step("v4TokenFactory", "V4TokenFactory", [
     await A(plainImpl), poolManager, await A(locker), await A(hook),
-    deployFee, launchFee, treasury, lpLock, platformFeeWallet, priceFeed,
+    launchFee, treasury, lpLock, platformFeeWallet, priceFeed,
   ]);
   const swapRouter = await step("v4SwapRouter", "V4SwapRouter", [poolManager, await A(hook)]);
   const compounder = await step("compounder", "V4LiquidityCompounder", [poolManager, await A(hook)]);
@@ -541,7 +538,6 @@ async function main() {
     taxDistributorFeeWallet: withTaxDistributor ? taxFeeWallet : null,
     feeTreasury: treasury,
     platformFeeWallet,
-    deployFeeWei: deployFee.toString(),
     launchFeeWei: launchFee.toString(),
     curveLaunchFeeWei: curveFee.toString(),
     lpLockDurationSeconds: lpLock.toString(),
@@ -571,7 +567,7 @@ async function main() {
       [summary.v4LiquidityLocker, [poolManager]],
       [summary.create2Deployer, []],
       [summary.v4TaxHook, [poolManager, deployer.address]],
-      [summary.v4TokenFactory, [summary.plainTokenImpl, poolManager, summary.v4LiquidityLocker, summary.v4TaxHook, deployFee, launchFee, treasury, lpLock, platformFeeWallet, priceFeed]],
+      [summary.v4TokenFactory, [summary.plainTokenImpl, poolManager, summary.v4LiquidityLocker, summary.v4TaxHook, launchFee, treasury, lpLock, platformFeeWallet, priceFeed]],
       [summary.v4SwapRouter, [poolManager, summary.v4TaxHook]],
       [summary.v4LiquidityCompounder, [poolManager, summary.v4TaxHook]],
       [summary.v4CustomTokenFactory, [summary.customTokenImpl, summary.v4TokenFactory, summary.v4LiquidityCompounder, launchFee, lpLock]],

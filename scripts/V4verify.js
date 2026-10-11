@@ -32,8 +32,7 @@ async function main() {
   const zero = ethers.ZeroAddress;
   const at = (n, a) => ethers.getContractAt(n, a);
 
-  const feesLock = [s.deployFeeWei, s.launchFeeWei].map(BigInt);
-  const deployFee = feesLock[0], launchFee = feesLock[1];
+  const launchFee = BigInt(s.launchFeeWei);
   const curveFee = BigInt(s.curveLaunchFeeWei);
   const lpLock = BigInt(s.lpLockDurationSeconds);
 
@@ -47,7 +46,7 @@ async function main() {
     [
       "V4TokenFactory",
       s.v4TokenFactory,
-      [s.plainTokenImpl, s.poolManager, s.v4LiquidityLocker, s.v4TaxHook, deployFee, launchFee, s.feeTreasury, lpLock, s.platformFeeWallet, s.priceFeed],
+      [s.plainTokenImpl, s.poolManager, s.v4LiquidityLocker, s.v4TaxHook, launchFee, s.feeTreasury, lpLock, s.platformFeeWallet, s.priceFeed],
     ],
     ["V4SwapRouter", s.v4SwapRouter, [s.poolManager, s.v4TaxHook]],
     ["V4LiquidityCompounder", s.v4LiquidityCompounder, [s.poolManager, s.v4TaxHook]],

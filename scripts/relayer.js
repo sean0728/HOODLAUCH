@@ -914,7 +914,8 @@ function normalizeFeeSet(feeSet) {
 }
 
 function expectedDepositForToken(voucher) {
-  return voucher.addLiquidityAtLaunch ? voucher.fee + voucher.liquidityEthAmount + voucher.creatorBuyEthAmount : voucher.fee;
+  // V4TokenFactory no longer has a deploy-only mode: the launch is always fee + liquidity + buy-in.
+  return voucher.fee + voucher.liquidityEthAmount + voucher.creatorBuyEthAmount;
 }
 
 // V4LaunchRelay custom-tax token: launch fee + pool liquidity + creator buy-in.
@@ -3381,6 +3382,13 @@ async function main() {
     // BigInt fields back into plain strings — re-normalize before doing any
     // arithmetic on them (expectedDepositFn) or passing them back on-chain.
     const voucher = normalizeVoucher(record.voucher, watcher.voucherFields, watcher.voucherUintFields);
+    // Deploy-only vouchers (addLiquidityAtLaunch=false) were removed from V4TokenFactory: the
+    // contract would revert, and the relayer would pay gas for a transaction that can only fail.
+    if (watcher.kind === "v4token" && !voucher.addLiquidityAtLaunch) {
+      await upsertVoucher(voucherHash, { status: "failed", error: "deploy-only launches are no longer supported" });
+      console.error(`[${watcher.kind}] voucher ${voucherHash} is a deploy-only launch, which V4TokenFactory no longer supports — not relaying; the creator can reclaim the deposit after ${deadline}.`);
+      return;
+    }
     const expected = watcher.expectedDepositFn(voucher);
     if (amount !== expected) {
       await upsertVoucher(voucherHash, { status: "failed", error: `deposit amount ${amount} != expected ${expected}` });
