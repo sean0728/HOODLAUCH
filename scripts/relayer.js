@@ -2233,37 +2233,55 @@ async function main() {
     createdAt: r.createdAt || null,
   });
 
-  // ---- linked wallets ----
-  // An account is its Robinhood (EVM) wallet. A Solana wallet can be LINKED to it, and from then on whatever that
-  // Solana wallet does on the site (comments, callouts, launches, trades shown in the feed) is shown under the
-  // account's name and picture. A link needs a signature from BOTH wallets over the same text, so nobody can attach
-  // a wallet they don't control, or claim someone else's.
-  //   GET  /profiles                     { profiles, links: { solanaAddress: accountAddress } }  (links = every linked wallet)
+  // ---- accounts and linked wallets ----
+  // An ACCOUNT is identified by its main wallet — a Robinhood (EVM) wallet or a Solana wallet, whichever it was
+  // created with. A visitor who only has a Solana wallet logs in with it and gets a full account (name, picture,
+  // follows, comments, callouts). Another wallet (either chain) can be LINKED to an account, and from then on
+  // whatever that wallet does is shown under the account's name and picture. A link needs a signature from BOTH
+  // wallets over the same text, so nobody can attach a wallet they don't control, or claim someone else's.
+  //   GET  /profiles                     { profiles, links: { walletAddress: accountAddress } }  (links = every linked wallet)
   //   GET  /wallet-links/:account        { wallets: [{ address, createdAt }] }
-  //   POST /wallet-links                 { solana, owner, timestamp, ownerSignature, solanaSignature }
-  //   POST /wallet-links/remove          { solana, owner, timestamp, signature }  (signed by the account's EVM wallet)
-  // Social actions (comment / callout and their deletes) accept either the account's EVM wallet or a linked Solana
-  // wallet as the signer; they are always stored under the ACCOUNT (see resolveActor below).
+  //   POST /wallet-links                 { wallet, owner, timestamp, ownerSignature, walletSignature }
+  //   POST /wallet-links/remove          { wallet, owner, timestamp, signature }  (signed by the account's main wallet or the linked wallet)
+  // Every social action (profile edit, comment, callout, follow and their deletes) accepts any wallet of the
+  // account as the signer; it is always stored under the ACCOUNT (see resolveActor below).
+  // A wallet that already has its own account (a profile, follows, comments, callouts, or wallets linked to it)
+  // can't be linked into another one — accounts aren't merged.
   const isEvmAddr = (a) => typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) && hre.ethers.isAddress(a);
   const isSolAddr = (a) => typeof a === "string" && isSolanaAddress(a);
   const isTokenId = (a) => isEvmAddr(a) || isSolAddr(a);
+  const isAccountId = (a) => isEvmAddr(a) || isSolAddr(a);
   let solanaBridge = null; // set where the Solana routes are registered (price history of Solana tokens)
   const linkLimiter = solanaPub.createLimiter({ windowMs: 3600_000, max: 10 });
 
-  // Who is acting? `signer` is the wallet that signed `message`. Returns { account, via } (account = lowercase EVM
-  // address everything is stored under; via = the Solana wallet when one signed) or { status, error }.
+  // True only if `signature` over `message` is genuinely from `address`, whichever chain it is on.
+  function verifyWalletAny(message, signature, address) {
+    if (isEvmAddr(address)) return verifySignatureFrom(message, signature, address);
+    if (isSolAddr(address)) return solanaPub.verifyWalletSignature(address, message, signature);
+    return false;
+  }
+
+  // Who is acting? `signer` is the wallet that signed `message`. Returns { account, via } — account = the main
+  // wallet everything is stored under (the signer itself unless it is linked to another account's main wallet),
+  // via = the signing wallet when it isn't the main one — or { status, error }.
   async function resolveActor(signer, message, signature) {
-    if (isEvmAddr(signer)) {
-      if (!verifySignatureFrom(message, signature, signer)) return { status: 403, error: "Signature does not match this wallet." };
-      return { account: signer.toLowerCase(), via: null };
-    }
-    if (isSolAddr(signer)) {
-      if (!solanaPub.verifyWalletSignature(signer, message, signature)) return { status: 403, error: "Signature does not match this wallet." };
-      const owner = await walletLinkStore.getOwner(signer);
-      if (!owner) return { status: 403, error: "This Solana wallet isn't linked to an account yet — open your Profile and link it first." };
-      return { account: owner, via: signer };
-    }
-    return { status: 400, error: "wallet must be a valid address" };
+    if (!isAccountId(signer)) return { status: 400, error: "wallet must be a valid address" };
+    if (!verifyWalletAny(message, signature, signer)) return { status: 403, error: "Signature does not match this wallet." };
+    const me = social.canonId(signer);
+    const account = (await walletLinkStore.getOwner(signer)) || me;
+    return { account, via: account === me ? null : signer };
+  }
+
+  // Has this wallet built up an account of its own already?
+  async function ownFootprint(wallet) {
+    const net = hre.network.name;
+    const prof = await profileStore.getProfile(wallet);
+    if (prof && (prof.name || prof.avatar)) return prof.name ? `a profile named "${prof.name}"` : "a profile picture";
+    if ((await walletLinkStore.listForOwner(wallet)).length) return "wallets linked to it";
+    if ((await followStore.getFollowing(wallet)).length || (await followStore.getFollowers(wallet)).length) return "follows";
+    if ((await commentStore.listComments(net, { author: wallet, limit: 1 })).length) return "comments";
+    if ((await calloutStore.countSince(net, wallet, 0)) > 0) return "callouts";
+    return null;
   }
 
   app.get("/profiles", asyncRoute(async (_req, res) => {
@@ -2271,67 +2289,72 @@ async function main() {
   }));
 
   app.get("/profile/:address", asyncRoute(async (req, res) => {
-    let address = req.params.address;
-    let account = null;
-    if (isSolAddr(address)) {
-      account = await walletLinkStore.getOwner(address);
-      if (!account) return sendJson(res, 200, { profile: null });
-      address = account;
-    } else if (!hre.ethers.isAddress(address)) {
-      return sendJson(res, 400, { error: "address must be a valid address" });
-    }
-    const rec = await profileStore.getProfile(address);
-    sendJson(res, 200, { profile: rec ? publicProfile(rec) : null, account });
+    const address = req.params.address;
+    if (!isAccountId(address)) return sendJson(res, 400, { error: "address must be a valid address" });
+    const owner = await walletLinkStore.getOwner(address);
+    const rec = await profileStore.getProfile(owner || address);
+    sendJson(res, 200, { profile: rec ? publicProfile(rec) : null, account: owner || social.canonId(address) });
   }));
 
   app.get("/wallet-links/:account", asyncRoute(async (req, res) => {
-    if (!isEvmAddr(req.params.account)) return sendJson(res, 400, { error: "account must be a valid address" });
+    if (!isAccountId(req.params.account)) return sendJson(res, 400, { error: "account must be a valid address" });
     sendJson(res, 200, { wallets: await walletLinkStore.listForOwner(req.params.account) });
   }));
 
   app.post("/wallet-links", asyncRoute(async (req, res) => {
-    const { solana, owner, timestamp, ownerSignature, solanaSignature } = req.body || {};
-    if (!isSolAddr(solana)) return sendJson(res, 400, { error: "solana must be a valid Solana address" });
-    if (!isEvmAddr(owner)) return sendJson(res, 400, { error: "owner must be a valid address" });
+    const { wallet, owner, timestamp, ownerSignature, walletSignature } = req.body || {};
+    if (!isAccountId(wallet)) return sendJson(res, 400, { error: "wallet must be a valid address" });
+    if (!isAccountId(owner)) return sendJson(res, 400, { error: "owner must be a valid address" });
+    if (social.canonId(wallet) === social.canonId(owner)) return sendJson(res, 400, { error: "That is already your main wallet." });
     if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
-    const message = social.linkMessage(solana, owner, timestamp);
-    if (!verifySignatureFrom(message, ownerSignature, owner)) return sendJson(res, 403, { error: "The account wallet's signature doesn't match." });
-    if (!solanaPub.verifyWalletSignature(solana, message, solanaSignature)) return sendJson(res, 403, { error: "The Solana wallet's signature doesn't match." });
-    const account = owner.toLowerCase();
+    const message = social.linkMessage(wallet, owner, timestamp);
+    if (!verifyWalletAny(message, ownerSignature, owner)) return sendJson(res, 403, { error: "The main wallet's signature doesn't match." });
+    if (!verifyWalletAny(message, walletSignature, wallet)) return sendJson(res, 403, { error: "The wallet being linked didn't sign (or its signature doesn't match)." });
+    const account = social.canonId(owner);
+    if (await walletLinkStore.getOwner(account)) {
+      return sendJson(res, 400, { error: "This wallet is itself linked to another account — link from that account's main wallet instead." });
+    }
     if (!linkLimiter.take(account)) return sendJson(res, 429, { error: "Too many link changes — try again later." });
     const existing = await walletLinkStore.listForOwner(account);
-    if (!existing.some((w) => w.address === solana) && existing.length >= social.MAX_LINKED_WALLETS) {
-      return sendJson(res, 400, { error: `An account can have up to ${social.MAX_LINKED_WALLETS} linked Solana wallets.` });
+    if (existing.some((w) => w.address === social.canonId(wallet))) return sendJson(res, 200, { wallets: existing });
+    if (existing.length >= social.MAX_LINKED_WALLETS) {
+      return sendJson(res, 400, { error: `An account can have up to ${social.MAX_LINKED_WALLETS} linked wallets.` });
+    }
+    const taken = await ownFootprint(wallet);
+    if (taken) {
+      return sendJson(res, 409, { error: `That wallet already has its own account (${taken}). Accounts can't be merged yet — link a wallet that has no profile, follows, comments or callouts.` });
     }
     try {
-      await walletLinkStore.addLink(solana, account);
+      await walletLinkStore.addLink(wallet, account);
     } catch (err) {
-      if (err && err.code === "LINKED_ELSEWHERE") return sendJson(res, 409, { error: "That Solana wallet is already linked to another account. Unlink it there first." });
+      if (err && err.code === "LINKED_ELSEWHERE") return sendJson(res, 409, { error: "That wallet is already linked to another account. Unlink it there first." });
       throw err;
     }
-    console.log(`[link] Solana ${solana} linked to ${account}.`);
+    console.log(`[link] ${wallet} linked to ${account}.`);
     sendJson(res, 200, { wallets: await walletLinkStore.listForOwner(account) });
   }));
 
   app.post("/wallet-links/remove", asyncRoute(async (req, res) => {
-    const { solana, owner, timestamp, signature } = req.body || {};
-    if (!isSolAddr(solana)) return sendJson(res, 400, { error: "solana must be a valid Solana address" });
-    if (!isEvmAddr(owner)) return sendJson(res, 400, { error: "owner must be a valid address" });
+    const { wallet, owner, timestamp, signature } = req.body || {};
+    if (!isAccountId(wallet)) return sendJson(res, 400, { error: "wallet must be a valid address" });
+    if (!isAccountId(owner)) return sendJson(res, 400, { error: "owner must be a valid address" });
     if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
-    if (!verifySignatureFrom(social.unlinkMessage(solana, owner, timestamp), signature, owner)) {
+    const message = social.unlinkMessage(wallet, owner, timestamp);
+    // the account's main wallet can unlink any of its wallets; a linked wallet can also detach itself
+    if (!verifyWalletAny(message, signature, owner) && !verifyWalletAny(message, signature, wallet)) {
       return sendJson(res, 403, { error: "Signature does not match this wallet." });
     }
-    const account = owner.toLowerCase();
+    const account = social.canonId(owner);
     if (!linkLimiter.take(account)) return sendJson(res, 429, { error: "Too many link changes — try again later." });
-    const current = await walletLinkStore.getOwner(solana);
+    const current = await walletLinkStore.getOwner(wallet);
     let removed = false;
-    if (current === account) removed = await walletLinkStore.removeLink(solana);
-    console.log(`[link] Solana ${solana} unlinked from ${account} (${removed ? "existed" : "was not linked"}).`);
+    if (current === account) removed = await walletLinkStore.removeLink(wallet);
+    console.log(`[link] ${wallet} unlinked from ${account} (${removed ? "existed" : "was not linked"}).`);
     sendJson(res, 200, { removed, wallets: await walletLinkStore.listForOwner(account) });
   }));
 
   app.get("/profile-avatar/:address", asyncRoute(async (req, res) => {
-    if (!hre.ethers.isAddress(req.params.address)) return res.sendStatus(400);
+    if (!isAccountId(req.params.address)) return res.sendStatus(400);
     const rec = await profileStore.getProfile(req.params.address);
     const m = rec && rec.avatar && /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(rec.avatar);
     if (!m) return res.sendStatus(404);
@@ -2343,30 +2366,32 @@ async function main() {
     res.end(Buffer.from(m[2], "base64"));
   }));
 
+  // `address` is the wallet that signed — the account's main wallet or any wallet linked to it (either chain).
+  // The profile is saved under the ACCOUNT.
   app.post("/profile", asyncRoute(async (req, res) => {
     const { address, name: rawName, avatar, timestamp, signature } = req.body || {};
-    if (!address || !hre.ethers.isAddress(address)) return sendJson(res, 400, { error: "address must be a valid address" });
+    if (!address || !isAccountId(address)) return sendJson(res, 400, { error: "address must be a valid address" });
     if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
     const name = typeof rawName === "string" ? rawName : "";
-    const isAdmin = address.toLowerCase() === ADMIN_WALLET.toLowerCase();
-    const nameError = profileLib.validateName(name, { isAdmin });
-    if (nameError) return sendJson(res, 400, { error: nameError });
     // avatar: undefined/absent = keep the saved picture, null = remove, string = new picture
     const avatarField = avatar === undefined ? undefined : avatar;
     const avatarError = profileLib.validateAvatar(avatarField);
     if (avatarError) return sendJson(res, 400, { error: avatarError });
     const avatarPart = avatarField === undefined ? "keep" : avatarField === null ? "none" : profileLib.avatarHash(avatarField);
     const message = profileLib.profileMessage(address, name, avatarPart, timestamp);
-    if (!verifySignatureFrom(message, signature, address)) {
-      return sendJson(res, 403, { error: "Signature does not match this wallet." });
-    }
-    if (!profileWriteAllowed(address.toLowerCase())) {
+    const actor = await resolveActor(address, message, signature);
+    if (actor.error) return sendJson(res, actor.status, { error: actor.error });
+    const account = actor.account;
+    const isAdmin = account === ADMIN_WALLET.toLowerCase();
+    const nameError = profileLib.validateName(name, { isAdmin });
+    if (nameError) return sendJson(res, 400, { error: nameError });
+    if (!profileWriteAllowed(account)) {
       return sendJson(res, 429, { error: "Too many profile changes — try again later." });
     }
     try {
-      const rec = await profileStore.saveProfile(address, { name, nameKey: profileLib.nameKey(name), avatar: avatarField });
-      console.log(`[profile] saved for ${address}${name ? ` as "${name}"` : ""}.`);
-      sendJson(res, 200, { profile: rec ? publicProfile(rec) : null });
+      const rec = await profileStore.saveProfile(account, { name, nameKey: profileLib.nameKey(name), avatar: avatarField });
+      console.log(`[profile] saved for ${account}${actor.via ? ` (via ${actor.via})` : ""}${name ? ` as "${name}"` : ""}.`);
+      sendJson(res, 200, { profile: rec ? publicProfile(rec) : null, account });
     } catch (err) {
       if (err && err.code === "NAME_TAKEN") return sendJson(res, 409, { error: "That name is already taken." });
       throw err;
@@ -2375,9 +2400,9 @@ async function main() {
 
   app.post("/profile/remove", asyncRoute(async (req, res) => {
     const { address, timestamp, signature } = req.body || {};
-    if (!address || !hre.ethers.isAddress(address)) return sendJson(res, 400, { error: "address must be a valid address" });
+    if (!address || !isAccountId(address)) return sendJson(res, 400, { error: "address must be a valid address" });
     if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
-    const message = `Hood Launch admin: remove profile ${String(address).toLowerCase()} at ${timestamp}`;
+    const message = `Hood Launch admin: remove profile ${social.canonId(address)} at ${timestamp}`;
     if (!verifyAdminSignature(message, signature)) return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
     const removed = await profileStore.deleteProfile(address);
     console.log(`[admin] removed profile for ${address} (${removed ? "existed" : "none"}).`);
@@ -2429,12 +2454,12 @@ async function main() {
       filters.token = String(token);
     }
     if (author) {
-      if (!hre.ethers.isAddress(String(author))) return sendJson(res, 400, { error: "author must be a valid address" });
+      if (!isAccountId(String(author))) return sendJson(res, 400, { error: "author must be a valid address" });
       filters.author = String(author);
     }
     if (authors) {
       const list = String(authors).split(",").map((a) => a.trim()).filter(Boolean).slice(0, 100);
-      if (!list.length || !list.every((a) => hre.ethers.isAddress(a))) return sendJson(res, 400, { error: "authors must be a comma-separated list of addresses" });
+      if (!list.length || !list.every((a) => isAccountId(a))) return sendJson(res, 400, { error: "authors must be a comma-separated list of addresses" });
       filters.authors = list;
     }
     if (!filters.token && !filters.author && !filters.authors) return sendJson(res, 400, { error: "Pass token, author or authors." });
@@ -2492,28 +2517,33 @@ async function main() {
   }));
 
   app.get("/follows/:address", asyncRoute(async (req, res) => {
-    if (!hre.ethers.isAddress(req.params.address)) return sendJson(res, 400, { error: "address must be a valid address" });
-    const [following, followers] = await Promise.all([followStore.getFollowing(req.params.address), followStore.getFollowers(req.params.address)]);
+    if (!isAccountId(req.params.address)) return sendJson(res, 400, { error: "address must be a valid address" });
+    const acct = (await walletLinkStore.getOwner(req.params.address)) || req.params.address;
+    const [following, followers] = await Promise.all([followStore.getFollowing(acct), followStore.getFollowers(acct)]);
     sendJson(res, 200, { following, followers });
   }));
 
+  // `follower` is the wallet that signed (the account's main wallet or a linked one); the follow is stored between
+  // ACCOUNTS. `followee` may be any wallet — a linked one is followed as its account.
   app.post("/follow", asyncRoute(async (req, res) => {
-    const { follower, followee, follow, timestamp, signature } = req.body || {};
-    if (!follower || !hre.ethers.isAddress(follower)) return sendJson(res, 400, { error: "follower must be a valid address" });
-    if (!followee || !hre.ethers.isAddress(followee)) return sendJson(res, 400, { error: "followee must be a valid address" });
+    const { follower: signer, followee, follow, timestamp, signature } = req.body || {};
+    if (!signer || !isAccountId(signer)) return sendJson(res, 400, { error: "follower must be a valid address" });
+    if (!followee || !isAccountId(followee)) return sendJson(res, 400, { error: "followee must be a valid address" });
     if (typeof follow !== "boolean") return sendJson(res, 400, { error: "follow must be true or false" });
-    if (String(follower).toLowerCase() === String(followee).toLowerCase()) return sendJson(res, 400, { error: "You can't follow yourself." });
     if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
-    const message = social.followMessage(follow, followee, follower, timestamp);
-    if (!verifySignatureFrom(message, signature, follower)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
-    if (!followActionAllowed(String(follower).toLowerCase())) return sendJson(res, 429, { error: "Too many follow changes — try again later." });
+    const actor = await resolveActor(signer, social.followMessage(follow, followee, signer, timestamp), signature);
+    if (actor.error) return sendJson(res, actor.status, { error: actor.error });
+    const follower = actor.account;
+    const target = (await walletLinkStore.getOwner(followee)) || social.canonId(followee);
+    if (follower === target) return sendJson(res, 400, { error: "You can't follow yourself." });
+    if (!followActionAllowed(follower)) return sendJson(res, 429, { error: "Too many follow changes — try again later." });
     if (follow) {
       const current = await followStore.getFollowing(follower);
-      if (current.length >= social.MAX_FOLLOWING && !current.includes(String(followee).toLowerCase())) {
+      if (current.length >= social.MAX_FOLLOWING && !current.includes(target)) {
         return sendJson(res, 400, { error: `You can follow up to ${social.MAX_FOLLOWING} members.` });
       }
     }
-    const changed = await followStore.setFollow(follower, followee, follow);
+    const changed = await followStore.setFollow(follower, target, follow);
     sendJson(res, 200, { follow, changed });
   }));
 
@@ -2600,12 +2630,12 @@ async function main() {
       filters.token = String(token);
     }
     if (caller) {
-      if (!hre.ethers.isAddress(String(caller))) return sendJson(res, 400, { error: "caller must be a valid address" });
+      if (!isAccountId(String(caller))) return sendJson(res, 400, { error: "caller must be a valid address" });
       filters.caller = String(caller);
     }
     if (callers) {
       const list = String(callers).split(",").map((a) => a.trim()).filter(Boolean).slice(0, 100);
-      if (!list.length || !list.every((a) => hre.ethers.isAddress(a))) return sendJson(res, 400, { error: "callers must be a comma-separated list of addresses" });
+      if (!list.length || !list.every((a) => isAccountId(a))) return sendJson(res, 400, { error: "callers must be a comma-separated list of addresses" });
       filters.callers = list;
     }
     if (!filters.token && !filters.caller && !filters.callers) return sendJson(res, 400, { error: "Pass token, caller or callers." });
