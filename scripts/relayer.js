@@ -115,7 +115,9 @@ const { readActivity, appendActivity } = require("../lib/activityStore");
 const tradeStore = require("../lib/tradeStore");
 const pnlLib = require("../lib/pnl");
 const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore");
-const { registerSolanaRoutes } = require("../lib/solanaApi");
+const { registerSolanaRoutes, isSolanaAddress } = require("../lib/solanaApi");
+const solanaPub = require("../lib/solanaPublic");
+const walletLinkStore = require("../lib/walletLinkStore");
 const { CHAINS, normalizeChain } = require("../lib/chains");
 const { ROBINHOOD_NETWORKS } = require("../lib/networks");
 const { isDbConfigured, ensureSchema } = require("../lib/db");
@@ -2231,14 +2233,101 @@ async function main() {
     createdAt: r.createdAt || null,
   });
 
+  // ---- linked wallets ----
+  // An account is its Robinhood (EVM) wallet. A Solana wallet can be LINKED to it, and from then on whatever that
+  // Solana wallet does on the site (comments, callouts, launches, trades shown in the feed) is shown under the
+  // account's name and picture. A link needs a signature from BOTH wallets over the same text, so nobody can attach
+  // a wallet they don't control, or claim someone else's.
+  //   GET  /profiles                     { profiles, links: { solanaAddress: accountAddress } }  (links = every linked wallet)
+  //   GET  /wallet-links/:account        { wallets: [{ address, createdAt }] }
+  //   POST /wallet-links                 { solana, owner, timestamp, ownerSignature, solanaSignature }
+  //   POST /wallet-links/remove          { solana, owner, timestamp, signature }  (signed by the account's EVM wallet)
+  // Social actions (comment / callout and their deletes) accept either the account's EVM wallet or a linked Solana
+  // wallet as the signer; they are always stored under the ACCOUNT (see resolveActor below).
+  const isEvmAddr = (a) => typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) && hre.ethers.isAddress(a);
+  const isSolAddr = (a) => typeof a === "string" && isSolanaAddress(a);
+  const isTokenId = (a) => isEvmAddr(a) || isSolAddr(a);
+  let solanaBridge = null; // set where the Solana routes are registered (price history of Solana tokens)
+  const linkLimiter = solanaPub.createLimiter({ windowMs: 3600_000, max: 10 });
+
+  // Who is acting? `signer` is the wallet that signed `message`. Returns { account, via } (account = lowercase EVM
+  // address everything is stored under; via = the Solana wallet when one signed) or { status, error }.
+  async function resolveActor(signer, message, signature) {
+    if (isEvmAddr(signer)) {
+      if (!verifySignatureFrom(message, signature, signer)) return { status: 403, error: "Signature does not match this wallet." };
+      return { account: signer.toLowerCase(), via: null };
+    }
+    if (isSolAddr(signer)) {
+      if (!solanaPub.verifyWalletSignature(signer, message, signature)) return { status: 403, error: "Signature does not match this wallet." };
+      const owner = await walletLinkStore.getOwner(signer);
+      if (!owner) return { status: 403, error: "This Solana wallet isn't linked to an account yet — open your Profile and link it first." };
+      return { account: owner, via: signer };
+    }
+    return { status: 400, error: "wallet must be a valid address" };
+  }
+
   app.get("/profiles", asyncRoute(async (_req, res) => {
-    sendJson(res, 200, { profiles: await profileStore.listProfiles() });
+    sendJson(res, 200, { profiles: await profileStore.listProfiles(), links: await walletLinkStore.listAll() });
   }));
 
   app.get("/profile/:address", asyncRoute(async (req, res) => {
-    if (!hre.ethers.isAddress(req.params.address)) return sendJson(res, 400, { error: "address must be a valid address" });
-    const rec = await profileStore.getProfile(req.params.address);
-    sendJson(res, 200, { profile: rec ? publicProfile(rec) : null });
+    let address = req.params.address;
+    let account = null;
+    if (isSolAddr(address)) {
+      account = await walletLinkStore.getOwner(address);
+      if (!account) return sendJson(res, 200, { profile: null });
+      address = account;
+    } else if (!hre.ethers.isAddress(address)) {
+      return sendJson(res, 400, { error: "address must be a valid address" });
+    }
+    const rec = await profileStore.getProfile(address);
+    sendJson(res, 200, { profile: rec ? publicProfile(rec) : null, account });
+  }));
+
+  app.get("/wallet-links/:account", asyncRoute(async (req, res) => {
+    if (!isEvmAddr(req.params.account)) return sendJson(res, 400, { error: "account must be a valid address" });
+    sendJson(res, 200, { wallets: await walletLinkStore.listForOwner(req.params.account) });
+  }));
+
+  app.post("/wallet-links", asyncRoute(async (req, res) => {
+    const { solana, owner, timestamp, ownerSignature, solanaSignature } = req.body || {};
+    if (!isSolAddr(solana)) return sendJson(res, 400, { error: "solana must be a valid Solana address" });
+    if (!isEvmAddr(owner)) return sendJson(res, 400, { error: "owner must be a valid address" });
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    const message = social.linkMessage(solana, owner, timestamp);
+    if (!verifySignatureFrom(message, ownerSignature, owner)) return sendJson(res, 403, { error: "The account wallet's signature doesn't match." });
+    if (!solanaPub.verifyWalletSignature(solana, message, solanaSignature)) return sendJson(res, 403, { error: "The Solana wallet's signature doesn't match." });
+    const account = owner.toLowerCase();
+    if (!linkLimiter.take(account)) return sendJson(res, 429, { error: "Too many link changes — try again later." });
+    const existing = await walletLinkStore.listForOwner(account);
+    if (!existing.some((w) => w.address === solana) && existing.length >= social.MAX_LINKED_WALLETS) {
+      return sendJson(res, 400, { error: `An account can have up to ${social.MAX_LINKED_WALLETS} linked Solana wallets.` });
+    }
+    try {
+      await walletLinkStore.addLink(solana, account);
+    } catch (err) {
+      if (err && err.code === "LINKED_ELSEWHERE") return sendJson(res, 409, { error: "That Solana wallet is already linked to another account. Unlink it there first." });
+      throw err;
+    }
+    console.log(`[link] Solana ${solana} linked to ${account}.`);
+    sendJson(res, 200, { wallets: await walletLinkStore.listForOwner(account) });
+  }));
+
+  app.post("/wallet-links/remove", asyncRoute(async (req, res) => {
+    const { solana, owner, timestamp, signature } = req.body || {};
+    if (!isSolAddr(solana)) return sendJson(res, 400, { error: "solana must be a valid Solana address" });
+    if (!isEvmAddr(owner)) return sendJson(res, 400, { error: "owner must be a valid address" });
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    if (!verifySignatureFrom(social.unlinkMessage(solana, owner, timestamp), signature, owner)) {
+      return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    }
+    const account = owner.toLowerCase();
+    if (!linkLimiter.take(account)) return sendJson(res, 429, { error: "Too many link changes — try again later." });
+    const current = await walletLinkStore.getOwner(solana);
+    let removed = false;
+    if (current === account) removed = await walletLinkStore.removeLink(solana);
+    console.log(`[link] Solana ${solana} unlinked from ${account} (${removed ? "existed" : "was not linked"}).`);
+    sendJson(res, 200, { removed, wallets: await walletLinkStore.listForOwner(account) });
   }));
 
   app.get("/profile-avatar/:address", asyncRoute(async (req, res) => {
@@ -2336,7 +2425,7 @@ async function main() {
     const { token, author, authors, limit, before } = req.query || {};
     const filters = { limit, before };
     if (token) {
-      if (!hre.ethers.isAddress(String(token))) return sendJson(res, 400, { error: "token must be a valid address" });
+      if (!isTokenId(String(token))) return sendJson(res, 400, { error: "token must be a valid address" });
       filters.token = String(token);
     }
     if (author) {
@@ -2354,14 +2443,17 @@ async function main() {
   }));
 
   app.post("/comments", asyncRoute(async (req, res) => {
-    const { token, author, text, timestamp, signature } = req.body || {};
-    if (!token || !hre.ethers.isAddress(token)) return sendJson(res, 400, { error: "token must be a valid address" });
-    if (!author || !hre.ethers.isAddress(author)) return sendJson(res, 400, { error: "author must be a valid address" });
+    // `author` is whichever wallet signed: the account's EVM wallet, or a Solana wallet linked to it. The comment is
+    // stored under the ACCOUNT, so it shows the account's name wherever it appears.
+    const { token, author: signer, text, timestamp, signature } = req.body || {};
+    if (!token || !isTokenId(token)) return sendJson(res, 400, { error: "token must be a valid address" });
+    if (!signer || !(isEvmAddr(signer) || isSolAddr(signer))) return sendJson(res, 400, { error: "author must be a valid address" });
     if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
     const textError = social.validateComment(text);
     if (textError) return sendJson(res, 400, { error: textError });
-    const message = social.commentMessage(token, author, text, timestamp);
-    if (!verifySignatureFrom(message, signature, author)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    const actor = await resolveActor(signer, social.commentMessage(token, signer, text, timestamp), signature);
+    if (actor.error) return sendJson(res, actor.status, { error: actor.error });
+    const author = actor.account;
     const net = hre.network.name;
     // Only tokens this relayer knows about, so nobody can park comments on arbitrary addresses.
     const tokenKey = String(token).toLowerCase();
@@ -2376,22 +2468,23 @@ async function main() {
     const gate = commentPostAllowed(String(author).toLowerCase());
     if (gate) return sendJson(res, 429, { error: gate });
     const rec = await commentStore.addComment(net, { token, author, text });
-    console.log(`[comment] ${author} on ${token}.`);
+    console.log(`[comment] ${author}${actor.via ? ` (via Solana ${actor.via})` : ""} on ${token}.`);
     sendJson(res, 200, { comment: publicComment(rec) });
   }));
 
   app.post("/comments/delete", asyncRoute(async (req, res) => {
-    const { id, requester, timestamp, signature } = req.body || {};
+    const { id, requester: signer, timestamp, signature } = req.body || {};
     if (typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) return sendJson(res, 400, { error: "invalid comment id" });
-    if (!requester || !hre.ethers.isAddress(requester)) return sendJson(res, 400, { error: "requester must be a valid address" });
+    if (!signer || !(isEvmAddr(signer) || isSolAddr(signer))) return sendJson(res, 400, { error: "requester must be a valid address" });
     if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
-    const message = social.deleteCommentMessage(id, requester, timestamp);
-    if (!verifySignatureFrom(message, signature, requester)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    const actor = await resolveActor(signer, social.deleteCommentMessage(id, signer, timestamp), signature);
+    if (actor.error) return sendJson(res, actor.status, { error: actor.error });
+    const requester = actor.account;
     const net = hre.network.name;
     const c = await commentStore.getComment(net, id);
     if (!c) return sendJson(res, 200, { deleted: false });
-    const isAuthor = c.author === String(requester).toLowerCase();
-    const isAdmin = String(requester).toLowerCase() === ADMIN_WALLET.toLowerCase();
+    const isAuthor = c.author === requester;
+    const isAdmin = requester === ADMIN_WALLET.toLowerCase();
     if (!isAuthor && !isAdmin) return sendJson(res, 403, { error: "Only the author or the admin can delete a comment." });
     const deleted = await commentStore.deleteComment(net, id);
     console.log(`[comment] ${id} deleted by ${requester}${isAdmin && !isAuthor ? " (admin)" : ""}.`);
@@ -2445,13 +2538,27 @@ async function main() {
   async function enrichCallouts(rows) {
     const net = hre.network.name;
     const tracked = (await readTrackedTokens(net)) || {};
+    let ledgerBySol = null; // Solana tokens aren't in the tracked-token store; their name/symbol live in the launch ledger
+    const solInfo = async (token) => {
+      if (!ledgerBySol) {
+        ledgerBySol = new Map();
+        for (const e of (await readLedger(net).catch(() => [])) || []) if (e && e.tokenAddress && isSolAddr(e.tokenAddress)) ledgerBySol.set(e.tokenAddress, e);
+      }
+      return ledgerBySol.get(token) || {};
+    };
     const histories = new Map();
     const histFor = async (token) => {
-      if (!histories.has(token)) histories.set(token, (await readPriceHistory(net, token).catch(() => [])) || []);
+      if (!histories.has(token)) {
+        let h;
+        if (isSolAddr(token)) h = solanaBridge ? await solanaBridge.priceHistory(token).catch(() => []) : [];
+        else h = await readPriceHistory(net, token).catch(() => []);
+        histories.set(token, h || []);
+      }
       return histories.get(token);
     };
     const out = [];
     for (const r of rows) {
+      const sol = isSolAddr(r.token);
       const hist = await histFor(r.token);
       const last = hist.length ? hist[hist.length - 1] : null;
       let peak = null;
@@ -2461,10 +2568,13 @@ async function main() {
       const cur = last && last.p > 0 ? last.p : null;
       const multiple = cur && r.priceAtCall > 0 ? cur / r.priceAtCall : null;
       const peakMultiple = peak && r.priceAtCall > 0 ? Math.max(peak / r.priceAtCall, multiple || 0) : multiple;
-      const tk = tracked[r.token] || {};
+      const tk = sol ? await solInfo(r.token) : (tracked[r.token] || {});
       out.push({
         id: r.id,
         token: r.token,
+        // Solana prices are in SOL per token (there is no USD price sample for them); Robinhood prices are in USD.
+        chain: sol ? CHAINS.SOLANA : CHAINS.ROBINHOOD,
+        priceUnit: sol ? "SOL" : "USD",
         symbol: tk.symbol || null,
         name: tk.name || null,
         caller: r.caller,
@@ -2486,7 +2596,7 @@ async function main() {
     const { token, caller, callers, limit, before } = req.query || {};
     const filters = { limit, before };
     if (token) {
-      if (!hre.ethers.isAddress(String(token))) return sendJson(res, 400, { error: "token must be a valid address" });
+      if (!isTokenId(String(token))) return sendJson(res, 400, { error: "token must be a valid address" });
       filters.token = String(token);
     }
     if (caller) {
@@ -2504,15 +2614,18 @@ async function main() {
   }));
 
   app.post("/callouts", asyncRoute(async (req, res) => {
-    const { token, caller, reason: rawReason, timestamp, signature } = req.body || {};
-    if (!token || !hre.ethers.isAddress(token)) return sendJson(res, 400, { error: "token must be a valid address" });
-    if (!caller || !hre.ethers.isAddress(caller)) return sendJson(res, 400, { error: "caller must be a valid address" });
+    // `caller` is whichever wallet signed (the account's EVM wallet, or a Solana wallet linked to it); the callout
+    // is stored under the ACCOUNT so a member's track record is one list across both chains.
+    const { token, caller: signer, reason: rawReason, timestamp, signature } = req.body || {};
+    if (!token || !isTokenId(token)) return sendJson(res, 400, { error: "token must be a valid address" });
+    if (!signer || !(isEvmAddr(signer) || isSolAddr(signer))) return sendJson(res, 400, { error: "caller must be a valid address" });
     if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
     const reason = typeof rawReason === "string" ? rawReason : "";
     const reasonError = social.validateReason(reason);
     if (reasonError) return sendJson(res, 400, { error: reasonError });
-    const message = social.calloutMessage(token, caller, reason, timestamp);
-    if (!verifySignatureFrom(message, signature, caller)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    const actor = await resolveActor(signer, social.calloutMessage(token, signer, reason, timestamp), signature);
+    if (actor.error) return sendJson(res, actor.status, { error: actor.error });
+    const caller = actor.account;
     const net = hre.network.name;
     const tokenKey = String(token).toLowerCase();
     let known = !!((await readTrackedTokens(net)) || {})[tokenKey];
@@ -2529,7 +2642,10 @@ async function main() {
       return sendJson(res, 429, { error: `You can make up to ${CALLOUTS_PER_DAY} callouts per day.` });
     }
     // The snapshot: the most recent price sample this relayer recorded for the token.
-    const hist = (await readPriceHistory(net, token).catch(() => [])) || [];
+    const solToken = isSolAddr(token);
+    const hist = solToken
+      ? ((solanaBridge ? await solanaBridge.priceHistory(token).catch(() => []) : []) || [])
+      : ((await readPriceHistory(net, token).catch(() => [])) || []);
     const last = hist.length ? hist[hist.length - 1] : null;
     if (!last || !(last.p > 0) || Date.now() - last.t > CALLOUT_MAX_PRICE_AGE_MS) {
       return sendJson(res, 409, { error: "This token has no live price yet, so it can't be called out." });
@@ -2537,22 +2653,23 @@ async function main() {
     const rec = await calloutStore.addCallout(net, {
       token, caller, reason, priceAtCall: last.p, mcapAtCall: last.mcapUsd > 0 ? last.mcapUsd : null,
     });
-    console.log(`[callout] ${caller} called ${token} at $${last.p}.`);
+    console.log(`[callout] ${caller}${actor.via ? ` (via Solana ${actor.via})` : ""} called ${token} at ${solToken ? `${last.p} SOL` : `$${last.p}`}.`);
     sendJson(res, 200, { callout: (await enrichCallouts([rec]))[0] });
   }));
 
   app.post("/callouts/delete", asyncRoute(async (req, res) => {
-    const { id, requester, timestamp, signature } = req.body || {};
+    const { id, requester: signer, timestamp, signature } = req.body || {};
     if (typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) return sendJson(res, 400, { error: "invalid callout id" });
-    if (!requester || !hre.ethers.isAddress(requester)) return sendJson(res, 400, { error: "requester must be a valid address" });
+    if (!signer || !(isEvmAddr(signer) || isSolAddr(signer))) return sendJson(res, 400, { error: "requester must be a valid address" });
     if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
-    const message = social.deleteCalloutMessage(id, requester, timestamp);
-    if (!verifySignatureFrom(message, signature, requester)) return sendJson(res, 403, { error: "Signature does not match this wallet." });
+    const actor = await resolveActor(signer, social.deleteCalloutMessage(id, signer, timestamp), signature);
+    if (actor.error) return sendJson(res, actor.status, { error: actor.error });
+    const requester = actor.account;
     const net = hre.network.name;
     const c = await calloutStore.getCallout(net, id);
     if (!c || c.deletedAt) return sendJson(res, 200, { deleted: false });
-    const isCaller = c.caller === String(requester).toLowerCase();
-    const isAdmin = String(requester).toLowerCase() === ADMIN_WALLET.toLowerCase();
+    const isCaller = c.caller === requester;
+    const isAdmin = requester === ADMIN_WALLET.toLowerCase();
     if (!isCaller && !isAdmin) return sendJson(res, 403, { error: "Only the caller or the admin can delete a callout." });
     const deleted = await calloutStore.softDeleteCallout(net, id);
     console.log(`[callout] ${id} deleted by ${requester}${isAdmin && !isCaller ? " (admin)" : ""}.`);
@@ -3055,7 +3172,7 @@ async function main() {
   // history for Meteora DBC quick launches. Write routes are admin-signed, the
   // price poller is off unless SOLANA_RPC_URL is set, and the Solana packages
   // are loaded lazily — see lib/solanaApi.js and README "Solana (devnet prototype)".
-  registerSolanaRoutes(app, { sendJson, asyncRoute, verifyAdminSignature, isFreshTimestamp, announceLaunch: announceSolanaLaunchToTelegram, announceMilestone: announceSolanaMilestoneToTelegram });
+  solanaBridge = registerSolanaRoutes(app, { sendJson, asyncRoute, verifyAdminSignature, isFreshTimestamp, announceLaunch: announceSolanaLaunchToTelegram, announceMilestone: announceSolanaMilestoneToTelegram });
 
   app.get("/holder-distribution/:tokenAddress", async (req, res) => {
     const rows = await computeHolderDistribution(req.params.tokenAddress);
