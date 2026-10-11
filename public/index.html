@@ -1111,9 +1111,12 @@
           <div class="token-grid" style="grid-template-columns:1fr; margin-bottom:0;">
             <div class="token-card" id="previewCard" style="cursor:default;"></div>
           </div>
-          <div class="panel" id="launchProgress" hidden style="margin-top:16px;"></div>
         </div>
       </div>
+      <!-- Launch progress lives OUTSIDE .wizard-wrap on purpose: startLaunchProgress() hides the
+           whole wrap while a launch runs, and a progress panel inside it would be hidden with it
+           (leaving a blank page until something re-rendered the wizard). -->
+      <div class="panel" id="launchProgress" hidden style="margin:42px auto 70px; max-width:720px;"></div>
     </section>
 
     <!-- ===================== PORTFOLIO ===================== -->
