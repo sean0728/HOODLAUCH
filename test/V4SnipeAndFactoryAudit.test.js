@@ -38,7 +38,7 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
     hook = HookF.attach(mined.address);
     factory = await (await ethers.getContractFactory("V4TokenFactory")).deploy(
       await plainImpl.getAddress(), await pm.getAddress(), await locker.getAddress(), await hook.getAddress(),
-      DEPLOY_FEE, LAUNCH_FEE, treasury.address, LOCK, feeWallet.address, await feed.getAddress());
+      LAUNCH_FEE, treasury.address, LOCK, feeWallet.address, await feed.getAddress());
     await (await locker.setFactory(await factory.getAddress())).wait();
     await (await hook.setFactory(await factory.getAddress())).wait();
     compounder = await (await ethers.getContractFactory("V4LiquidityCompounder")).deploy(await pm.getAddress(), await hook.getAddress());
@@ -313,9 +313,11 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
         expect(outcome).to.match(/^refused/);
       });
 
-      it("a relayed DEPLOY-ONLY launch with a fee below deployFee is refused", async () => {
-        const v = await mkVoucher({ addLiquidityAtLaunch: false, liquidityEthAmount: 0n, fee: DEPLOY_FEE - 1n });
-        await expect(relay(v)).to.be.revertedWith("V4TokenFactory: voucher fee below the current launch fee");
+      it("a relayed DEPLOY-ONLY voucher is refused outright (that mode was removed), whatever its fee", async () => {
+        for (const fee of [1n, LAUNCH_FEE, LAUNCH_FEE * 2n]) {
+          const v = await mkVoucher({ addLiquidityAtLaunch: false, liquidityEthAmount: 0n, fee });
+          await expect(relay(v)).to.be.revertedWith("V4TokenFactory: deploy-only launches are not supported");
+        }
       });
 
       it("a fee one wei below launchFee is refused; exactly launchFee and anything above it launch", async () => {
@@ -360,7 +362,7 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
       });
       it("the constructor applies the same bound", async () => {
         const F = await ethers.getContractFactory("V4TokenFactory");
-        const a = [await A(plainImpl), await A(pm), await A(locker), await A(hook), DEPLOY_FEE, LAUNCH_FEE, treasury.address];
+        const a = [await A(plainImpl), await A(pm), await A(locker), await A(hook), LAUNCH_FEE, treasury.address];
         const z = [feeWallet.address, await A(feed)];
         await expect(F.deploy(...a, 0, ...z)).to.be.revertedWith("V4TokenFactory: lock duration must be > 0");
         await expect(F.deploy(...a, 3651 * 24 * 3600, ...z)).to.be.revertedWith("V4TokenFactory: lock duration above 10 year ceiling");
@@ -385,9 +387,10 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
 
       it("a clone cannot be launched twice for the same creator and salt, and the other creator's salt is independent", async () => {
         const salt = saltCounter++;
-        await factory.connect(creator).createToken("T", "T", SUPPLY, false, 0, 0, 0, salt, { value: DEPLOY_FEE });
-        await expect(factory.connect(creator).createToken.staticCall("T", "T", SUPPLY, false, 0, 0, 0, salt, { value: DEPLOY_FEE })).to.be.reverted;
-        await factory.connect(other).createToken("T", "T", SUPPLY, false, 0, 0, 0, salt, { value: DEPLOY_FEE });
+        const val = LAUNCH_FEE + ETH("10");
+        await factory.connect(creator).createToken("T", "T", SUPPLY, true, ETH("10"), 0, 0, salt, { value: val });
+        await expect(factory.connect(creator).createToken.staticCall("T", "T", SUPPLY, true, ETH("10"), 0, 0, salt, { value: val })).to.be.reverted;
+        await factory.connect(other).createToken("T", "T", SUPPLY, true, ETH("10"), 0, 0, salt, { value: val });
       });
 
       it("the factory never ends a launch holding ETH or tokens", async () => {
@@ -420,22 +423,19 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
       await expect(token.connect(other).registerPool(ethers.id("x"), other.address)).to.be.revertedWith("V4LaunchedToken: caller is not the factory");
     });
     it("burn / burnFrom reduce supply and respect allowances", async () => {
-      const salt = saltCounter++;
-      await factory.connect(creator).createToken("T", "T", SUPPLY, false, 0, 0, 0, salt, { value: DEPLOY_FEE });
-      const token = await ethers.getContractAt("V4LaunchedToken", await factory.predictTokenAddress(creator.address, salt));
+      const { token } = await plainLaunch({ creatorBuy: ETH("0.3") }); // the creator holds tokens from the buy-in
+      const supply0 = await token.totalSupply(); // the buy-in's tax already burned a little, so measure from here
       await token.connect(creator).burn(ETH("10"));
-      expect(await token.totalSupply()).to.equal(SUPPLY - ETH("10"));
+      expect(await token.totalSupply()).to.equal(supply0 - ETH("10"));
       await expect(token.connect(other).burnFrom(creator.address, 1)).to.be.reverted;
       await token.connect(creator).approve(other.address, ETH("5"));
       await token.connect(other).burnFrom(creator.address, ETH("5"));
-      expect(await token.totalSupply()).to.equal(SUPPLY - ETH("15"));
+      expect(await token.totalSupply()).to.equal(supply0 - ETH("15"));
     });
     it("supply bounds are enforced, and transfers are never taxed", async () => {
       const big = 1_000_000_000_000_000n * 10n ** 18n + 1n;
-      await expect(factory.connect(creator).createToken("T", "T", big, false, 0, 0, 0, saltCounter++, { value: DEPLOY_FEE })).to.be.revertedWith("V4LaunchedToken: supply too large");
-      const salt = saltCounter++;
-      await factory.connect(creator).createToken("T", "T", SUPPLY, false, 0, 0, 0, salt, { value: DEPLOY_FEE });
-      const token = await ethers.getContractAt("V4LaunchedToken", await factory.predictTokenAddress(creator.address, salt));
+      await expect(factory.connect(creator).createToken("T", "T", big, true, ETH("10"), 0, 0, saltCounter++, { value: LAUNCH_FEE + ETH("10") })).to.be.revertedWith("V4LaunchedToken: supply too large");
+      const { token } = await plainLaunch({ creatorBuy: ETH("0.3") });
       await token.connect(creator).transfer(other.address, ETH("1000"));
       expect(await token.balanceOf(other.address)).to.equal(ETH("1000"));
     });

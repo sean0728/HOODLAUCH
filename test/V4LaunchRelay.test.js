@@ -44,7 +44,7 @@ describe("V4LaunchRelay (gasless custom-tax and curve launches)", function () {
 
     factory = await (await ethers.getContractFactory("V4TokenFactory")).deploy(
       await A(plainImpl), await A(pm), await A(locker), await A(hook),
-      DEPLOY_FEE, LAUNCH_FEE, treasury.address, LOCK_DURATION, feeWallet.address, await A(feed)
+      LAUNCH_FEE, treasury.address, LOCK_DURATION, feeWallet.address, await A(feed)
     );
     await (await locker.setFactory(await A(factory))).wait();
     await (await hook.setFactory(await A(factory))).wait();

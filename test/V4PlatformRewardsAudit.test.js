@@ -39,7 +39,7 @@ describe("V4PlatformRewardsDistributor security audit", function () {
     hook = HookF.attach(mined.address);
     factory = await (await ethers.getContractFactory("V4TokenFactory")).deploy(
       await plainImpl.getAddress(), await pm.getAddress(), await locker.getAddress(), await hook.getAddress(),
-      ETH("0.01"), LAUNCH_FEE, treasury.address, LOCK, feeWallet.address, await feed.getAddress());
+      LAUNCH_FEE, treasury.address, LOCK, feeWallet.address, await feed.getAddress());
     await (await locker.setFactory(await factory.getAddress())).wait();
     await (await hook.setFactory(await factory.getAddress())).wait();
     compounder = await (await ethers.getContractFactory("V4LiquidityCompounder")).deploy(await pm.getAddress(), await hook.getAddress());

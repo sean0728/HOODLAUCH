@@ -37,7 +37,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
     hook = HookF.attach(mined.address);
     factory = await (await ethers.getContractFactory("V4TokenFactory")).deploy(
       await plainImpl.getAddress(), await pm.getAddress(), await locker.getAddress(), await hook.getAddress(),
-      DEPLOY_FEE, LAUNCH_FEE, treasury.address, LOCK, feeWallet.address, await feed.getAddress());
+      LAUNCH_FEE, treasury.address, LOCK, feeWallet.address, await feed.getAddress());
     await (await locker.setFactory(await factory.getAddress())).wait();
     await (await hook.setFactory(await factory.getAddress())).wait();
     compounder = await (await ethers.getContractFactory("V4LiquidityCompounder")).deploy(await pm.getAddress(), await hook.getAddress());
@@ -605,6 +605,52 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       expect(evS.fee).to.equal(sellAmt / 100n);
       // and the pool's fee splits like the curve's: 10% creator rewards, 90% fee-wallet distributor
       expect(evS.toCreator).to.equal(evS.fee / 10n);
+    });
+
+    it("FR-15. the platform RewardsDistributor is paid ONCE per launch, on every launch path, 50/50 with the treasury; trading never pays it again", async () => {
+      const prd = await (await ethers.getContractFactory("V4PlatformRewardsDistributor")).deploy(await A(pm), await A(hook), owner.address, await A(v2router));
+      await prd.setPlatformToken(await A(plat));
+      await factory.setRewardsDistributor(await A(prd)); // replaces the stand-in wallet from beforeEach
+      const paid = async (fn) => {
+        const r0 = await bal(await A(prd)), t0 = await bal(treasury.address);
+        await fn();
+        return [(await bal(await A(prd))) - r0, (await bal(treasury.address)) - t0];
+      };
+      const LIQ = ETH("10");
+      // plain, deploy + liquidity (launch fee)
+      expect(await paid(() => factory.connect(creator).createToken("P", "P", SUPPLY, true, LIQ, 0, 0, saltCounter++, { value: LAUNCH_FEE + LIQ }))).to.deep.equal([LAUNCH_FEE / 2n, LAUNCH_FEE / 2n]);
+      // custom tax
+      const cs = saltCounter++;
+      expect(await paid(() => customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(100, 0, 0, 100), fs(0, 0, 0, 100), marketing.address, LIQ, 0, 0, cs, { value: LAUNCH_FEE + LIQ }))).to.deep.equal([LAUNCH_FEE / 2n, LAUNCH_FEE / 2n]);
+      // curve (plain and custom): the curve launch fee
+      let curveAddr;
+      expect(await paid(async () => { curveAddr = (await newCurve()).addr; })).to.deep.equal([CURVE_FEE / 2n, CURVE_FEE / 2n]);
+      expect(await paid(async () => { await newCurve({ custom: true }); })).to.deep.equal([CURVE_FEE / 2n, CURVE_FEE / 2n]);
+      // the launch fee reaches the platform token holders: bought back, 50% burned, 50% queued for the airdrop
+      const supply0 = await plat.totalSupply();
+      await prd.triggerEthBuyback(1);
+      expect(await prd.pendingAirdropTokens()).to.be.gt(0n);
+      expect(await plat.totalSupply()).to.be.lt(supply0);
+      // trading on every phase and type pays it nothing: curve buy and sell, then pool buy and sell (plain + custom)
+      const after = await bal(await A(prd));
+      const customTok = await ethers.getContractAt("V4CustomToken", await customFactory.predictTokenAddress(creator.address, cs));
+      const plainSalt = saltCounter - 1n; // unused; pool trades use the custom token and a graduated curve below
+      await curveFactory.connect(trader).buy(curveAddr, 0, { value: ETH("0.5") });
+      const ctoken = await ethers.getContractAt("V4LaunchedToken", curveAddr);
+      await ctoken.connect(trader).approve(await A(curveFactory), ethers.MaxUint256);
+      await curveFactory.connect(trader).sell(curveAddr, (await ctoken.balanceOf(trader.address)) / 2n, 0);
+      await crossTarget(curveAddr);
+      const keyC = await keyOf(curveAddr);
+      await ctoken.connect(sniper).approve(await A(testRouter), ethers.MaxUint256);
+      await swap(sniper, keyC, true, -ETH("0.3"), ETH("0.3"));
+      await swap(sniper, keyC, false, -((await ctoken.balanceOf(sniper.address)) / 2n));
+      const keyX = await keyOf(await A(customTok));
+      await customTok.connect(sniper).approve(await A(testRouter), ethers.MaxUint256);
+      await swap(sniper, keyX, true, -ETH("0.3"), ETH("0.3"));
+      await swap(sniper, keyX, false, -((await customTok.balanceOf(sniper.address)) / 2n));
+      expect(await bal(await A(prd))).to.equal(after);
+      expect(await ctoken.balanceOf(await A(prd))).to.equal(0n);
+      expect(await customTok.balanceOf(await A(prd))).to.equal(0n);
     });
   });
 });

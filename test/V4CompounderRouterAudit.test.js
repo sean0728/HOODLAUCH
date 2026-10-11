@@ -38,7 +38,7 @@ describe("V4LiquidityCompounder / V4SwapRouter / V4Create2Deployer security audi
     hook = HookF.attach(mined.address);
     factory = await (await ethers.getContractFactory("V4TokenFactory")).deploy(
       await plainImpl.getAddress(), await pm.getAddress(), await locker.getAddress(), await hook.getAddress(),
-      DEPLOY_FEE, LAUNCH_FEE, treasury.address, LOCK, feeWallet.address, await feed.getAddress());
+      LAUNCH_FEE, treasury.address, LOCK, feeWallet.address, await feed.getAddress());
     await (await locker.setFactory(await factory.getAddress())).wait();
     await (await hook.setFactory(await factory.getAddress())).wait();
     compounder = await (await ethers.getContractFactory("V4LiquidityCompounder")).deploy(await pm.getAddress(), await hook.getAddress());

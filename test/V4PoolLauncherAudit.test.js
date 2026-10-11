@@ -40,7 +40,7 @@ describe("V4PoolLauncher security audit", function () {
 
     factory = await (await ethers.getContractFactory("V4TokenFactory")).deploy(
       await plainImpl.getAddress(), await pm.getAddress(), await locker.getAddress(), await hook.getAddress(),
-      DEPLOY_FEE, LAUNCH_FEE, treasury.address, LOCK_DURATION, feeWallet.address, await feed.getAddress()
+      LAUNCH_FEE, treasury.address, LOCK_DURATION, feeWallet.address, await feed.getAddress()
     );
     await (await locker.setFactory(await factory.getAddress())).wait();
     await (await hook.setFactory(await factory.getAddress())).wait();
