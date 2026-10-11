@@ -1,117 +1,56 @@
 // The gasless-launch relayer service. Run this as a long-lived process (it
 // never exits on its own) alongside a funded hot wallet:
 //
-//   RELAYER_PRIVATE_KEY=0x... TOKEN_FACTORY_ADDRESS=0x... \
-//     CUSTOM_TOKEN_FACTORY_ADDRESS=0x... \
+//   RELAYER_PRIVATE_KEY=0x... V4_TOKEN_FACTORY_ADDRESS=0x... \
+//     V4_CUSTOM_TOKEN_FACTORY_ADDRESS=0x... V4_CURVE_FACTORY_ADDRESS=0x... \
+//     V4_LAUNCH_RELAY_ADDRESS=0x... \
 //     npx hardhat run scripts/relayer.js --network robinhoodTestnet
 //
-// What it does, end to end:
-//   1. The front end has a creator sign an EIP-712 LaunchVoucher /
-//      CustomLaunchVoucher (free, no gas) and POSTs it here
-//      (POST /vouchers/token or /vouchers/custom) — this is how the relayer
-//      learns the actual launch parameters, since the cheap on-chain deposit
-//      only carries an opaque hash.
-//   2. The creator then sends ONE plain ETH transfer into the factory's
-//      escrow (depositForRelayedLaunch) — this service polls for the
-//      resulting LaunchDeposited event.
-//   3. Once both the voucher (step 1) and a matching deposit (step 2) are on
-//      file, this service calls relayedCreateToken / relayedCreateCustomToken
-//      from its own wallet, paying that transaction's gas itself.
-//   4. On success, it runs the same post-launch pipeline scripts/launch.js
-//      and scripts/customLaunch.js already use: verify the implementation
-//      (and best-effort the clone), generate a flattened source archive, and
-//      record the launch via lib/launchStore.
-//
-// Separately, and entirely optionally, this service can also auto-sweep AND
-// auto-claim the platform's own fee-wallet slice end to end: set
-// FEE_WALLET_DISTRIBUTOR_ADDRESS and this service periodically calls
-// FeeWalletDistributor.triggerFeeWalletSwap for every launched token
-// carrying enough accumulated in-kind balance there (converting it to ETH),
-// then calls claimFeeWalletRewards for every token with a nonzero claimable
-// balance (paying that ETH straight to the platform's feeWallet) — so
-// neither step needs a person to open the admin panel and trigger them one
-// token at a time. See the FEE_WALLET_* constants and feeWalletPollLoop
-// below.
-//
-// Once FeeWalletDistributor.platformToken() is configured, the same
-// feeWalletPollLoop tick ALSO drives that contract's own accumulate ->
-// burn/airdrop half (see FeeWalletDistributor.sol's own contract-level
-// comment): startAirdropRound/processAirdropBatch push whatever's
-// accumulated in pendingAirdropTokens out to platformToken's holders,
-// proportional to their live holdings, in gas-bounded batches — the exact
-// same PERMISSIONLESS calls the admin panel's own manual "Airdrop rounds"
-// button already makes, just on a schedule. This is the FeeWalletDistributor
-// counterpart to PlatformRewardsDistributor's own airdrop sweep described
-// below; before this, FeeWalletDistributor's burn half of every buyback ran
-// automatically (it happens inline in _splitAndProcess) but the holder half
-// just sat in pendingAirdropTokens forever unless someone called
-// startAirdropRound/processAirdropBatch by hand. See the
-// FEE_WALLET_AIRDROP_* constants and sweepFeeWalletAirdropRoundOnce below.
-//
-// A second, identical auto-sweep-and-claim runs for the per-token creator
-// reward: set CREATOR_REWARDS_DISTRIBUTOR_ADDRESS and this service
-// periodically calls CreatorRewardsDistributor.triggerCreatorSwap for every
-// launched token carrying enough accumulated in-kind balance there, then
-// claimCreatorRewards for every token with a nonzero claimable balance —
-// paid straight to that token's own creator(), read live off the token at
-// claim time, exactly as the contract itself always resolves it regardless
-// of who calls it.
-//
-// NOTE (history): an earlier version of this file removed this sweep,
-// on the belief that CreatorRewardsDistributor.triggerCreatorSwap/
-// claimCreatorRewards had become restricted to msg.sender ==
-// token.creator() — under that belief, every automated call from this
-// service's own wallet (never a token's creator) would revert forever.
-// The CreatorRewardsDistributor.sol actually reviewed and shipped with this
-// codebase has NO such restriction: both functions are explicitly
-// permissionless by their own code and doc comments — same
-// "callable by anyone, fixed destination" shape as FeeWalletDistributor's
-// triggerFeeWalletSwap/claimFeeWalletRewards, just paying a per-token
-// creator() instead of one fixed feeWallet. This sweep is restored on that
-// basis. If the contract actually deployed on your network differs from
-// that source and truly does gate these calls to the creator's own wallet,
-// every attempt below simply reverts and is logged (per-token, per-tick) as
-// a skip rather than failing the whole sweep — watch the
-// "[creator-rewards] swap skip"/"claim skip" log lines after enabling this;
-// a revert reason mentioning "creator" repeating for every token, every
-// tick, is the signal that's the case, and CREATOR_REWARDS_DISTRIBUTOR_ADDRESS
-// should be unset again until that's resolved.
-//
-// A fourth, similarly-optional sweep automates PlatformRewardsDistributor's
-// own accumulate -> buyback -> burn/airdrop pipeline: set
-// PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS and this service periodically calls
-// triggerEthBuyback (for the 50% launch-fee ETH share sitting there),
-// triggerTokenBuyback (for every launched token's own rewardBps cut,
-// accumulated in-kind same as the fee-wallet/creator-rewards flows above),
-// and startAirdropRound/processAirdropBatch (to actually push the
-// resulting platformToken half out to holders) once each one's own
-// threshold clears — the exact same PERMISSIONLESS calls the admin panel's
-// own manual "Trigger a buyback"/"Airdrop rounds" buttons already make, just
-// on a schedule instead of requiring someone to notice and click them. Like
-// the fee-wallet sweep, this is safe to run from this service's own wallet
-// because none of these calls have a caller-dependent destination — the
-// split is always the same fixed 50% burn / 50% holder-airdrop-pool,
-// regardless of who triggers it. See the PLATFORM_REWARDS_*/
-// PLATFORM_AIRDROP_* constants and platformRewardsPollLoop below.
-//
-// V4 custom-tax + curve factories (all optional, all DIRECT-LAUNCH ONLY):
-//   V4_CUSTOM_TOKEN_FACTORY_ADDRESS  V4CustomTokenFactory (watcher kind "v4custom")
-//   V4_CURVE_FACTORY_ADDRESS         V4CurveFactory       (watcher kind "v4curve")
+// Robinhood Chain launches are Uniswap V4 only (Solana launches are separate
+// and handled by lib/solanaApi.js). The contract set:
+//   V4_TOKEN_FACTORY_ADDRESS         V4TokenFactory       (watcher kind "v4token";
+//                                    plain tokens, has its own relay built in)
+//   V4_CUSTOM_TOKEN_FACTORY_ADDRESS  V4CustomTokenFactory (kind "v4custom")
+//   V4_CURVE_FACTORY_ADDRESS         V4CurveFactory       (kinds "v4curve" and
+//                                    "v4custom-curve")
+//   V4_LAUNCH_RELAY_ADDRESS          V4LaunchRelay: the gasless path for the
+//                                    custom-tax and curve factories
 //   V4_COMPOUNDER_ADDRESS            V4LiquidityCompounder, used by the opt-in
 //                                    compounder keeper below
 //   V4_COMPOUND_MIN_SUPPLY_BPS       compound once pending >= this many bps of
 //                                    the token's supply (default 1 = 0.01%)
 //   V4_COMPOUND_POLL_INTERVAL_MS     compounder keeper tick (default: the
 //                                    fee-wallet keeper interval)
-// Neither factory has a gasless/voucher path, so their watchers carry no
-// hashFn/relayFn: every relaying/deposit/voucher/relayer-health loop skips
-// them and there are no POST /vouchers/... routes for them. They are still
-// discovered (discoverLaunchedTokens), priced (pollTokenPrices — the curve's
-// own marginal price until graduation, the V4 pool afterwards) and their
-// trades listed (pollTokenActivity). Any one of the V4 factory env vars
-// (V4_TOKEN_FACTORY_ADDRESS included) satisfies the "set at least one
-// factory" startup check. The compounder keeper only runs with
-// the Admin "V4 keeper" switch (Relayer settings) AND V4_COMPOUNDER_ADDRESS set.
+// Each address comes from the env var, else the Admin panel's saved config
+// (restart after saving). At least one V4 factory must be set.
+//
+// What the gasless flow does, end to end (the same for all four kinds):
+//   1. The front end has a creator sign an EIP-712 voucher (free, no gas) and
+//      POSTs it here (POST /vouchers/v4token, /vouchers/v4custom,
+//      /vouchers/v4curve or /vouchers/v4custom-curve) — this is how the
+//      relayer learns the actual launch parameters, since the cheap on-chain
+//      deposit only carries an opaque hash.
+//   2. The creator then sends ONE plain ETH transfer into the escrow
+//      (depositForRelayedLaunch on V4TokenFactory or V4LaunchRelay) — this
+//      service polls for the resulting LaunchDeposited event. The three
+//      V4LaunchRelay kinds share one relay contract, so its events are
+//      scanned once and each deposit is routed to its voucher's kind.
+//   3. Once both the voucher (step 1) and a matching deposit (step 2) are on
+//      file, this service calls the relay function from its own wallet,
+//      paying that transaction's gas itself (repaid out of the launch fee, up
+//      to a cap the contract owner sets).
+//   4. On success, it runs the post-launch pipeline: verify the
+//      implementation (and best-effort the clone), generate a flattened
+//      source archive, and record the launch via lib/launchStore.
+//
+// Launch discovery, price/activity polling and the "new launch" Telegram post
+// do not depend on the relay: every launch the factories emit — gasless or
+// paid for from the creator's own wallet — is found from the factory events.
+//
+// The V4 keeper loops (fee-wallet / creator-rewards / platform-rewards /
+// platform-tax distributors and the liquidity compounder) are optional and
+// switched on from Admin -> Relayer settings; the relayer wallet must be an
+// approved keeper on each distributor (setKeeper).
 //
 // GET /status/:voucherHash lets the front end poll a launch's progress
 // (received -> deposited -> relayed, or failed) — merged with a live
@@ -138,7 +77,6 @@ const https = require("https"); // used only by sendTelegramMessage below — No
 const express = require("express");
 const hre = require("hardhat");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
-const { recordDeployment, readCurrentDeployment } = require("../lib/deploymentStore");
 const { recordLaunch, updateLaunch, deleteLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = require("../lib/launchStore");
 const {
   getVoucher,
@@ -173,7 +111,6 @@ const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/toke
 const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
 const { readTrackedTokens, upsertTrackedToken, deleteTrackedToken } = require("../lib/trackedTokensStore");
 const { classifyDiscoveredLaunch } = require("../lib/launchAnnouncement");
-const { mergeV2KeeperTokens } = require("../lib/keeperTokens");
 const { readActivity, appendActivity } = require("../lib/activityStore");
 const tradeStore = require("../lib/tradeStore");
 const pnlLib = require("../lib/pnl");
@@ -265,7 +202,7 @@ const POLL_INTERVAL_MS = Number(process.env.RELAYER_POLL_INTERVAL_MS || 15_000);
 const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5_000);
 
 // ---- Telegram notifications — entirely optional, same "unset = does
-// nothing extra" posture as FEE_WALLET_DISTRIBUTOR_ADDRESS/etc. above.
+// nothing extra" posture as the optional V4 keepers.
 // The bot token is shared across both channels (one bot, create it once via
 // @BotFather); the two chat IDs are deliberately separate so a public-facing
 // "new launch" announcement never lands in the same place as an admin-only
@@ -297,45 +234,9 @@ const MAX_BLOCK_RANGE_PER_POLL = Number(process.env.RELAYER_MAX_BLOCK_RANGE || 5
 // POLL_INTERVAL_MS forever.
 const RELAYER_HEALTH_POLL_INTERVAL_MS = Number(process.env.RELAYER_HEALTH_POLL_INTERVAL_MS || 5 * 60_000);
 
-// Entirely optional: leaving FEE_WALLET_DISTRIBUTOR_ADDRESS unset means this
-// service does nothing extra, same as before this feature existed. When it
-// IS set, this service periodically sweeps every launched token's
-// accumulated in-kind platform fee-wallet cut into ETH
-// (FeeWalletDistributor.triggerFeeWalletSwap is permissionless and always
-// pays out to the platform's own fixed fee wallet, not a per-token address,
-// so there's no "wrong recipient" risk in sweeping it from this service's
-// own wallet). A much longer default interval than the deposit poll above is
-// intentional — unlike a pending gasless launch, an unconverted reward
-// balance costs nothing by sitting a while longer, and sweeping every
-// launched token on every tick would waste gas for no benefit. Its own
-// poll interval/slippage/claim-min-wei knobs now live in relayerSettings
-// below (formerly frozen consts here) so an admin can retune them without a
-// restart — see the big comment on RELAYER_SETTINGS_DEFAULTS.
-const FEE_WALLET_DISTRIBUTOR_ADDRESS = process.env.FEE_WALLET_DISTRIBUTOR_ADDRESS || null;
-
-// Same optionality as FEE_WALLET_* above — leaving
-// CREATOR_REWARDS_DISTRIBUTOR_ADDRESS unset means this service does nothing
-// extra for per-token creator rewards. When set, it automates
-// CreatorRewardsDistributor's own swap-then-claim flow (see the module
-// comment near the top of this file — including the history note on why
-// this was once removed and why it's back) on the same 5-minute-default
-// cadence as the fee-wallet sweep, for the identical reason: an unconverted
-// creator-reward balance costs nothing by sitting a while longer.
-const CREATOR_REWARDS_DISTRIBUTOR_ADDRESS = process.env.CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null;
-
-// Same optionality as FEE_WALLET_*/CREATOR_REWARDS_* above — leaving
-// PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS unset means this service does
-// nothing extra here either. When set, it automates
-// PlatformRewardsDistributor's own buyback/burn/airdrop pipeline (see the
-// module comment above and platformRewardsPollLoop below) on this same
-// 5-minute-default cadence — an unconverted buyback balance or an
-// un-started airdrop round costs nothing by sitting a while longer, same
-// reasoning as the other two sweeps.
-const PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS = process.env.PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS || null;
-
 // ---------------------------------------------------------------------
 // Relayer runtime settings — poll interval / slippage / claim-min-wei /
-// airdrop-batch knobs for the three reward auto-sweep loops above. These
+// airdrop-batch knobs for the V4 reward keeper loops. These
 // used to be frozen `const`s read from process.env exactly once at process
 // start (the only way to change one was to edit .env and restart the whole
 // service). They're now a single mutable object, seeded from those same env
@@ -549,124 +450,12 @@ function redactSecretSettings(settingsObj) {
 }
 
 // ---------------------------------------------------------------------
-// Contract deployment (POST /deploy below) — lets an admin run the
-// equivalent of `npx hardhat run scripts/deploy.js` from the browser
-// instead of a terminal, per the "avoid command line" goal this feature was
-// built for. This mirrors scripts/deploy.js's own main() as closely as
-// possible: same contracts, same deployment order, same constructor-arg
-// shapes, same optional-bundle env-var-driven-defaults philosophy (a field
-// left out of the request body behaves exactly like the matching env var
-// being unset) — just driven by an admin-signed HTTP request instead of
-// process.env, and using THIS service's own relayerWallet as the deploying
-// account instead of whatever DEPLOYER_PRIVATE_KEY/getSigners()[0]
-// scripts/deploy.js would use when run directly. See runFullStackDeploy()
-// and the POST /deploy route (registered in main(), since it needs
-// relayerWallet) for the actual logic.
-//
-// PlatformTaxDistributor (see scripts/deploy.js's own big comment on it) is
-// deliberately NOT included here: it's a standalone contract that is never
-// wired into any HoodLaunch factory, so there is no owner-only follow-up
-// call this route could make on its behalf the way it does for every other
-// contract above (wiring rewardsDistributor, setPlatformToken, etc.). It
-// stays a command-line-only, deliberately manual deploy step — run it with
-// `npx hardhat run scripts/deploy.js` and DEPLOY_PLATFORM_TAX_DISTRIBUTOR=true
-// exactly as before. Once deployed, though, wiring its address into the
-// front end is now an ordinary admin-panel action like any other contract
-// address (the "platformTaxDistributor" field in the "Platform contracts"
-// panel, saved through the same signed POST /platform-config this route's
-// siblings use) — it no longer requires hand-editing index.html.
-//
-// Ownership handoff: every Ownable2Step contract this deploys ends the run
-// owned by relayerWallet (the deploying account) — required so the relayer
-// itself can still make the handful of owner-only setup calls deploy.js
-// itself makes right after deploying (wiring rewardsDistributor/
-// creatorRewardsDistributor/feeWalletDistributor onto each factory,
-// PlatformRewardsDistributor.setPlatformToken, etc.) — and only THEN calls
-// transferOwnership(ADMIN_WALLET) on each one it just deployed (never on a
-// reused/already-existing address it didn't itself deploy). That sets each
-// contract's pendingOwner to the admin wallet while leaving owner as
-// relayerWallet until the admin's own browser wallet calls acceptOwnership()
-// — exactly the existing "Accept ownership" button already in the Contract
-// admin grid (see lib/adminAuth.js/index.html's own transferOwnership/
-// acceptOwnership selectors), which needs no new code to handle a
-// freshly-deployed contract once its address is saved into the admin panel.
-const DEPLOY_KNOWN_ROUTER_ADDRESSES = {
-  robinhoodMainnet: "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba", // UniswapV2Router02 — see scripts/deploy.js's own comment for how this was confirmed
-};
-const DEPLOY_KNOWN_FACTORY_ADDRESSES = {
-  robinhoodMainnet: "0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f", // UniswapV2Factory — informational sanity-check only
-};
-const DEPLOY_KNOWN_PRICE_FEED_ADDRESSES = {
-  robinhoodMainnet: "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9", // Chainlink ETH/USD, Standard Proxy
-};
-const DEPLOY_FEE_USD = 50;
-const DEPLOY_LAUNCH_FEE_USD = 100;
-const DEPLOY_CURVE_LAUNCH_FEE_USD = 25;
-
-async function fetchEthUsdPriceForDeploy() {
-  try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd");
-    if (!res.ok) return null;
-    const data = await res.json();
-    const price = data && data.ethereum && data.ethereum.usd;
-    return typeof price === "number" && price > 0 ? price : null;
-  } catch (err) {
-    return null;
-  }
-}
-
-// Generic (schema-independent) canonicalization for the admin-signed
-// message below — deploy config has many optional/nested fields, too many
-// to hand-maintain a fixed CONFIG_KEYS-style list the way platformConfig.js
-// does without it drifting the moment either side adds a field. Sorting
-// keys recursively is instead the ENTIRE contract between client and
-// server: both sides just need this exact function, not a shared schema.
-function sortObjectKeysDeep(value) {
-  if (Array.isArray(value)) return value.map(sortObjectKeysDeep);
-  if (value && typeof value === "object") {
-    const out = {};
-    for (const key of Object.keys(value).sort()) out[key] = sortObjectKeysDeep(value[key]);
-    return out;
-  }
-  return value;
-}
-// MUST stay byte-identical to index.html's own copy (same convention as
-// platformConfigMessage/relayerSettingsMessage above).
-function deployMessage(deployConfig, timestamp) {
-  return `Hood Launch admin: deploy contracts with config ${JSON.stringify(sortObjectKeysDeep(deployConfig || {}))} at ${timestamp}`;
-}
-
-// Validates an address field from the deploy request body — returns the
-// checksummed-or-as-given address string, or null if unset, or throws a
-// descriptive Error if it's present but not a valid address (the route
-// handler turns that into a 400, never a 500).
-function parseOptionalAddress(value, fieldName) {
-  if (value === undefined || value === null || value === "") return null;
-  if (!hre.ethers.isAddress(value)) throw new Error(`${fieldName} must be a valid address`);
-  return value;
-}
-
-function parseOptionalWei(value, fieldName) {
-  if (value === undefined || value === null || value === "") return null;
-  try {
-    const big = BigInt(value);
-    if (big < 0n) throw new Error("negative");
-    return big;
-  } catch (err) {
-    throw new Error(`${fieldName} must be a non-negative integer (wei)`);
-  }
-}
-
-// ---------------------------------------------------------------------
 // Serializes every transaction THIS process sends from the relayer's own
-// wallet (relayerWallet in main(), `deployerWallet` here in
-// runFullStackDeploy — the exact same wallet; see that function's own
-// comment). At least six independent, concurrently-running things can each
+// wallet (relayerWallet in main()). At least six independent, concurrently-running things can each
 // try to send a transaction from this one wallet: the voucher-relay poll
-// (every POLL_INTERVAL_MS, ~15s default), the three reward-sweep loops
-// (fee-wallet/creator-rewards/platform-rewards, each on their own
-// relayerSettings.*PollIntervalMs), an admin-triggered POST /deploy
-// (runFullStackDeploy below, a long chain of its own sequential sends), and
+// (every POLL_INTERVAL_MS, ~15s default), the V4 keeper loops
+// (fee-wallet/creator-rewards/platform-rewards/compounder, each on their own
+// relayerSettings.*PollIntervalMs), and
 // the relayer-health poll (read-only, no sends, but listed for completeness
 // of "what's running concurrently"). Without this, two of them landing in
 // the same window — which WILL happen: each loop reschedules itself only
@@ -689,10 +478,9 @@ function parseOptionalWei(value, fieldName) {
 // the receipt, which would otherwise hold every other queued send hostage
 // for the full confirmation time for no benefit.
 //
-// Module-level (not inside main()) so both main()'s nested poll loops and
-// the top-level runFullStackDeploy share the exact same queue — there must
-// only ever be one, covering every sender of a relayerWallet transaction in
-// this process.
+// Module-level (not inside main()) so every poll loop shares the exact same
+// queue — there must only ever be one, covering every sender of a
+// relayerWallet transaction in this process.
 //
 // A rejected/reverted send must not wedge the queue for everything queued
 // after it — relayerTxQueue is re-armed via .catch(()=>{}) on every link so
@@ -705,345 +493,6 @@ function sendRelayerTx(fn) {
   const run = relayerTxQueue.catch(() => {}).then(() => fn());
   relayerTxQueue = run.catch(() => {});
   return run;
-}
-
-// Runs the actual deploy — a near-line-for-line port of scripts/deploy.js's
-// own main() body, with `deployerWallet` (this service's relayerWallet)
-// standing in for that script's `deployer` signer, and every env var
-// replaced by the matching field on `body` (same fallback semantics: a
-// field left unset behaves exactly like the env var being unset). See the
-// big comment above this section for why PlatformTaxDistributor is excluded
-// and how ownership handoff works. Throws on any failure — the route
-// handler is responsible for turning that into a clear error response;
-// nothing here ever silently swallows a failed deployment.
-async function runFullStackDeploy(body, deployerWallet) {
-  const network = hre.network.name;
-  const isLocal = network === "hardhat" || network === "localhost";
-  const deployedFreshOwnable = []; // { label, contract } — transferOwnership(ADMIN_WALLET) target list, filled in as we go
-
-  const feeTreasury = parseOptionalAddress(body.feeTreasuryAddress, "feeTreasuryAddress") || deployerWallet.address;
-  const platformFeeWallet = parseOptionalAddress(body.platformFeeWalletAddress, "platformFeeWalletAddress") || deployerWallet.address;
-
-  let deployFeeWei = parseOptionalWei(body.deployFeeWei, "deployFeeWei");
-  let launchFeeWei = parseOptionalWei(body.launchFeeWei, "launchFeeWei");
-  let curveLaunchFeeWei = parseOptionalWei(body.curveLaunchFeeWei, "curveLaunchFeeWei");
-  if (deployFeeWei == null || launchFeeWei == null || curveLaunchFeeWei == null) {
-    const ethUsdPrice = await fetchEthUsdPriceForDeploy();
-    const priceForConversion = ethUsdPrice != null ? ethUsdPrice : FALLBACK_ETH_USD;
-    if (deployFeeWei == null) deployFeeWei = hre.ethers.parseEther((DEPLOY_FEE_USD / priceForConversion).toFixed(18));
-    if (launchFeeWei == null) launchFeeWei = hre.ethers.parseEther((DEPLOY_LAUNCH_FEE_USD / priceForConversion).toFixed(18));
-    if (curveLaunchFeeWei == null)
-      curveLaunchFeeWei = hre.ethers.parseEther((DEPLOY_CURVE_LAUNCH_FEE_USD / priceForConversion).toFixed(18));
-  }
-  const lpLockDurationSeconds = body.lpLockDurationSeconds ? Number(body.lpLockDurationSeconds) : 15 * 24 * 60 * 60;
-  if (!Number.isFinite(lpLockDurationSeconds) || lpLockDurationSeconds < 0) {
-    throw new Error("lpLockDurationSeconds must be a non-negative number of seconds");
-  }
-
-  let routerAddress = parseOptionalAddress(body.dexRouterAddress, "dexRouterAddress") || DEPLOY_KNOWN_ROUTER_ADDRESSES[network];
-  let priceFeedAddress = parseOptionalAddress(body.priceFeedAddress, "priceFeedAddress") || DEPLOY_KNOWN_PRICE_FEED_ADDRESSES[network];
-  if (!routerAddress) {
-    if (!isLocal) {
-      throw new Error(
-        `dexRouterAddress is required — no confirmed default DEX router exists for network "${network}". ` +
-          "See scripts/deploy.js's KNOWN_ROUTER_ADDRESSES comment for what is and isn't confirmed."
-      );
-    }
-    const MockERC20 = await hre.ethers.getContractFactory("MockERC20", deployerWallet);
-    const mockWeth = await MockERC20.deploy("Mock Wrapped ETH", "mWETH", hre.ethers.parseEther("1000000"));
-    await mockWeth.waitForDeployment();
-    const MockRouter = await hre.ethers.getContractFactory("MockRouter", deployerWallet);
-    const mockRouter = await MockRouter.deploy(await mockWeth.getAddress());
-    await mockRouter.waitForDeployment();
-    routerAddress = await mockRouter.getAddress();
-  }
-  if (!priceFeedAddress) {
-    if (!isLocal) {
-      throw new Error(
-        `priceFeedAddress is required — no confirmed default ETH/USD feed exists for network "${network}". ` +
-          "See scripts/deploy.js's KNOWN_PRICE_FEED_ADDRESSES comment for what is and isn't confirmed."
-      );
-    }
-    const MockAggregatorV3 = await hre.ethers.getContractFactory("MockAggregatorV3", deployerWallet);
-    const mockFeed = await MockAggregatorV3.deploy(8, 3000n * 10n ** 8n);
-    await mockFeed.waitForDeployment();
-    priceFeedAddress = await mockFeed.getAddress();
-  }
-
-  // Same live on-chain sanity checks scripts/deploy.js runs before spending
-  // any real gas — see that script's own comments for exactly what these
-  // catch and why.
-  if (!isLocal) {
-    let onChainFactory;
-    try {
-      const router = new hre.ethers.Contract(routerAddress, ["function factory() view returns (address)"], deployerWallet);
-      onChainFactory = await router.factory();
-    } catch (err) {
-      throw new Error(`dexRouterAddress (${routerAddress}) does not behave like a Uniswap V2 router (${err.message}).`);
-    }
-    const knownFactory = DEPLOY_KNOWN_FACTORY_ADDRESSES[network];
-    if (knownFactory && onChainFactory.toLowerCase() !== knownFactory.toLowerCase()) {
-      throw new Error(
-        `Router at ${routerAddress} reports factory ${onChainFactory}, which does not match the confirmed ` +
-          `Uniswap V2 Factory for ${network} (${knownFactory}). Double-check dexRouterAddress.`
-      );
-    }
-    try {
-      const feed = new hre.ethers.Contract(
-        priceFeedAddress,
-        [
-          "function decimals() view returns (uint8)",
-          "function latestRoundData() view returns (uint80, int256, uint256, uint256, uint80)",
-        ],
-        deployerWallet
-      );
-      await feed.decimals();
-      const [, answer] = await feed.latestRoundData();
-      if (answer <= 0n) throw new Error(`latestRoundData() returned a non-positive answer (${answer})`);
-    } catch (err) {
-      throw new Error(`priceFeedAddress (${priceFeedAddress}) does not behave like a Chainlink price feed (${err.message}).`);
-    }
-  }
-
-  // ---- LaunchedToken / TokenFactory ----
-  const LaunchedToken = await hre.ethers.getContractFactory("LaunchedToken", deployerWallet);
-  const tokenImplementation = await LaunchedToken.deploy();
-  await tokenImplementation.waitForDeployment();
-  const tokenImplementationVerification = await verifyContract(await tokenImplementation.getAddress(), []);
-
-  const LiquidityLocker = await hre.ethers.getContractFactory("LiquidityLocker", deployerWallet);
-  const locker = await LiquidityLocker.deploy();
-  await locker.waitForDeployment();
-  const lockerVerification = await verifyContract(await locker.getAddress(), []);
-
-  const tokenFactoryConstructorArgs = [
-    await tokenImplementation.getAddress(),
-    routerAddress,
-    await locker.getAddress(),
-    deployFeeWei,
-    launchFeeWei,
-    feeTreasury,
-    lpLockDurationSeconds,
-    platformFeeWallet,
-    priceFeedAddress,
-  ];
-  const TokenFactory = await hre.ethers.getContractFactory("TokenFactory", deployerWallet);
-  const factory = await TokenFactory.deploy(...tokenFactoryConstructorArgs);
-  await factory.waitForDeployment();
-  const factoryAddress = await factory.getAddress();
-  await (await sendRelayerTx(() => locker.setFactory(factoryAddress))).wait();
-  const tokenFactoryVerification = await verifyContract(factoryAddress, tokenFactoryConstructorArgs);
-  deployedFreshOwnable.push({ label: "tokenFactory", contract: factory });
-
-  // ---- CustomToken / CustomTokenFactory ----
-  const CustomToken = await hre.ethers.getContractFactory("CustomToken", deployerWallet);
-  const customTokenImplementation = await CustomToken.deploy();
-  await customTokenImplementation.waitForDeployment();
-  const customTokenImplementationVerification = await verifyContract(await customTokenImplementation.getAddress(), []);
-
-  const customLocker = await LiquidityLocker.deploy();
-  await customLocker.waitForDeployment();
-  const customLockerVerification = await verifyContract(await customLocker.getAddress(), []);
-
-  const customTokenFactoryConstructorArgs = [
-    await customTokenImplementation.getAddress(),
-    routerAddress,
-    await customLocker.getAddress(),
-    deployFeeWei,
-    launchFeeWei,
-    feeTreasury,
-    lpLockDurationSeconds,
-    platformFeeWallet,
-    priceFeedAddress,
-  ];
-  const CustomTokenFactory = await hre.ethers.getContractFactory("CustomTokenFactory", deployerWallet);
-  const customFactory = await CustomTokenFactory.deploy(...customTokenFactoryConstructorArgs);
-  await customFactory.waitForDeployment();
-  const customFactoryAddress = await customFactory.getAddress();
-  await (await sendRelayerTx(() => customLocker.setFactory(customFactoryAddress))).wait();
-  const customTokenFactoryVerification = await verifyContract(customFactoryAddress, customTokenFactoryConstructorArgs);
-  deployedFreshOwnable.push({ label: "customTokenFactory", contract: customFactory });
-
-  // ---- BondingCurveFactory (Quick Launch, zero-tax) ----
-  const bondingCurveLocker = await LiquidityLocker.deploy();
-  await bondingCurveLocker.waitForDeployment();
-  const bondingCurveLockerVerification = await verifyContract(await bondingCurveLocker.getAddress(), []);
-
-  const bondingCurveFactoryConstructorArgs = [
-    await tokenImplementation.getAddress(),
-    routerAddress,
-    await bondingCurveLocker.getAddress(),
-    curveLaunchFeeWei,
-    feeTreasury,
-    lpLockDurationSeconds,
-    platformFeeWallet,
-    priceFeedAddress,
-  ];
-  const BondingCurveFactory = await hre.ethers.getContractFactory("BondingCurveFactory", deployerWallet);
-  const bondingCurveFactory = await BondingCurveFactory.deploy(...bondingCurveFactoryConstructorArgs);
-  await bondingCurveFactory.waitForDeployment();
-  const bondingCurveFactoryAddress = await bondingCurveFactory.getAddress();
-  await (await sendRelayerTx(() => bondingCurveLocker.setFactory(bondingCurveFactoryAddress))).wait();
-  const poolSeedTargetWei = parseOptionalWei(body.poolSeedTargetWei, "poolSeedTargetWei");
-  if (poolSeedTargetWei != null) await (await sendRelayerTx(() => bondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei))).wait();
-  const bondingCurveFactoryVerification = await verifyContract(bondingCurveFactoryAddress, bondingCurveFactoryConstructorArgs);
-  deployedFreshOwnable.push({ label: "bondingCurveFactory", contract: bondingCurveFactory });
-
-  // ---- CustomBondingCurveFactory (Quick Launch, custom tax) ----
-  const customBondingCurveLocker = await LiquidityLocker.deploy();
-  await customBondingCurveLocker.waitForDeployment();
-  const customBondingCurveLockerVerification = await verifyContract(await customBondingCurveLocker.getAddress(), []);
-
-  const customBondingCurveFactoryConstructorArgs = [
-    await customTokenImplementation.getAddress(),
-    routerAddress,
-    await customBondingCurveLocker.getAddress(),
-    curveLaunchFeeWei,
-    feeTreasury,
-    lpLockDurationSeconds,
-    platformFeeWallet,
-    priceFeedAddress,
-  ];
-  const CustomBondingCurveFactory = await hre.ethers.getContractFactory("CustomBondingCurveFactory", deployerWallet);
-  const customBondingCurveFactory = await CustomBondingCurveFactory.deploy(...customBondingCurveFactoryConstructorArgs);
-  await customBondingCurveFactory.waitForDeployment();
-  const customBondingCurveFactoryAddress = await customBondingCurveFactory.getAddress();
-  await (await sendRelayerTx(() => customBondingCurveLocker.setFactory(customBondingCurveFactoryAddress))).wait();
-  if (poolSeedTargetWei != null) await (await sendRelayerTx(() => customBondingCurveFactory.setPoolSeedTargetWei(poolSeedTargetWei))).wait();
-  const customBondingCurveFactoryVerification = await verifyContract(
-    customBondingCurveFactoryAddress,
-    customBondingCurveFactoryConstructorArgs
-  );
-  deployedFreshOwnable.push({ label: "customBondingCurveFactory", contract: customBondingCurveFactory });
-
-  // ---- Platform rewards (optional) ----
-  let rewardsDistributorAddress = parseOptionalAddress(body.rewardsDistributorAddress, "rewardsDistributorAddress");
-  let platformTokenAddress = parseOptionalAddress(body.platformTokenAddress, "platformTokenAddress");
-  let platformTokenDeployed = false;
-  if (!rewardsDistributorAddress && body.deployPlatformToken) {
-    if (!platformTokenAddress) {
-      const platformTokenName = body.platformTokenName || "Hood Launch";
-      const platformTokenSymbol = body.platformTokenSymbol || "HOOD";
-      const platformTokenSupply = hre.ethers.parseEther(String(body.platformTokenSupply || "1000000000"));
-      const platformTokenInitialHolder = parseOptionalAddress(body.platformTokenInitialHolder, "platformTokenInitialHolder") || deployerWallet.address;
-      const PlatformToken = await hre.ethers.getContractFactory("PlatformToken", deployerWallet);
-      const platformToken = await PlatformToken.deploy(platformTokenName, platformTokenSymbol, platformTokenSupply, platformTokenInitialHolder);
-      await platformToken.waitForDeployment();
-      platformTokenAddress = await platformToken.getAddress();
-      platformTokenDeployed = true;
-    }
-    // Owner is THIS service's own wallet, not ADMIN_WALLET directly — so the
-    // very next line (setPlatformToken, an onlyOwner call) can still
-    // succeed. Ownership is proposed to ADMIN_WALLET only once, at the very
-    // end of this function, after every owner-only setup call is done. See
-    // the big comment above this function for why.
-    const PlatformRewardsDistributor = await hre.ethers.getContractFactory("PlatformRewardsDistributor", deployerWallet);
-    const distributor = await PlatformRewardsDistributor.deploy(routerAddress, deployerWallet.address);
-    await distributor.waitForDeployment();
-    rewardsDistributorAddress = await distributor.getAddress();
-    await (await sendRelayerTx(() => distributor.setPlatformToken(platformTokenAddress))).wait();
-    deployedFreshOwnable.push({ label: "platformRewardsDistributor", contract: distributor });
-  }
-  if (rewardsDistributorAddress) {
-    await (await sendRelayerTx(() => factory.setRewardsDistributor(rewardsDistributorAddress))).wait();
-    await (await sendRelayerTx(() => customFactory.setRewardsDistributor(rewardsDistributorAddress))).wait();
-    await (await sendRelayerTx(() => bondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress))).wait();
-    await (await sendRelayerTx(() => customBondingCurveFactory.setRewardsDistributor(rewardsDistributorAddress))).wait();
-  }
-
-  // ---- Creator rewards (optional) ----
-  let creatorRewardsDistributorAddress = parseOptionalAddress(body.creatorRewardsDistributorAddress, "creatorRewardsDistributorAddress");
-  if (!creatorRewardsDistributorAddress && body.deployCreatorRewards) {
-    const CreatorRewardsDistributor = await hre.ethers.getContractFactory("CreatorRewardsDistributor", deployerWallet);
-    const creatorDistributor = await CreatorRewardsDistributor.deploy(routerAddress, deployerWallet.address);
-    await creatorDistributor.waitForDeployment();
-    creatorRewardsDistributorAddress = await creatorDistributor.getAddress();
-    deployedFreshOwnable.push({ label: "creatorRewardsDistributor", contract: creatorDistributor });
-  }
-  if (creatorRewardsDistributorAddress) {
-    await (await sendRelayerTx(() => factory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress))).wait();
-    await (await sendRelayerTx(() => customFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress))).wait();
-    await (await sendRelayerTx(() => bondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress))).wait();
-    await (await sendRelayerTx(() => customBondingCurveFactory.setCreatorRewardsDistributor(creatorRewardsDistributorAddress))).wait();
-  }
-
-  // ---- Fee-wallet distributor (optional) ----
-  let feeWalletDistributorAddress = parseOptionalAddress(body.feeWalletDistributorAddress, "feeWalletDistributorAddress");
-  if (!feeWalletDistributorAddress && body.deployFeeWalletDistributor) {
-    const feeWalletRecipient = parseOptionalAddress(body.feeWalletAddress, "feeWalletAddress") || platformFeeWallet;
-    const FeeWalletDistributor = await hre.ethers.getContractFactory("FeeWalletDistributor", deployerWallet);
-    const feeWalletDistributorContract = await FeeWalletDistributor.deploy(routerAddress, deployerWallet.address, feeWalletRecipient);
-    await feeWalletDistributorContract.waitForDeployment();
-    feeWalletDistributorAddress = await feeWalletDistributorContract.getAddress();
-    deployedFreshOwnable.push({ label: "feeWalletDistributor", contract: feeWalletDistributorContract });
-  }
-  if (feeWalletDistributorAddress) {
-    await (await sendRelayerTx(() => factory.setFeeWalletDistributor(feeWalletDistributorAddress))).wait();
-    await (await sendRelayerTx(() => customFactory.setFeeWalletDistributor(feeWalletDistributorAddress))).wait();
-    await (await sendRelayerTx(() => bondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress))).wait();
-    await (await sendRelayerTx(() => customBondingCurveFactory.setFeeWalletDistributor(feeWalletDistributorAddress))).wait();
-  }
-
-  // ---- Ownership handoff — the very last step, after every owner-only
-  // setup call above has already gone through as relayerWallet. Only
-  // contracts THIS run actually deployed are touched; a reused/
-  // already-existing address someone passed in via *Address is left alone
-  // (this service was never necessarily its owner in the first place).
-  const ownershipProposals = [];
-  for (const { label, contract } of deployedFreshOwnable) {
-    const address = await contract.getAddress();
-    try {
-      await (await sendRelayerTx(() => contract.transferOwnership(ADMIN_WALLET))).wait();
-      ownershipProposals.push({ label, address, proposedTo: ADMIN_WALLET, ok: true });
-    } catch (err) {
-      // Never let a failed handoff undo or hide the deployment itself — the
-      // contract is real and already recorded; the admin can always call
-      // transferOwnership manually later from the Contract admin grid.
-      ownershipProposals.push({ label, address, proposedTo: ADMIN_WALLET, ok: false, error: err.message });
-    }
-  }
-
-  const deploymentSummary = {
-    deployedBy: deployerWallet.address,
-    tokenImplementation: await tokenImplementation.getAddress(),
-    tokenImplementationVerified: tokenImplementationVerification.verified,
-    liquidityLocker: await locker.getAddress(),
-    liquidityLockerVerified: lockerVerification.verified,
-    tokenFactory: factoryAddress,
-    tokenFactoryVerified: tokenFactoryVerification.verified,
-    customTokenImplementation: await customTokenImplementation.getAddress(),
-    customTokenImplementationVerified: customTokenImplementationVerification.verified,
-    customLiquidityLocker: await customLocker.getAddress(),
-    customLiquidityLockerVerified: customLockerVerification.verified,
-    customTokenFactory: customFactoryAddress,
-    customTokenFactoryVerified: customTokenFactoryVerification.verified,
-    bondingCurveLiquidityLocker: await bondingCurveLocker.getAddress(),
-    bondingCurveLiquidityLockerVerified: bondingCurveLockerVerification.verified,
-    bondingCurveFactory: bondingCurveFactoryAddress,
-    bondingCurveFactoryVerified: bondingCurveFactoryVerification.verified,
-    customBondingCurveLiquidityLocker: await customBondingCurveLocker.getAddress(),
-    customBondingCurveLiquidityLockerVerified: customBondingCurveLockerVerification.verified,
-    customBondingCurveFactory: customBondingCurveFactoryAddress,
-    customBondingCurveFactoryVerified: customBondingCurveFactoryVerification.verified,
-    curveLaunchFeeWei: curveLaunchFeeWei.toString(),
-    router: routerAddress,
-    priceFeed: priceFeedAddress,
-    deployFeeWei: deployFeeWei.toString(),
-    launchFeeWei: launchFeeWei.toString(),
-    lpLockDurationSeconds: String(lpLockDurationSeconds),
-    feeTreasury,
-    platformFeeWallet,
-    platformToken: platformTokenAddress || null,
-    platformTokenFreshlyDeployed: platformTokenDeployed,
-    rewardsDistributor: rewardsDistributorAddress || null,
-    creatorRewardsDistributor: creatorRewardsDistributorAddress || null,
-    feeWalletDistributor: feeWalletDistributorAddress || null,
-    ownershipProposals,
-    deployedViaRelayerAdminPanel: true,
-  };
-
-  const { currentPath, historyPath } = await recordDeployment(network, deploymentSummary);
-  return { network, deploymentSummary, currentPath, historyPath };
 }
 
 const ERC20_BALANCE_OF_ABI = ["function balanceOf(address) view returns (uint256)"];
@@ -1314,6 +763,12 @@ function isV4Kind(kind) {
 function canRelay(watcher) {
   return !!(watcher && watcher.relayFn && watcher.hashFn);
 }
+// The contract that holds a watcher's escrowed deposits, emits LaunchDeposited
+// and has relayer(): the shared V4LaunchRelay for custom/curve watchers
+// (watcher.relay), else the factory itself (V4TokenFactory has its own relay).
+function relayContractOf(watcher) {
+  return watcher.relay || watcher.factory;
+}
 
 function bigIntSqrt(n) {
   if (n < 2n) return n;
@@ -1349,24 +804,6 @@ const UNIV2_ROUTER_QUOTE_ABI = [
 const UNIV2_FACTORY_ABI = ["function getPair(address tokenA, address tokenB) view returns (address pair)"];
 // Minimal ERC20 metadata ABI, best-effort only — see POST /track-token.
 const ERC20_METADATA_ABI = ["function name() view returns (string)", "function symbol() view returns (string)"];
-// LaunchedToken and CustomToken expose the same tax-progress fields under
-// different getter names (taxActive vs platformTaxActive — see the module
-// comment in lib/priceMath.js and CustomToken.sol/LaunchedToken.sol
-// themselves), so pollTokenPrices picks the right ABI per tracked token's
-// own `kind`.
-const TOKEN_STATE_ABI = [
-  ...ERC20_META_ABI,
-  "function priceFeed() view returns (address)",
-  "function graduationTargetUsd() view returns (uint256)",
-  "function taxActive() view returns (bool)",
-];
-const CUSTOM_TOKEN_STATE_ABI = [
-  ...ERC20_META_ABI,
-  "function priceFeed() view returns (address)",
-  "function graduationTargetUsd() view returns (uint256)",
-  "function platformTaxActive() view returns (bool)",
-];
-
 const LAUNCH_VOUCHER_FIELDS = [
   "creator",
   "name",
@@ -1390,25 +827,18 @@ const LAUNCH_VOUCHER_UINT_FIELDS = [
   "deadline",
 ];
 
-const CUSTOM_LAUNCH_VOUCHER_FIELDS = [
+// V4LaunchRelay vouchers (custom-tax token, plain curve, custom-tax curve) —
+// see contracts/V4LaunchRelay.sol. Field order is the struct order there.
+// No addLiquidity flag (every V4 custom launch seeds a pool) and no
+// reflectionAsset (V4 reflections are paid in ETH by the hook).
+const V4_CUSTOM_VOUCHER_FIELDS = [
   "creator",
   "name",
   "symbol",
   "totalSupply",
-  "addLiquidity",
-  "liquidityEthAmount",
   "buyFees",
   "sellFees",
-  "reflectionAsset",
   "marketingWallet",
-  "creatorBuyEthAmount",
-  "minCreatorTokensOut",
-  "fee",
-  "salt",
-  "deadline",
-];
-const CUSTOM_LAUNCH_VOUCHER_UINT_FIELDS = [
-  "totalSupply",
   "liquidityEthAmount",
   "creatorBuyEthAmount",
   "minCreatorTokensOut",
@@ -1416,14 +846,16 @@ const CUSTOM_LAUNCH_VOUCHER_UINT_FIELDS = [
   "salt",
   "deadline",
 ];
-
-// Quick Launch (bonding curve) vouchers — see BondingCurveFactory.
-// CurveLaunchVoucher / CustomBondingCurveFactory.CustomCurveLaunchVoucher.
-// No addLiquidityAtLaunch/liquidityEthAmount fields at all: createCurveToken
-// has no liquidity step to relay, only curve creation plus the optional
-// same-transaction creator buy-in that already exists on the direct-wallet
-// path.
-const CURVE_LAUNCH_VOUCHER_FIELDS = [
+const V4_CUSTOM_VOUCHER_UINT_FIELDS = [
+  "totalSupply",
+  "liquidityEthAmount",
+  "creatorBuyEthAmount",
+  "minCreatorTokensOut",
+  "fee",
+  "salt",
+  "deadline",
+];
+const V4_CURVE_VOUCHER_FIELDS = [
   "creator",
   "name",
   "symbol",
@@ -1434,7 +866,7 @@ const CURVE_LAUNCH_VOUCHER_FIELDS = [
   "salt",
   "deadline",
 ];
-const CURVE_LAUNCH_VOUCHER_UINT_FIELDS = [
+const V4_CURVE_VOUCHER_UINT_FIELDS = [
   "totalSupply",
   "creatorBuyEthAmount",
   "minCreatorTokensOut",
@@ -1442,15 +874,13 @@ const CURVE_LAUNCH_VOUCHER_UINT_FIELDS = [
   "salt",
   "deadline",
 ];
-
-const CUSTOM_CURVE_LAUNCH_VOUCHER_FIELDS = [
+const V4_CUSTOM_CURVE_VOUCHER_FIELDS = [
   "creator",
   "name",
   "symbol",
   "totalSupply",
   "buyFees",
   "sellFees",
-  "reflectionAsset",
   "marketingWallet",
   "creatorBuyEthAmount",
   "minCreatorTokensOut",
@@ -1458,14 +888,7 @@ const CUSTOM_CURVE_LAUNCH_VOUCHER_FIELDS = [
   "salt",
   "deadline",
 ];
-const CUSTOM_CURVE_LAUNCH_VOUCHER_UINT_FIELDS = [
-  "totalSupply",
-  "creatorBuyEthAmount",
-  "minCreatorTokensOut",
-  "fee",
-  "salt",
-  "deadline",
-];
+const V4_CUSTOM_CURVE_VOUCHER_UINT_FIELDS = V4_CURVE_VOUCHER_UINT_FIELDS;
 
 function normalizeVoucher(rawVoucher, fields, uintFields) {
   const voucher = {};
@@ -1494,12 +917,13 @@ function expectedDepositForToken(voucher) {
   return voucher.addLiquidityAtLaunch ? voucher.fee + voucher.liquidityEthAmount + voucher.creatorBuyEthAmount : voucher.fee;
 }
 
-function expectedDepositForCustom(voucher) {
-  return voucher.addLiquidity ? voucher.fee + voucher.liquidityEthAmount + voucher.creatorBuyEthAmount : voucher.fee;
+// V4LaunchRelay custom-tax token: launch fee + pool liquidity + creator buy-in.
+function expectedDepositForV4Custom(voucher) {
+  return voucher.fee + voucher.liquidityEthAmount + voucher.creatorBuyEthAmount;
 }
 
-// A curve launch never has a liquidity leg to escrow — see the voucher
-// field lists above.
+// A curve launch has no liquidity leg to escrow (V4CurveFactory seeds the pool
+// at graduation) — just the launch fee plus the optional creator buy-in.
 function expectedDepositForCurve(voucher) {
   return voucher.fee + voucher.creatorBuyEthAmount;
 }
@@ -1574,26 +998,12 @@ async function postLaunchPipeline({
 
   let flattenedSource = null;
   try {
-    // "custom" (CustomTokenFactory) and "custom-curve" (CustomBondingCurveFactory)
-    // both clone CustomToken; "token" (TokenFactory) and "curve"
-    // (BondingCurveFactory) both clone the plain LaunchedToken — see each
-    // factory's own createCurveToken()/relayedCreateCurveToken() for which
-    // token contract it initializes.
-    // "v4token" (V4TokenFactory) clones V4LaunchedToken, a separate, tax-free
-    // ERC20 (the tax lives in V4TaxHook, not the token).
-    // "v4custom" (V4CustomTokenFactory) and "v4curve" (V4CurveFactory) are
-    // direct-launch only, so postLaunchPipeline is never reached for them;
-    // the entries below just keep this table total if that ever changes
-    // (v4custom clones V4CustomToken; v4curve clones V4LaunchedToken or
-    // V4CustomToken depending on the curve, V4LaunchedToken here).
+    // "v4token" (V4TokenFactory), "v4curve" (V4CurveFactory, plain) clone
+    // V4LaunchedToken, a tax-free ERC20 (the tax lives in V4TaxHook).
+    // "v4custom" (V4CustomTokenFactory) and "v4custom-curve" (V4CurveFactory,
+    // custom-tax) clone V4CustomToken.
     const contractFile =
-      kind === "custom" || kind === "custom-curve"
-        ? "CustomToken.sol"
-        : kind === "v4custom"
-          ? "V4CustomToken.sol"
-          : isV4Kind(kind)
-            ? "V4LaunchedToken.sol"
-            : "LaunchedToken.sol";
+      kind === "v4custom" || kind === "v4custom-curve" ? "V4CustomToken.sol" : "V4LaunchedToken.sol";
     const absPath = path.join(hre.config.paths.root, "contracts", contractFile);
     flattenedSource = await hre.run("flatten:get-flattened-sources", { files: [absPath] });
   } catch (err) {
@@ -1760,35 +1170,38 @@ function escapeTelegramHtml(str) {
 // mismatched, or newly resolved), tracked in relayerMismatchState, so a
 // persistent misconfiguration doesn't spam the channel on every tick.
 const FACTORY_LABELS = {
-  token: "TokenFactory",
-  custom: "CustomTokenFactory",
-  curve: "BondingCurveFactory",
-  "custom-curve": "CustomBondingCurveFactory",
   v4token: "V4TokenFactory",
   v4custom: "V4CustomTokenFactory",
   v4curve: "V4CurveFactory",
+  "v4custom-curve": "V4CurveFactory",
+  v4relay: "V4LaunchRelay",
 };
 const relayerMismatchState = {}; // { [kind]: boolean } — last known mismatch state, absent until the first check
 
 async function checkRelayerHealth(watchers, relayerWallet) {
+  const checked = new Set();
   for (const watcher of watchers) {
-    // Direct-launch-only factories (v4custom/v4curve) have no relayer() to
-    // check — there is nothing for this wallet to relay through them.
+    // Watchers without a relay path (no voucher/relay function) have no
+    // relayer() to check — there is nothing for this wallet to relay there.
     if (!canRelay(watcher)) continue;
-    const label = FACTORY_LABELS[watcher.kind] || watcher.kind;
+    // The three custom/curve watchers share ONE V4LaunchRelay: check it once.
+    const stateKey = watcher.relay ? "v4relay" : watcher.kind;
+    if (checked.has(stateKey)) continue;
+    checked.add(stateKey);
+    const label = FACTORY_LABELS[stateKey] || stateKey;
     let onChainRelayer;
     try {
-      onChainRelayer = await watcher.factory.relayer();
+      onChainRelayer = await relayContractOf(watcher).relayer();
     } catch (err) {
       console.warn(`[relayer-health] couldn't read ${label}.relayer(): ${err.message}`);
       continue;
     }
     const mismatched = onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase();
-    const wasMismatched = relayerMismatchState[watcher.kind];
+    const wasMismatched = relayerMismatchState[stateKey];
     if (mismatched && !wasMismatched) {
       console.warn(
         `WARNING: ${label}.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
-          "Relayed launches through this factory will revert until the factory owner calls setRelayer (admin panel → Contracts)."
+          "Relayed launches through it will revert until its owner calls setRelayer (admin panel → Contracts)."
       );
       await sendTelegramMessage(
         relayerSettings.telegramAlertsChatId,
@@ -1804,7 +1217,7 @@ async function checkRelayerHealth(watchers, relayerWallet) {
         `✅ <b>${escapeTelegramHtml(label)}</b> relayer mismatch resolved — now matches this relayer's wallet (<code>${escapeTelegramHtml(relayerWallet.address)}</code>).`
       );
     }
-    relayerMismatchState[watcher.kind] = mismatched;
+    relayerMismatchState[stateKey] = mismatched;
   }
 }
 
@@ -1815,16 +1228,17 @@ async function relayerHealthPollLoop(watchers, relayerWallet) {
 
 // ---- "new launch" Telegram announcement ----
 // Called from discoverLaunchedTokens below, which scans TokenCreated/
-// CustomTokenCreated/CurveTokenCreated across ALL FOUR factories — unlike
+// CustomTokenCreated/CurveTokenCreated across all three V4 factories — unlike
 // postLaunchPipeline (relayed launches only), this is the one discovery path
 // that sees every launch regardless of whether it was gasless-relayed or
 // paid for directly by the creator's own wallet, so it's the right place to
 // hook a "new launch" announcement that never misses one.
-async function announceLaunchToTelegram(network, kind, { token, name, symbol, pairAddress }) {
+async function announceLaunchToTelegram(network, kind, { token, name, symbol, hasPool }) {
   const label = FACTORY_LABELS[kind] || kind;
   const explorerBrowserUrl = process.env.EXPLORER_BROWSER_URL || (ROBINHOOD_NETWORKS[network] || {}).explorerBrowserUrl || null;
   const link = explorerBrowserUrl ? `${explorerBrowserUrl.replace(/\/$/, "")}/address/${token}` : null;
-  const kindNote = kind === "curve" || kind === "custom-curve" ? "⚡ Quick Launch" : pairAddress ? "Launch + liquidity" : "Deploy";
+  const kindNote =
+    kind === "v4curve" || kind === "v4custom-curve" ? "⚡ Quick Launch (bonding curve)" : kind === "v4custom" ? "Custom-tax launch" : hasPool ? "Launch + liquidity" : "Deploy";
   if (!relayerSettings.telegramBotToken || !relayerSettings.telegramLaunchesChatId) {
     console.warn(
       `[telegram] not announcing $${symbol}: ` +
@@ -1956,16 +1370,11 @@ async function announceMilestoneToTelegram(network, entry, milestone, { mcapUsd 
 function logEnvVarPresence() {
   const names = [
     "RELAYER_PRIVATE_KEY",
-    "TOKEN_FACTORY_ADDRESS",
-    "CUSTOM_TOKEN_FACTORY_ADDRESS",
-    "BONDING_CURVE_FACTORY_ADDRESS",
-    "CUSTOM_BONDING_CURVE_FACTORY_ADDRESS",
     "V4_TOKEN_FACTORY_ADDRESS",
     "V4_CUSTOM_TOKEN_FACTORY_ADDRESS",
     "V4_CURVE_FACTORY_ADDRESS",
+    "V4_LAUNCH_RELAY_ADDRESS",
     "V4_COMPOUNDER_ADDRESS",
-    "FEE_WALLET_DISTRIBUTOR_ADDRESS",
-    "PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_LAUNCHES_CHAT_ID",
     "TELEGRAM_ALERTS_CHAT_ID",
@@ -2070,13 +1479,10 @@ async function loadRelayerSettingsFromStore() {
 // Addresses are read once at startup, so after saving new ones in Admin the
 // relayer needs a restart to pick them up.
 const CONFIG_ADDRESS_ENV = {
-  tokenFactory: "TOKEN_FACTORY_ADDRESS",
-  customTokenFactory: "CUSTOM_TOKEN_FACTORY_ADDRESS",
-  bondingCurveFactory: "BONDING_CURVE_FACTORY_ADDRESS",
-  customBondingCurveFactory: "CUSTOM_BONDING_CURVE_FACTORY_ADDRESS",
   v4TokenFactory: "V4_TOKEN_FACTORY_ADDRESS",
   v4CustomTokenFactory: "V4_CUSTOM_TOKEN_FACTORY_ADDRESS",
   v4CurveFactory: "V4_CURVE_FACTORY_ADDRESS",
+  v4LaunchRelay: "V4_LAUNCH_RELAY_ADDRESS",
   v4LiquidityCompounder: "V4_COMPOUNDER_ADDRESS",
 };
 
@@ -2212,40 +1618,21 @@ async function main() {
         "cover gas for the launches you expect to relay, and never reuse it anywhere else."
     );
   }
-  const tokenFactoryAddress = cfgAddr.tokenFactory; // env var, else saved Admin config
-  const customTokenFactoryAddress = cfgAddr.customTokenFactory; // env var, else saved Admin config
-  // Quick Launch's two bonding-curve factories — optional, same as the two
-  // above. Gasless relaying for these only works once the deployed
-  // contracts actually have this relay code (see BondingCurveFactory.sol /
-  // CustomBondingCurveFactory.sol's own "gasless relayed launches" section)
-  // and the factory owner has run scripts/setRelayer.js against them.
-  const bondingCurveFactoryAddress = cfgAddr.bondingCurveFactory; // env var, else saved Admin config
-  const customBondingCurveFactoryAddress = cfgAddr.customBondingCurveFactory; // env var, else saved Admin config
-  // Uniswap V4 TokenFactory (admin-only, under development) — optional and
-  // fully independent of the V2 factories above: its own watcher, its own
-  // POST /vouchers/v4token route, its own cursor. Leaving it unset changes
-  // nothing about V2.
-  const v4TokenFactoryAddress = cfgAddr.v4TokenFactory; // env var, else saved Admin config
-  // V4CustomTokenFactory / V4CurveFactory — optional, direct-launch only
-  // (no voucher/relay path, so no POST /vouchers/... route and nothing for
-  // the relaying loops to do). They exist here for discovery, price and
-  // activity polling, and the compounder keeper.
-  const v4CustomTokenFactoryAddress = cfgAddr.v4CustomTokenFactory; // env var, else saved Admin config
-  const v4CurveFactoryAddress = cfgAddr.v4CurveFactory; // env var, else saved Admin config
-  if (
-    !tokenFactoryAddress &&
-    !customTokenFactoryAddress &&
-    !bondingCurveFactoryAddress &&
-    !customBondingCurveFactoryAddress &&
-    !v4TokenFactoryAddress &&
-    !v4CustomTokenFactoryAddress &&
-    !v4CurveFactoryAddress
-  ) {
+  // Robinhood Chain launches are Uniswap V4 only. Four contracts matter here:
+  //   - V4TokenFactory: plain tokens. Has its own gasless relay built in.
+  //   - V4CustomTokenFactory + V4CurveFactory: custom-tax and bonding-curve
+  //     launches. Their gasless path is the separate V4LaunchRelay contract,
+  //     which calls the factory's ordinary launch function on the creator's
+  //     behalf (see contracts/V4LaunchRelay.sol).
+  // Each address comes from an env var, else the Admin panel's saved config.
+  const v4TokenFactoryAddress = cfgAddr.v4TokenFactory;
+  const v4CustomTokenFactoryAddress = cfgAddr.v4CustomTokenFactory;
+  const v4CurveFactoryAddress = cfgAddr.v4CurveFactory;
+  const v4LaunchRelayAddress = cfgAddr.v4LaunchRelay;
+  if (!v4TokenFactoryAddress && !v4CustomTokenFactoryAddress && !v4CurveFactoryAddress) {
     throw new Error(
-      "No factory address found. Save at least one in the Admin panel (then restart), or set one of " +
-        "TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS / " +
-        "BONDING_CURVE_FACTORY_ADDRESS / CUSTOM_BONDING_CURVE_FACTORY_ADDRESS / V4_TOKEN_FACTORY_ADDRESS / " +
-        "V4_CUSTOM_TOKEN_FACTORY_ADDRESS / V4_CURVE_FACTORY_ADDRESS."
+      "No V4 factory address found. Save at least one in the Admin panel (then restart), or set one of " +
+        "V4_TOKEN_FACTORY_ADDRESS / V4_CUSTOM_TOKEN_FACTORY_ADDRESS / V4_CURVE_FACTORY_ADDRESS."
     );
   }
 
@@ -2255,50 +1642,9 @@ async function main() {
 
   const watchers = [];
 
-  // FIX: each of these four factory loads used to run unguarded — a missing/
-  // stale Hardhat build artifact for ANY one of them (HH700) threw out of
-  // main() before app.listen() was ever reached, crashing the entire process
-  // and taking the whole site down (index.html, config.json, GET /launches,
-  // wallet-paid launches — everything) over what should only ever disable
-  // gasless relaying for that one launch type. feeWalletDistributor/
-  // platformRewardsDistributor below were already guarded this way for
-  // exactly this reason (see their own comments) — this brings the four
-  // actual factories in line with that same, more important protection.
-  if (tokenFactoryAddress) {
-    try {
-      const factory = await hre.ethers.getContractAt("TokenFactory", tokenFactoryAddress, relayerWallet);
-      const onChainRelayer = await factory.relayer();
-      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
-        console.warn(
-          `WARNING: TokenFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
-            `relayedCreateToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}).`
-        );
-      }
-      watchers.push({
-        kind: "token",
-        factory,
-        voucherFields: LAUNCH_VOUCHER_FIELDS,
-        voucherUintFields: LAUNCH_VOUCHER_UINT_FIELDS,
-        hashFn: (v) => factory.hashLaunchVoucher(v),
-        expectedDepositFn: expectedDepositForToken,
-        relayFn: (v, sig) => factory.relayedCreateToken(v, sig),
-        createdEventName: "TokenCreated",
-        // TokenFactory's own liquidity event — carries ethAmount/tokenAmount
-        // in addition to lpAmount/lockId/unlockTime (see LiquidityAdded in
-        // contracts/TokenFactory.sol).
-        liquidityEventName: "LiquidityAdded",
-      });
-    } catch (err) {
-      console.error(
-        `Could not load TokenFactory at ${tokenFactoryAddress} (${err.message}). Gasless relaying for plain-token ` +
-          "launches is DISABLED for this run — everything else (the site, wallet-paid launches, other factories' " +
-          "relaying, activity/price polling) starts normally regardless. This specific error usually means the " +
-          "contract's build artifact wasn't included in this deploy (a stale/cached build) — a clean rebuild that " +
-          "actually recompiles contracts/TokenFactory.sol should fix it."
-      );
-    }
-  }
-
+  // Every factory load is guarded: a missing/stale Hardhat build artifact
+  // (HH700) for ANY one of them must only disable that launch type, never
+  // crash main() before app.listen() and take the whole site down with it.
   if (v4TokenFactoryAddress) {
     try {
       const factory = await hre.ethers.getContractAt("V4TokenFactory", v4TokenFactoryAddress, relayerWallet);
@@ -2312,8 +1658,6 @@ async function main() {
       watchers.push({
         kind: "v4token",
         factory,
-        // V4TokenFactory's LaunchVoucher is field-for-field the same struct
-        // as TokenFactory's, so the same field lists/deposit math apply.
         voucherFields: LAUNCH_VOUCHER_FIELDS,
         voucherUintFields: LAUNCH_VOUCHER_UINT_FIELDS,
         hashFn: (v) => factory.hashLaunchVoucher(v),
@@ -2321,24 +1665,48 @@ async function main() {
         relayFn: (v, sig) => factory.relayedCreateToken(v, sig),
         createdEventName: "TokenCreated",
         // V4's LiquidityAdded: (token, creator, ethAmount, tokenAmount,
-        // liquidity, unlockTime, lockId) — same name as V2's, different shape
-        // (liquidity instead of lpAmount, no pair).
+        // liquidity, unlockTime, lockId).
         liquidityEventName: "LiquidityAdded",
       });
     } catch (err) {
       console.error(
-        `Could not load V4TokenFactory at ${v4TokenFactoryAddress} (${err.message}). Gasless relaying for V4 launches ` +
-          "is DISABLED for this run — everything else starts normally regardless. This usually means the contract's " +
-          "build artifact is missing (run a normal `npx hardhat compile` so contracts/V4TokenFactory.sol is built)."
+        `Could not load V4TokenFactory at ${v4TokenFactoryAddress} (${err.message}). Gasless relaying for plain V4 ` +
+          "launches is DISABLED for this run — everything else starts normally regardless. This usually means the " +
+          "contract's build artifact is missing (run a normal `npx hardhat compile` so contracts/V4TokenFactory.sol is built)."
       );
     }
   }
 
-  // V4CustomTokenFactory: direct launches only, so this watcher has NO
-  // voucherFields/hashFn/expectedDepositFn/relayFn — every loop that relays,
-  // matches deposits, or checks relayer() skips a watcher without them (see
-  // canRelay()). Its CustomTokenCreated already carries the poolId, the
-  // marketing wallet and both fee sets, which discovery persists.
+  // V4LaunchRelay: the gasless path for the custom-tax and curve factories.
+  // Optional at load time (without it those two factories are still
+  // discovered and priced, and creators can launch from their own wallet),
+  // but every V4 launch type is expected to run through it in production.
+  let v4Relay = null;
+  if (v4LaunchRelayAddress && (v4CustomTokenFactoryAddress || v4CurveFactoryAddress)) {
+    try {
+      v4Relay = await hre.ethers.getContractAt("V4LaunchRelay", v4LaunchRelayAddress, relayerWallet);
+      const onChainRelayer = await v4Relay.relayer();
+      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
+        console.warn(
+          `WARNING: V4LaunchRelay.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
+            `Relayed launches will revert until the relay owner calls setRelayer(${relayerWallet.address}).`
+        );
+      }
+    } catch (err) {
+      v4Relay = null;
+      console.error(
+        `Could not load V4LaunchRelay at ${v4LaunchRelayAddress} (${err.message}). Gasless relaying for V4 custom-tax ` +
+          "and curve launches is DISABLED for this run — everything else starts normally regardless. This usually " +
+          "means the contract's build artifact is missing (run a normal `npx hardhat compile`)."
+      );
+    }
+  } else if (v4CustomTokenFactoryAddress || v4CurveFactoryAddress) {
+    console.warn(
+      "V4_LAUNCH_RELAY_ADDRESS is not set (and no v4LaunchRelay is saved in the Admin config) — custom-tax and curve " +
+        "launches can only be paid for from the creator's own wallet until it is."
+    );
+  }
+
   if (v4CustomTokenFactoryAddress) {
     try {
       const factory = await hre.ethers.getContractAt("V4CustomTokenFactory", v4CustomTokenFactoryAddress, relayerWallet);
@@ -2347,21 +1715,33 @@ async function main() {
         factory,
         createdEventName: "CustomTokenCreated",
         liquidityEventName: "LiquidityAdded",
+        ...(v4Relay
+          ? {
+              relay: v4Relay,
+              voucherFields: V4_CUSTOM_VOUCHER_FIELDS,
+              voucherUintFields: V4_CUSTOM_VOUCHER_UINT_FIELDS,
+              hashFn: (v) => v4Relay.hashCustomVoucher(v),
+              expectedDepositFn: expectedDepositForV4Custom,
+              relayFn: (v, sig) => v4Relay.relayedCreateCustomToken(v, sig),
+              implementationFn: () => factory.tokenImplementation(),
+            }
+          : {}),
       });
     } catch (err) {
       console.error(
         `Could not load V4CustomTokenFactory at ${v4CustomTokenFactoryAddress} (${err.message}). Discovery, price and ` +
-          "activity polling for V4 custom-tax launches is DISABLED for this run — everything else starts normally " +
-          "regardless. This usually means the contract's build artifact is missing (run a normal `npx hardhat compile` " +
-          "so contracts/V4CustomTokenFactory.sol is built)."
+          "activity polling and gasless relaying for V4 custom-tax launches are DISABLED for this run — everything " +
+          "else starts normally regardless. This usually means the contract's build artifact is missing (run a " +
+          "normal `npx hardhat compile` so contracts/V4CustomTokenFactory.sol is built)."
       );
     }
   }
 
-  // V4CurveFactory: bonding curve for plain AND custom-tax tokens, direct
-  // launches only (no relay path, same as above). CurveTokenCreated carries
-  // no custom-tax info; discovery also reads CustomCurveConfigured (and falls
-  // back to isCustomCurve()) to learn it.
+  // V4CurveFactory: bonding curve for plain AND custom-tax tokens. The plain
+  // curve and the custom curve have different vouchers, so the relay gets two
+  // watchers over the same factory: "v4curve" (relay + discovery + pricing)
+  // and "v4custom-curve" (relay only — discovery is done by "v4curve", which
+  // learns custom-tax config from CustomCurveConfigured / isCustomCurve()).
   if (v4CurveFactoryAddress) {
     try {
       const factory = await hre.ethers.getContractAt("V4CurveFactory", v4CurveFactoryAddress, relayerWallet);
@@ -2370,143 +1750,40 @@ async function main() {
         factory,
         createdEventName: "CurveTokenCreated",
         liquidityEventName: null,
+        ...(v4Relay
+          ? {
+              relay: v4Relay,
+              voucherFields: V4_CURVE_VOUCHER_FIELDS,
+              voucherUintFields: V4_CURVE_VOUCHER_UINT_FIELDS,
+              hashFn: (v) => v4Relay.hashCurveVoucher(v),
+              expectedDepositFn: expectedDepositForCurve,
+              relayFn: (v, sig) => v4Relay.relayedCreateCurveToken(v, sig),
+              implementationFn: () => factory.plainTokenImplementation(),
+            }
+          : {}),
       });
+      if (v4Relay) {
+        watchers.push({
+          kind: "v4custom-curve",
+          relayOnly: true, // never scanned for discovery/price/activity — "v4curve" does that
+          factory,
+          relay: v4Relay,
+          voucherFields: V4_CUSTOM_CURVE_VOUCHER_FIELDS,
+          voucherUintFields: V4_CUSTOM_CURVE_VOUCHER_UINT_FIELDS,
+          hashFn: (v) => v4Relay.hashCustomCurveVoucher(v),
+          expectedDepositFn: expectedDepositForCurve,
+          relayFn: (v, sig) => v4Relay.relayedCreateCustomCurveToken(v, sig),
+          implementationFn: () => factory.customTokenImplementation(),
+          createdEventName: "CurveTokenCreated",
+          liquidityEventName: null,
+        });
+      }
     } catch (err) {
       console.error(
         `Could not load V4CurveFactory at ${v4CurveFactoryAddress} (${err.message}). Discovery, price and activity ` +
-          "polling for V4 curve launches is DISABLED for this run — everything else starts normally regardless. This " +
-          "usually means the contract's build artifact is missing (run a normal `npx hardhat compile` so " +
-          "contracts/V4CurveFactory.sol is built)."
-      );
-    }
-  }
-
-  if (customTokenFactoryAddress) {
-    try {
-      const factory = await hre.ethers.getContractAt("CustomTokenFactory", customTokenFactoryAddress, relayerWallet);
-      const onChainRelayer = await factory.relayer();
-      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
-        console.warn(
-          `WARNING: CustomTokenFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
-            `relayedCreateCustomToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}).`
-        );
-      }
-      watchers.push({
-        kind: "custom",
-        factory,
-        voucherFields: CUSTOM_LAUNCH_VOUCHER_FIELDS,
-        voucherUintFields: CUSTOM_LAUNCH_VOUCHER_UINT_FIELDS,
-        hashFn: (v) => factory.hashCustomLaunchVoucher(v),
-        expectedDepositFn: expectedDepositForCustom,
-        relayFn: (v, sig) => factory.relayedCreateCustomToken(v, sig),
-        createdEventName: "CustomTokenCreated",
-        // FIX: CustomTokenFactory never emits "LiquidityAdded" — that event
-        // (and its ethAmount/tokenAmount fields) only exists on TokenFactory.
-        // CustomTokenFactory's own equivalent is InitialLiquidityLocked (see
-        // contracts/CustomTokenFactory.sol), which carries lpAmount/lockId/
-        // unlockTime but never the ETH/token amounts actually paired into
-        // the pool — scripts/customLaunch.js's own record-keeping already
-        // works around that same gap by falling back to the caller-supplied
-        // liquidityEthAmount instead of an event value; postLaunchPipeline
-        // below does the same for a relayed launch, from the voucher's own
-        // liquidityEthAmount. Before this fix, relayMatchedDeposit only ever
-        // looked for "LiquidityAdded", so every relayed custom-token launch
-        // recorded liquidityEthAmount/liquidityLpAmount/liquidityLockId/
-        // liquidityUnlockTime as permanently null even when liquidity really
-        // was added (visible in the ledger as a real, non-null pairAddress
-        // sitting next to five null liquidity fields).
-        liquidityEventName: "InitialLiquidityLocked",
-      });
-    } catch (err) {
-      console.error(
-        `Could not load CustomTokenFactory at ${customTokenFactoryAddress} (${err.message}). Gasless relaying for ` +
-          "custom-tax-token launches is DISABLED for this run — everything else (the site, wallet-paid launches, " +
-          "other factories' relaying, activity/price polling) starts normally regardless. This specific error " +
-          "usually means the contract's build artifact wasn't included in this deploy (a stale/cached build) — a " +
-          "clean rebuild that actually recompiles contracts/CustomTokenFactory.sol should fix it."
-      );
-    }
-  }
-
-  if (bondingCurveFactoryAddress) {
-    try {
-      const factory = await hre.ethers.getContractAt("BondingCurveFactory", bondingCurveFactoryAddress, relayerWallet);
-      const onChainRelayer = await factory.relayer();
-      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
-        console.warn(
-          `WARNING: BondingCurveFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
-            `relayedCreateCurveToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}) ` +
-            "(see scripts/setRelayer.js)."
-        );
-      }
-      watchers.push({
-        kind: "curve",
-        factory,
-        voucherFields: CURVE_LAUNCH_VOUCHER_FIELDS,
-        voucherUintFields: CURVE_LAUNCH_VOUCHER_UINT_FIELDS,
-        hashFn: (v) => factory.hashCurveLaunchVoucher(v),
-        expectedDepositFn: expectedDepositForCurve,
-        relayFn: (v, sig) => factory.relayedCreateCurveToken(v, sig),
-        createdEventName: "CurveTokenCreated",
-        // createCurveToken has no liquidity branch at all to relay — see
-        // CurveLaunchVoucher's own comment in contracts/BondingCurveFactory.sol
-        // — so there is no liquidity event for postLaunchPipeline/
-        // relayMatchedDeposit to look for here, same as the plain (non-
-        // relayed) curve launch path already records no liquidity fields.
-        liquidityEventName: null,
-      });
-    } catch (err) {
-      console.error(
-        `Could not load BondingCurveFactory at ${bondingCurveFactoryAddress} (${err.message}). Gasless relaying ` +
-          "for Quick Launch (zero-tax) is DISABLED for this run — everything else (the site, wallet-paid launches, " +
-          "other factories' relaying, activity/price polling) starts normally regardless. This specific error " +
-          "usually means the contract's build artifact wasn't included in this deploy (a stale/cached build) — a " +
-          "clean rebuild that actually recompiles contracts/BondingCurveFactory.sol should fix it."
-      );
-    }
-  }
-
-  if (customBondingCurveFactoryAddress) {
-    try {
-      const factory = await hre.ethers.getContractAt(
-        "CustomBondingCurveFactory",
-        customBondingCurveFactoryAddress,
-        relayerWallet
-      );
-      const onChainRelayer = await factory.relayer();
-      if (onChainRelayer.toLowerCase() !== relayerWallet.address.toLowerCase()) {
-        console.warn(
-          `WARNING: CustomBondingCurveFactory.relayer() is ${onChainRelayer}, not this wallet (${relayerWallet.address}). ` +
-            `relayedCreateCurveToken calls will revert until the factory owner calls setRelayer(${relayerWallet.address}) ` +
-            "(see scripts/setRelayer.js)."
-        );
-      }
-      watchers.push({
-        kind: "custom-curve",
-        factory,
-        voucherFields: CUSTOM_CURVE_LAUNCH_VOUCHER_FIELDS,
-        voucherUintFields: CUSTOM_CURVE_LAUNCH_VOUCHER_UINT_FIELDS,
-        hashFn: (v) => factory.hashCustomCurveLaunchVoucher(v),
-        // Same escrow shape as the plain curve voucher (fee +
-        // creatorBuyEthAmount, no liquidity leg) — CustomCurveLaunchVoucher
-        // only adds fee-config fields on top, nothing that changes what gets
-        // escrowed.
-        expectedDepositFn: expectedDepositForCurve,
-        relayFn: (v, sig) => factory.relayedCreateCurveToken(v, sig),
-        // Same event name as the plain curve factory (CurveTokenCreated) —
-        // this factory's own version just carries two extra fields
-        // (reflectionAsset/marketingWallet). No collision risk: each watcher
-        // queries its own factory instance.
-        createdEventName: "CurveTokenCreated",
-        liquidityEventName: null,
-      });
-    } catch (err) {
-      console.error(
-        `Could not load CustomBondingCurveFactory at ${customBondingCurveFactoryAddress} (${err.message}). Gasless ` +
-          "relaying for Quick Launch (custom tax) is DISABLED for this run — everything else (the site, wallet-paid " +
-          "launches, other factories' relaying, activity/price polling) starts normally regardless. This specific " +
-          "error usually means the contract's build artifact wasn't included in this deploy (a stale/cached build) " +
-          "— a clean rebuild that actually recompiles contracts/CustomBondingCurveFactory.sol should fix it."
+          "polling and gasless relaying for V4 curve launches are DISABLED for this run — everything else starts " +
+          "normally regardless. This usually means the contract's build artifact is missing (run a normal " +
+          "`npx hardhat compile` so contracts/V4CurveFactory.sol is built)."
       );
     }
   }
@@ -2523,91 +1800,6 @@ async function main() {
         : " (set a Telegram bot token + alerts chat ID — admin panel → Relayer settings, or TELEGRAM_BOT_TOKEN/TELEGRAM_ALERTS_CHAT_ID env vars — to also alert on Telegram).")
   );
   relayerHealthPollLoop(watchers, relayerWallet);
-
-  // See the module comment's history note on why this was once removed and
-  // restored — same optional-feature try/catch guard as FeeWalletDistributor
-  // below, for the identical reason. Manual "Convert to ETH"/"Claim" from
-  // the portfolio UI keep working exactly as before regardless of whether
-  // this is enabled — those are separate calls made directly from the
-  // creator's own connected wallet, never routed through this relayer
-  // process.
-  let creatorRewardsDistributor = null;
-  if (CREATOR_REWARDS_DISTRIBUTOR_ADDRESS) {
-    try {
-      creatorRewardsDistributor = await hre.ethers.getContractAt(
-        "CreatorRewardsDistributor",
-        CREATOR_REWARDS_DISTRIBUTOR_ADDRESS,
-        relayerWallet
-      );
-      console.log(`Creator-rewards auto-sweep enabled against distributor ${CREATOR_REWARDS_DISTRIBUTOR_ADDRESS}.`);
-    } catch (err) {
-      console.error(
-        `Could not load CreatorRewardsDistributor at ${CREATOR_REWARDS_DISTRIBUTOR_ADDRESS} (${err.message}). ` +
-          "Creator-rewards auto-sweep is DISABLED for this run — everything else (vouchers, deposits, the API, " +
-          "the site, activity/price polling, fee-wallet auto-sweep) starts normally regardless. This specific " +
-          "error usually means the contract's build artifact wasn't included in this deploy (a stale/cached " +
-          "build) — a clean rebuild that actually recompiles contracts/CreatorRewardsDistributor.sol should fix " +
-          "it; set CREATOR_REWARDS_DISTRIBUTOR_ADDRESS again afterward to re-enable auto-sweep."
-      );
-      creatorRewardsDistributor = null;
-    }
-  }
-
-  let feeWalletDistributor = null;
-  if (FEE_WALLET_DISTRIBUTOR_ADDRESS) {
-    // Wrapped in try/catch deliberately: this is an optional convenience
-    // feature (see the module comment above), and the most likely failure
-    // here — a missing/stale build artifact for FeeWalletDistributor on
-    // whatever host this is running on (HH700) — has nothing to do with
-    // whether the core relayer (vouchers, deposits, the API, the site
-    // itself) can run correctly. Before this guard, any failure loading this
-    // one optional contract crashed the ENTIRE process before it ever
-    // reached app.listen() below, taking the whole site down over a feature
-    // nobody was actively using yet.
-    try {
-      feeWalletDistributor = await hre.ethers.getContractAt(
-        "FeeWalletDistributor",
-        FEE_WALLET_DISTRIBUTOR_ADDRESS,
-        relayerWallet
-      );
-      console.log(`Fee-wallet auto-sweep enabled against distributor ${FEE_WALLET_DISTRIBUTOR_ADDRESS}.`);
-    } catch (err) {
-      console.error(
-        `Could not load FeeWalletDistributor at ${FEE_WALLET_DISTRIBUTOR_ADDRESS} (${err.message}). ` +
-          "Fee-wallet auto-sweep is DISABLED for this run — everything else (vouchers, deposits, the API, " +
-          "the site, activity/price polling) starts normally regardless. This specific error usually means the " +
-          "contract's build artifact wasn't included in this deploy (a stale/cached build) — a clean rebuild " +
-          "that actually recompiles contracts/FeeWalletDistributor.sol should fix it; set " +
-          "FEE_WALLET_DISTRIBUTOR_ADDRESS again afterward to re-enable auto-sweep."
-      );
-      feeWalletDistributor = null;
-    }
-  }
-
-  let platformRewardsDistributor = null;
-  if (PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS) {
-    // Same try/catch reasoning as FeeWalletDistributor above: an optional
-    // convenience feature whose load failure should never take the core
-    // relayer down with it.
-    try {
-      platformRewardsDistributor = await hre.ethers.getContractAt(
-        "PlatformRewardsDistributor",
-        PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS,
-        relayerWallet
-      );
-      console.log(`Platform rewards (buyback/burn/airdrop) auto-sweep enabled against distributor ${PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS}.`);
-    } catch (err) {
-      console.error(
-        `Could not load PlatformRewardsDistributor at ${PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS} (${err.message}). ` +
-          "Platform rewards auto-sweep is DISABLED for this run — everything else (vouchers, deposits, the API, " +
-          "the site, activity/price polling, fee-wallet auto-sweep) starts normally regardless. This specific " +
-          "error usually means the contract's build artifact wasn't included in this deploy (a stale/cached " +
-          "build) — a clean rebuild that actually recompiles contracts/PlatformRewardsDistributor.sol should " +
-          "fix it; set PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS again afterward to re-enable auto-sweep."
-      );
-      platformRewardsDistributor = null;
-    }
-  }
 
   // ---- HTTP API ----
   const app = express();
@@ -2711,19 +1903,12 @@ async function main() {
       ok: true,
       uiBuild: uiBuild.build,
       relayer: relayerWallet.address,
-      tokenFactoryAddress: tokenFactoryAddress || null,
-      customTokenFactoryAddress: customTokenFactoryAddress || null,
-      bondingCurveFactoryAddress: bondingCurveFactoryAddress || null,
-      customBondingCurveFactoryAddress: customBondingCurveFactoryAddress || null,
       v4TokenFactoryAddress: v4TokenFactoryAddress || null,
       v4CustomTokenFactoryAddress: v4CustomTokenFactoryAddress || null,
       v4CurveFactoryAddress: v4CurveFactoryAddress || null,
-      creatorRewardsDistributorAddress: CREATOR_REWARDS_DISTRIBUTOR_ADDRESS || null,
-      creatorRewardsAutoSweepEnabled: !!creatorRewardsDistributor,
-      feeWalletDistributorAddress: FEE_WALLET_DISTRIBUTOR_ADDRESS || null,
-      feeWalletAutoSweepEnabled: !!feeWalletDistributor,
-      platformRewardsDistributorAddress: PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS || null,
-      platformRewardsAutoSweepEnabled: !!platformRewardsDistributor,
+      v4LaunchRelayAddress: v4LaunchRelayAddress || null,
+      v4LaunchRelayLoaded: !!v4Relay,
+      gaslessKinds: watchers.filter(canRelay).map((w) => w.kind),
     })
   );
 
@@ -3453,65 +2638,6 @@ async function main() {
     sendJson(res, 200, { settings: redactSecretSettings(relayerSettings) });
   });
 
-  // ---- contract deployment (admin-gated) ----
-  // Public: lets the admin panel prefill sensible defaults (this network's
-  // name/mode, any independently-confirmed router/price-feed address) before
-  // the admin fills in the rest of the deploy form — nothing here is
-  // sensitive, same reasoning as GET /platform-config being public while its
-  // POST twin is admin-signed.
-  app.get("/deploy/network-hints", (_req, res) => {
-    sendJson(res, 200, {
-      network,
-      knownRouter: DEPLOY_KNOWN_ROUTER_ADDRESSES[network] || null,
-      knownPriceFeed: DEPLOY_KNOWN_PRICE_FEED_ADDRESSES[network] || null,
-      deployerAddress: relayerWallet.address,
-      adminWallet: ADMIN_WALLET,
-    });
-  });
-
-  // Public: whatever this network's most recent deployment recorded (see
-  // lib/deploymentStore.js) — the same record `npx hardhat run
-  // scripts/deploy.js` itself has always produced, now also written here
-  // whenever POST /deploy below runs. Lets the admin panel show "what's
-  // already deployed" before offering to deploy anything new.
-  app.get("/deploy/current", async (_req, res) => {
-    const current = await readCurrentDeployment(network).catch(() => null);
-    sendJson(res, 200, { network, deployment: current });
-  });
-
-  // Body: { config, timestamp, signature }. Runs the entire deploy pipeline
-  // (see runFullStackDeploy above) using this service's own relayerWallet as
-  // the deploying account — this is a real, potentially multi-minute series
-  // of on-chain transactions (every contract in the stack, back to back),
-  // not a quick admin toggle, so this route's own socket timeout is
-  // extended well past Express's/Node's defaults rather than making the
-  // admin's browser see a connection-reset partway through a real deploy
-  // that's still running server-side.
-  app.post("/deploy", async (req, res) => {
-    req.setTimeout(20 * 60 * 1000);
-    res.setTimeout(20 * 60 * 1000);
-    const { config, timestamp, signature } = req.body || {};
-    if (!config || typeof config !== "object") {
-      return sendJson(res, 400, { error: "config is required" });
-    }
-    if (!isFreshTimestamp(timestamp)) {
-      return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
-    }
-    const message = deployMessage(config, timestamp);
-    if (!verifyAdminSignature(message, signature)) {
-      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
-    }
-    console.log(`[admin] deploy requested with config: ${JSON.stringify(config)}`);
-    try {
-      const result = await runFullStackDeploy(config, relayerWallet);
-      console.log(`[admin] deploy finished for network "${result.network}": ${JSON.stringify(result.deploymentSummary)}`);
-      sendJson(res, 200, result);
-    } catch (err) {
-      console.error(`[admin] deploy failed: ${err.stack || err.message}`);
-      sendJson(res, 500, { error: err.message || "Deployment failed — check server logs for the full error." });
-    }
-  });
-
   // ---- manual token tracking (admin-gated) ----
   // Registers an arbitrary token address for price/activity tracking even
   // though it was never launched through TokenFactory/CustomTokenFactory —
@@ -3574,19 +2700,17 @@ async function main() {
     }
     const normalized = hre.ethers.getAddress(tokenAddress);
     await removeDeletedLaunch(normalized).catch(() => {}); // tracking it again undoes an earlier delete
-    // The direct-launch-only V4 watchers (v4custom/v4curve) expose no V2
-    // router()/priceFeed(), so only a relay-capable watcher is a valid source.
-    const sourceWatcher = watchers.find(canRelay);
-    if (!sourceWatcher) {
-      return sendJson(res, 500, { error: "No factory watcher configured on this relayer — can't resolve a router/price feed to track against." });
-    }
     try {
-      // router/priceFeed are shared platform-wide (see TokenFactory.sol's
-      // own module comment), so any configured watcher's factory is an
-      // equally valid source for them — this doesn't have to be the
-      // factory that (didn't) launch this token.
-      const sourceFactory = sourceWatcher.factory;
-      const [routerAddress, priceFeed] = await Promise.all([sourceFactory.router(), sourceFactory.priceFeed()]);
+      // The platform token trades on a Uniswap V2 pair; its router and the
+      // ETH/USD feed come from the V4 contracts (see resolvePlatformDex).
+      const { routerAddress, priceFeed } = await resolvePlatformDex();
+      if (!routerAddress) {
+        return sendJson(res, 500, {
+          error:
+            "Can't find the V2 router the platform token trades on. Set the platform token on a V4 distributor " +
+            "(its buybackRouter is used), or set PLATFORM_ROUTER_ADDRESS on this relayer.",
+        });
+      }
       const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
       const [wethAddress, factoryAddress] = await Promise.all([router.WETH(), router.factory()]);
       const univ2Factory = await hre.ethers.getContractAt(UNIV2_FACTORY_ABI, factoryAddress, hre.ethers.provider);
@@ -4184,11 +3308,13 @@ async function main() {
     sendJson(res, 200, { network, failedLaunches });
   }));
 
-  if (tokenFactoryAddress) app.post("/vouchers/token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "token")));
-  if (customTokenFactoryAddress) app.post("/vouchers/custom", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom")));
-  if (bondingCurveFactoryAddress) app.post("/vouchers/curve", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "curve")));
-  if (v4TokenFactoryAddress) app.post("/vouchers/v4token", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "v4token")));
-  if (customBondingCurveFactoryAddress) app.post("/vouchers/custom-curve", (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === "custom-curve")));
+  // One route per voucher kind. The page picks the route from the launch it
+  // builds: plain token -> v4token (V4TokenFactory's own relay); custom-tax
+  // token -> v4custom, plain curve -> v4curve, custom-tax curve ->
+  // v4custom-curve (all three through V4LaunchRelay).
+  for (const kind of ["v4token", "v4custom", "v4curve", "v4custom-curve"]) {
+    app.post(`/vouchers/${kind}`, (req, res) => handleVoucherSubmission(req, res, watchers.find((w) => w.kind === kind)));
+  }
 
   app.get("/status/:voucherHash", asyncRoute(async (req, res) => {
     const record = await getVoucher(req.params.voucherHash);
@@ -4198,7 +3324,7 @@ async function main() {
     let onChainDeposit = null;
     if (canRelay(watcher)) {
       try {
-        const d = await watcher.factory.deposits(record.creator, req.params.voucherHash);
+        const d = await relayContractOf(watcher).deposits(record.creator, req.params.voucherHash);
         onChainDeposit = { amount: d.amount, deadline: d.deadline, settled: d.settled, reclaimed: d.reclaimed };
       } catch {
         // best-effort — status still returns the local record below
@@ -4211,15 +3337,16 @@ async function main() {
 
   // ---- on-chain poller ----
   async function pollWatcher(watcher) {
-    if (!canRelay(watcher)) return; // direct-launch-only factory: no LaunchDeposited events exist
-    const factoryAddress = await watcher.factory.getAddress();
+    if (!canRelay(watcher)) return; // no relay path: no LaunchDeposited events exist
+    const relayContract = relayContractOf(watcher);
+    const factoryAddress = await relayContract.getAddress();
     const latestBlock = await hre.ethers.provider.getBlockNumber();
     const storedCursor = await getCursor(factoryAddress);
     const fromBlock = storedCursor !== null ? storedCursor + 1 : latestBlock; // first run: only watch new deposits from now on
     if (fromBlock > latestBlock) return;
     const toBlock = Math.min(latestBlock, fromBlock + MAX_BLOCK_RANGE_PER_POLL);
 
-    const events = await watcher.factory.queryFilter(watcher.factory.filters.LaunchDeposited(), fromBlock, toBlock);
+    const events = await relayContract.queryFilter(relayContract.filters.LaunchDeposited(), fromBlock, toBlock);
     for (const event of events) {
       await handleDeposit(watcher, event).catch((err) =>
         console.error(`[${watcher.kind}] error handling deposit in tx ${event.transactionHash}: ${err.message}`)
@@ -4232,8 +3359,18 @@ async function main() {
   // voucher on file — split out from handleDeposit() so retryPendingDeposits()
   // below can run the identical logic for a deposit whose voucher only
   // showed up a tick or two late, without duplicating any of it.
+  // Several watchers can share one relay contract (the three V4LaunchRelay
+  // kinds). The shared relay's LaunchDeposited events are polled once, through
+  // whichever watcher comes first; this finds the watcher that owns a
+  // voucher's kind so the right voucher struct / relay function is used.
+  function relayTargetFor(polledWatcher, kind) {
+    if (polledWatcher.kind === kind) return polledWatcher;
+    if (!polledWatcher.relay) return null;
+    return watchers.find((w) => w.kind === kind && w.relay === polledWatcher.relay && canRelay(w)) || null;
+  }
+
   async function relayMatchedDeposit(watcher, { voucherHash, creator, amount, deadline }, record) {
-    if (!canRelay(watcher)) return; // never relay through a direct-launch-only factory
+    if (!canRelay(watcher)) return; // never relay through a watcher with no relay path
     if (record.creator.toLowerCase() !== creator.toLowerCase()) {
       console.warn(`[${watcher.kind}] deposit creator ${creator} doesn't match voucher's own creator ${record.creator} for ${voucherHash} — ignoring.`);
       return;
@@ -4281,7 +3418,9 @@ async function main() {
       const tokenAddress = created.args.token;
       const pairAddress = created.args.pair || hre.ethers.ZeroAddress; // undefined on V4 (TokenCreated carries poolId instead)
       const poolId = created.args.poolId || null; // V4 only
-      const implementationAddress = await watcher.factory.tokenImplementation();
+      const implementationAddress = watcher.implementationFn
+        ? await watcher.implementationFn()
+        : await watcher.factory.tokenImplementation();
       const network = hre.network.name;
 
       await upsertVoucher(voucherHash, {
@@ -4346,7 +3485,8 @@ async function main() {
     if (!canRelay(watcher)) return;
     const { voucherHash, creator, amount, deadline } = event.args;
     const record = await getVoucher(voucherHash);
-    if (!record || record.kind !== watcher.kind) {
+    const target = record ? relayTargetFor(watcher, record.kind) : null;
+    if (!record || !target) {
       await upsertPendingDeposit(watcher.kind, voucherHash, {
         creator,
         amount: amount.toString(),
@@ -4355,12 +3495,12 @@ async function main() {
       console.warn(
         `[${watcher.kind}] deposit for ${voucherHash} from ${creator} has no matching voucher on file yet — the ` +
           `front end may not have finished submitting it here yet, or submitted it to a different relayer instance. ` +
-          `Will keep retrying every poll tick until a matching POST /vouchers/${watcher.kind} arrives or its ` +
+          `Will keep retrying every poll tick until a matching POST /vouchers/<kind> arrives or its ` +
           `deadline (${deadline}) passes.`
       );
       return;
     }
-    return relayMatchedDeposit(watcher, { voucherHash, creator, amount, deadline }, record);
+    return relayMatchedDeposit(target, { voucherHash, creator, amount, deadline }, record);
   }
 
   // Re-checks every deposit that previously lost the voucher race above.
@@ -4376,11 +3516,12 @@ async function main() {
     for (const [voucherHash, dep] of Object.entries(pending)) {
       if (dep.kind !== watcher.kind) continue;
       const record = await getVoucher(voucherHash);
-      if (record && record.kind === watcher.kind) {
+      const target = record ? relayTargetFor(watcher, record.kind) : null;
+      if (record && target) {
         await removePendingDeposit(voucherHash);
         console.log(`[${watcher.kind}] voucher for previously-unmatched deposit ${voucherHash} has arrived — relaying now.`);
         await relayMatchedDeposit(
-          watcher,
+          target,
           { voucherHash, creator: dep.creator, amount: BigInt(dep.amount), deadline: BigInt(dep.deadline) },
           record
         ).catch((err) => console.error(`[${watcher.kind}] error relaying previously-pending deposit ${voucherHash}: ${err.message}`));
@@ -4397,10 +3538,14 @@ async function main() {
   }
 
   async function pollLoop() {
+    // One poll per distinct deposit contract: the three V4LaunchRelay watchers
+    // share a single relay, so only the first of them scans its events.
+    const polled = new Set();
     for (const watcher of watchers) {
-      // v4custom/v4curve are direct-launch only: no LaunchDeposited event, no
-      // vouchers, nothing to relay.
       if (!canRelay(watcher)) continue;
+      const relayKey = (await relayContractOf(watcher).getAddress()).toLowerCase();
+      if (polled.has(relayKey)) continue;
+      polled.add(relayKey);
       await retryPendingDeposits(watcher).catch((err) => console.error(`[${watcher.kind}] pending-deposit retry error: ${err.message}`));
       await pollWatcher(watcher).catch((err) => console.error(`[${watcher.kind}] poll error: ${err.message}`));
     }
@@ -4526,7 +3671,6 @@ async function main() {
       // NOT merely "a row exists": /token-metadata and others can create a
       // partial row first. See lib/launchAnnouncement.js.
       const { firstDiscovery: isNewToken, announce: shouldAnnounce, reason: skipReason } = classifyDiscoveredLaunch({
-        isV4,
         isNeverRunOrStuck,
         existingEntry: alreadyTrackedBeforeThisTick[token.toLowerCase()],
       });
@@ -4580,10 +3724,8 @@ async function main() {
       // alreadyTrackedBeforeThisTick above) guards the separate case of this
       // exact event being re-scanned — a duplicate Telegram post for a token
       // already announced, rather than a flood of historical ones.
-      // V4 is admin-only while under development — never announce it to the
-      // public launches channel.
       if (shouldAnnounce) {
-        await announceLaunchToTelegram(network, watcher.kind, { token, name, symbol, pairAddress }).catch((err) =>
+        await announceLaunchToTelegram(network, watcher.kind, { token, name, symbol, hasPool: !!(pairAddress || v4PoolId) }).catch((err) =>
           console.warn(`[telegram] couldn't announce new launch ${token}: ${err.message}`)
         );
       } else {
@@ -4596,6 +3738,7 @@ async function main() {
 
   async function tokenDiscoveryPollLoop() {
     for (const watcher of watchers) {
+      if (watcher.relayOnly) continue; // relay-only entry over a factory another watcher already scans
       await discoverLaunchedTokens(watcher).catch((err) => console.error(`[discovery] ${watcher.kind} poll error: ${err.message}`));
     }
     setTimeout(tokenDiscoveryPollLoop, TOKEN_DISCOVERY_POLL_INTERVAL_MS);
@@ -4732,6 +3875,32 @@ async function main() {
     return v4ContextPromise;
   }
 
+  // The platform token is the one asset that still trades on a Uniswap V2
+  // pair. Its V2 router is whatever the V4 distributors buy it through
+  // (their immutable buybackRouter()); the ETH/USD feed is the V4 factory's.
+  // PLATFORM_ROUTER_ADDRESS overrides the router. Returns
+  // { routerAddress, priceFeed } with either one null when it can't be found.
+  async function resolvePlatformDex() {
+    let routerAddress = process.env.PLATFORM_ROUTER_ADDRESS || null;
+    let priceFeed = null;
+    const ctx = await getV4Context();
+    if (!ctx) return { routerAddress, priceFeed };
+    const nonZero = (a) => (a && a !== hre.ethers.ZeroAddress ? a : null);
+    if (!routerAddress) {
+      const slots = await hre.ethers.getContractAt(V4_FACTORY_SLOTS_ABI, ctx.slotsAddress, hre.ethers.provider);
+      for (const g of ["rewardsDistributor", "feeWalletDistributor", "creatorRewardsDistributor"]) {
+        const dist = nonZero(await slots[g]().catch(() => null));
+        if (!dist) continue;
+        const d = await hre.ethers.getContractAt(["function buybackRouter() view returns (address)"], dist, hre.ethers.provider);
+        routerAddress = nonZero(await d.buybackRouter().catch(() => null));
+        if (routerAddress) break;
+      }
+    }
+    const feedSource = await hre.ethers.getContractAt(["function priceFeed() view returns (address)"], ctx.slotsAddress, hre.ethers.provider);
+    priceFeed = nonZero(await feedSource.priceFeed().catch(() => null));
+    return { routerAddress, priceFeed };
+  }
+
   // Reads a V4 pool's slot0: returns { sqrtPriceX96 } (0n when the pool was
   // never initialized).
   async function readV4Slot0(pm, poolId) {
@@ -4821,9 +3990,6 @@ async function main() {
     if (Date.now() - platformSweepCache.at < 60_000) return platformSweepCache.set;
     const set = new Set();
     const add = (a) => { if (a && typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) && a !== hre.ethers.ZeroAddress) set.add(a.toLowerCase()); };
-    for (const c of [creatorRewardsDistributor, feeWalletDistributor, platformRewardsDistributor]) {
-      try { if (c) add(await c.getAddress()); } catch (err) { /* ignore */ }
-    }
     add(V4_COMPOUNDER_ADDRESS);
     try {
       const ctx = await getV4Context();
@@ -5112,78 +4278,9 @@ async function main() {
         }
         continue;
       }
-      // Quick Launch ("curve"/"custom-curve") tokens trade against their own
-      // factory contract, not a Uniswap pair, until they graduate — there is
-      // no pairAddress yet, so the ordinary Swap-event loop below (which
-      // only ever looks at a pair) would just skip them forever. Read
-      // CurveBought/CurveSold straight off the factory instead, scoped to
-      // this one token via the event's own indexed `token` topic. Once a
-      // curve graduates, pollTokenPrices' curve branch backfills
-      // pairAddress from the factory's own pairOf() the same tick it
-      // observes curveState().graduated flip true, and every later tick
-      // falls through to the ordinary pairAddress-based Swap loop below like
-      // any other launched token — this branch only ever needs to cover the
-      // pre-graduation window.
-      if ((entry.kind === "curve" || entry.kind === "custom-curve") && !entry.pairAddress) {
-        const watcher = watchers.find((w) => w.kind === entry.kind);
-        if (!watcher) continue;
-        try {
-          const factoryAddress = await watcher.factory.getAddress();
-          const cursorKey = `${factoryAddress}:curve-activity:${entry.tokenAddress}`;
-          const latestBlock = await hre.ethers.provider.getBlockNumber();
-          const storedCursor = await getCursor(cursorKey);
-          const fromBlock = storedCursor !== null ? storedCursor + 1 : firstActivityBlock(entry, latestBlock, true); // older history is skipped; a newly launched token starts at its launch block
-          if (fromBlock > latestBlock) continue;
-          const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
-
-          const [boughtEvents, soldEvents] = await Promise.all([
-            watcher.factory.queryFilter(watcher.factory.filters.CurveBought(entry.tokenAddress), fromBlock, toBlock),
-            watcher.factory.queryFilter(watcher.factory.filters.CurveSold(entry.tokenAddress), fromBlock, toBlock),
-          ]);
-          const ethUsd = await fetchEthUsdFromFeed(entry.priceFeed);
-
-          for (const event of boughtEvents) {
-            const key = `${event.transactionHash}:${event.index}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            const { buyer, ethIn, tokensOut } = event.args;
-            const t = await blockTimestampMs(event.blockNumber);
-            await appendTradeActivity({
-              t,
-              txHash: event.transactionHash,
-              logIndex: event.index,
-              tokenAddress: entry.tokenAddress,
-              symbol: entry.symbol || null,
-              side: "buy",
-              wallet: buyer,
-              tokenAmount: tokensOut.toString(),
-              usdValue: (Number(ethIn) / 1e18) * ethUsd,
-            });
-          }
-          for (const event of soldEvents) {
-            const key = `${event.transactionHash}:${event.index}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            const { seller, tokensIn, ethOut } = event.args;
-            const t = await blockTimestampMs(event.blockNumber);
-            await appendTradeActivity({
-              t,
-              txHash: event.transactionHash,
-              logIndex: event.index,
-              tokenAddress: entry.tokenAddress,
-              symbol: entry.symbol || null,
-              side: "sell",
-              wallet: seller,
-              tokenAmount: tokensIn.toString(),
-              usdValue: (Number(ethOut) / 1e18) * ethUsd,
-            });
-          }
-          await setCursor(cursorKey, toBlock);
-        } catch (err) {
-          console.warn(`[activity] skip curve ${entry.tokenAddress}: ${err.message}`);
-        }
-        continue;
-      }
+      // Only the platform token still trades on a V2 pair; pre-V4 launch
+      // tokens from earlier platform versions are no longer followed.
+      if (entry.kind !== "platform") continue;
       if (!entry.pairAddress) continue;
       try {
         const pair = await hre.ethers.getContractAt(UNIV2_PAIR_ABI, entry.pairAddress, hre.ethers.provider);
@@ -5197,7 +4294,7 @@ async function main() {
         const cursorKey = `${entry.pairAddress}:activity`;
         const latestBlock = await hre.ethers.provider.getBlockNumber();
         const storedCursor = await getCursor(cursorKey);
-        const fromBlock = storedCursor !== null ? storedCursor + 1 : firstActivityBlock(entry, latestBlock, entry.kind !== "curve" && entry.kind !== "custom-curve"); // older history is skipped; a newly launched token starts at its launch block
+        const fromBlock = storedCursor !== null ? storedCursor + 1 : firstActivityBlock(entry, latestBlock, true); // older history is skipped
         if (fromBlock > latestBlock) continue;
         const toBlock = Math.min(latestBlock, fromBlock + ACTIVITY_MAX_BLOCK_RANGE);
 
@@ -5281,18 +4378,18 @@ async function main() {
           // pairOf()-backfill below but sourced from the DEX itself rather
           // than a launch factory, since this token was never launched
           // through one.
-          const platformSourceWatcher = watchers.find(canRelay);
-          if (!entry.pairAddress && platformSourceWatcher) {
+          if (!entry.pairAddress) {
             try {
-              const sourceFactory = platformSourceWatcher.factory;
-              const routerAddress = await sourceFactory.router();
-              const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
-              const [wethAddress, dexFactoryAddress] = await Promise.all([router.WETH(), router.factory()]);
-              const univ2Factory = await hre.ethers.getContractAt(UNIV2_FACTORY_ABI, dexFactoryAddress, hre.ethers.provider);
-              const onChainPair = await univ2Factory.getPair(entry.tokenAddress, wethAddress);
-              if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
-                entry.pairAddress = onChainPair;
-                await upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
+              const { routerAddress } = await resolvePlatformDex();
+              if (routerAddress) {
+                const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
+                const [wethAddress, dexFactoryAddress] = await Promise.all([router.WETH(), router.factory()]);
+                const univ2Factory = await hre.ethers.getContractAt(UNIV2_FACTORY_ABI, dexFactoryAddress, hre.ethers.provider);
+                const onChainPair = await univ2Factory.getPair(entry.tokenAddress, wethAddress);
+                if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
+                  entry.pairAddress = onChainPair;
+                  await upsertTrackedToken(network, entry.tokenAddress, { pairAddress: onChainPair });
+                }
               }
             } catch (err) {
               // best-effort backfill only — next tick tries again
@@ -5331,192 +4428,9 @@ async function main() {
           continue;
         }
 
-        // Quick Launch ("curve"/"custom-curve") tokens have no Uniswap pair
-        // at all until their curve graduates — price them off curveState()'s
-        // own reserves instead, and only once a pool actually exists does
-        // this fall through to the ordinary pair-reserve branch below like
-        // any other launched token.
-        if ((entry.kind === "curve" || entry.kind === "custom-curve") && !entry.pairAddress) {
-          const watcher = watchers.find((w) => w.kind === entry.kind);
-          if (!watcher) continue;
-          const state = await watcher.factory.curveState(entry.tokenAddress);
-          if (state.graduated) {
-            // A pool just appeared — backfill pairAddress from the
-            // factory's own pairOf() (written inside _doGraduate the same
-            // transaction the pool was created), so THIS tick's fall-through
-            // and every tick after it reads real Uniswap reserves via the
-            // ordinary pool-based branch below instead of this curve-only
-            // one. This is also the "live on DEX" transition for a curve
-            // token — advance TOKEN_STATUS from DEPLOYED (0, curve-only) to
-            // LAUNCHED (1, live pool + this token's own post-graduation tax
-            // now counting up), never past GRADUATED (2) if that somehow
-            // already landed first. Real graduation — this token's own tax
-            // permanently disabling at its $50,000 market-cap target — is
-            // still what the pool-based branch's own taxActive check below
-            // detects and persists, exactly the same way it already does for
-            // every other launched token.
-            try {
-              const onChainPair = await watcher.factory.pairOf(entry.tokenAddress);
-              if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
-                entry.pairAddress = onChainPair;
-                const patch = { pairAddress: onChainPair };
-                if (entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
-                  entry.tokenStatus = TOKEN_STATUS.LAUNCHED;
-                  patch.tokenStatus = TOKEN_STATUS.LAUNCHED;
-                }
-                await upsertTrackedToken(network, entry.tokenAddress, patch);
-                await announceMilestoneToTelegram(network, entry, "live");
-                // Also backfill lib/launchStore's own launched_tokens ledger
-                // row, not just trackedTokensStore above — GET /launches
-                // already prefers trackedTokensStore's pairAddress (see that
-                // route's own comment), so this isn't needed for the API/
-                // front end, but the ledger itself (queried directly, e.g.
-                // launched-tokens.csv or a raw SELECT against
-                // launched_tokens) was otherwise left showing the null it was
-                // recorded with at launch time forever, since
-                // CurveTokenCreated never carries a pair for
-                // postLaunchPipeline/recordLaunch to capture in the first
-                // place. Only ever throws for a DIRECT (creator-paid-gas)
-                // curve launch, which has no ledger row at all to update —
-                // updateLaunch() is deliberately not upsert-like (see its own
-                // doc comment in lib/launchStore.js), so that's an expected,
-                // silent no-op here, not a real failure; anything else gets
-                // logged so a genuine problem (e.g. a DB hiccup) isn't
-                // swallowed silently.
-                try {
-                  await updateLaunch(network, entry.tokenAddress, { pairAddress: onChainPair });
-                } catch (ledgerErr) {
-                  if (!/no existing entry/i.test(ledgerErr.message || "")) {
-                    console.warn(`[price] couldn't backfill launched_tokens.pairAddress for ${entry.tokenAddress}: ${ledgerErr.message}`);
-                  }
-                }
-              }
-            } catch (err) {
-              // best-effort — next tick tries again
-            }
-            // Falls through below (no `continue`) so a pairAddress found
-            // just now still gets a real, pool-priced point this same tick
-            // instead of waiting a full extra poll interval for one.
-          } else {
-            // Still pre-pool: marginal spot price off this curve's own
-            // constant-product reserves (effective ETH reserve / effective
-            // token reserve — "effective" meaning virtual + real on both
-            // sides, exactly what _quoteBuy/_quoteSell price an actual trade
-            // against). Same reserve-ratio shape computeTokenPriceUsd already
-            // expects from a Uniswap pair, just sourced from curveState()
-            // instead of getReserves().
-            const effEthReserve = state.virtualEthReserve + state.realEthReserve;
-            const effTokenReserve = state.virtualTokenReserve + state.tokensRemaining;
-            const ethUsd = await fetchEthUsdFromFeed(entry.priceFeed);
-            const priceUsd = computeTokenPriceUsd(effTokenReserve, effEthReserve, ethUsd);
-            const mcapUsd = computeMarketCapUsd(priceUsd, state.totalSupply_);
-            // A curve graduates once realEthReserve crosses poolSeedTargetWei
-            // — an ETH amount, not a dollar market cap — so progress here
-            // tracks THAT crossing directly instead of reusing
-            // computeTaxProgressPct's USD-target math, which has nothing to
-            // compare against pre-pool.
-            const taxProgressPct =
-              state.poolSeedTargetWei_ > 0n
-                ? Math.min(100, (Number(state.realEthReserve) / Number(state.poolSeedTargetWei_)) * 100)
-                : null;
-            const holders = await fetchHolderCount(entry.tokenAddress);
-            const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive: true };
-            if (holders !== null) point.holders = holders;
-            await appendPricePoint(network, entry.tokenAddress, point);
-            continue;
-          }
-        }
-
-        // A "Just Launch" token can gain a pool later via independently-
-        // added liquidity (see index.html's checkPendingLiquidity), including
-        // via LaunchedToken/CustomToken's own _maybeAutoActivateTax()/
-        // _activatePoolIfFound() — the token contract detects the pool and
-        // sets ITS OWN `pair` state variable directly, with zero factory
-        // involvement. TokenFactory/CustomTokenFactory's `pairOf` mapping is
-        // ONLY ever written from inside the atomic "Launch + Add Liquidity"
-        // codepath (_launchWithLiquidity/_relayedLaunchWithLiquidity) — a
-        // "Deploy Only" token's pairOf entry stays address(0) forever, no
-        // matter how or when a pool later shows up for it, since nothing else
-        // in either factory ever assigns it. So querying pairOf() here would
-        // never notice this transition. Recheck the DEX factory's own
-        // getPair() directly instead — the same real on-chain source of truth
-        // the "platform" branch above and index.html's checkPendingLiquidity
-        // both already use, and the only thing that actually reflects a pair
-        // a token contract set on itself.
-        if (!entry.pairAddress) {
-          const watcher = watchers.find((w) => w.kind === entry.kind);
-          if (watcher) {
-            let onChainPair = null;
-            try {
-              const routerAddress = await watcher.factory.router();
-              const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
-              const [wethAddress, dexFactoryAddress] = await Promise.all([router.WETH(), router.factory()]);
-              const univ2Factory = await hre.ethers.getContractAt(UNIV2_FACTORY_ABI, dexFactoryAddress, hre.ethers.provider);
-              onChainPair = await univ2Factory.getPair(entry.tokenAddress, wethAddress);
-            } catch (err) {
-              onChainPair = null; // best-effort backfill only — next tick tries again
-            }
-            if (onChainPair && onChainPair !== hre.ethers.ZeroAddress) {
-              entry.pairAddress = onChainPair;
-              // A DEPLOYED (no-pool) token just gained one — advance it to
-              // LAUNCHED. Guarded so this never clobbers GRADUATED, though
-              // in practice a token can't graduate before it has a pool.
-              const patch = { pairAddress: onChainPair };
-              if (entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
-                entry.tokenStatus = TOKEN_STATUS.LAUNCHED;
-                patch.tokenStatus = TOKEN_STATUS.LAUNCHED;
-              }
-              await upsertTrackedToken(network, entry.tokenAddress, patch);
-            }
-          }
-        }
-        if (!entry.pairAddress) continue; // still no pool — nothing to sample yet
-
-        const pair = await hre.ethers.getContractAt(UNIV2_PAIR_ABI, entry.pairAddress, hre.ethers.provider);
-        const [reserves, token0] = await Promise.all([pair.getReserves(), pair.token0()]);
-        const wethIsToken0 = token0.toLowerCase() !== entry.tokenAddress.toLowerCase();
-        if (entry.wethIsToken0 !== wethIsToken0) await upsertTrackedToken(network, entry.tokenAddress, { wethIsToken0 });
-        const tokenReserve = wethIsToken0 ? reserves.reserve1 : reserves.reserve0;
-        const wethReserve = wethIsToken0 ? reserves.reserve0 : reserves.reserve1;
-
-        // "custom" (CustomTokenFactory) and "custom-curve"
-        // (CustomBondingCurveFactory, post-graduation) both clone CustomToken,
-        // whose post-graduation tax surface is named platformTaxActive()
-        // rather than plain taxActive() — see CustomToken.sol.
-        const isCustomLike = entry.kind === "custom" || entry.kind === "custom-curve";
-        const stateAbi = isCustomLike ? CUSTOM_TOKEN_STATE_ABI : TOKEN_STATE_ABI;
-        const token = await hre.ethers.getContractAt(stateAbi, entry.tokenAddress, hre.ethers.provider);
-        const [totalSupply, feedAddress, graduationTargetUsd, taxActive] = await Promise.all([
-          token.totalSupply(),
-          token.priceFeed(),
-          token.graduationTargetUsd(),
-          isCustomLike ? token.platformTaxActive() : token.taxActive(),
-        ]);
-        if (entry.priceFeed !== feedAddress) await upsertTrackedToken(network, entry.tokenAddress, { priceFeed: feedAddress });
-        // Graduation is permanent on-chain once taxActive()/
-        // platformTaxActive() reads false — flip TOKEN_STATUS the first
-        // time this tick observes that, same signal index.html's own
-        // client-side refreshLiveTokenPrices already uses to flip its
-        // "taxed"->"graduated" status string (see the comment there), just
-        // persisted here so GET /launches reports it correctly too, even to
-        // a visitor whose browser hasn't sampled price-history itself yet.
-        let justGraduated = false;
-        if (taxActive === false && entry.tokenStatus !== TOKEN_STATUS.GRADUATED) {
-          entry.tokenStatus = TOKEN_STATUS.GRADUATED;
-          await upsertTrackedToken(network, entry.tokenAddress, { tokenStatus: TOKEN_STATUS.GRADUATED });
-          justGraduated = true;
-        }
-
-        const ethUsd = await fetchEthUsdFromFeed(feedAddress);
-        const priceUsd = computeTokenPriceUsd(tokenReserve, wethReserve, ethUsd);
-        const mcapUsd = computeMarketCapUsd(priceUsd, totalSupply);
-        if (justGraduated) await announceMilestoneToTelegram(network, entry, "graduated", { mcapUsd });
-        const taxProgressPct = computeTaxProgressPct(mcapUsd, graduationTargetUsd);
-        const holders = await fetchHolderCount(entry.tokenAddress);
-
-        const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive };
-        if (holders !== null) point.holders = holders;
-        await appendPricePoint(network, entry.tokenAddress, point);
+        // Anything else is a pre-V4 token from an earlier platform version.
+        // Robinhood launches are V4-only now; those are no longer sampled.
+        continue;
       } catch (err) {
         console.warn(`[price] skip ${entry.tokenAddress}: ${err.message}`);
       }
@@ -5526,506 +4440,6 @@ async function main() {
   async function tokenPricePollLoop() {
     await pollTokenPrices().catch((err) => console.error(`[price] poll error: ${err.message}`));
     setTimeout(tokenPricePollLoop, TOKEN_PRICE_POLL_INTERVAL_MS);
-  }
-
-  // FIX (two issues, same root cause): triggerCreatorSwap/triggerFeeWalletSwap
-  // both route the FULL amountIn (balance, capped by maxSwapAmount) straight
-  // through swapExactTokensForETHSupportingFeeOnTransferTokens with minEthOut
-  // hardcoded to 0 by both sweep loops below.
-  //
-  // Issue 1 (dust/log-spam): minEthOut=0 only floors an ACCEPTABLE output, it
-  // does nothing to prevent one that rounds down to EXACTLY zero. A
-  // dust-sized amountIn against thick reserves (or a pool that's barely
-  // traded, or effectively abandoned — exactly the state of "test3", a token
-  // that predates the current factory deployment) computes a zero output,
-  // and UniswapV2Pair.swap() itself hard-reverts with "UniswapV2:
-  // INSUFFICIENT_OUTPUT_AMOUNT" in that case. Before this fix, nothing
-  // distinguished that PERMANENT failure from a transient one (no pool yet,
-  // threshold not yet reached), so a token stuck at dust got retried and
-  // logged as a fresh failure on every single poll tick forever, with no
-  // path to ever succeed until real trading volume changes its balance.
-  //
-  // Issue 2 (MEV/sandwich): minEthOut=0 is also a wide-open door for a
-  // sandwich bot — it can front-run this tx to push the pool's price down,
-  // let the swap fill at whatever's left (zero floor never objects), then
-  // back-run to restore price and pocket the difference, extracting up to
-  // the ENTIRE swap value on every sweep. quoteSwapEthOut's prediction is
-  // used for both: first to skip a permanently-dust call quietly, and now
-  // (see FEE_WALLET_SLIPPAGE_BPS and sweepFeeWalletRewardsOnce below) as the
-  // basis for a real minEthOut floor, exactly the fix already applied to
-  // index.html's convertCreatorRewards and to the platform-rewards sweep
-  // below — this was the one sweep loop still missing it.
-  //
-  // This predicts the swap's output with the router's own free,
-  // side-effect-free getAmountsOut before ever sending a transaction, so a
-  // permanently-dust token can be skipped quietly (same treatment as a
-  // balance under threshold) instead of spamming a "failure" that isn't
-  // actionable by anyone. Fee-on-transfer tax on the token being sold means
-  // the REAL on-chain output can come in lower than this predicts (never
-  // higher), so this can still occasionally let a call through that ends up
-  // reverting anyway — but it eliminates the guaranteed-forever dust case,
-  // which is what was actually spamming the logs. Returns 0n (never
-  // throws) for "don't bother yet" on any failure, including no pool/no
-  // liquidity at all for this token yet.
-  async function quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn) {
-    if (amountIn === 0n) return 0n;
-    try {
-      const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
-      const amounts = await router.getAmountsOut(amountIn, [tokenAddress, wethAddress]);
-      return amounts[amounts.length - 1];
-    } catch (err) {
-      return 0n;
-    }
-  }
-
-  // Generalized version of quoteSwapEthOut above for an arbitrary path —
-  // used by the platform-rewards sweep below, where the path is either
-  // [WETH, platformToken] (the ETH-buyback leg) or [token, WETH,
-  // platformToken] (the token-buyback leg), neither of which is the fixed
-  // [token, WETH] shape quoteSwapEthOut itself assumes. Same contract:
-  // never throws, returns 0n for "don't bother yet" on any failure
-  // (including no pool/liquidity along the path yet), and amountIn === 0n
-  // short-circuits without an RPC round trip.
-  async function quoteAmountsOut(routerAddress, path, amountIn) {
-    if (amountIn === 0n) return 0n;
-    try {
-      const router = await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider);
-      const amounts = await router.getAmountsOut(amountIn, path);
-      return amounts[amounts.length - 1];
-    } catch (err) {
-      return 0n;
-    }
-  }
-
-  // ---- creator-rewards auto-sweep + auto-claim (optional) ----
-  // Walks every token this relayer has ever recorded a launch for and, for
-  // each one carrying more than its own swapThreshold in accumulated in-kind
-  // balance on CreatorRewardsDistributor, calls triggerCreatorSwap on the
-  // relayer's own dime, then claimCreatorRewards for whatever's currently
-  // claimable — paid straight to that token's own creator(), read live off
-  // the token at claim time, exactly as the contract itself always resolves
-  // it regardless of who calls it. See the module comment's history note for
-  // why this was once removed and why it's back, and what to watch for if
-  // the deployed contract turns out to actually restrict these calls.
-  // Structurally identical to sweepFeeWalletRewardsOnce below (same
-  // trySwap/tryClaim shape, same dust-prediction and slippage-floor
-  // treatment) — kept as its own separate pair of functions, mirroring how
-  // this file already keeps fee-wallet and platform-rewards sweeps
-  // independent, so one distributor's contract-loading failure or one
-  // sweep's own bug can never take the other down with it.
-  async function sweepCreatorRewardsOnce() {
-    const network = hre.network.name;
-    const ledger = await readLedger(network);
-    const distributorAddress = await creatorRewardsDistributor.getAddress();
-    const routerAddress = await creatorRewardsDistributor.router();
-    const wethAddress = await (
-      await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
-    ).WETH();
-    const tokenAddresses = mergeV2KeeperTokens(ledger, await readTrackedTokens(network)); // ledger + every discovered launch (direct launches have no ledger row)
-
-    // ---- step 1: convert each token's accumulated in-kind balance to ETH.
-    // See sweepFeeWalletRewardsOnce's trySwap for why "nothing to do this
-    // tick" returns quietly rather than throwing/logging.
-    async function trySwap(tokenAddress) {
-      try {
-        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
-        const balance = await token.balanceOf(distributorAddress);
-        if (balance === 0n) return;
-
-        const threshold = await creatorRewardsDistributor.swapThreshold(tokenAddress);
-        if (balance < threshold) return;
-
-        const cap = await creatorRewardsDistributor.maxSwapAmount(tokenAddress);
-        const amountIn = cap > 0n && balance > cap ? cap : balance;
-
-        const predictedEthOut = await quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn);
-        if (predictedEthOut === 0n) return; // dust, or no pool/liquidity yet — nothing worth logging
-
-        const minEthOut = (predictedEthOut * (10000n - creatorRewardsSlippageBpsBig())) / 10000n;
-
-        const tx = await sendRelayerTx(() => creatorRewardsDistributor.triggerCreatorSwap(tokenAddress, minEthOut));
-        const receipt = await tx.wait();
-        console.log(
-          `[creator-rewards] swept ${tokenAddress} (balance ${balance}, predicted ${predictedEthOut} wei, ` +
-            `minEthOut ${minEthOut} wei) in tx ${receipt.hash}.`
-        );
-      } catch (err) {
-        // Expected/benign cases include: a threshold that hasn't been
-        // reached, another caller having already swept it between our
-        // balance read and our tx landing, or the token having no creator
-        // (renounced — see rescueOrphanedEth/rescueOrphanedTokens in
-        // CreatorRewardsDistributor.sol for that case). If this instead logs
-        // a "creator" access-control revert for EVERY token, EVERY tick, see
-        // the module comment's history note — that's the signal this
-        // relayer's deployed contract restricts these calls after all, and
-        // CREATOR_REWARDS_DISTRIBUTOR_ADDRESS should be unset again.
-        console.warn(`[creator-rewards] swap skip ${tokenAddress}: ${err.message}`);
-      }
-    }
-
-    // ---- step 2: claim whatever ETH is currently sitting in
-    // claimableEth[token], straight to that token's own creator(). See
-    // sweepFeeWalletRewardsOnce's tryClaim for why this always runs
-    // independently of trySwap above.
-    async function tryClaim(tokenAddress) {
-      try {
-        const claimable = await creatorRewardsDistributor.claimableEth(tokenAddress);
-        if (claimable === 0n || claimable < creatorRewardsClaimMinWeiBig()) return;
-
-        const tx = await sendRelayerTx(() => creatorRewardsDistributor.claimCreatorRewards(tokenAddress));
-        const receipt = await tx.wait();
-        console.log(`[creator-rewards] claimed ${claimable} wei for ${tokenAddress} in tx ${receipt.hash}.`);
-      } catch (err) {
-        // Expected/benign cases include: the token having no creator
-        // (renounced), or another caller already having claimed this
-        // token's balance between our read and our tx landing.
-        console.warn(`[creator-rewards] claim skip ${tokenAddress}: ${err.message}`);
-      }
-    }
-
-    for (const tokenAddress of tokenAddresses) {
-      await trySwap(tokenAddress);
-      await tryClaim(tokenAddress);
-    }
-  }
-
-  async function creatorRewardsPollLoop() {
-    await sweepCreatorRewardsOnce().catch((err) => console.error(`[creator-rewards] sweep error: ${err.message}`));
-    setTimeout(creatorRewardsPollLoop, relayerSettings.creatorRewardsPollIntervalMs);
-  }
-
-  // ---- fee-wallet auto-sweep + auto-claim (optional) ----
-  // Walks every token this relayer has ever recorded a launch for and, for
-  // each one carrying more than its own swapThreshold in accumulated in-kind
-  // balance on FeeWalletDistributor, calls triggerFeeWalletSwap on the
-  // relayer's own dime — this one stays permissionless and safe to run from
-  // here because it always pays out to the platform's own fixed fee wallet,
-  // never a per-token creator. Each token is handled independently and a
-  // failure on one (no pool yet, a threshold that hasn't been reached) is
-  // logged and skipped rather than aborting the sweep, mirroring
-  // handleDeposit's per-event error isolation above.
-  //
-  // FIX: the swap step above only ever converts a token's in-kind balance
-  // into ETH sitting in FeeWalletDistributor.claimableEth[token] — it never
-  // moved that ETH the rest of the way to the actual feeWallet address.
-  // Before this fix, claimFeeWalletRewards(token) still had to be called by
-  // hand, per token, from the admin panel — exactly the "put each contract
-  // in and swap reward" tedium this was reported as. claimFeeWalletRewards
-  // is permissionless and, like triggerFeeWalletSwap, always pays out to
-  // this contract's own fixed feeWallet regardless of who calls it (see
-  // FeeWalletDistributor.sol's own doc comment), so it's exactly as safe to
-  // run from this service's own wallet as the swap step already was. Each
-  // token's claimable balance is now checked and claimed in the same tick,
-  // right after that token's own swap attempt, but as an independent
-  // try/catch step — so a balance left over from an earlier tick (or from
-  // before this auto-claim step existed) still gets claimed even on a tick
-  // where that token's own swap was skipped (below threshold, no pool yet)
-  // or failed.
-  async function sweepFeeWalletRewardsOnce() {
-    const network = hre.network.name;
-    const ledger = await readLedger(network);
-    const distributorAddress = await feeWalletDistributor.getAddress();
-    const routerAddress = await feeWalletDistributor.router();
-    const wethAddress = await (
-      await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
-    ).WETH();
-    const tokenAddresses = mergeV2KeeperTokens(ledger, await readTrackedTokens(network)); // ledger + every discovered launch (direct launches have no ledger row)
-
-    // ---- step 1: convert each token's accumulated in-kind balance to ETH.
-    // Broken out as its own inner function (rather than inline in the loop
-    // below) purely so a "nothing to do this tick" outcome (dust balance,
-    // threshold not yet reached, no pool/liquidity yet) can `return` early
-    // without needing a second exception type just to distinguish "quietly
-    // skipped" from "actually failed" once control reaches the outer catch.
-    async function trySwap(tokenAddress) {
-      try {
-        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
-        const balance = await token.balanceOf(distributorAddress);
-        if (balance === 0n) return;
-
-        const threshold = await feeWalletDistributor.swapThreshold(tokenAddress);
-        if (balance < threshold) return;
-
-        // See quoteSwapEthOut()'s own comment above — predicts the swap's
-        // output first so a dust balance or thin/abandoned pool skips
-        // quietly instead of reverting with
-        // "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT" on every tick forever.
-        const cap = await feeWalletDistributor.maxSwapAmount(tokenAddress);
-        const amountIn = cap > 0n && balance > cap ? cap : balance;
-
-        const predictedEthOut = await quoteSwapEthOut(routerAddress, wethAddress, tokenAddress, amountIn);
-        if (predictedEthOut === 0n) return; // dust, or no pool/liquidity yet — nothing worth logging
-
-        // Real slippage floor instead of minEthOut=0 — see the FIX comment
-        // above (Issue 2) and FEE_WALLET_SLIPPAGE_BPS's own comment for why
-        // 3% rather than a UI's tighter 2%.
-        const minEthOut = (predictedEthOut * (10000n - feeWalletSlippageBpsBig())) / 10000n;
-
-        const tx = await sendRelayerTx(() => feeWalletDistributor.triggerFeeWalletSwap(tokenAddress, minEthOut));
-        const receipt = await tx.wait();
-        console.log(
-          `[fee-wallet] swept ${tokenAddress} (balance ${balance}, predicted ${predictedEthOut} wei, ` +
-            `minEthOut ${minEthOut} wei) in tx ${receipt.hash}.`
-        );
-      } catch (err) {
-        // Expected/benign cases include: a threshold that hasn't been
-        // reached, or another caller having already swept it between our
-        // balance read and our tx landing — the permanent dust/no-liquidity
-        // case is now filtered out above before it ever gets here.
-        console.warn(`[fee-wallet] swap skip ${tokenAddress}: ${err.message}`);
-      }
-    }
-
-    // ---- step 2: claim whatever ETH is currently sitting in
-    // claimableEth[token], straight to feeWallet. Independent of trySwap
-    // above (and always attempted, even on a tick where that same token's
-    // own swap was skipped or failed) so a balance left over from an
-    // earlier tick — or from before this auto-claim step existed — still
-    // gets claimed rather than sitting there until someone opens the admin
-    // panel. FEE_WALLET_CLAIM_MIN_WEI exists purely to skip a dust-sized
-    // claimable balance not worth spending a transaction's gas on; it
-    // defaults to 0 (claim anything nonzero), same "permissive until an
-    // owner tightens it" default swapThreshold/maxSwapAmount already use.
-    async function tryClaim(tokenAddress) {
-      try {
-        const claimable = await feeWalletDistributor.claimableEth(tokenAddress);
-        if (claimable === 0n || claimable < feeWalletClaimMinWeiBig()) return;
-
-        const tx = await sendRelayerTx(() => feeWalletDistributor.claimFeeWalletRewards(tokenAddress));
-        const receipt = await tx.wait();
-        console.log(`[fee-wallet] claimed ${claimable} wei for ${tokenAddress} in tx ${receipt.hash}.`);
-      } catch (err) {
-        // Expected/benign cases include: feeWallet not yet set by the owner
-        // (claimFeeWalletRewards reverts until it is — see
-        // FeeWalletDistributor.sol), or another caller already having
-        // claimed this token's balance between our read and our tx landing.
-        console.warn(`[fee-wallet] claim skip ${tokenAddress}: ${err.message}`);
-      }
-    }
-
-    for (const tokenAddress of tokenAddresses) {
-      await trySwap(tokenAddress);
-      await tryClaim(tokenAddress);
-    }
-
-    // ---- step 3: the bonding curves' per-trade fee. It arrives as ETH (not in
-    // kind), so it has no token to swap: half is already owed to the fee wallet
-    // under key address(0), and half is earmarked in pendingBuybackEth for the
-    // platform-token buyback. Run the buyback with a quote-based floor (skipped
-    // quietly when there is no platform token or no quotable pool; the
-    // contract's own protective floor still applies), then claim the fee
-    // wallet's share. Each step is independent and never aborts the sweep.
-    try {
-      const pending = await feeWalletDistributor.pendingBuybackEth();
-      const platformTokenAddress = await feeWalletDistributor.platformToken();
-      if (pending > 0n && platformTokenAddress !== hre.ethers.ZeroAddress) {
-        const quotedTokens = await quoteV4PlatformBuy(routerAddress, platformTokenAddress, pending);
-        if (quotedTokens > 0n) {
-          const minPlatform = (quotedTokens * (10000n - feeWalletSlippageBpsBig())) / 10000n;
-          const tx = await sendRelayerTx(() => feeWalletDistributor.triggerPendingBuyback(0, minPlatform));
-          const receipt = await tx.wait();
-          console.log(`[fee-wallet] curve-fee buyback of ${pending} wei ran in tx ${receipt.hash}.`);
-        }
-      }
-    } catch (err) {
-      console.warn(`[fee-wallet] curve-fee buyback skip: ${err.message}`);
-    }
-    await tryClaim(hre.ethers.ZeroAddress);
-  }
-
-  // Drives FeeWalletDistributor's OTHER half of its buyback pipeline — the
-  // platformToken accumulate -> burn/airdrop mechanism ported directly from
-  // PlatformRewardsDistributor (see FeeWalletDistributor.sol's own
-  // contract-level comment). The burn half of every _splitAndProcess() call
-  // already happens automatically, inline, the instant a buyback lands —
-  // this sub-sweep is what's needed for the OTHER half (whatever landed in
-  // pendingAirdropTokens) to actually reach platformToken's holders, rather
-  // than sitting there until someone calls startAirdropRound/
-  // processAirdropBatch by hand from the admin panel. Mirrors
-  // sweepPlatformAirdropRoundOnce() above exactly, substituting
-  // feeWalletDistributor and the feeWalletAirdrop* settings; an unfinished
-  // round simply continues on the next tick (roundActive/roundCursor persist
-  // on-chain, same as the platform-rewards version).
-  async function sweepFeeWalletAirdropRoundOnce() {
-    const platformTokenAddress = await feeWalletDistributor.platformToken();
-    if (platformTokenAddress === hre.ethers.ZeroAddress) return; // not configured yet — nothing to do
-
-    let roundActive = await feeWalletDistributor.roundActive();
-    if (!roundActive) {
-      const pending = await feeWalletDistributor.pendingAirdropTokens();
-      if (pending === 0n) return; // nothing to distribute yet
-
-      const tx = await sendRelayerTx(() => feeWalletDistributor.startAirdropRound());
-      const receipt = await tx.wait();
-      console.log(`[fee-wallet] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
-      roundActive = true;
-    }
-
-    for (let i = 0; i < relayerSettings.feeWalletAirdropMaxBatchesPerTick && roundActive; i++) {
-      const tx = await sendRelayerTx(() => feeWalletDistributor.processAirdropBatch(relayerSettings.feeWalletAirdropBatchSize));
-      const receipt = await tx.wait();
-      roundActive = await feeWalletDistributor.roundActive();
-      console.log(
-        `[fee-wallet] airdrop batch processed in tx ${receipt.hash}` +
-          (roundActive ? " (round continues next tick)." : " (round completed).")
-      );
-    }
-  }
-
-  async function feeWalletPollLoop() {
-    await sweepFeeWalletRewardsOnce().catch((err) => console.error(`[fee-wallet] sweep error: ${err.message}`));
-    await sweepFeeWalletAirdropRoundOnce().catch((err) => console.error(`[fee-wallet] airdrop round sweep error: ${err.message}`));
-    setTimeout(feeWalletPollLoop, relayerSettings.feeWalletPollIntervalMs);
-  }
-
-  // ---- platform rewards auto-sweep (optional) ----
-  // Automates PlatformRewardsDistributor's own accumulate -> buyback ->
-  // burn/airdrop pipeline (see PlatformRewardsDistributor.sol's own
-  // contract-level comment, and the module comment near the top of this
-  // file). Three independent sub-sweeps, run in sequence every tick — each
-  // one no-ops quietly (not as a logged failure) until
-  // PlatformRewardsDistributor.platformToken() is actually configured (see
-  // scripts/deploy.js's DEPLOY_PLATFORM_TOKEN flag), since every trigger
-  // call on the contract reverts with "platform token not set" until then.
-
-  // Sub-sweep 1: the 50%-of-every-deployFee/launchFee ETH share that lands
-  // here directly (see TokenFactory._finalizeLaunch /
-  // CustomTokenFactory.createCustomToken) — buys platformToken with it once
-  // ethBuybackThreshold clears, same dust/no-pool prediction check as the
-  // fee-wallet sweep above, with a real slippage floor instead of the 0
-  // this project's earlier sweeps used to hardcode (see
-  // PLATFORM_BUYBACK_SLIPPAGE_BPS above).
-  async function sweepPlatformEthBuybackOnce() {
-    const platformTokenAddress = await platformRewardsDistributor.platformToken();
-    if (platformTokenAddress === hre.ethers.ZeroAddress) return; // not configured yet — see comment above
-
-    const distributorAddress = await platformRewardsDistributor.getAddress();
-    const balance = await hre.ethers.provider.getBalance(distributorAddress);
-    if (balance === 0n) return;
-
-    const threshold = await platformRewardsDistributor.ethBuybackThreshold();
-    if (balance < threshold) return;
-
-    const cap = await platformRewardsDistributor.maxEthBuybackAmount();
-    const ethIn = cap > 0n && balance > cap ? cap : balance;
-
-    const routerAddress = await platformRewardsDistributor.router();
-    const wethAddress = await (
-      await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
-    ).WETH();
-
-    const quotedTokensOut = await quoteAmountsOut(routerAddress, [wethAddress, platformTokenAddress], ethIn);
-    if (quotedTokensOut === 0n) return; // dust, or no platformToken pool/liquidity yet — nothing worth logging
-
-    const minTokensOut = (quotedTokensOut * (10000n - platformBuybackSlippageBpsBig())) / 10000n;
-    const tx = await sendRelayerTx(() => platformRewardsDistributor.triggerEthBuyback(minTokensOut));
-    const receipt = await tx.wait();
-    console.log(`[platform-rewards] ETH buyback: ${ethIn} wei -> ~${quotedTokensOut} platformToken in tx ${receipt.hash}.`);
-  }
-
-  // Sub-sweep 2: every launched token's own rewardBps cut, accumulated
-  // in-kind on this same distributor exactly like the creator-rewards/
-  // fee-wallet flows — walks every token this relayer has ever recorded a
-  // launch for and buys platformToken with whatever's cleared that token's
-  // own tokenBuybackThreshold. A token that happens to equal platformToken
-  // itself (e.g. someone sends it here directly) is credited without a
-  // swap — the contract's own triggerTokenBuyback special-cases that path
-  // uncapped and never touches minTokensOut for it, so this passes 0 there
-  // and only computes a real quote/floor for the swapped case.
-  async function sweepPlatformTokenBuybacksOnce() {
-    const platformTokenAddress = await platformRewardsDistributor.platformToken();
-    if (platformTokenAddress === hre.ethers.ZeroAddress) return;
-
-    const network = hre.network.name;
-    const ledger = await readLedger(network);
-    const distributorAddress = await platformRewardsDistributor.getAddress();
-    const routerAddress = await platformRewardsDistributor.router();
-    const wethAddress = await (
-      await hre.ethers.getContractAt(UNIV2_ROUTER_QUOTE_ABI, routerAddress, hre.ethers.provider)
-    ).WETH();
-    const tokenAddresses = mergeV2KeeperTokens(ledger, await readTrackedTokens(network)); // ledger + every discovered launch (direct launches have no ledger row)
-
-    for (const tokenAddress of tokenAddresses) {
-      try {
-        const token = await hre.ethers.getContractAt(ERC20_BALANCE_OF_ABI, tokenAddress, relayerWallet);
-        const balance = await token.balanceOf(distributorAddress);
-        if (balance === 0n) continue;
-
-        const threshold = await platformRewardsDistributor.tokenBuybackThreshold(tokenAddress);
-        if (balance < threshold) continue;
-
-        const isPlatformTokenItself = tokenAddress.toLowerCase() === platformTokenAddress.toLowerCase();
-        let amountIn = balance;
-        let minTokensOut = 0n; // unused by the contract on the direct-credit path below
-
-        if (!isPlatformTokenItself) {
-          const cap = await platformRewardsDistributor.maxTokenBuybackAmount(tokenAddress);
-          amountIn = cap > 0n && balance > cap ? cap : balance;
-
-          const quotedTokensOut = await quoteAmountsOut(
-            routerAddress,
-            [tokenAddress, wethAddress, platformTokenAddress],
-            amountIn
-          );
-          if (quotedTokensOut === 0n) continue; // dust, or no pool/liquidity yet — nothing worth logging
-          minTokensOut = (quotedTokensOut * (10000n - platformBuybackSlippageBpsBig())) / 10000n;
-        }
-
-        const tx = await sendRelayerTx(() => platformRewardsDistributor.triggerTokenBuyback(tokenAddress, minTokensOut));
-        const receipt = await tx.wait();
-        console.log(
-          `[platform-rewards] ${isPlatformTokenItself ? "direct-credited" : "token buyback"} ${tokenAddress} ` +
-            `(amountIn ${amountIn}) in tx ${receipt.hash}.`
-        );
-      } catch (err) {
-        // Expected/benign cases include: a threshold that hasn't been
-        // reached, or another caller having already swept it between our
-        // balance read and our tx landing — the permanent dust/no-liquidity
-        // case is now filtered out above before it ever gets here.
-        console.warn(`[platform-rewards] skip token buyback for ${tokenAddress}: ${err.message}`);
-      }
-    }
-  }
-
-  // Sub-sweep 3: actually moves the burn half's counterpart — the half
-  // sitting in pendingAirdropTokens after either buyback above — out to
-  // platformToken's own holders. Starts a round if one isn't already active
-  // and there's something to distribute, then keeps calling
-  // processAirdropBatch until either the round completes or this tick's own
-  // PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK budget is spent; an unfinished
-  // round just continues on the next tick (roundActive/roundCursor are
-  // on-chain state, not something this loop needs to track itself).
-  async function sweepPlatformAirdropRoundOnce() {
-    const platformTokenAddress = await platformRewardsDistributor.platformToken();
-    if (platformTokenAddress === hre.ethers.ZeroAddress) return;
-
-    let roundActive = await platformRewardsDistributor.roundActive();
-    if (!roundActive) {
-      const pending = await platformRewardsDistributor.pendingAirdropTokens();
-      if (pending === 0n) return; // nothing to distribute yet
-
-      const tx = await sendRelayerTx(() => platformRewardsDistributor.startAirdropRound());
-      const receipt = await tx.wait();
-      console.log(`[platform-rewards] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
-      roundActive = true;
-    }
-
-    for (let i = 0; i < relayerSettings.platformAirdropMaxBatchesPerTick && roundActive; i++) {
-      const tx = await sendRelayerTx(() => platformRewardsDistributor.processAirdropBatch(relayerSettings.platformAirdropBatchSize));
-      const receipt = await tx.wait();
-      roundActive = await platformRewardsDistributor.roundActive();
-      console.log(
-        `[platform-rewards] airdrop batch processed in tx ${receipt.hash}` +
-          (roundActive ? " (round continues next tick)." : " (round completed).")
-      );
-    }
-  }
-
-  async function platformRewardsPollLoop() {
-    await sweepPlatformEthBuybackOnce().catch((err) => console.error(`[platform-rewards] ETH buyback sweep error: ${err.message}`));
-    await sweepPlatformTokenBuybacksOnce().catch((err) => console.error(`[platform-rewards] token buyback sweep error: ${err.message}`));
-    await sweepPlatformAirdropRoundOnce().catch((err) => console.error(`[platform-rewards] airdrop round sweep error: ${err.message}`));
-    setTimeout(platformRewardsPollLoop, relayerSettings.platformRewardsPollIntervalMs);
   }
 
   // ---- V4 distributor keeper (optional; see the v4KeeperOn switch above) ----
@@ -6578,28 +4992,6 @@ async function main() {
   tokenDiscoveryPollLoop();
   tokenActivityPollLoop();
   tokenPricePollLoop();
-
-  if (creatorRewardsDistributor) {
-    console.log(
-      `Sweeping and auto-claiming creator rewards every ${relayerSettings.creatorRewardsPollIntervalMs}ms ` +
-        `(claim floor ${relayerSettings.creatorRewardsClaimMinWei} wei).`
-    );
-    creatorRewardsPollLoop();
-  }
-
-  if (feeWalletDistributor) {
-    console.log(
-      `Sweeping and auto-claiming fee-wallet rewards every ${relayerSettings.feeWalletPollIntervalMs}ms ` +
-        `(claim floor ${relayerSettings.feeWalletClaimMinWei} wei), including its platformToken airdrop-round ` +
-        `sweep once platformToken() is configured.`
-    );
-    feeWalletPollLoop();
-  }
-
-  if (platformRewardsDistributor) {
-    console.log(`Sweeping platform rewards (buyback/burn/airdrop) every ${relayerSettings.platformRewardsPollIntervalMs}ms.`);
-    platformRewardsPollLoop();
-  }
 
   if (V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS) {
     console.log(

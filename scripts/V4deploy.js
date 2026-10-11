@@ -11,7 +11,9 @@
 //      bits are 0x20CC (the salt is mined here, after the final build)
 //   5. V4TokenFactory (also the "tax source" the other factories read)
 //   6. V4SwapRouter (the trading router the token page uses)
-//   7. V4LiquidityCompounder, V4CustomTokenFactory, V4CurveFactory
+//   7. V4LiquidityCompounder, V4CustomTokenFactory, V4CurveFactory, then V4LaunchRelay (the gasless
+//      launch relay for those two factories; it is switched on in each factory and, when RELAYER_ADDRESS
+//      is set, given that relayer wallet and a gas-reimbursement cap)
 //   8. V4FeeWalletDistributor + V4CreatorRewardsDistributor (DEPLOY_DISTRIBUTORS=false skips)
 //   9. V4PlatformTaxDistributor, the 0.30% trade-tax collector (DEPLOY_TAX_DISTRIBUTOR=false skips)
 //  10. V4PlatformRewardsDistributor, the factory's rewards slot (DEPLOY_PLATFORM_REWARDS=false skips;
@@ -31,6 +33,12 @@
 // with no platform token it sends everything it collects to its fee wallet in ETH, and
 // switches to the 50/50 buyback once the owner calls setRouter + setPlatformToken.
 // Save its address as platformTaxDistributor in Admin.
+//
+// Updating an existing set: if deployments/<network>/v4-deploy.json holds a V4CustomTokenFactory or
+// V4CurveFactory from before gasless launches existed (it has no launchRelay()), this script retires
+// it from the saved state and deploys the new one next to the rest of the set (hook, locker, token
+// factory, distributors are reused). The old factory keeps working on-chain until you remove it as a
+// launcher on the hook (hook.setLauncher(old, false), deployer wallet) -- do that once the new one is live.
 //
 // Safe to re-run: every step is saved to deployments/<network>/v4-deploy.json as it
 // completes, and a re-run reuses anything already on-chain and only does what is left.
@@ -56,6 +64,8 @@
 //                              Applied to V4TokenFactory, V4CustomTokenFactory and V4CurveFactory alike; each has
 //                              its own on-chain value, and PLAIN_/CUSTOM_/CURVE_ prefixed versions of both
 //                              variables (e.g. CURVE_SNIPE_START_BPS) override it for one mode.
+//   RELAY_MAX_GAS_REIMBURSEMENT_WEI  Most gas the launch relay repays the relayer per launch, out of the
+//                              launch fee (default 0.01 ETH). Only applied together with RELAYER_ADDRESS.
 //   OWNER_ADDRESS              If set, ownership of every owned contract is proposed to this wallet
 //                              at the end (Ownable2Step: that wallet must accept each one).
 //   DEPLOY_DISTRIBUTORS        "false" to skip both distributors.
@@ -291,12 +301,31 @@ async function main() {
   ]);
   const swapRouter = await step("v4SwapRouter", "V4SwapRouter", [poolManager, await A(hook)]);
   const compounder = await step("compounder", "V4LiquidityCompounder", [poolManager, await A(hook)]);
+  // A factory saved by an earlier run that predates gasless launches has no launchRelay(); retire
+  // it from the saved state so the current code is deployed in its place.
+  state.retired = state.retired || [];
+  for (const [key, name] of [["v4CustomTokenFactory", "V4CustomTokenFactory"], ["v4CurveFactory", "V4CurveFactory"], ["v4LaunchRelay", "V4LaunchRelay"]]) {
+    if (!(await hasCode(state[key]))) continue;
+    let current = true;
+    try {
+      if (name === "V4LaunchRelay") await (await getF(name)).attach(state[key]).customFactory();
+      else await (await getF(name)).attach(state[key]).launchRelay();
+    } catch (e) { current = false; }
+    if (!current) {
+      console.log(`  ! ${key} at ${state[key]} is from before gasless launches; deploying the current version (the old one stays on-chain, retired in the saved state).`);
+      state.retired.push({ key, address: state[key], retiredAt: new Date().toISOString() });
+      delete state[key];
+      save();
+    }
+  }
   const customFactory = await step("v4CustomTokenFactory", "V4CustomTokenFactory", [
     await A(customImpl), await A(factory), await A(compounder), launchFee, lpLock,
   ]);
   const curveFactory = await step("v4CurveFactory", "V4CurveFactory", [
     await A(plainImpl), await A(customImpl), await A(factory), await A(compounder), curveFee, lpLock,
   ]);
+
+  const launchRelay = await step("v4LaunchRelay", "V4LaunchRelay", [await A(customFactory), await A(curveFactory), await A(factory)]);
 
   let feeWalletDist, creatorDist;
   if (withDistributors) {
@@ -344,6 +373,28 @@ async function main() {
     if (!(await hook.launchers(fa))) await send(`hook.setLauncher(${label}, true)`, () => hook.setLauncher(fa, true));
     if (!(await locker.extraFactories(fa)))
       await send(`locker.setExtraFactory(${label}, true)`, () => locker.setExtraFactory(fa, true));
+  }
+
+  // Gasless launches: each factory trusts exactly one relay; the relay needs a gas cap before
+  // it can be given a relayer wallet.
+  const relayA = await A(launchRelay);
+  for (const [label, f] of [["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory]]) {
+    if ((await f.launchRelay()).toLowerCase() !== relayA.toLowerCase())
+      await send(`${label}.setLaunchRelay(V4LaunchRelay)`, () => f.setLaunchRelay(relayA));
+  }
+  const relayerWallet = envAddr("RELAYER_ADDRESS", null);
+  const relayCap = BigInt(process.env.RELAY_MAX_GAS_REIMBURSEMENT_WEI || ethers.parseEther("0.01"));
+  if (relayerWallet) {
+    if ((await launchRelay.owner()).toLowerCase() === deployer.address.toLowerCase()) {
+      if ((await launchRelay.maxRelayerGasReimbursementWei()) === 0n)
+        await send(`V4LaunchRelay.setMaxRelayerGasReimbursement(${relayCap})`, () => launchRelay.setMaxRelayerGasReimbursement(relayCap));
+      if ((await launchRelay.relayer()).toLowerCase() !== relayerWallet.toLowerCase())
+        await send("V4LaunchRelay.setRelayer(relayer wallet)", () => launchRelay.setRelayer(relayerWallet));
+    } else {
+      console.log("  NOTE: the V4LaunchRelay owner must call setMaxRelayerGasReimbursement, then setRelayer(" + relayerWallet + ").");
+    }
+  } else {
+    console.log("  NOTE: set RELAYER_ADDRESS (the relayer wallet) so the V4LaunchRelay can be given its relayer, or call setMaxRelayerGasReimbursement then setRelayer(relayerWallet) on it as the owner. Gasless custom-tax and curve launches need this.");
   }
 
   // Snipe protection: the setting every NEW pool of each launch mode copies at creation
@@ -423,7 +474,7 @@ async function main() {
   // ---- ownership handoff ----------------------------------------------
   if (ownerAddress && ownerAddress.toLowerCase() !== deployer.address.toLowerCase()) {
     console.log("\nOwnership (proposed; the new owner must accept each one):");
-    const owned = [["V4TokenFactory", factory], ["V4LiquidityLocker", locker], ["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory]];
+    const owned = [["V4TokenFactory", factory], ["V4LiquidityLocker", locker], ["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory], ["V4LaunchRelay", launchRelay]];
     if (withTaxDistributor) owned.push(["V4PlatformTaxDistributor", taxDist]);
     for (const [label, c] of owned) {
       const cur = await c.owner();
@@ -447,6 +498,9 @@ async function main() {
     check(await hook.launchers(fa), `${label} is an allowed launcher on the hook`);
     check(await locker.extraFactories(fa), `${label} is an allowed factory on the locker`);
   }
+  for (const [label, f] of [["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory]])
+    check((await f.launchRelay()).toLowerCase() === relayA.toLowerCase(), `${label}.launchRelay == V4LaunchRelay`);
+  if (relayerWallet) check((await launchRelay.relayer()).toLowerCase() === relayerWallet.toLowerCase() || (await launchRelay.owner()).toLowerCase() !== deployer.address.toLowerCase(), "V4LaunchRelay relayer set");
   check((await factory.platformFeeWallet()).toLowerCase() === platformFeeWallet.toLowerCase(), "platform fee wallet set");
   check((await factory.priceFeed()).toLowerCase() === priceFeed.toLowerCase(), "price feed set");
   if (withDistributors) {
@@ -476,6 +530,7 @@ async function main() {
     v4CustomTokenFactory: await A(customFactory),
     v4CurveFactory: await A(curveFactory),
     v4LiquidityCompounder: compounderA,
+    v4LaunchRelay: relayA,
     plainTokenImpl: await A(plainImpl),
     customTokenImpl: await A(customImpl),
     create2Deployer: await A(create2),
@@ -494,8 +549,8 @@ async function main() {
   state.summary = summary;
   save();
 
-  console.log(`\n=== Admin -> Overview -> Platform contracts (save these ${withTaxDistributor ? 8 : 7} for this network) ===`);
-  for (const k of ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder"])
+  console.log(`\n=== Admin -> Overview -> Platform contracts (save these ${withTaxDistributor ? 9 : 8} for this network) ===`);
+  for (const k of ["v4TokenFactory", "v4TaxHook", "v4LiquidityLocker", "v4SwapRouter", "v4CustomTokenFactory", "v4CurveFactory", "v4LiquidityCompounder", "v4LaunchRelay"])
     console.log(`  ${k.padEnd(22)} ${summary[k]}`);
   if (withTaxDistributor) console.log(`  ${"platformTaxDistributor".padEnd(22)} ${summary.platformTaxDistributor}`);
   console.log("\n=== Relayer env vars ===");
@@ -503,6 +558,7 @@ async function main() {
   console.log(`  V4_CUSTOM_TOKEN_FACTORY_ADDRESS=${summary.v4CustomTokenFactory}`);
   console.log(`  V4_CURVE_FACTORY_ADDRESS=${summary.v4CurveFactory}`);
   console.log(`  V4_COMPOUNDER_ADDRESS=${summary.v4LiquidityCompounder}`);
+  console.log(`  V4_LAUNCH_RELAY_ADDRESS=${summary.v4LaunchRelay}`);
   console.log(`  V4_KEEPER_ENABLED=false    (optional; keeper is ON by default, toggle it in Admin → Relayer settings)`);
   if (!ephemeral) console.log(`\nSaved: ${statePath}`);
 
@@ -520,6 +576,7 @@ async function main() {
       [summary.v4LiquidityCompounder, [poolManager, summary.v4TaxHook]],
       [summary.v4CustomTokenFactory, [summary.customTokenImpl, summary.v4TokenFactory, summary.v4LiquidityCompounder, launchFee, lpLock]],
       [summary.v4CurveFactory, [summary.plainTokenImpl, summary.customTokenImpl, summary.v4TokenFactory, summary.v4LiquidityCompounder, curveFee, lpLock]],
+      [summary.v4LaunchRelay, [summary.v4CustomTokenFactory, summary.v4CurveFactory, summary.v4TokenFactory]],
     ];
     if (withDistributors) {
       v.push([summary.feeWalletDistributor, [poolManager, summary.v4TaxHook, ownerAddress || deployer.address, zero, distributorFeeWallet]]);

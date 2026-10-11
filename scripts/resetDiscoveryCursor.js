@@ -1,93 +1,115 @@
-// One-time admin fixup for exactly the situation /debug/token/:address
-// exists to diagnose: discoverLaunchedTokens' cursor is keyed by
-// "<factoryAddress>:discovery" (see scripts/relayer.js), so redeploying
-// TokenFactory/CustomTokenFactory to brand-new addresses gives each one a
-// brand-new cursor that starts from TOKEN_DISCOVERY_START_BLOCK — a value
-// that made sense back when it was first set (near that deployment's own
-// block) but is now enormously far behind the chain tip on a fast-moving
-// network. Left alone, the background discovery loop would need
-// (blocksBehind / TOKEN_DISCOVERY_MAX_BLOCK_RANGE) polls to ever reach the
-// tokens actually launched against the new factories — which is why price/
-// TVL/volume/chart data for every token stayed stuck at 0 after this
-// redeploy, even though the tokens themselves (and their pools) are real.
+// Fast-forwards each configured factory's token-discovery cursor on a
+// running scripts/relayer.js instance to (or near) the current block tip, by
+// calling its admin-gated POST /debug/reset-discovery-cursor route -- see
+// that route's own comment in scripts/relayer.js for the full mechanics and
+// its safety property: it only ever moves a cursor FORWARD (never past
+// targetBlock - 1 if it's already there or beyond), so this is safe to run
+// more than once and can never cause discoverLaunchedTokens to reprocess or
+// duplicate a launch.
 //
-// This script jumps each new factory's discovery cursor to just behind the
-// current chain tip (minus a generous lookback, so nothing launched very
-// recently is skipped) instead of waiting for it to crawl there normally.
-// Safe to run any number of times — it only ever fast-forwards a cursor
-// (never rewinds one past where it already is), so it can't cause the
-// discovery loop to reprocess/duplicate anything.
+// Use this any time discoverLaunchedTokens would otherwise have to crawl a
+// large amount of chain history to catch up and ends up re-finding launches
+// you've already deleted from the admin panel on purpose -- most commonly:
+//   - right after pointing V4_TOKEN_FACTORY_ADDRESS/V4_CUSTOM_TOKEN_FACTORY_ADDRESS/
+//     V4_CURVE_FACTORY_ADDRESS (or V4_LAUNCH_RELAY_ADDRESS) at a
+//     freshly redeployed factory -- its discovery cursor has never run
+//     before, so the very next poll would otherwise do a full
+//     TOKEN_DISCOVERY_AUTO_LOOKBACK_BLOCKS-sized (3,000,000 blocks by
+//     default) historical scan and re-track everything it finds; or
+//   - any time the relayer's own persisted cursor storage didn't survive a
+//     restart/redeploy for some other reason (see lib/relayerStore.js's own
+//     GoDaddy-persistence notes) and keeps re-finding the same old launches
+//     no matter how many times you delete them from the admin panel's
+//     "Launch activity" list.
 //
-// Required env: at least one of TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS
-//   (same convention as scripts/setRelayer.js).
+// This does NOT touch anything on-chain -- it only moves a bookkeeping
+// cursor inside the relayer's own storage (lib/relayerStore.js), the exact
+// same personal_sign-the-admin-wallet pattern POST /platform-config and
+// POST /active-network already use.
+//
+// Required env:
+//   ADMIN_PRIVATE_KEY  - the private key for the wallet in lib/adminAuth.js's
+//                        ADMIN_WALLET constant -- the same wallet the admin
+//                        panel's "Connect wallet" flow signs with, NOT the
+//                        relayer's own RELAYER_PRIVATE_KEY. Treat this
+//                        exactly like any other private key: never commit
+//                        it, never paste it anywhere outside this one
+//                        command, and prefer running it from a shell history
+//                        that isn't persisted if that's a concern on your
+//                        machine.
+//   RELAYER_API_URL    - base URL of the running relayer instance, e.g.
+//                        https://yourdomain.com or http://localhost:3000 --
+//                        same value as the "Gasless relayer API" field in
+//                        the admin panel's Platform Contracts section.
+//
 // Optional env:
-//   DISCOVERY_LOOKBACK_BLOCKS — how far behind the current tip to jump to
-//     (default 3,000,000 — generous for a redeploy that happened in the
-//     last few days on a fast testnet; raise it if your tokens were
-//     launched longer ago than that).
-//   DISCOVERY_RESET_BLOCK — set an exact block number instead of computing
-//     one from the current tip (e.g. the redeploy's own block, if you know
-//     it from the explorer's "contract creation" transaction).
-//
-// The relayer process (scripts/relayer.js) must be RESTARTED after this —
-// like setRelayer(), it only reads cursors.json into memory... actually it
-// re-reads it on every poll (see getCursor/setCursor in lib/relayerStore.js
-// — no restart strictly required for this one), but restarting is still
-// the safest way to confirm the change took via the startup logs.
+//   TARGET_BLOCK       - block number to fast-forward cursors to. Defaults
+//                        to the current chain tip (read via this script's
+//                        own --network connection) if not set -- the common
+//                        "catch me up to right now" case.
 //
 // Example:
-//   TOKEN_FACTORY_ADDRESS=0x... CUSTOM_TOKEN_FACTORY_ADDRESS=0x... \
+//   ADMIN_PRIVATE_KEY=0x... RELAYER_API_URL=https://yourdomain.com \
 //     npx hardhat run scripts/resetDiscoveryCursor.js --network robinhoodTestnet
 const hre = require("hardhat");
-const { getCursor, setCursor } = require("../lib/relayerStore");
-
-const DEFAULT_LOOKBACK_BLOCKS = 3_000_000;
-
-async function resetOne(label, factoryAddress, targetBlock) {
-  const cursorKey = `${factoryAddress}:discovery`;
-  const before = await getCursor(cursorKey);
-
-  if (before !== null && before >= targetBlock - 1) {
-    console.log(
-      `${label}: current cursor (${before}) is already at or past the target (${targetBlock - 1}) — leaving it alone.`
-    );
-    return;
-  }
-
-  await setCursor(cursorKey, targetBlock - 1); // discoverLaunchedTokens scans from storedCursor + 1
-  console.log(`${label}: discovery cursor for ${factoryAddress} moved ${before === null ? "(never run)" : before} -> ${targetBlock - 1}.`);
-}
+const { ADMIN_WALLET } = require("../lib/adminAuth");
 
 async function main() {
-  const tokenFactoryAddress = process.env.TOKEN_FACTORY_ADDRESS || null;
-  const customTokenFactoryAddress = process.env.CUSTOM_TOKEN_FACTORY_ADDRESS || null;
-  if (!tokenFactoryAddress && !customTokenFactoryAddress) {
-    throw new Error("Set at least one of TOKEN_FACTORY_ADDRESS / CUSTOM_TOKEN_FACTORY_ADDRESS.");
+  const adminPrivateKey = process.env.ADMIN_PRIVATE_KEY;
+  if (!adminPrivateKey) {
+    throw new Error(
+      "Set ADMIN_PRIVATE_KEY to the admin wallet's private key (see lib/adminAuth.js's ADMIN_WALLET) -- " +
+        "never the relayer's own RELAYER_PRIVATE_KEY."
+    );
+  }
+  const relayerApiUrl = process.env.RELAYER_API_URL;
+  if (!relayerApiUrl) {
+    throw new Error("Set RELAYER_API_URL to the running relayer's base URL, e.g. https://yourdomain.com.");
   }
 
-  const latestBlock = await hre.ethers.provider.getBlockNumber();
-  let targetBlock;
-  if (process.env.DISCOVERY_RESET_BLOCK) {
-    targetBlock = Number(process.env.DISCOVERY_RESET_BLOCK);
-  } else {
-    const lookback = process.env.DISCOVERY_LOOKBACK_BLOCKS
-      ? Number(process.env.DISCOVERY_LOOKBACK_BLOCKS)
-      : DEFAULT_LOOKBACK_BLOCKS;
-    targetBlock = Math.max(0, latestBlock - lookback);
+  const adminWallet = new hre.ethers.Wallet(adminPrivateKey);
+  if (adminWallet.address.toLowerCase() !== ADMIN_WALLET.toLowerCase()) {
+    throw new Error(
+      `ADMIN_PRIVATE_KEY resolves to ${adminWallet.address}, but lib/adminAuth.js's ADMIN_WALLET is ` +
+        `${ADMIN_WALLET} -- the relayer will reject this signature. Use the private key matching that address.`
+    );
   }
 
-  console.log(`Network: ${hre.network.name}`);
-  console.log(`Current chain tip: ${latestBlock}`);
-  console.log(`Resetting discovery cursors to resume from block ${targetBlock} (${latestBlock - targetBlock} blocks behind tip).`);
+  const targetBlock = process.env.TARGET_BLOCK != null ? Number(process.env.TARGET_BLOCK) : await hre.ethers.provider.getBlockNumber();
+  if (!Number.isInteger(targetBlock) || targetBlock < 0) {
+    throw new Error(`Invalid target block: ${process.env.TARGET_BLOCK}`);
+  }
 
-  if (tokenFactoryAddress) await resetOne("TokenFactory", tokenFactoryAddress, targetBlock);
-  if (customTokenFactoryAddress) await resetOne("CustomTokenFactory", customTokenFactoryAddress, targetBlock);
+  const timestamp = Date.now();
+  const message = `Hood Launch admin: reset discovery cursor to block ${targetBlock} at ${timestamp}`;
+  const signature = await adminWallet.signMessage(message);
 
+  console.log(`Signing as admin wallet ${adminWallet.address}.`);
+  console.log(`Fast-forwarding discovery cursors on ${relayerApiUrl} to block ${targetBlock}...`);
+
+  const res = await fetch(`${relayerApiUrl}/debug/reset-discovery-cursor`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetBlock, timestamp, signature }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`Relayer rejected the request (HTTP ${res.status}): ${data.error || JSON.stringify(data)}`);
+  }
+
+  console.log(`Done. Network: ${data.network}`);
+  for (const [kind, result] of Object.entries(data.results || {})) {
+    const beforeLabel = result.before === null ? "never run" : result.before;
+    console.log(
+      result.changed
+        ? `  ${kind} (${result.factoryAddress}): ${beforeLabel} -> ${result.after}`
+        : `  ${kind} (${result.factoryAddress}): already at ${beforeLabel} -- no change needed, already caught up.`
+    );
+  }
   console.log(
-    "\nDone. The discovery loop will pick this up on its next scheduled poll (no restart strictly required, " +
-      "but restart scripts/relayer.js if you want to confirm via its startup logs). Once discovery catches up " +
-      "to the block each token was actually created in, pollTokenActivity/pollTokenPrices start sampling it " +
-      "and price/TVL/volume/charts should populate within a few poll cycles after that."
+    "\nNothing on-chain was touched. If any of the kinds above still show stale launches in the admin panel " +
+      "after this, delete them one more time now -- discovery won't re-scan the history behind this new cursor " +
+      "position again."
   );
 }
 
