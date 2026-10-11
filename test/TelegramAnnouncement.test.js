@@ -88,18 +88,18 @@ describe("Telegram integration", function () {
   });
 
   it("announces a launch with escaped name/symbol, kind note and explorer link", async () => {
-    await api.announceLaunchToTelegram("robinhoodTestnet", "curve", {
+    await api.announceLaunchToTelegram("robinhoodTestnet", "v4curve", {
       token: "0xAbC",
       name: "A<b>&Co",
       symbol: "X&Y",
-      pairAddress: null,
+      hasPool: false,
     });
     assert.strictEqual(received.length, 1);
     assert.strictEqual(received[0].body.chat_id, "-1001");
     const t = received[0].body.text;
     assert.ok(t.includes("A&lt;b&gt;&amp;Co"), t);
     assert.ok(t.includes("$X&amp;Y"), t);
-    assert.ok(t.includes("⚡ Quick Launch via BondingCurveFactory"), t);
+    assert.ok(t.includes("⚡ Quick Launch (bonding curve) via V4CurveFactory"), t);
     assert.ok(t.includes("https://explorer.example/address/0xAbC"), t);
   });
 
@@ -131,19 +131,23 @@ describe("Telegram integration", function () {
     assert.strictEqual(received.length, 2);
   });
 
-  it("labels plain launches by pool presence and skips quietly when unconfigured", async () => {
-    await api.announceLaunchToTelegram("robinhoodTestnet", "token", { token: "0x1", name: "N", symbol: "S", pairAddress: "0x2" });
-    await api.announceLaunchToTelegram("robinhoodTestnet", "token", { token: "0x1", name: "N", symbol: "S", pairAddress: null });
-    assert.ok(received[0].body.text.includes("Launch + liquidity via TokenFactory"));
-    assert.ok(received[1].body.text.includes("Deploy via TokenFactory"));
+  it("labels V4 launches by kind and pool presence, and skips quietly when unconfigured", async () => {
+    await api.announceLaunchToTelegram("robinhoodTestnet", "v4token", { token: "0x1", name: "N", symbol: "S", hasPool: true });
+    await api.announceLaunchToTelegram("robinhoodTestnet", "v4token", { token: "0x1", name: "N", symbol: "S", hasPool: false });
+    await api.announceLaunchToTelegram("robinhoodTestnet", "v4custom", { token: "0x1", name: "N", symbol: "S", hasPool: true });
+    await api.announceLaunchToTelegram("robinhoodTestnet", "v4custom-curve", { token: "0x1", name: "N", symbol: "S", hasPool: false });
+    assert.ok(received[0].body.text.includes("Launch + liquidity via V4TokenFactory"));
+    assert.ok(received[1].body.text.includes("Deploy via V4TokenFactory"));
+    assert.ok(received[2].body.text.includes("Custom-tax launch via V4CustomTokenFactory"));
+    assert.ok(received[3].body.text.includes("⚡ Quick Launch (bonding curve) via V4CurveFactory"));
     relayerSettings.telegramLaunchesChatId = "";
-    await api.announceLaunchToTelegram("robinhoodTestnet", "token", { token: "0x1", name: "N", symbol: "S", pairAddress: null });
-    assert.strictEqual(received.length, 2);
+    await api.announceLaunchToTelegram("robinhoodTestnet", "v4token", { token: "0x1", name: "N", symbol: "S", hasPool: false });
+    assert.strictEqual(received.length, 4);
   });
 
   describe("announcement gate (discovery)", () => {
-    const base = { isV4: false, isNeverRunOrStuck: false };
-    it("announces a brand-new V2 launch with no row", () => {
+    const base = { isNeverRunOrStuck: false };
+    it("announces a brand-new V4 launch with no row", () => {
       assert.strictEqual(classifyDiscoveredLaunch({ ...base, existingEntry: undefined }).announce, true);
     });
     it("REGRESSION: still announces when /token-metadata already wrote a partial row", () => {
@@ -154,12 +158,12 @@ describe("Telegram integration", function () {
       assert.strictEqual(r.firstDiscovery, true); // also keeps activityFromBlock for early buys
     });
     it("does not re-announce a block discovery already processed", () => {
-      const r = classifyDiscoveredLaunch({ ...base, existingEntry: { discoveredAt: "2026-10-01T00:00:00Z", kind: "token" } });
+      const r = classifyDiscoveredLaunch({ ...base, existingEntry: { discoveredAt: "2026-10-01T00:00:00Z", kind: "v4token" } });
       assert.strictEqual(r.announce, false);
     });
-    it("never announces catch-up scans or V4", () => {
-      assert.strictEqual(classifyDiscoveredLaunch({ isV4: false, isNeverRunOrStuck: true, existingEntry: undefined }).announce, false);
-      assert.strictEqual(classifyDiscoveredLaunch({ isV4: true, isNeverRunOrStuck: false, existingEntry: undefined }).announce, false);
+    it("never announces catch-up scans (but V4 launches are announced like any other)", () => {
+      assert.strictEqual(classifyDiscoveredLaunch({ isNeverRunOrStuck: true, existingEntry: undefined }).announce, false);
+      assert.strictEqual(classifyDiscoveredLaunch({ isNeverRunOrStuck: false, existingEntry: undefined }).reason, null);
     });
   });
 
