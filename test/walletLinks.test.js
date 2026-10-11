@@ -45,11 +45,23 @@ describe("Linked wallets", function () {
       expect(social.commentMessage(mint, kp.address, "hi", 1)).to.equal(`Hood Launch: comment on ${mint} as ${kp.address}: "hi" at 1`);
     });
 
-    it("builds the link / unlink messages with the account lowercased and the Solana wallet untouched", function () {
+    it("builds the link / unlink messages with EVM addresses lowercased and Solana addresses untouched, whichever side is which", function () {
       const kp = newSolanaKeypair();
       const acct = "0x9965507D1a55bcc2695C58ba16FB37d819B0A4dc";
-      expect(social.linkMessage(kp.address, acct, 77)).to.equal(`IgnitionX: link Solana wallet ${kp.address} to account ${acct.toLowerCase()} at 77`);
-      expect(social.unlinkMessage(kp.address, acct, 78)).to.equal(`IgnitionX: unlink Solana wallet ${kp.address} from account ${acct.toLowerCase()} at 78`);
+      expect(social.linkMessage(kp.address, acct, 77)).to.equal(`IgnitionX: link wallet ${kp.address} to account ${acct.toLowerCase()} at 77`);
+      expect(social.unlinkMessage(kp.address, acct, 78)).to.equal(`IgnitionX: unlink wallet ${kp.address} from account ${acct.toLowerCase()} at 78`);
+      // a Solana-first account: the main wallet is the Solana one, the linked wallet is the EVM one
+      expect(social.linkMessage(acct, kp.address, 79)).to.equal(`IgnitionX: link wallet ${acct.toLowerCase()} to account ${kp.address} at 79`);
+    });
+
+    it("builds follow and profile messages that work for Solana accounts too", function () {
+      const kp = newSolanaKeypair();
+      const evm = "0x9965507D1a55bcc2695C58ba16FB37d819B0A4dc";
+      expect(social.followMessage(true, evm, kp.address, 5)).to.equal(`Hood Launch: follow ${evm.toLowerCase()} as ${kp.address} at 5`);
+      expect(social.followMessage(false, kp.address, evm, 6)).to.equal(`Hood Launch: unfollow ${kp.address} as ${evm.toLowerCase()} at 6`);
+      const profile = require("../lib/profile");
+      expect(profile.profileMessage(kp.address, "Sol Fan", "keep", 7)).to.equal(`Hood Launch: update profile for ${kp.address} name="Sol Fan" avatar=keep at 7`);
+      expect(profile.profileMessage(evm, "Evm Fan", "none", 8)).to.equal(`Hood Launch: update profile for ${evm.toLowerCase()} name="Evm Fan" avatar=none at 8`);
     });
   });
 
@@ -120,6 +132,42 @@ describe("Linked wallets", function () {
       expect(await store.getOwner(kp.address)).to.equal(null);
       expect(await store.addLink(kp.address, B)).to.equal(true);
       expect(await store.getOwner(kp.address)).to.equal(B);
+    });
+  });
+
+  describe("profile and follow stores accept Solana accounts", function () {
+    let profiles, follows, dir;
+    before(function () {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "solacct-"));
+      process.env.RELAYER_DATA_DIR = dir;
+      for (const m of ["../lib/relayerStore", "../lib/profileStore", "../lib/followStore", "../lib/db"]) delete require.cache[require.resolve(m)];
+      profiles = require("../lib/profileStore");
+      follows = require("../lib/followStore");
+    });
+    after(function () { fs.rmSync(dir, { recursive: true, force: true }); });
+
+    it("saves a profile under a Solana address exactly as given and finds it again", async function () {
+      const kp = newSolanaKeypair();
+      await profiles.saveProfile(kp.address, { name: "Sol Native", nameKey: "solnative" });
+      const rec = await profiles.getProfile(kp.address);
+      expect(rec.address).to.equal(kp.address);
+      expect(rec.name).to.equal("Sol Native");
+      expect((await profiles.listProfiles())[kp.address].name).to.equal("Sol Native");
+      // the same name can't be taken by an EVM account
+      let err;
+      try { await profiles.saveProfile("0x1111111111111111111111111111111111111111", { name: "sol native", nameKey: "solnative" }); } catch (e) { err = e; }
+      expect(err && err.code).to.equal("NAME_TAKEN");
+    });
+
+    it("follows work between Solana and EVM accounts in both directions", async function () {
+      const kp = newSolanaKeypair();
+      const evm = "0x2222222222222222222222222222222222222222";
+      await follows.setFollow(kp.address, evm.toUpperCase().replace("0X", "0x"), true);
+      await follows.setFollow(evm, kp.address, true);
+      expect(await follows.getFollowing(kp.address)).to.deep.equal([evm]);
+      expect(await follows.getFollowers(kp.address)).to.deep.equal([evm]);
+      expect(await follows.setFollow(kp.address, evm, false)).to.equal(true);
+      expect(await follows.getFollowing(kp.address)).to.deep.equal([]);
     });
   });
 
