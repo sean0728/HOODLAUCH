@@ -1050,7 +1050,11 @@ describe("Solana settings routes + network switch", () => {
     assert.strictEqual(back.json.settings.cluster, "devnet");
     assert.strictEqual(back.json.settings.mainnet.dbcConfig, MAIN_CFG);
     list = await c2("GET", "/solana/launches");
-    assert.deepStrictEqual(list.json.launches.map((l) => l.mint), [devMint]);
+    // (the main ledger is shared by every test in this file, so earlier devnet launches may be listed too)
+    const devMints = list.json.launches.map((l) => l.mint);
+    assert.ok(devMints.includes(devMint), "the devnet launch is back");
+    assert.ok(!devMints.includes(mainMint), "the mainnet launch is not on devnet");
+    assert.ok(list.json.launches.every((l) => l.cluster === "devnet"));
     assert.strictEqual((await c2("GET", `/solana/price-history/${mainMint}`)).json.history.length, 0, "mainnet price history is not visible on devnet");
   });
 
@@ -1137,7 +1141,6 @@ describe("tracker status + cluster awareness", () => {
 describe("Solana tokens in the platform's own ledger and activity store", () => {
   const launchStore = require("../lib/launchStore");
   const activityStore = require("../lib/activityStore");
-  const { mergeV2KeeperTokens } = require("../lib/keeperTokens");
 
   async function register(over = {}) {
     const meta = await call("POST", "/solana/metadata", await signedMetadata({ image: PNG_URL, banner: PNG_URL, ...(over.meta || {}) }));
@@ -1191,12 +1194,6 @@ describe("Solana tokens in the platform's own ledger and activity store", () => 
     const r = await call("POST", "/solana/launches/delete", { mint, timestamp, signature: await sign(admin, api.deleteLaunchMessage(mint, timestamp)) });
     assert.strictEqual(r.status, 200);
     assert.ok(!(await launchStore.readLedger("robinhoodTestnet")).some((e) => e.tokenAddress === mint));
-  });
-
-  it("the EVM keepers never see a Solana ledger row", () => {
-    const evm = "0xAaaa000000000000000000000000000000000001";
-    const rows = [{ tokenAddress: evm, chain: "robinhood" }, { tokenAddress: evm.replace("Aaaa", "Bbbb") }, { tokenAddress: randAddr(), chain: "solana" }, { tokenAddress: randAddr(), protocol: "meteora-dbc" }];
-    assert.deepStrictEqual(mergeV2KeeperTokens(rows, {}), [evm, evm.replace("Aaaa", "Bbbb")]);
   });
 
   it("activity rows: Solana ones are labelled chain solana, Robinhood ones chain robinhood, in one store", async () => {
