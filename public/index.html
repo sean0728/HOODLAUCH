@@ -2763,18 +2763,14 @@
   // ABIs. createCurveToken/buy/sell/curveState/graduate/curveLaunchFee and the
   // CurveTokenCreated/CurveBought/CurveSold/CreatorBought events are
   // byte-identical to V2's, so those V2 constants are reused as-is.
-  const V4_CREATE_CUSTOM_TOKEN_SELECTOR = "ca88bd6f"; // createCustomToken(string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),(uint8,address),address,uint256,uint256,uint256,uint256) — (name,symbol,supply,buyFees,sellFees,payout,marketingWallet,liquidityEthAmount,creatorBuyEthAmount,minCreatorTokensOut,salt)
-  const V4_CREATE_CUSTOM_CURVE_TOKEN_SELECTOR = "b6d9becc"; // createCustomCurveToken(string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),(uint8,address),address,uint256,uint256,uint256) — (name,symbol,supply,buyFees,sellFees,payout,marketingWallet,creatorBuyEthAmount,minCreatorTokensOut,salt)
+  const V4_CREATE_CUSTOM_TOKEN_SELECTOR = "ac33aaec"; // createCustomToken(string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,uint256,uint256,uint256,uint256) — (name,symbol,supply,buyFees,sellFees,marketingWallet,liquidityEthAmount,creatorBuyEthAmount,minCreatorTokensOut,salt)
+  const V4_CREATE_CUSTOM_CURVE_TOKEN_SELECTOR = "7c0e3943"; // createCustomCurveToken(string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,uint256,uint256,uint256) — (name,symbol,supply,buyFees,sellFees,marketingWallet,creatorBuyEthAmount,minCreatorTokensOut,salt)
   const V4_CUSTOM_TOKEN_CREATED_TOPIC0 = "0xec119cb0aa9b367234271f222ece89ff8753b1e3c7b6fe9f9e6417b556747837"; // CustomTokenCreated(address,address,string,string,uint256,bytes32,address,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16))
   const V4_CURVE_GRADUATED_TOPIC0 = "0xc08e1752fb18394e7dd57511830f351a283b241f80d42146ab5d926daa0539a4"; // CurveGraduated(address indexed token, bytes32 indexed poolId, ethAdded, tokensAdded, liquidity, unlockTime, lockId)
   const V4_PREDICT_CURVE_TOKEN_SELECTOR = "6ecba597"; // predictTokenAddress(address,uint256,bool) on V4CurveFactory — (creator, salt, custom)
   const V4_PLAIN_TOKEN_IMPL_SELECTOR = "d19b17c5"; // plainTokenImplementation()
   const V4_CUSTOM_TOKEN_IMPL_SELECTOR = "73b25656"; // customTokenImplementation()
   const V4_IS_CUSTOM_CURVE_SELECTOR = "c10894de"; // isCustomCurve(address)
-  const V4_REFLECTION_CONVERTER_SELECTOR = "96d90381"; // reflectionConverter() on V4TokenFactory
-  const V4_VALIDATE_PAYOUT_TARGET_SELECTOR = "91d1e7da"; // validateTarget(address) on V4ReflectionConverter
-  const V4_PAYOUT_MODE_SELECTOR = "4890f8d1"; // payoutMode() on V4CustomToken: 0 in kind, 1 ETH, 2 another token
-  const V4_PAYOUT_TOKEN_SELECTOR = "4efa82b6"; // payoutToken() on V4CustomToken
   const V4_PENDING_REFLECTIONS_SELECTOR = "695d69b3"; // pendingReflections(address) on V4CustomToken
   const V4_CLAIM_REFLECTIONS_SELECTOR = "82262808"; // claimReflections() on V4CustomToken
   const V4_TOTAL_REFLECTIONS_CLAIMED_SELECTOR = "47c56876"; // totalReflectionsClaimed()
@@ -2796,8 +2792,6 @@
   const V4_DEPLOYER_SELECTOR = "d5f39488";                 // deployer() — hook
   const V4_LOCK_COUNT_SELECTOR = "9b10b6f5";               // lockCount() — locker
   // V4 distributors + hook tax-exempt list
-  const V4_SET_REFLECTION_CONVERTER_SELECTOR = "b370ba60"; // setReflectionConverter(address) — on the V4TokenFactory
-  const V4_CONVERTER_KEEPERS_SELECTOR = "3bbd64bc";        // keepers(address) — on V4ReflectionConverter
   const V4_SET_TAX_EXEMPT_SELECTOR = "1dc61040";           // setTaxExempt(address,bool) — on the V4TokenFactory
   const V4_HOOK_COMPOUNDER_SELECTOR = "0de85b2a";          // liquidityCompounder() — on the hook
   const V4_HOOK_IS_LAUNCHER_SELECTOR = "fa275e11";         // isLauncher(address) — on the hook
@@ -3227,16 +3221,11 @@
   }
   // V4CustomTokenFactory.createCustomToken: no reflectionAsset (reflections
   // are always paid in the token itself) and a single launch mode, so the
-  // head is 18 words: name offset, symbol offset, totalSupply, buyFees (4),
-  // sellFees (4), payout (mode, token), marketingWallet, liquidityEthAmount,
-  // creatorBuyEthAmount, minCreatorTokensOut, salt.
-  // `payout` = {mode: 0 same token (in kind) | 1 ETH | 2 another token, token: address}.
-  function encodeV4Payout(p){
-    const mode = p && p.mode ? Number(p.mode) : 0;
-    return toHex32(BigInt(mode)) + encodeAddressParam(mode===2 && p.token ? p.token : ZERO_ADDRESS);
-  }
-  function encodeCreateV4CustomTokenCalldata({name, symbol, totalSupply, buyFees, sellFees, payout, marketingWallet, liquidityWei, buyInWei, minTokensOut, salt}){
-    const HEAD_SLOTS = 18;
+  // head is 16 words: name offset, symbol offset, totalSupply, buyFees (4),
+  // sellFees (4), marketingWallet, liquidityEthAmount, creatorBuyEthAmount,
+  // minCreatorTokensOut, salt.
+  function encodeCreateV4CustomTokenCalldata({name, symbol, totalSupply, buyFees, sellFees, marketingWallet, liquidityWei, buyInWei, minTokensOut, salt}){
+    const HEAD_SLOTS = 16;
     const headBytes = BigInt(HEAD_SLOTS*32);
     const nameTail = encodeAbiString(name);
     const symbolTail = encodeAbiString(symbol);
@@ -3246,7 +3235,6 @@
       toHex32(BigInt(totalSupply)),
       encodeFeeSet(buyFees),
       encodeFeeSet(sellFees),
-      encodeV4Payout(payout),
       encodeAddressParam(marketingWallet || ZERO_ADDRESS),
       toHex32(BigInt(liquidityWei)),
       toHex32(BigInt(buyInWei)),
@@ -3255,11 +3243,11 @@
     ].join("");
     return "0x" + V4_CREATE_CUSTOM_TOKEN_SELECTOR + head + nameTail + symbolTail;
   }
-  // V4CurveFactory.createCustomCurveToken — 17 head words (no liquidity; the
-  // payout tuple is 2 words). The plain createCurveToken reuses
+  // V4CurveFactory.createCustomCurveToken — 15 head words (no liquidity, no
+  // reflectionAsset). The plain createCurveToken reuses
   // encodeCreateCurveTokenCalldata unchanged.
-  function encodeCreateV4CustomCurveTokenCalldata({name, symbol, totalSupply, buyFees, sellFees, payout, marketingWallet, buyInWei, minTokensOut, salt}){
-    const HEAD_SLOTS = 17;
+  function encodeCreateV4CustomCurveTokenCalldata({name, symbol, totalSupply, buyFees, sellFees, marketingWallet, buyInWei, minTokensOut, salt}){
+    const HEAD_SLOTS = 15;
     const headBytes = BigInt(HEAD_SLOTS*32);
     const nameTail = encodeAbiString(name);
     const symbolTail = encodeAbiString(symbol);
@@ -3269,7 +3257,6 @@
       toHex32(BigInt(totalSupply)),
       encodeFeeSet(buyFees),
       encodeFeeSet(sellFees),
-      encodeV4Payout(payout),
       encodeAddressParam(marketingWallet || ZERO_ADDRESS),
       toHex32(BigInt(buyInWei)),
       toHex32(BigInt(minTokensOut)),
@@ -4886,8 +4873,6 @@
       sell: { reflectionBps:0, marketingBps:0, liquidityBps:0, burnBps:0 },
       reflectionAsset: "", // "" = native ETH; else a creator-supplied ERC20 address
       marketingWallet: "", // "" = none — only valid while every marketingBps stays 0
-      payoutMode: "kind",  // V4 only: how reflections reach holders — "kind" (the token itself) | "eth" | "token"
-      payoutToken: "",     // V4 only, payoutMode "token": the ERC20 holders receive instead
     };
   }
   function resetLaunchDraft(){
@@ -6147,7 +6132,7 @@
       (sl)=>encodeAddressUint256Calldata(PREDICT_TOKEN_ADDRESS_SELECTOR, wallet, sl), onStep);
     const data = encodeCreateV4CustomTokenCalldata({
       name: draft.name, symbol: draft.ticker, totalSupply: BigInt(draft.supply) * (10n**18n),
-      buyFees: draft.customFees.buy, sellFees: draft.customFees.sell, payout: v4PayoutFromDraft(), marketingWallet,
+      buyFees: draft.customFees.buy, sellFees: draft.customFees.sell, marketingWallet,
       liquidityWei, buyInWei, minTokensOut: 0n, salt,
     });
     const { txHash, receipt } = await sendV4LaunchTx(factoryAddress, totalWei, data, onStep);
@@ -6193,7 +6178,7 @@
     const data = isCustom
       ? encodeCreateV4CustomCurveTokenCalldata({
           name: draft.name, symbol: draft.ticker, totalSupply: supply,
-          buyFees: draft.customFees.buy, sellFees: draft.customFees.sell, payout: v4PayoutFromDraft(),
+          buyFees: draft.customFees.buy, sellFees: draft.customFees.sell,
           marketingWallet: draft.customFees.marketingWallet || ZERO_ADDRESS,
           buyInWei, minTokensOut: 0n, salt,
         })
@@ -6241,27 +6226,21 @@
      paying their own gas.
   */
   const V4_RELAY_EIP712_DOMAIN_NAME = "HoodLaunchV4Relay";
-  const V4_RELAY_HASH_CUSTOM_SELECTOR = "ae1860e8";       // hashCustomVoucher((address,string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),(uint8,address),address,uint256,uint256,uint256,uint256,uint256,uint256))
+  const V4_RELAY_HASH_CUSTOM_SELECTOR = "2c9fb32e";       // hashCustomVoucher((address,string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,uint256,uint256,uint256,uint256,uint256,uint256))
   const V4_RELAY_HASH_CURVE_SELECTOR = "c81e162b";        // hashCurveVoucher((address,string,string,uint256,uint256,uint256,uint256,uint256,uint256))
-  const V4_RELAY_HASH_CUSTOM_CURVE_SELECTOR = "0679bea8"; // hashCustomCurveVoucher((address,string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),(uint8,address),address,uint256,uint256,uint256,uint256,uint256))
+  const V4_RELAY_HASH_CUSTOM_CURVE_SELECTOR = "6b5e74b0"; // hashCustomCurveVoucher((address,string,string,uint256,(uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address,uint256,uint256,uint256,uint256,uint256))
   const V4_FEESET_EIP712_TYPE = [
     { name: "reflectionBps", type: "uint16" },
     { name: "marketingBps", type: "uint16" },
     { name: "liquidityBps", type: "uint16" },
     { name: "burnBps", type: "uint16" },
   ];
-  const V4_PAYOUT_EIP712_TYPE = [
-    { name: "mode", type: "uint8" },
-    { name: "token", type: "address" },
-  ];
   const V4_RELAY_VOUCHER_EIP712_TYPES = {
     custom: {
       FeeSet: V4_FEESET_EIP712_TYPE,
-      ReflectionPayout: V4_PAYOUT_EIP712_TYPE,
       CustomLaunchVoucher: [
         { name: "creator", type: "address" }, { name: "name", type: "string" }, { name: "symbol", type: "string" },
         { name: "totalSupply", type: "uint256" }, { name: "buyFees", type: "FeeSet" }, { name: "sellFees", type: "FeeSet" },
-        { name: "payout", type: "ReflectionPayout" },
         { name: "marketingWallet", type: "address" }, { name: "liquidityEthAmount", type: "uint256" },
         { name: "creatorBuyEthAmount", type: "uint256" }, { name: "minCreatorTokensOut", type: "uint256" },
         { name: "fee", type: "uint256" }, { name: "salt", type: "uint256" }, { name: "deadline", type: "uint256" },
@@ -6277,11 +6256,9 @@
     },
     customCurve: {
       FeeSet: V4_FEESET_EIP712_TYPE,
-      ReflectionPayout: V4_PAYOUT_EIP712_TYPE,
       CustomCurveLaunchVoucher: [
         { name: "creator", type: "address" }, { name: "name", type: "string" }, { name: "symbol", type: "string" },
         { name: "totalSupply", type: "uint256" }, { name: "buyFees", type: "FeeSet" }, { name: "sellFees", type: "FeeSet" },
-        { name: "payout", type: "ReflectionPayout" },
         { name: "marketingWallet", type: "address" }, { name: "creatorBuyEthAmount", type: "uint256" },
         { name: "minCreatorTokensOut", type: "uint256" }, { name: "fee", type: "uint256" },
         { name: "salt", type: "uint256" }, { name: "deadline", type: "uint256" },
@@ -6302,7 +6279,7 @@
     statics.push(null /* name offset */, null /* symbol offset */);
     statics.push(toHex32(BigInt(v.totalSupply)));
     if(mode!=="curve"){
-      statics.push(feeSet(v.buyFees), feeSet(v.sellFees), encodeV4Payout(v.payout), encodeAddressParam(v.marketingWallet || ZERO_ADDRESS));
+      statics.push(feeSet(v.buyFees), feeSet(v.sellFees), encodeAddressParam(v.marketingWallet || ZERO_ADDRESS));
     }
     if(mode==="custom") statics.push(toHex32(BigInt(v.liquidityEthAmount)));
     statics.push(toHex32(BigInt(v.creatorBuyEthAmount)), toHex32(BigInt(v.minCreatorTokensOut)),
@@ -6368,7 +6345,6 @@
     if(isCustom){
       voucher.buyFees = fees(draft.customFees.buy);
       voucher.sellFees = fees(draft.customFees.sell);
-      voucher.payout = v4PayoutFromDraft();
       voucher.marketingWallet = draft.customFees.marketingWallet || ZERO_ADDRESS;
     }
     if(mode==="custom") voucher.liquidityEthAmount = liquidityWei;
@@ -6503,8 +6479,7 @@
             : await performOnChainV4CustomLaunch(factoryAddress, setLaunchStep));
       const customFields = isCustomTax ? {
         customTax:true, buyFees: {...draft.customFees.buy}, sellFees: {...draft.customFees.sell},
-        reflectionAsset: null, reflectionInKind: v4PayoutFromDraft().mode===0,
-        payoutMode: v4PayoutFromDraft().mode, payoutToken: v4PayoutFromDraft().token===ZERO_ADDRESS ? null : v4PayoutFromDraft().token,
+        reflectionAsset: null, reflectionInKind: true,
         marketingWallet: draft.customFees.marketingWallet || null,
       } : {};
       const base = {
@@ -7835,12 +7810,12 @@
         <div class="review-list">
           <div class="review-row"><span class="k">Buy tax</span><span class="v num">${customTaxSummaryLine(t.buyFees)}</span></div>
           <div class="review-row"><span class="k">Sell tax</span><span class="v num">${customTaxSummaryLine(t.sellFees)}</span></div>
-          <div class="review-row"><span class="k">Reflections paid in</span><span class="v" id="v4PaidInVal">${escapeHtml(v4PayoutLabelFor(t.payoutMode, t.payoutToken, t.ticker))}</span></div>
+          <div class="review-row"><span class="k">Paid in</span><span class="v">In-kind ($${escapeHtml(t.ticker)})</span></div>
           <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${t.marketingWallet ? fmtAddrSafe(t.marketingWallet) : "— (marketing share is burned)"}</span></div>
         </div>
         <div class="hint" style="margin-top:8px;">${v4PreGraduation
           ? "This curve trades with the curve's own 1.00% fee. Once it graduates to a Uniswap V4 pool, these rates apply at the pool on top of the platform's tax."
-          : "These rates are taken in the token itself at the pool, on top of the platform's own tax. Reflections accrue to every holder pro rata and are paid in whatever the creator chose at launch — the token itself, ETH, or another token (ETH and token payouts are sent to holders automatically in batches, and anyone can claim from the contract); marketing goes to the marketing wallet; the liquidity share is added to the pool as permanent liquidity by a keeper; burn reduces total supply. Every rate locked in at launch — only the marketing wallet can change, and only the creator can change it."}</div>
+          : "These rates are taken in the token itself at the pool, on top of the platform's own tax. Reflections accrue to every holder pro rata and are claimed in the token; marketing goes to the marketing wallet; the liquidity share is added to the pool as permanent liquidity by a keeper; burn reduces total supply. Every rate locked in at launch — only the marketing wallet can change, and only the creator can change it."}</div>
         ${t.onChain && !v4PreGraduation ? `<div id="v4ReflectionBox" style="margin-top:12px;"></div>` : ""}
       </div>`;
     }
@@ -7864,25 +7839,7 @@
 
   // V4 custom token: shows the connected wallet's unclaimed reflections
   // (V4CustomToken.pendingReflections) and a Claim button
-  // (claimReflections()). What reflections are paid in depends on the payout
-  // choice the creator made at launch, read from the token itself:
-  // payoutMode() 0 = the token, 1 = ETH, 2 = payoutToken(). In ETH / token
-  // modes a keeper also pays holders automatically, in batches; the Claim
-  // button just lets a holder collect their share right now.
-  async function readV4PayoutConfig(tokenAddress, fallback){
-    try{
-      const mode = Number(decodeUint256(await ethCall(tokenAddress, "0x"+V4_PAYOUT_MODE_SELECTOR)));
-      if(mode!==2) return { mode, token:null, symbol: mode===1 ? "ETH" : null, decimals:18 };
-      const token = decodeAddress(await ethCall(tokenAddress, "0x"+V4_PAYOUT_TOKEN_SELECTOR));
-      let symbol = "tokens", decimals = 18;
-      try{ symbol = decodeAbiString(await ethCall(token, "0x"+SYMBOL_SELECTOR)) || "tokens"; }catch(e){}
-      try{ decimals = Number(decodeUint256(await ethCall(token, "0x"+DECIMALS_SELECTOR))); }catch(e){}
-      return { mode, token, symbol, decimals };
-    }catch(e){
-      // A token launched before payouts existed has no payoutMode(): in kind.
-      return { mode:0, token:null, symbol:null, decimals:18 };
-    }
-  }
+  // (claimReflections()). Reflections are paid in the token itself.
   async function wireV4ReflectionPanel(t){
     const box = document.getElementById("v4ReflectionBox");
     if(!box) return;
@@ -7890,14 +7847,6 @@
       box.innerHTML = `<div class="hint">Connect a wallet to see your claimable reflections.</div>`;
       return;
     }
-    const cfg = await readV4PayoutConfig(t.tokenAddress);
-    const paidIn = document.getElementById("v4PaidInVal");
-    const unitLabel = cfg.mode===1 ? "ETH" : cfg.mode===2 ? cfg.symbol : "$"+t.ticker;
-    if(paidIn) paidIn.textContent = cfg.mode===1 ? "ETH" : cfg.mode===2 ? `${cfg.symbol} (${shortAddr(cfg.token)})` : `Same token ($${t.ticker})`;
-    const fmtAmt = (raw)=> cfg.mode===1 ? weiToEtherString(raw, 6) : formatRawTokenAmount(raw, cfg.mode===2 ? cfg.decimals : 18);
-    const note = cfg.mode===0
-      ? "Reflections accrue to every holder in this token as trades happen."
-      : "Holders are paid automatically, in batches, by a keeper — you don't have to do anything. Claim now only if you don't want to wait.";
     const render = async ()=>{
       const el = document.getElementById("v4ReflectionBox");
       if(!el || currentDetailTokenId!==t.id) return;
@@ -7909,8 +7858,7 @@
         return;
       }
       el.innerHTML = `
-        <div class="review-list"><div class="review-row"><span class="k">Your claimable reflections</span><span class="v num" id="v4PendingVal">${escapeHtml(fmtAmt(pending))} ${escapeHtml(unitLabel)}</span></div></div>
-        <div class="hint" style="margin-top:6px;">${escapeHtml(note)}</div>
+        <div class="review-list"><div class="review-row"><span class="k">Your claimable reflections</span><span class="v num" id="v4PendingVal">${fmtInt(Number(weiToEtherString(pending,2)))} $${escapeHtml(t.ticker)}</span></div></div>
         <button class="btn btn-ghost btn-sm" id="v4ClaimBtn" style="margin-top:8px;" ${pending>0n ? "" : "disabled"}>Claim reflections</button>`;
       const btn = document.getElementById("v4ClaimBtn");
       if(btn) btn.addEventListener("click", async ()=>{
@@ -10943,7 +10891,7 @@
       <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 18px;">Buy and sell tax are configured independently, each capped at 5% total. Every rate locks in permanently at launch — only the marketing wallet address can ever be changed afterward.</p>
       ${feeSideHTML("buy","Buy")}
       ${feeSideHTML("sell","Sell")}
-      ${reflectionAssetFieldHTML(reflectionOn ? "Holders accrue their share automatically as trades happen. Paid in ETH or another token, they also receive it automatically, in batches, with no action needed. Paid in the same token, holders claim it themselves from the token page." : "Only matters once a reflection % is set above, on either side.")}
+      ${reflectionAssetFieldHTML(reflectionOn ? "Holders accrue their share automatically as trades happen and get paid out automatically too, in batches, with no action needed from them — anyone can also claim their own share immediately at any time, if they don't want to wait." : "Only matters once a reflection % is set above, on either side.")}
       <div class="field">
         <label for="fMarketingWallet">Marketing wallet ${marketingOn ? "(required — a marketing % is set above)" : "(optional — only needed if you set a marketing % above)"}</label>
         <input id="fMarketingWallet" type="text" placeholder="0x… wallet address" value="${escapeHtml(draft.customFees.marketingWallet)}">
@@ -11214,7 +11162,7 @@
         <div class="review-row"><span class="k">Pool</span><span class="v">None — 100% to your wallet</span></div>
         <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")} (recorded, inactive)</span></div>
         <div class="review-row"><span class="k">Sell tax</span><span class="v num">${feeSideSummaryText("sell")} (recorded, inactive)</span></div>
-        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draftProtocol()==="v4" ? escapeHtml(v4PayoutLabel()) : reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
+        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draftProtocol()==="v4" ? `In-kind ($${escapeHtml(draft.ticker||"TOKEN")})` : reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
         <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${draft.customFees.marketingWallet ? fmtAddrSafe(draft.customFees.marketingWallet) : "—"}</span></div>
         <div class="review-row"><span class="k">Platform tax</span><span class="v">None — requires a live pool</span></div>
       `;
@@ -11225,7 +11173,7 @@
         ${draft.buyInEth>0 ? `<div class="review-row"><span class="k">Your buy-in</span><span class="v num">${draft.buyInEth} ETH, same transaction</span></div>` : ""}
         <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")}</span></div>
         <div class="review-row"><span class="k">Sell tax</span><span class="v num">${feeSideSummaryText("sell")}</span></div>
-        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draftProtocol()==="v4" ? escapeHtml(v4PayoutLabel()) : reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
+        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draftProtocol()==="v4" ? `In-kind ($${escapeHtml(draft.ticker||"TOKEN")})` : reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
         <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${draft.customFees.marketingWallet ? fmtAddrSafe(draft.customFees.marketingWallet) : "—"}</span></div>
         <div class="review-row"><span class="k">Plus platform tax</span><span class="v num">1.00% until $50,000 MC</span></div>
         <div class="review-row"><span class="k">LP lock</span><span class="v num">${lpLockDaysDisplay()} days</span></div>
@@ -11245,7 +11193,7 @@
         ${draft.buyInEth>0 ? `<div class="review-row"><span class="k">Your buy-in</span><span class="v num">${fmtEthAmt(draft.buyInEth)} ETH, same transaction</span></div>` : ""}
         <div class="review-row"><span class="k">Buy tax</span><span class="v num">${feeSideSummaryText("buy")} (active once live on DEX)</span></div>
         <div class="review-row"><span class="k">Sell tax</span><span class="v num">${feeSideSummaryText("sell")} (active once live on DEX)</span></div>
-        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draftProtocol()==="v4" ? escapeHtml(v4PayoutLabel()) : reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
+        <div class="review-row"><span class="k">Reflections asset</span><span class="v">${draftProtocol()==="v4" ? `In-kind ($${escapeHtml(draft.ticker||"TOKEN")})` : reflectionAssetLabel(draft.customFees.reflectionAsset, draft.ticker)}</span></div>
         <div class="review-row"><span class="k">Marketing wallet</span><span class="v">${draft.customFees.marketingWallet ? fmtAddrSafe(draft.customFees.marketingWallet) : "—"}</span></div>
         <div class="review-row"><span class="k">Curve fee</span><span class="v num">1.00% until live on DEX</span></div>
         <div class="review-row"><span class="k">Live on DEX at</span><span class="v num">${curvePoolSeedEthDisplay("customCurve")} ETH</span></div>
@@ -11385,11 +11333,6 @@
         if(totalEl){ totalEl.textContent = `${(total/100).toFixed(2)}% / 5.00% max`; totalEl.style.color = over ? "var(--critical-500)" : "var(--paper-500)"; }
         const hintEl = byId(`fee${side}OverHint`);
         if(hintEl) hintEl.hidden = !over;
-        if(byId("v4PayoutChoice")){
-          const on = v4ReflectionOnInDraft();
-          byId("v4PayoutChoice").hidden = !on;
-          if(byId("v4ReflNoteOff")) byId("v4ReflNoteOff").hidden = on;
-        }
         // Marketing wallet's "(required)" label depends on both sides —
         // simplest to just refresh that one line's text directly.
         const marketingLabel = byId("fMarketingWallet") ? byId("fMarketingWallet").previousElementSibling : null;
@@ -11436,23 +11379,6 @@
       }
     }
     if(byId("fMarketingWallet")) byId("fMarketingWallet").addEventListener("input", e=>{ draft.customFees.marketingWallet = e.target.value.trim(); });
-    document.querySelectorAll('input[name="v4PayoutMode"]').forEach(r=>r.addEventListener("change", e=>{
-      if(!e.target.checked) return;
-      draft.customFees.payoutMode = e.target.value;
-      const inp = byId("fV4PayoutToken");
-      if(inp){
-        inp.disabled = e.target.value!=="token";
-        if(e.target.value==="token"){ inp.focus(); if(isAddressLike(inp.value)) { draft.customFees.payoutToken = inp.value.trim(); scheduleV4PayoutTokenLookup(); } }
-      }
-      const ex = byId("v4PayoutExplain"); if(ex) ex.textContent = v4PayoutExplainText(e.target.value);
-      renderV4PayoutInfo();
-      renderPreview();
-    }));
-    if(byId("fV4PayoutToken")) byId("fV4PayoutToken").addEventListener("input", e=>{
-      draft.customFees.payoutToken = e.target.value.trim();
-      scheduleV4PayoutTokenLookup();
-    });
-    initV4PayoutField();
     if(byId("wizNext")) byId("wizNext").addEventListener("click", ()=>{ wizStep=Math.min(4,wizStep+1); renderWizard(); });
     if(byId("wizBack")) byId("wizBack").addEventListener("click", ()=>{ wizStep=Math.max(1,wizStep-1); renderWizard(); });
     if(byId("fAgree")) byId("fAgree").addEventListener("change", e=>{ byId("wizLaunch").disabled = !e.target.checked; });
@@ -11683,31 +11609,12 @@
   // surfacing right underneath it.
   function reflectionAssetFieldHTML(reflectionOnHint){
     if(draftProtocol()==="v4"){
-      // V4: every tax component is taken in the token itself, at the pool.
-      // Reflections can then reach holders in that same token, or be sold by
-      // a keeper-run converter and paid as ETH or as another token.
+      // V4: every custom component is taken in the token itself, at the pool.
       draft.customFees.reflectionAsset = "";
-      const cf = draft.customFees;
-      const reflOn = cf.buy.reflectionBps>0 || cf.sell.reflectionBps>0;
-      const pm = cf.payoutMode || "kind";
-      const tk = escapeHtml(draft.ticker||"your token");
-      const radio = (id, val, label)=>`<label style="display:flex; align-items:center; gap:6px; font-size:.84rem; font-weight:400;"><input type="radio" name="v4PayoutMode" id="${id}" value="${val}" ${pm===val?"checked":""}> ${label}</label>`;
       return `
       <div class="field" id="v4InKindNote">
-        <label style="margin-bottom:8px; display:block;">How the tax is taken (Uniswap V4)</label>
-        <div class="hint" style="border-left:2px solid var(--signal-500); padding-left:10px;">On V4 the tax is taken in <strong>$${tk}</strong> at the pool, not in ETH. <strong>Marketing</strong> is sent to your marketing wallet in the token. <strong>Liquidity</strong> is turned into permanent pool liquidity by a keeper — it can never be withdrawn. <strong>Burn</strong> destroys tokens. <span id="v4ReflNoteOff" ${reflOn?"hidden":""}>${reflectionOnHint}</span></div>
-      </div>
-      <div class="field" id="v4PayoutChoice" ${reflOn?"":"hidden"}>
-        <label style="margin-bottom:8px; display:block;">Reflections payout</label>
-        <div style="display:flex; gap:16px; margin-bottom:8px; flex-wrap:wrap;">
-          ${radio("fV4PayKind","kind",`Same token ($${tk})`)}
-          ${radio("fV4PayEth","eth","ETH")}
-          ${radio("fV4PayToken","token","Another token")}
-        </div>
-        <input id="fV4PayoutToken" type="text" placeholder="0x… token address on this network" value="${pm==="token"?escapeHtml(cf.payoutToken||""):""}" ${pm==="token"?"":"disabled"}>
-        <div id="v4PayoutInfo" class="hint" style="margin-top:6px;"></div>
-        <div class="hint" style="margin-top:6px;" id="v4PayoutExplain">${escapeHtml(v4PayoutExplainText(pm))}</div>
-        <div class="hint" style="margin-top:6px;">${reflectionOnHint}</div>
+        <label style="margin-bottom:8px; display:block;">Paid in-kind (Uniswap V4)</label>
+        <div class="hint" style="border-left:2px solid var(--signal-500); padding-left:10px;">On V4 the tax is taken in <strong>$${escapeHtml(draft.ticker||"your token")}</strong> at the pool, not in ETH. <strong>Reflections</strong> accrue to holders in the token (claim any time from the token page). <strong>Marketing</strong> is sent to your marketing wallet in the token. <strong>Liquidity</strong> is turned into permanent pool liquidity by a keeper — it can never be withdrawn. <strong>Burn</strong> destroys tokens. ${reflectionOnHint}</div>
       </div>`;
     }
     const raw = draft.customFees.reflectionAsset || "";
@@ -11726,136 +11633,6 @@
       </div>
     `;
   }
-  // ---- V4 reflection payout choice: same token / ETH / another token ----
-  // draft.customFees.payoutMode ("kind" | "eth" | "token") + payoutToken. The
-  // hook always hands reflections to the token in kind; for ETH / token modes
-  // the token parks them and a keeper-run converter sells them (and buys the
-  // target token), then holders are paid in automatic batches, or claim any
-  // time from the token's own contract.
-  function v4ReflectionOnInDraft(){
-    return draft.customFees.buy.reflectionBps>0 || draft.customFees.sell.reflectionBps>0;
-  }
-  function v4PayoutFromDraft(){
-    const cf = draft.customFees;
-    if(!v4ReflectionOnInDraft() || !cf.payoutMode || cf.payoutMode==="kind") return { mode:0, token:ZERO_ADDRESS };
-    if(cf.payoutMode==="eth") return { mode:1, token:ZERO_ADDRESS };
-    return { mode:2, token: cf.payoutToken || ZERO_ADDRESS };
-  }
-  function v4PayoutLabelFor(mode, token, ticker){
-    const m = Number(mode||0);
-    if(m===1) return "ETH";
-    if(m===2){
-      const info = v4PayoutCheck.address && token && v4PayoutCheck.address.toLowerCase()===String(token).toLowerCase() && v4PayoutCheck.info;
-      return info ? `${info.symbol} (${shortAddr(token)})` : (token ? `Another token (${shortAddr(token)})` : "Another token");
-    }
-    return `Same token ($${ticker||"TOKEN"})`;
-  }
-  function v4PayoutLabel(){
-    const p = v4PayoutFromDraft();
-    return v4PayoutLabelFor(p.mode, p.token, draft.ticker||"TOKEN");
-  }
-  function shortAddr(a){ a = String(a||""); return a.length>12 ? a.slice(0,6)+"…"+a.slice(-4) : a; }
-  function v4PayoutExplainText(pm){
-    if(pm==="eth") return "Holders are paid in ETH, in proportion to their holdings of this token. A keeper sells the reflection tokens for ETH through this token's own pool, then sends each holder their share automatically, in batches. Anyone can also claim their share from the contract at any time.";
-    if(pm==="token") return "Holders are paid in the token you choose, in proportion to their holdings of this token. A keeper sells the reflection tokens for ETH, buys the chosen token, then sends each holder their share automatically, in batches. The chosen token must already trade on this platform's Uniswap V4 hook and must not pay reflections itself. Anyone can also claim from the contract at any time.";
-    return "Holders accrue reflections in this same token as trades happen and can claim any time from the token page. Simplest option — no conversion step, nothing sold.";
-  }
-  // Is a reflection converter wired on the V4 deployment this draft launches into?
-  // Without one, ETH / token payouts would revert, so the wizard offers in-kind only.
-  const v4ConverterCache = {};
-  async function v4ReadReflectionConverter(){
-    const factory = v4FactoryForMode(draft.mode);
-    if(!factory) return null;
-    const key = (appMode+":"+factory).toLowerCase();
-    if(key in v4ConverterCache) return v4ConverterCache[key];
-    if(!getEth()) return null;
-    try{
-      const src = decodeAddress(await ethCall(factory, "0x"+V4_TAX_SOURCE_SELECTOR));
-      const conv = decodeAddress(await ethCall(src, "0x"+V4_REFLECTION_CONVERTER_SELECTOR));
-      v4ConverterCache[key] = (conv && conv.toLowerCase()!==ZERO_ADDRESS.toLowerCase()) ? conv : "";
-    }catch(e){ return null; }
-    return v4ConverterCache[key];
-  }
-  let v4PayoutCheck = { address:"", status:"idle", info:null, reason:"" }; // status: idle | checking | valid | invalid | offline | unsupported
-  let v4PayoutCheckSeq = 0;
-  let v4PayoutCheckTimer = null;
-  function renderV4PayoutInfo(){
-    const el = document.getElementById("v4PayoutInfo");
-    if(!el) return;
-    let color = "var(--paper-500)", text = "";
-    if(draft.customFees.payoutMode==="token"){
-      const raw = (draft.customFees.payoutToken||"").trim();
-      if(raw && raw.toLowerCase()===v4PayoutCheck.address.toLowerCase()){
-        const { status, info, reason } = v4PayoutCheck;
-        if(status==="checking") text = "Checking this token on-chain…";
-        else if(status==="offline") text = "Connect a wallet to verify this token on-chain before launching.";
-        else if(status==="invalid"){ color = "var(--critical-500)"; text = reason || "This token can't be used as a payout."; }
-        else if(status==="valid" && info){ color = "var(--good-500)"; text = `✓ ${info.name} ($${info.symbol}) · ${info.decimals} decimals — trades on the platform hook, doesn't pay reflections itself`; }
-      }
-    }
-    if(v4PayoutCheck.status==="unsupported" && draft.customFees.payoutMode!=="kind"){ color = "var(--critical-500)"; text = "ETH / token payouts aren't enabled on this network yet — reflections will be paid in the same token."; }
-    el.style.color = color;
-    el.textContent = text; // textContent: name/symbol come from an arbitrary contract
-  }
-  function scheduleV4PayoutTokenLookup(){
-    const raw = (draft.customFees.payoutToken||"").trim();
-    clearTimeout(v4PayoutCheckTimer);
-    if(!isAddressLike(raw)){ v4PayoutCheck = { address: raw, status:"idle", info:null, reason:"" }; renderV4PayoutInfo(); return; }
-    v4PayoutCheck = { address: raw, status:"checking", info:null, reason:"" };
-    renderV4PayoutInfo();
-    const mySeq = ++v4PayoutCheckSeq;
-    v4PayoutCheckTimer = setTimeout(async()=>{
-      if(!getEth()){
-        if(mySeq!==v4PayoutCheckSeq) return;
-        v4PayoutCheck = { address: raw, status:"offline", info:null, reason:"" };
-        renderV4PayoutInfo();
-        return;
-      }
-      let result;
-      try{
-        const [nameHex, symbolHex, decimalsHex] = await Promise.all([
-          ethCall(raw, "0x"+NAME_SELECTOR), ethCall(raw, "0x"+SYMBOL_SELECTOR), ethCall(raw, "0x"+DECIMALS_SELECTOR),
-        ]);
-        const info = { name: decodeAbiString(nameHex), symbol: decodeAbiString(symbolHex), decimals: Number(decodeUint256(decimalsHex)) };
-        result = { address: raw, status:"valid", info, reason:"" };
-        // The converter itself decides whether it can buy this token.
-        const conv = await v4ReadReflectionConverter();
-        if(conv === ""){
-          result = { address: raw, status:"unsupported", info, reason:"" };
-        } else if(conv){
-          try{ await ethCall(conv, "0x"+V4_VALIDATE_PAYOUT_TARGET_SELECTOR+encodeAddressParam(raw)); }
-          catch(err){
-            const msg = String((err && (err.message || (err.data && err.data.message))) || "");
-            const reason = /no platform pool/i.test(msg) ? "This token has no pool on this platform's Uniswap V4 hook, so the keeper can't buy it. Pick a token launched here."
-              : /pays reflections itself/i.test(msg) ? "This token pays reflections itself, so it can't be used as a payout token."
-              : "The reflection converter can't buy this token — pick a token launched on this platform.";
-            result = { address: raw, status:"invalid", info, reason };
-          }
-        }
-      }catch(err){
-        result = { address: raw, status:"invalid", info:null, reason:"No ERC20 token found at this address on the current network — double-check it." };
-      }
-      if(mySeq!==v4PayoutCheckSeq) return;
-      v4PayoutCheck = result;
-      renderV4PayoutInfo();
-    }, 500);
-  }
-  // After the step renders: learn whether the converter exists, and lock the
-  // ETH / token options if it doesn't.
-  async function initV4PayoutField(){
-    if(!document.getElementById("v4PayoutChoice")) return;
-    renderV4PayoutInfo();
-    const conv = await v4ReadReflectionConverter();
-    if(conv !== ""){ if(draft.customFees.payoutMode==="token") scheduleV4PayoutTokenLookup(); return; }
-    // no converter on this deployment
-    v4PayoutCheck = { address: v4PayoutCheck.address, status:"unsupported", info:null, reason:"" };
-    draft.customFees.payoutMode = "kind";
-    ["fV4PayEth","fV4PayToken"].forEach(id=>{ const e=document.getElementById(id); if(e){ e.disabled = true; e.checked = false; } });
-    const k = document.getElementById("fV4PayKind"); if(k) k.checked = true;
-    const inp = document.getElementById("fV4PayoutToken"); if(inp){ inp.disabled = true; inp.value = ""; }
-    const info = document.getElementById("v4PayoutInfo");
-    if(info){ info.style.color = "var(--paper-500)"; info.textContent = "ETH and other-token payouts aren't enabled on this network yet, so reflections are paid in the same token."; }
-  }
   function validateCustomFeesOrToast(){
     const buyTotal = feeSideTotalBps("buy");
     const sellTotal = feeSideTotalBps("sell");
@@ -11871,24 +11648,6 @@
       return false;
     }
     if(draftProtocol()==="v4") draft.customFees.reflectionAsset = "";
-    if(draftProtocol()==="v4" && v4ReflectionOnInDraft() && draft.customFees.payoutMode==="token"){
-      const raw = (draft.customFees.payoutToken||"").trim();
-      if(!isAddressLike(raw)){
-        toast("Reflections are set to pay out in another token — enter that token's 0x… address, or choose ETH or the same token.");
-        wizStep=3; renderWizard();
-        return false;
-      }
-      if(raw.toLowerCase()===v4PayoutCheck.address.toLowerCase()){
-        if(v4PayoutCheck.status==="checking"){ toast("Still checking the payout token on-chain — wait a moment and try again."); wizStep=3; renderWizard(); return false; }
-        if(v4PayoutCheck.status==="invalid"){ toast(v4PayoutCheck.reason || "That token can't be used as a reflections payout."); wizStep=3; renderWizard(); return false; }
-        if(v4PayoutCheck.status==="unsupported"){ toast("Other-token payouts aren't enabled on this network yet — choose the same token."); wizStep=3; renderWizard(); return false; }
-      } else {
-        scheduleV4PayoutTokenLookup();
-        toast("Checking the payout token on-chain — try again in a moment.");
-        wizStep=3; renderWizard();
-        return false;
-      }
-    }
     if(draftProtocol()!=="v4" && draft.customFees.reflectionAsset && !isAddressLike(draft.customFees.reflectionAsset)){
       toast("That doesn't look like a valid ERC20 address for reflections — use a 0x… address, or switch back to Native Token.");
       wizStep=3; renderWizard();
@@ -11932,7 +11691,7 @@
     const v4Address = v4FactoryForMode(draft.mode);
     if(!v4Address){ toast(`${v4FactoryNameForMode(draft.mode)} not configured — save its address in Admin first.`); return; }
     if(draft.mode==="custom" || draft.mode==="customCurve"){
-      draft.customFees.reflectionAsset = ""; // V4 has no per-token reflection asset; the payout choice lives in payoutMode/payoutToken
+      draft.customFees.reflectionAsset = ""; // V4 reflections are always in-kind
       if(!validateCustomFeesOrToast()) return;
     }
     if(draft.mode==="custom" || draft.mode==="curve" || draft.mode==="customCurve"){
@@ -14948,11 +14707,6 @@
     { key: "platformBuybackSlippageBps", label: "Platform buyback slippage (bps)", help: "Slippage tolerance applied to both the ETH buyback and the per-token buyback's minTokensOut floor." },
     { key: "platformAirdropBatchSize", label: "Airdrop holders per batch", help: "How many platformToken holders one processAirdropBatch call sweeps." },
     { key: "platformAirdropMaxBatchesPerTick", label: "Airdrop batches per tick", help: "How many processAirdropBatch calls one sweep tick makes before yielding to the next tick — bounds one tick's gas spend on a large holder set." },
-    { key: "reflectionPayoutPollIntervalMs", label: "Reflection-payout sweep interval (ms)", help: "How often the V4 keeper converts pending reflections (for tokens paying holders in ETH or another token) and then pays holders out in batches." },
-    { key: "reflectionPayoutSlippageBps", label: "Reflection-payout slippage (bps)", help: "Slippage tolerance on the conversion: the tokens-to-ETH sale and the ETH-to-target-token purchase." },
-    { key: "reflectionPayoutMinPayoutWei", label: "Reflection-payout floor (wei of ETH value)", help: "Skip paying a holder automatically while their owed amount is worth less than this many wei of ETH — avoids spending gas on dust. They can still claim any time from the token contract." },
-    { key: "reflectionPayoutBatchSize", label: "Reflection-payout holders per batch", help: "How many holders one automatic payout transaction pays." },
-    { key: "reflectionPayoutMaxBatchesPerTick", label: "Reflection-payout batches per tick", help: "How many payout batches one sweep tick sends per token before yielding to the next tick — bounds one tick's gas spend on a large holder set." },
     { key: "telegramBotToken", label: "Telegram bot token", help: "From @BotFather — shared by both channels below. Write-only: once saved, the real value is never sent back to this page, so this field always shows blank. Leave it blank to keep the currently-saved token unchanged; paste a new one only to replace it.", secret: true },
     { key: "telegramLaunchesChatId", label: "Telegram launches chat ID", help: "Public channel's chat ID — new-launch announcements post here. Leave blank to disable launch announcements." },
     { key: "telegramAlertsChatId", label: "Telegram alerts chat ID", help: "Private channel's chat ID — relayer-wallet-mismatch alerts post here. Leave blank to disable these alerts." },
@@ -16508,13 +16262,6 @@
           <button class="btn btn-primary btn-sm" data-admin-action="taxExemptOn" data-factory-key="v4">Exempt</button>
           <button class="btn btn-ghost btn-sm" data-admin-action="taxExemptOff" data-factory-key="v4">Remove</button>
         </div>
-        <div class="admin-section-label">Reflection converter · ETH / other-token payouts</div>
-        <p class="admin-empty" style="margin-bottom:10px;">Lets a Custom Tax token's creator pay reflections to holders in ETH or another token. One shared V4ReflectionConverter serves every token: it sells the reflection tokens, and the relayer keeper then pays holders in batches. Needed: set here, tax-exempt (above), and the relayer wallet approved as a keeper on it. Setting it affects only tokens launched afterwards; with it unset, creators can only pick the same token.</p>
-        <div id="v4ConverterInfo" class="admin-readout-grid"><div class="admin-readout" style="grid-column:1 / -1;"><div class="l">Current converter</div><div class="v">Loading…</div></div></div>
-        <div class="admin-action-row">
-          <div class="field"><label>Converter address (0x0 to turn the choice off)</label><input type="text" id="admin_v4_reflectionConverter" placeholder="0x… (V4ReflectionConverter)"></div>
-          <button class="btn btn-primary btn-sm" data-admin-action="reflectionConverter" data-factory-key="v4">Update</button>
-        </div>
       </div>`;
     return splitPanel + v4DistributorStatusPanelHTML(snap) + `<div class="admin-grid" id="v4RewardsGrid" style="grid-column:1 / -1;">${slotsPanel}<div id="v4TaxHeldWrap">${v4TaxHeldPanelHTML(snap, rd, null)}</div></div>`;
   }
@@ -16619,43 +16366,12 @@
     ov.innerHTML = v4OverviewPanelHTML(snap);
     if(act) act.innerHTML = v4ActivityPanelHTML(snap, rd);
     if(ct){ ct.innerHTML = v4ContractsPanelsHTML(snap); bind(ct); }
-    if(rw){ rw.innerHTML = v4RewardsPanelsHTML(snap, rd); bind(rw); fillV4ConverterInfo(snap, rd); }
+    if(rw){ rw.innerHTML = v4RewardsPanelsHTML(snap, rd); bind(rw); }
     if(snap.fState && rd.launches.length){
       const balances = await loadV4TaxBalances(snap, rd);
       if(stale()) return;
       const held = document.getElementById("v4TaxHeldWrap");
       if(held) held.innerHTML = v4TaxHeldPanelHTML(snap, rd, balances);
-    }
-  }
-
-  // Fills the reflection-converter readout: address, tax-exempt, and whether the relayer wallet is a keeper.
-  async function fillV4ConverterInfo(snap, rd){
-    const el = document.getElementById("v4ConverterInfo");
-    if(!el || !snap.factory) return;
-    const row = (l, v)=>`<div class="admin-readout" style="grid-column:1 / -1;"><div class="l">${l}</div><div class="v">${v}</div></div>`;
-    try{
-      const conv = decodeAddress(await v4Read(snap.factory, V4_REFLECTION_CONVERTER_SELECTOR));
-      if(isZeroAddr(conv)){ el.innerHTML = row("Current converter", v4Pill("warn","Not set — creators can only pick the same token")); return; }
-      const [exHex, ownerHex] = await Promise.all([
-        snap.hook ? v4Read(snap.hook, V4_TAX_EXEMPT_SELECTOR + encodeAddressParam(conv)) : null,
-        v4Read(conv, OWNER_SELECTOR),
-      ]);
-      const exempt = exHex ? decodeUint256(exHex)===1n : null;
-      let keeperPill = v4Pill("warn","Relayer wallet unknown");
-      try{
-        const relayerUrl = relayerApiUrl(appMode);
-        const hres = relayerUrl ? await fetch(`${relayerUrl}/health`) : null;
-        const h = hres && hres.ok ? await hres.json() : null;
-        if(h && h.relayer){
-          const k = decodeUint256(await v4Read(conv, V4_CONVERTER_KEEPERS_SELECTOR + encodeAddressParam(h.relayer)))===1n;
-          keeperPill = k ? v4Pill("ok","Relayer is a keeper") : v4Pill("bad","Relayer is not a keeper — converter.setKeeper(relayerWallet, true)");
-        }
-      }catch(e){}
-      el.innerHTML = row("Current converter", explorerAddrHTML(conv))
-        + row("Status", [exempt===null ? v4Pill("warn","Couldn't check exemption") : exempt ? v4Pill("ok","Tax-exempt") : v4Pill("bad","Not tax-exempt — setTaxExempt(converter, true) above"), keeperPill].join(" "))
-        + row("Owner", ownerHex ? escapeHtml(decodeAddress(ownerHex)) : "—");
-    }catch(e){
-      el.innerHTML = row("Current converter", v4Pill("warn","Couldn't read it — this factory may be from before payouts existed"));
     }
   }
 
@@ -17002,11 +16718,6 @@
         if((b===0) !== (d===0)) throw new Error("Set both the surcharge and the duration, or set both to 0 to turn it off.");
         data = "0x"+V4_SET_SNIPE_PROTECTION_SELECTOR+toHex32(BigInt(b))+toHex32(BigInt(d));
         successMsg = b===0 ? "Snipe protection turned off for new launches." : "Snipe protection updated for new launches.";
-      } else if(action==="reflectionConverter"){
-        const v = field("reflectionConverter").value.trim();
-        if(!isAddressLike(v)) throw new Error("Enter the converter's address (or 0x0000000000000000000000000000000000000000 to turn it off).");
-        data = "0x"+V4_SET_REFLECTION_CONVERTER_SELECTOR+encodeAddressParam(v);
-        successMsg = isZeroAddr(v) ? "Reflection converter removed — new tokens can only pay reflections in the same token." : "Reflection converter set for tokens launched from now on.";
       } else if(action==="taxExemptOn" || action==="taxExemptOff"){
         const v = field("exemptAddr").value.trim();
         if(!isAddressLike(v)) throw new Error("Enter the distributor's address.");
