@@ -203,9 +203,12 @@ describe("compareSupplyConfig", () => {
 
 // ---- settings: new keys ------------------------------------------------
 describe("settings for public launching / supply / curve", () => {
-  it("validates the new keys and applies defaults (public OFF)", () => {
+  it("validates the new keys and applies defaults (launching open to everyone)", () => {
     const eff = settingsLib.effectiveSettings({}, {});
-    assert.strictEqual(eff.publicLaunch, false);
+    assert.strictEqual(eff.publicLaunch, true);
+    // a saved value is ignored; only the environment kill switch restricts it
+    assert.strictEqual(settingsLib.effectiveSettings({ publicLaunch: false }, {}).publicLaunch, true);
+    assert.strictEqual(settingsLib.effectiveSettings({ publicLaunch: true }, { SOLANA_ADMIN_ONLY: "true" }).publicLaunch, false);
     assert.strictEqual(eff.customSupply, true);
     assert.strictEqual(eff.supplyMin, 1_000_000);
     assert.strictEqual(eff.supplyMax, 10_000_000_000);
@@ -244,13 +247,13 @@ describe("public launching over HTTP", () => {
     getLaunch: (m) => store.getLaunch(m, pre),
     deleteLaunch: (m) => store.deleteLaunch(m, pre),
   };
-  async function boot(stored, limits) {
+  async function boot(stored, limits, extraEnv = {}) {
     mem = stored;
     const a = express();
     a.use(express.json({ limit: "2mb" }));
     api.registerSolanaRoutes(a, {
       sendJson, verifyAdminSignature: (m, s) => verifySignatureFrom(m, s, admin.address), isFreshTimestamp,
-      logger: { log() {}, warn() {}, error() {} }, env: { PUBLIC_BASE_URL: "https://ix.example" }, startTracker: false, store: testStore, limits,
+      logger: { log() {}, warn() {}, error() {} }, env: { PUBLIC_BASE_URL: "https://ix.example", ...extraEnv }, startTracker: false, store: testStore, limits,
       announceLaunch: async (l) => { announced.push(l); if (announceFails) throw new Error("telegram down"); },
       readPlatformClaimer: async (args) => { calls.push(["readPlatformClaimer", args]); return claimerResult; },
       verifyLaunch: async (args) => { calls.push(["verifyLaunch", args]); return verifyLaunchResult; },
@@ -419,8 +422,8 @@ describe("public launching over HTTP", () => {
     } finally { base = prev; await new Promise((r) => sv.close(r)); }
   });
 
-  it("while public launching is OFF (the default) public requests are 403 and the admin path is unchanged", async () => {
-    const { sv, base: b2 } = await boot({ dbcConfig: CFG, rpcUrl: "https://rpc.example" });
+  it("with the SOLANA_ADMIN_ONLY kill switch on, public requests are 403 and the admin path is unchanged", async () => {
+    const { sv, base: b2 } = await boot({ dbcConfig: CFG, rpcUrl: "https://rpc.example" }, undefined, { SOLANA_ADMIN_ONLY: "true" });
     const prev = base; base = b2;
     try {
       const w = makeSolWallet();
@@ -434,8 +437,8 @@ describe("public launching over HTTP", () => {
     } finally { base = prev; await new Promise((r) => sv.close(r)); }
   });
 
-  it("while public launching is OFF the platform wallet (the config's fee claimer) can still launch with its Solana signature alone, unrationed", async () => {
-    const { sv, base: b2 } = await boot({ dbcConfig: CFG, rpcUrl: "https://rpc.example" }, { metadataPerWalletPerHour: 1 });
+  it("with the kill switch on the platform wallet (the config's fee claimer) can still launch with its Solana signature alone, unrationed", async () => {
+    const { sv, base: b2 } = await boot({ dbcConfig: CFG, rpcUrl: "https://rpc.example" }, { metadataPerWalletPerHour: 1 }, { SOLANA_ADMIN_ONLY: "true" });
     const prev = base; base = b2;
     try {
       const w = makeSolWallet(), stranger = makeSolWallet();
@@ -490,8 +493,8 @@ describe("public launching over HTTP", () => {
     } finally { announceFails = false; base = prev; await new Promise((r) => sv.close(r)); }
   });
 
-  it("OFF: if the platform wallet can't be read right now the request is refused (503 when retryable) — never let through", async () => {
-    const { sv, base: b2 } = await boot({ dbcConfig: CFG, rpcUrl: "https://rpc.example" });
+  it("kill switch on: if the platform wallet can't be read right now the request is refused (503 when retryable) — never let through", async () => {
+    const { sv, base: b2 } = await boot({ dbcConfig: CFG, rpcUrl: "https://rpc.example" }, undefined, { SOLANA_ADMIN_ONLY: "true" });
     const prev = base; base = b2;
     try {
       const w = makeSolWallet();
@@ -562,7 +565,7 @@ describe("public launching over HTTP", () => {
     assert.strictEqual((await call("GET", "/solana/settings")).json.settings.publicLaunch, true);
   });
 
-  it("an admin can't turn public launching on without an RPC the server can verify with, and can once one is saved", async () => {
+  it("a saved publicLaunch value changes nothing: launching stays open, and other settings still validate and save", async () => {
     const { sv, base: b2 } = await boot({});
     const prev = base; base = b2;
     try {
@@ -571,11 +574,10 @@ describe("public launching over HTTP", () => {
         const signature = await admin.signMessage(settingsLib.settingsMessage(settings, timestamp));
         return call("POST", "/solana/settings", { settings, timestamp, signature });
       };
-      let r = await save({ publicLaunch: "true" });
-      assert.strictEqual(r.status, 400); assert.match(r.json.error, /RPC/i);
-      r = await save({ publicLaunch: "true", rpcUrl: "https://rpc.example" });
+      let r = await save({ publicLaunch: "false" });
       assert.strictEqual(r.status, 200, JSON.stringify(r.json));
       assert.strictEqual(r.json.settings.publicLaunch, true);
+      assert.strictEqual((await call("GET", "/solana/settings")).json.settings.publicLaunch, true);
       r = await save({ curveStartMcapSol: "100", curveGraduationMcapSol: "100" });
       assert.strictEqual(r.status, 400, "graduation must be above the start");
       r = await save({ supplyMin: "9000000000", supplyMax: "2000000000" });
