@@ -72,6 +72,7 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         uint256 totalSupply;
         V4CustomToken.FeeSet buyFees;
         V4CustomToken.FeeSet sellFees;
+        V4CustomToken.ReflectionPayout payout;
         address marketingWallet;
         uint256 liquidityEthAmount;
         uint256 creatorBuyEthAmount;
@@ -100,6 +101,7 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         uint256 totalSupply;
         V4CustomToken.FeeSet buyFees;
         V4CustomToken.FeeSet sellFees;
+        V4CustomToken.ReflectionPayout payout;
         address marketingWallet;
         uint256 creatorBuyEthAmount;
         uint256 minCreatorTokensOut;
@@ -110,14 +112,15 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
 
     bytes32 private constant FEESET_TYPEHASH =
         keccak256("FeeSet(uint16 reflectionBps,uint16 marketingBps,uint16 liquidityBps,uint16 burnBps)");
+    bytes32 private constant PAYOUT_TYPEHASH = keccak256("ReflectionPayout(uint8 mode,address token)");
     bytes32 private constant CUSTOM_VOUCHER_TYPEHASH = keccak256(
-        "CustomLaunchVoucher(address creator,string name,string symbol,uint256 totalSupply,FeeSet buyFees,FeeSet sellFees,address marketingWallet,uint256 liquidityEthAmount,uint256 creatorBuyEthAmount,uint256 minCreatorTokensOut,uint256 fee,uint256 salt,uint256 deadline)FeeSet(uint16 reflectionBps,uint16 marketingBps,uint16 liquidityBps,uint16 burnBps)"
+        "CustomLaunchVoucher(address creator,string name,string symbol,uint256 totalSupply,FeeSet buyFees,FeeSet sellFees,ReflectionPayout payout,address marketingWallet,uint256 liquidityEthAmount,uint256 creatorBuyEthAmount,uint256 minCreatorTokensOut,uint256 fee,uint256 salt,uint256 deadline)FeeSet(uint16 reflectionBps,uint16 marketingBps,uint16 liquidityBps,uint16 burnBps)ReflectionPayout(uint8 mode,address token)"
     );
     bytes32 private constant CURVE_VOUCHER_TYPEHASH = keccak256(
         "CurveLaunchVoucher(address creator,string name,string symbol,uint256 totalSupply,uint256 creatorBuyEthAmount,uint256 minCreatorTokensOut,uint256 fee,uint256 salt,uint256 deadline)"
     );
     bytes32 private constant CUSTOM_CURVE_VOUCHER_TYPEHASH = keccak256(
-        "CustomCurveLaunchVoucher(address creator,string name,string symbol,uint256 totalSupply,FeeSet buyFees,FeeSet sellFees,address marketingWallet,uint256 creatorBuyEthAmount,uint256 minCreatorTokensOut,uint256 fee,uint256 salt,uint256 deadline)FeeSet(uint16 reflectionBps,uint16 marketingBps,uint16 liquidityBps,uint16 burnBps)"
+        "CustomCurveLaunchVoucher(address creator,string name,string symbol,uint256 totalSupply,FeeSet buyFees,FeeSet sellFees,ReflectionPayout payout,address marketingWallet,uint256 creatorBuyEthAmount,uint256 minCreatorTokensOut,uint256 fee,uint256 salt,uint256 deadline)FeeSet(uint16 reflectionBps,uint16 marketingBps,uint16 liquidityBps,uint16 burnBps)ReflectionPayout(uint8 mode,address token)"
     );
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -202,6 +205,10 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         );
     }
 
+    function _payoutHash(V4CustomToken.ReflectionPayout calldata p) private pure returns (bytes32) {
+        return keccak256(abi.encode(PAYOUT_TYPEHASH, p.mode, p.token));
+    }
+
     function hashCustomVoucher(CustomVoucher calldata v) public view returns (bytes32) {
         // One flat EIP-712 struct hash; encoded in two chunks only to keep the stack shallow.
         bytes memory head = abi.encode(
@@ -212,6 +219,7 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
             v.totalSupply,
             _feeSetHash(v.buyFees),
             _feeSetHash(v.sellFees),
+            _payoutHash(v.payout),
             v.marketingWallet
         );
         bytes memory tail =
@@ -247,6 +255,7 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
             v.totalSupply,
             _feeSetHash(v.buyFees),
             _feeSetHash(v.sellFees),
+            _payoutHash(v.payout),
             v.marketingWallet
         );
         bytes memory tail = abi.encode(v.creatorBuyEthAmount, v.minCreatorTokensOut, v.fee, v.salt, v.deadline);
@@ -333,6 +342,7 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
                     v.totalSupply,
                     v.buyFees,
                     v.sellFees,
+                    v.payout,
                     v.marketingWallet,
                     v.liquidityEthAmount,
                     v.creatorBuyEthAmount,
@@ -390,6 +400,7 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
                     v.totalSupply,
                     v.buyFees,
                     v.sellFees,
+                    v.payout,
                     v.marketingWallet,
                     v.creatorBuyEthAmount,
                     v.minCreatorTokensOut,

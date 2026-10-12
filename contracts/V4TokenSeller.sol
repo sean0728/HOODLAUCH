@@ -114,7 +114,7 @@ abstract contract V4TokenSeller is Ownable2Step, ReentrancyGuard, IUnlockCallbac
 
     /// @dev The price (tokens per ETH) rises as the token is sold into the
     /// pool, so the limit is the current sqrt price grown by the slippage.
-    function _sellPriceLimit(PoolKey memory key) private view returns (uint160) {
+    function _sellPriceLimit(PoolKey memory key) internal view returns (uint160) {
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(key.toId());
         require(sqrtPriceX96 != 0, "V4TokenSeller: no pool for token");
         uint256 factorX4 = Math.sqrt((10_000 + swapSlippageBps) * 1e4); // sqrt(1 + slip) * 1e4
@@ -139,7 +139,7 @@ abstract contract V4TokenSeller is Ownable2Step, ReentrancyGuard, IUnlockCallbac
     }
 
     /// @dev Runs inside PoolManager.unlock, which only this contract calls.
-    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+    function unlockCallback(bytes calldata data) external virtual returns (bytes memory) {
         require(msg.sender == address(poolManager), "V4TokenSeller: only pool manager");
         (PoolKey memory key, uint256 amountIn, uint160 limit) = abi.decode(data, (PoolKey, uint256, uint160));
 

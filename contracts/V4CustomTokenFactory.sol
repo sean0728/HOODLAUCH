@@ -91,6 +91,7 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         uint256 totalSupply_,
         V4CustomToken.FeeSet calldata buyFees,
         V4CustomToken.FeeSet calldata sellFees,
+        V4CustomToken.ReflectionPayout calldata payout,
         address marketingWallet,
         uint256 liquidityEthAmount,
         uint256 creatorBuyEthAmount,
@@ -114,7 +115,7 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         TaxTerms memory terms = _currentTerms();
         _requireTermsReady(terms);
 
-        token = _deployToken(name_, symbol_, totalSupply_, marketingWallet, buyFees, sellFees, salt);
+        token = _deployToken(name_, symbol_, totalSupply_, marketingWallet, buyFees, sellFees, payout, salt);
 
         bytes32 poolId;
         (liquidity, lockId, creatorTokensBought, poolId) =
@@ -136,12 +137,15 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         address marketingWallet,
         V4CustomToken.FeeSet calldata buyFees,
         V4CustomToken.FeeSet calldata sellFees,
+        V4CustomToken.ReflectionPayout calldata payout,
         uint256 salt
     ) private returns (address token) {
         token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(_creator(), salt));
         V4CustomToken(token).initialize(
             name_, symbol_, totalSupply_, _creator(), address(this), address(this), marketingWallet, buyFees, sellFees, _infra()
         );
+        // In kind (mode 0) is the token's default; only ETH / other-token payouts need the extra call.
+        if (payout.mode != 0) V4CustomToken(token).setReflectionPayout(payout);
     }
 
     function _emitCreated(

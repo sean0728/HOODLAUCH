@@ -3,6 +3,20 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
+/// @dev What the token needs to learn from its launcher and the converter.
+interface IV4PayoutLauncher {
+    function taxSource() external view returns (IV4PayoutTaxSource);
+}
+
+interface IV4PayoutTaxSource {
+    function reflectionConverter() external view returns (address);
+}
+
+interface IV4PayoutConverter {
+    /// @dev Reverts unless `token` is an acceptable "pay reflections in this token" target.
+    function validateTarget(address token) external view;
+}
+
 /// @title V4CustomToken
 /// @notice The ERC20 behind V4 "Custom Tax" launches (EIP-1167 clone). It is the
 /// V4 counterpart of V2's CustomToken, with one structural difference: on V2
@@ -13,9 +27,15 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 ///
 ///   - reflection  : the hook sends the reflection share to this contract and
 ///                   calls notifyReflection(); holders then claim their share
-///                   (in this same token) with claimReflections(), or anyone can
-///                   push it to them with claimFor(). Standard "magnified
-///                   dividend per share" accounting, O(1) per transfer.
+///                   with claimReflections(), or anyone can push it to them
+///                   with claimFor() / payBatch(). Standard "magnified dividend
+///                   per share" accounting, O(1) per transfer. WHAT it is paid
+///                   in is chosen at launch (ReflectionPayout): this same token
+///                   (in kind, the default), ETH, or another platform token.
+///                   For ETH / another token the reflection tokens wait here
+///                   until the platform's V4ReflectionConverter sells them
+///                   (and buys the target token), then the proceeds are shared
+///                   out by the same per-share accounting.
 ///   - marketing   : paid in-kind straight to marketingWallet (the creator can
 ///                   change it, see setMarketingWallet).
 ///   - liquidity   : delivered by the hook to the V4LiquidityCompounder, which
@@ -66,6 +86,37 @@ contract V4CustomToken is ERC20 {
 
     uint256 public constant MAX_TOTAL_SUPPLY = 1_000_000_000_000_000 * 1e18;
 
+    // ---- reflection payout (chosen at launch, never changes) ----
+    /// @notice What reflections are paid in: 0 = this token (in kind), 1 = ETH, 2 = another token.
+    struct ReflectionPayout {
+        uint8 mode;
+        address token; // mode 2 only: the token holders receive
+    }
+    uint8 public constant PAYOUT_IN_KIND = 0;
+    uint8 public constant PAYOUT_ETH = 1;
+    uint8 public constant PAYOUT_TOKEN = 2;
+    uint8 public payoutMode;
+    address public payoutToken;
+    /// @notice The only contract allowed to take reflection tokens out for conversion and to deposit the proceeds.
+    address public converter;
+    /// @notice (ETH / token payouts) reflection tokens received from the hook that the converter has not sold yet.
+    uint256 public pendingConversion;
+    /// @notice (ETH / token payouts) payout units held for holders: shared-out but unclaimed, plus unallocated.
+    uint256 public payoutHeld;
+    /// @dev Gas given to a holder when ETH is pushed to them; stops a hostile holder contract from
+    /// burning a batch's gas. A holder that cannot receive within it claims with claimReflectionsTo().
+    uint256 private constant PAY_CALL_GAS = 100_000;
+
+    // ---- holder list (ETH / token payouts only): lets payBatch() walk the holders on-chain ----
+    // Only accounts holding at least totalSupply / TRACK_DIVISOR are listed (dust holders still accrue
+    // and can claim themselves), so filling the list with throwaway wallets is expensive.
+    uint256 private constant TRACK_DIVISOR = 10_000_000;
+    address[] private _holders;
+    mapping(address => uint256) private _holderIdx; // index + 1, 0 = not listed
+    /// @notice Where the next payBatch() call starts.
+    uint256 public payCursor;
+    bool private _locked;
+
     // ---- reflection accounting ----
     // MAGNITUDE is 2^64, not the usual 2^128: it keeps perShare * balance far
     // from overflowing even in adversarial corner cases (see _flush), at a
@@ -91,6 +142,11 @@ contract V4CustomToken is ERC20 {
     event ReflectionsClaimed(address indexed holder, uint256 amount);
     event ExcludedFromReflections(address indexed account);
     event TokensBurned(uint256 amount);
+    event ReflectionPayoutSet(uint8 mode, address indexed payoutToken, address indexed converter);
+    event ReflectionsReleased(uint256 amount);
+    event ReflectionsReturned(uint256 amount);
+    event PayoutDeposited(uint256 amount, uint256 perShareAfter);
+    event PayoutFailed(address indexed holder, uint256 amount);
     event CreatorTransferStarted(address indexed previousCreator, address indexed newCreator);
     event CreatorTransferred(address indexed previousCreator, address indexed newCreator);
     event CreatorRenounced(address indexed previousCreator);
@@ -98,6 +154,9 @@ contract V4CustomToken is ERC20 {
     error NotFactory();
     error NotCreator();
     error NotHook();
+    error NotConverter();
+    error Locked();
+    error PayoutTransferFailed();
 
     modifier onlyFactory() {
         if (msg.sender != factory) revert NotFactory();
@@ -106,6 +165,16 @@ contract V4CustomToken is ERC20 {
     modifier onlyCreator() {
         if (msg.sender != creator) revert NotCreator();
         _;
+    }
+    modifier onlyConverter() {
+        if (msg.sender != converter || converter == address(0)) revert NotConverter();
+        _;
+    }
+    modifier lock() {
+        if (_locked) revert Locked();
+        _locked = true;
+        _;
+        _locked = false;
     }
 
     // Runs exactly once, on the implementation the factory clones from.
@@ -178,6 +247,28 @@ contract V4CustomToken is ERC20 {
         emit PoolRegistered(poolId_, hook_);
     }
 
+    /// @notice One-time, by the factory right after initialize(): pays reflections in ETH or another
+    /// token instead of in kind. Never called for the default (in kind). Needs the platform's
+    /// reflection converter to be set; fixed for the token's whole life.
+    function setReflectionPayout(ReflectionPayout calldata p) external onlyFactory {
+        require(poolId == bytes32(0) && payoutMode == PAYOUT_IN_KIND, "V4CustomToken: payout already fixed");
+        require(p.mode == PAYOUT_ETH || p.mode == PAYOUT_TOKEN, "V4CustomToken: invalid payout mode");
+        require(reflectionsEnabled, "V4CustomToken: no reflection fee to pay out");
+        address conv = IV4PayoutLauncher(msg.sender).taxSource().reflectionConverter();
+        require(conv != address(0), "V4CustomToken: reflection converter not set");
+        if (p.mode == PAYOUT_TOKEN) {
+            require(p.token != address(0) && p.token != address(this), "V4CustomToken: invalid payout token");
+            IV4PayoutConverter(conv).validateTarget(p.token);
+            payoutToken = p.token;
+        } else {
+            require(p.token == address(0), "V4CustomToken: payout token only for mode 2");
+        }
+        payoutMode = p.mode;
+        converter = conv;
+        _excludeNow(conv); // the converter holds tokens only in passing and never earns
+        emit ReflectionPayoutSet(p.mode, p.token, conv);
+    }
+
     function name() public view override returns (string memory) { return _tokenName; }
     function symbol() public view override returns (string memory) { return _tokenSymbol; }
 
@@ -239,8 +330,12 @@ contract V4CustomToken is ERC20 {
     /// @notice Called by the hook right after it sent `amount` tokens here.
     function notifyReflection(uint256 amount) external {
         if (msg.sender != hook || hook == address(0)) revert NotHook();
-        unallocatedReflections += amount;
-        _flush();
+        if (payoutMode == PAYOUT_IN_KIND) {
+            unallocatedReflections += amount;
+            _flush();
+        } else {
+            pendingConversion += amount; // waits for the converter
+        }
     }
 
     /// @notice Folds any waiting reflection tokens into the share price, if
@@ -276,29 +371,135 @@ contract V4CustomToken is ERC20 {
         return (acc > w ? acc - w : 0) + settledReflections[account];
     }
 
-    /// @notice Pays the caller their reflections, in this token.
-    function claimReflections() external returns (uint256) {
-        return _claim(msg.sender);
+    /// @notice Pays the caller their reflections (in the token's payout asset).
+    function claimReflections() external lock returns (uint256) {
+        return _claim(msg.sender, msg.sender, true);
+    }
+
+    /// @notice Pays the caller's reflections to `to` instead, for a holder contract that cannot
+    /// receive ETH (or the payout token) at its own address.
+    function claimReflectionsTo(address to) external lock returns (uint256) {
+        require(to != address(0) && to != address(this), "V4CustomToken: invalid recipient");
+        return _claim(msg.sender, to, true);
     }
 
     /// @notice Keeper helper: pays each listed holder their own reflections.
-    /// Always pays the holder, never the caller.
-    function claimFor(address[] calldata holders) external returns (uint256 total) {
-        for (uint256 i = 0; i < holders.length; i++) total += _claim(holders[i]);
+    /// Always pays the holder, never the caller. A holder that cannot be paid (e.g. a contract that
+    /// rejects ETH) is skipped and keeps what it is owed.
+    function claimFor(address[] calldata holders) external lock returns (uint256 total) {
+        for (uint256 i = 0; i < holders.length; i++) total += _claim(holders[i], holders[i], false);
     }
 
-    function _claim(address account) private returns (uint256 amount) {
+    /// @notice Automatic payout, in batches (ETH / token payouts): pays up to `maxHolders` listed
+    /// holders from where the last call stopped, skipping anyone owed less than `minPayout` (they keep
+    /// accruing). Anyone may call it; it only ever pays holders. Returns how many holders it looked at
+    /// and how much it paid out.
+    function payBatch(uint256 maxHolders, uint256 minPayout) external lock returns (uint256 processed, uint256 paid) {
+        require(payoutMode != PAYOUT_IN_KIND, "V4CustomToken: batches are for ETH / token payouts");
+        _flush();
+        uint256 n = _holders.length;
+        if (n == 0 || maxHolders == 0) return (0, 0);
+        if (minPayout == 0) minPayout = 1;
+        uint256 start = payCursor % n;
+        processed = maxHolders < n ? maxHolders : n;
+        for (uint256 i = 0; i < processed; i++) {
+            address h = _holders[(start + i) % n];
+            if (pendingReflections(h) >= minPayout) paid += _claim(h, h, false);
+        }
+        payCursor = (start + processed) % n;
+    }
+
+    /// @notice How many holders payBatch() walks through (ETH / token payouts).
+    function holderCount() external view returns (uint256) {
+        return _holders.length;
+    }
+
+    function holderAt(uint256 index) external view returns (address) {
+        return _holders[index];
+    }
+
+    function _claim(address account, address to, bool strict) private returns (uint256 amount) {
         _flush();
         amount = pendingReflections(account);
         if (amount == 0) return 0;
         settledReflections[account] = 0;
         if (!isExcludedFromReflections[account]) withdrawnReflections[account] = _accumulated(account);
+        if (payoutMode == PAYOUT_IN_KIND) {
+            totalReflectionsClaimed += amount;
+            // An ordinary balance move from this (excluded) contract: the receiver's
+            // correction term absorbs it, so their accrued total is unchanged and
+            // the amount just paid is not paid out again.
+            _update(address(this), to, amount);
+            emit ReflectionsClaimed(account, amount);
+            return amount;
+        }
+        payoutHeld -= amount; // effects before the external call
+        if (!_payOut(to, amount)) {
+            if (strict) revert PayoutTransferFailed();
+            payoutHeld += amount;
+            settledReflections[account] += amount; // still owed; claim it yourself
+            emit PayoutFailed(account, amount);
+            return 0;
+        }
         totalReflectionsClaimed += amount;
-        // An ordinary balance move from this (excluded) contract: the receiver's
-        // correction term absorbs it, so their accrued total is unchanged and
-        // the amount just paid is not paid out again.
-        _update(address(this), account, amount);
         emit ReflectionsClaimed(account, amount);
+    }
+
+    function _payOut(address to, uint256 amount) private returns (bool ok) {
+        if (payoutMode == PAYOUT_ETH) {
+            (ok,) = payable(to).call{value: amount, gas: PAY_CALL_GAS}("");
+        } else {
+            bytes memory ret;
+            (ok, ret) = payoutToken.call(abi.encodeWithSelector(0xa9059cbb, to, amount)); // transfer(address,uint256)
+            if (ok && ret.length > 0) ok = abi.decode(ret, (bool));
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Converter hooks (ETH / token payouts)
+    // ---------------------------------------------------------------
+
+    /// @notice Hands `amount` of the waiting reflection tokens to the converter, which sells them.
+    function releaseForConversion(uint256 amount) external onlyConverter {
+        require(amount > 0 && amount <= pendingConversion, "V4CustomToken: invalid amount");
+        pendingConversion -= amount;
+        _update(address(this), msg.sender, amount);
+        emit ReflectionsReleased(amount);
+    }
+
+    /// @notice Takes back tokens the converter could not sell (the pool's price limit was reached).
+    function returnUnconverted(uint256 amount) external onlyConverter {
+        require(amount > 0, "V4CustomToken: invalid amount");
+        pendingConversion += amount;
+        _update(msg.sender, address(this), amount);
+        emit ReflectionsReturned(amount);
+    }
+
+    /// @notice (mode 1) Shares the ETH the converter sends with this call among the holders.
+    function depositPayoutEth() external payable onlyConverter {
+        require(payoutMode == PAYOUT_ETH && msg.value > 0, "V4CustomToken: not an ETH payout");
+        _deposit(msg.value);
+    }
+
+    /// @notice (mode 2) Shares whatever payout tokens the converter just sent here among the holders.
+    function depositPayoutToken() external onlyConverter returns (uint256 received) {
+        require(payoutMode == PAYOUT_TOKEN, "V4CustomToken: not a token payout");
+        uint256 bal = _payoutBalance();
+        received = bal > payoutHeld ? bal - payoutHeld : 0;
+        require(received > 0, "V4CustomToken: nothing received");
+        _deposit(received);
+    }
+
+    function _payoutBalance() private view returns (uint256) {
+        (bool ok, bytes memory ret) = payoutToken.staticcall(abi.encodeWithSelector(0x70a08231, address(this))); // balanceOf
+        return ok && ret.length >= 32 ? abi.decode(ret, (uint256)) : 0;
+    }
+
+    function _deposit(uint256 amount) private {
+        payoutHeld += amount;
+        unallocatedReflections += amount;
+        _flush();
+        emit PayoutDeposited(amount, magnifiedPerShare);
     }
 
     /// @notice One-way: the factory marks an infrastructure address as not
@@ -317,6 +518,7 @@ contract V4CustomToken is ERC20 {
         _corrections[account] = 0;
         eligibleSupply -= balanceOf(account);
         isExcludedFromReflections[account] = true;
+        _untrack(account);
         emit ExcludedFromReflections(account);
     }
 
@@ -332,5 +534,36 @@ contract V4CustomToken is ERC20 {
             _corrections[to] -= int256(ps * value);
             eligibleSupply += value;
         }
+        if (payoutMode != PAYOUT_IN_KIND) {
+            _track(from);
+            _track(to);
+        }
+    }
+
+    // ---- holder list upkeep (ETH / token payouts) ----
+
+    function _track(address a) private {
+        if (isExcludedFromReflections[a]) return;
+        bool want = balanceOf(a) >= totalSupply() / TRACK_DIVISOR && balanceOf(a) > 0;
+        uint256 idx = _holderIdx[a];
+        if (want && idx == 0) {
+            _holders.push(a);
+            _holderIdx[a] = _holders.length;
+        } else if (!want && idx != 0) {
+            _untrack(a);
+        }
+    }
+
+    function _untrack(address a) private {
+        uint256 idx = _holderIdx[a];
+        if (idx == 0) return;
+        uint256 last = _holders.length;
+        if (idx != last) {
+            address moved = _holders[last - 1];
+            _holders[idx - 1] = moved;
+            _holderIdx[moved] = idx;
+        }
+        _holders.pop();
+        delete _holderIdx[a];
     }
 }

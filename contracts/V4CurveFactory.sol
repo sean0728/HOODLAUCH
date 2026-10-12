@@ -308,6 +308,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         uint256 totalSupply_,
         V4CustomToken.FeeSet calldata buyFees,
         V4CustomToken.FeeSet calldata sellFees,
+        V4CustomToken.ReflectionPayout calldata payout,
         address marketingWallet,
         uint256 creatorBuyEthAmount,
         uint256 minCreatorTokensOut,
@@ -318,6 +319,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         V4CustomToken(token).initialize(
             name_, symbol_, totalSupply_, _creator(), address(this), address(this), marketingWallet, buyFees, sellFees, _infra()
         );
+        if (payout.mode != 0) V4CustomToken(token).setReflectionPayout(payout);
         V4TaxHook.CustomFees memory f = V4TaxHook.CustomFees({
             buyReflectionBps: buyFees.reflectionBps,
             buyMarketingBps: buyFees.marketingBps,

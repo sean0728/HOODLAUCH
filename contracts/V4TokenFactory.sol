@@ -42,8 +42,10 @@ import {V4TaxHook} from "./V4TaxHook.sol";
 ///  - the creator's optional same-transaction buy-in is a real swap through the
 ///    PoolManager, so it pays the tax like any other buyer's.
 ///
-/// "Deploy Token" (addLiquidityAtLaunch = false) is unchanged in spirit: a plain
-/// ERC20 minted entirely to the creator, no pool, no tax, forever.
+/// There is no deploy-only ("no pool") mode any more: every launch seeds a pool.
+/// The addLiquidityAtLaunch flag is kept in createToken and in the voucher only so
+/// the function signature, the EIP-712 type and every integration stay unchanged;
+/// it must be true.
 contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     using SafeERC20 for IERC20;
     using SafeCast for uint256;
@@ -61,7 +63,6 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     uint24 public constant LP_FEE = 3000;
     int24 public constant TICK_SPACING = 60;
 
-    uint256 public deployFee;
     uint256 public launchFee;
     address public feeTreasury;
     uint256 public lpLockDuration;
@@ -84,6 +85,9 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     address public creatorRewardsDistributor;
     uint256 public creatorRewardBps = 10; // 0.10%
     address public feeWalletDistributor;
+    /// @notice V4ReflectionConverter: sells a Custom Tax token's reflection share when its creator chose an
+    /// ETH / other-token payout. Each such token fixes this address at launch.
+    address public reflectionConverter;
 
     /// @notice Anti-rug cap on the creator's same-transaction buy-in, in bps of
     /// totalSupply, checked against the tokens the creator actually receives
@@ -99,7 +103,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     uint256 public constant MAX_SLIPPAGE_BPS = 800;
 
     mapping(address => address) public creatorOf;
-    /// @notice token => its V4 PoolId, or bytes32(0) for a "Deploy Token" launch.
+    /// @notice token => its V4 PoolId.
     mapping(address => bytes32) public poolIdOf;
     address[] private _tokenList;
     mapping(address => address[]) private _tokensByCreator;
@@ -170,7 +174,6 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         uint256 indexed lockId
     );
     event CreatorBought(address indexed token, address indexed creator, uint256 ethIn, uint256 tokensOut);
-    event DeployFeeUpdated(uint256 newFee);
     event LaunchFeeUpdated(uint256 newFee);
     event LpLockDurationUpdated(uint256 newDuration);
     event FeeTreasuryUpdated(address newTreasury);
@@ -181,6 +184,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     event RewardsDistributorUpdated(address newDistributor);
     event CreatorRewardsDistributorUpdated(address newDistributor);
     event FeeWalletDistributorUpdated(address newDistributor);
+    event ReflectionConverterUpdated(address newConverter);
     event TokenPriceFeedUpdated(address indexed token, address newPriceFeed, uint256 newMaxOracleStaleness);
 
     modifier onlyRelayer() {
@@ -193,7 +197,6 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         address poolManager_,
         address locker_,
         address hook_,
-        uint256 deployFee_,
         uint256 launchFee_,
         address feeTreasury_,
         uint256 lpLockDuration_,
@@ -211,7 +214,6 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         poolManager = IPoolManager(poolManager_);
         locker = V4LiquidityLocker(locker_);
         hook = V4TaxHook(hook_);
-        deployFee = deployFee_;
         launchFee = launchFee_;
         feeTreasury = feeTreasury_;
         lpLockDuration = lpLockDuration_;
@@ -246,9 +248,10 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     // Launch entry points
     // ---------------------------------------------------------------
 
-    /// @notice Same contract as V2's createToken: msg.value must equal
-    /// deployFee exactly for "Deploy Token", or launchFee + liquidityEthAmount +
-    /// creatorBuyEthAmount for "Deploy and Add Liquidity (Launch)".
+    /// @notice Launches a token with a locked V4 pool: msg.value must equal
+    /// launchFee + liquidityEthAmount + creatorBuyEthAmount. addLiquidityAtLaunch
+    /// must be true (deploy-only launches were removed; the flag is kept so the
+    /// signature stays the same).
     function createToken(
         string calldata name_,
         string calldata symbol_,
@@ -267,32 +270,17 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         require(bytes(name_).length > 0, "V4TokenFactory: name required");
         require(bytes(symbol_).length > 0, "V4TokenFactory: symbol required");
         require(totalSupply_ > 0, "V4TokenFactory: supply must be > 0");
+        require(addLiquidityAtLaunch, "V4TokenFactory: deploy-only launches are not supported");
 
         token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(msg.sender, salt));
 
-        if (!addLiquidityAtLaunch) {
-            _createDeployOnly(token, name_, symbol_, totalSupply_);
-        } else {
-            (liquidity, lockId, creatorTokensBought) = _createWithLiquidity(
-                token, name_, symbol_, totalSupply_, liquidityEthAmount, creatorBuyEthAmount, minCreatorTokensOut
-            );
-        }
+        (liquidity, lockId, creatorTokensBought) = _createWithLiquidity(
+            token, name_, symbol_, totalSupply_, liquidityEthAmount, creatorBuyEthAmount, minCreatorTokensOut
+        );
     }
 
-    /// @dev "Deploy Token": plain ERC20, 100% to the creator, nothing else.
-    /// The helpers below also record + emit, so createToken's own stack stays
-    /// shallow enough to compile without viaIR (same reason V2 split it).
-    function _createDeployOnly(address token, string calldata name_, string calldata symbol_, uint256 totalSupply_)
-        internal
-    {
-        require(msg.value == deployFee, "V4TokenFactory: incorrect ETH sent for Deploy Token");
-        V4LaunchedToken(token).initialize(name_, symbol_, totalSupply_, msg.sender, msg.sender, address(this));
-        _finalizeLaunch(token, deployFee);
-        emit TokenCreated(token, msg.sender, name_, symbol_, totalSupply_, false, bytes32(0));
-    }
-
-    /// @dev "Deploy and Add Liquidity": validates the ETH split, initializes
-    /// the token, runs the shared launch, records and emits.
+    /// @dev Validates the ETH split, initializes the token, runs the shared
+    /// launch, records and emits (split out of createToken to keep its stack shallow).
     function _createWithLiquidity(
         address token,
         string calldata name_,
@@ -413,10 +401,8 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         // relayed path takes it from the escrowed deposit, so the fee the creator
         // signed must not be below it (a fee of 0 would launch for free and leave
         // the relayer paying the gas).
-        require(
-            voucher.fee >= (voucher.addLiquidityAtLaunch ? launchFee : deployFee),
-            "V4TokenFactory: voucher fee below the current launch fee"
-        );
+        require(voucher.addLiquidityAtLaunch, "V4TokenFactory: deploy-only launches are not supported");
+        require(voucher.fee >= launchFee, "V4TokenFactory: voucher fee below the current launch fee");
 
         voucherHash = hashLaunchVoucher(voucher);
         require(
@@ -430,9 +416,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         require(!d.reclaimed, "V4TokenFactory: deposit already reclaimed");
         require(block.timestamp <= d.deadline, "V4TokenFactory: deposit expired, creator must reclaim");
         require(
-            d.amount
-                == voucher.fee
-                    + (voucher.addLiquidityAtLaunch ? voucher.liquidityEthAmount + voucher.creatorBuyEthAmount : 0),
+            d.amount == voucher.fee + voucher.liquidityEthAmount + voucher.creatorBuyEthAmount,
             "V4TokenFactory: deposit does not match voucher amount"
         );
 
@@ -446,24 +430,18 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         token = Clones.cloneDeterministic(tokenImplementation, _deriveTokenSalt(voucher.creator, voucher.salt));
         bytes32 poolId;
 
-        if (!voucher.addLiquidityAtLaunch) {
-            V4LaunchedToken(token).initialize(
-                voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, voucher.creator, address(this)
-            );
-        } else {
-            V4LaunchedToken(token).initialize(
-                voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, address(this), address(this)
-            );
-            (liquidity, lockId, creatorTokensBought, poolId) = _launchWithLiquidity(
-                token,
-                voucher.creator,
-                voucher.totalSupply,
-                voucher.liquidityEthAmount,
-                voucher.creatorBuyEthAmount,
-                voucher.minCreatorTokensOut
-            );
-            poolIdOf[token] = poolId;
-        }
+        V4LaunchedToken(token).initialize(
+            voucher.name, voucher.symbol, voucher.totalSupply, voucher.creator, address(this), address(this)
+        );
+        (liquidity, lockId, creatorTokensBought, poolId) = _launchWithLiquidity(
+            token,
+            voucher.creator,
+            voucher.totalSupply,
+            voucher.liquidityEthAmount,
+            voucher.creatorBuyEthAmount,
+            voucher.minCreatorTokensOut
+        );
+        poolIdOf[token] = poolId;
 
         creatorOf[token] = voucher.creator;
         _tokensByCreator[voucher.creator].push(token);
@@ -726,11 +704,6 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     // Admin (same surface as V2)
     // ---------------------------------------------------------------
 
-    function setDeployFee(uint256 newFee) external onlyOwner {
-        deployFee = newFee;
-        emit DeployFeeUpdated(newFee);
-    }
-
     function setLaunchFee(uint256 newFee) external onlyOwner {
         launchFee = newFee;
         emit LaunchFeeUpdated(newFee);
@@ -796,6 +769,11 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     function setFeeWalletDistributor(address newDistributor) external onlyOwner {
         feeWalletDistributor = newDistributor;
         emit FeeWalletDistributorUpdated(newDistributor);
+    }
+
+    function setReflectionConverter(address newConverter) external onlyOwner {
+        reflectionConverter = newConverter;
+        emit ReflectionConverterUpdated(newConverter);
     }
 
     function setRelayer(address newRelayer) external onlyOwner {
