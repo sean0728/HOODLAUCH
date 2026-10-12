@@ -9942,6 +9942,26 @@
     return v.toFixed(dec);
   }
   function solFmtSol(n, d){ return (n==null || !isFinite(n)) ? "—" : Number(n).toFixed(d==null?3:d)+" SOL"; }
+  // Market cap is shown in dollars (like every other token on the page). SOL/USD comes from CoinGecko (already allowed by the
+  // page's CSP), cached for a minute; if it can't be fetched the last good price is kept, and with none at all the SOL amount
+  // is shown instead of a made-up dollar figure.
+  var solUsdPrice = null, solUsdAt = 0;
+  async function solRefreshUsdPrice(){
+    if(solUsdPrice && Date.now()-solUsdAt < 60000) return solUsdPrice;
+    try{
+      const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd");
+      if(res.ok){
+        const d = await res.json();
+        const px = d && d.solana && d.solana.usd;
+        if(typeof px==="number" && px>0){ solUsdPrice = px; solUsdAt = Date.now(); }
+      }
+    }catch(e){ /* offline / blocked — keep the last good price */ }
+    return solUsdPrice;
+  }
+  function solFmtMcap(marketCapSol){
+    if(marketCapSol==null || !isFinite(marketCapSol)) return "—";
+    return solUsdPrice ? fmtUSD(Number(marketCapSol)*solUsdPrice) : solFmtSol(marketCapSol, 1);
+  }
   function solExplorer(kind, id){ return `https://explorer.solana.com/${kind}/${encodeURIComponent(id)}${solIsMain() ? "" : "?cluster=devnet"}`; }
   // Only same-origin metadata images are ever rendered (the page CSP is img-src 'self' data:). Whatever
   // base URL the relayer wrote into a record, keep just the path.
@@ -10144,6 +10164,7 @@
     let lib;
     try{ lib = await solLoadLib(); solLibErr = ""; }
     catch(e){ solLibErr = solErr(e); console.error("[solana] module failed to load", e); solShowDetailError(); return; }
+    solRefreshUsdPrice(); // in parallel with the pool reads; the redraw below picks it up (or the next refresh does)
     await Promise.all(solLaunches.slice(0, 24).map(async l=>{
       try{
         const info = await lib.getPoolInfo(l.pool);
@@ -10157,6 +10178,7 @@
         console.error("[solana] getPoolInfo failed for", l.mint, e);
       }
     }));
+    await solRefreshUsdPrice();
     renderSolanaGrid();
     try{ renderStats(); }catch(e){ /* page still initialising */ }
     // The admin Recent Launches list reads each Solana row's graduation state from solInfo, so redraw it once that is fresh.
@@ -10188,7 +10210,7 @@
       </div>
       <div class="tc-metrics">
         <div class="m"><div class="v">${info ? solFmtPrice(info.priceSol) : "—"}</div><div class="l">Price</div></div>
-        <div class="m"><div class="v">${info && info.marketCapSol!=null ? solFmtSol(info.marketCapSol, 1) : "—"}</div><div class="l">Market cap</div></div>
+        <div class="m"><div class="v">${info ? solFmtMcap(info.marketCapSol) : "—"}</div><div class="l">Market cap</div></div>
       </div>
       <div class="bond-gauge" style="margin:0;">
         <div class="bond-labels"><span>Curve progress</span><span>${info ? pct.toFixed(1)+"%" : "—"}</span></div>
@@ -10682,7 +10704,7 @@
     if(!info) return;
     const set = (id, v)=>{ const e = document.getElementById(id); if(e) e.textContent = v; };
     set("solDPrice", solFmtPrice(info.priceSol));
-    set("solDMcap", info.marketCapSol!=null ? solFmtSol(info.marketCapSol, 1) : "—");
+    set("solDMcap", solFmtMcap(info.marketCapSol));
     set("solDRaised", solFmtSol(info.raisedSol, 2));
     set("solDTarget", solFmtSol(info.thresholdSol, 1));
     set("solDGaugePct", info.progressPct.toFixed(1)+"%");
