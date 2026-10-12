@@ -7481,10 +7481,12 @@
     const tvl = visible.reduce((a,t)=>a+t.mcap*0.22,0);
     const vol = visible.reduce((a,t)=>a+t.vol,0);
     const traders = visible.reduce((a,t)=>a+t.holders,0);
-    const graduated = visible.filter(t=>t.status==="graduated").length;
+    // Solana launches (shown in the same grid, only on the network the site's Solana side is on) count too.
+    const solAll = (typeof solGridAll === "function") ? solGridAll() : [];
+    const graduated = visible.filter(t=>t.status==="graduated").length + solAll.filter(s=>s.status==="graduated").length;
 
     document.getElementById("rdTvl").textContent = fmtUSD(tvl);
-    document.getElementById("rdLaunches").textContent = fmtInt(visible.length);
+    document.getElementById("rdLaunches").textContent = fmtInt(visible.length + solAll.length);
     document.getElementById("rdGrad").textContent = fmtInt(graduated);
 
     document.getElementById("statTvl").textContent = fmtUSD(tvl);
@@ -10170,6 +10172,7 @@
       solLaunches = [];
     }
     renderSolanaGrid();
+    try{ renderStats(); }catch(e){ /* page still initialising */ }
     solRefreshPools();
     // the shared "New launches" window + live feed now know about the Solana tokens
     try{ renderLaunchFeedFromTokens(); refreshLiveFeed(); }catch(e){ /* page still initialising */ }
@@ -10207,6 +10210,7 @@
       }
     }));
     renderSolanaGrid();
+    try{ renderStats(); }catch(e){ /* page still initialising */ }
     if(solDetailMint){ solUpdateDetailStats(); solShowDetailError(); }
   }
 
@@ -10939,7 +10943,7 @@
       <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 18px;">Buy and sell tax are configured independently, each capped at 5% total. Every rate locks in permanently at launch — only the marketing wallet address can ever be changed afterward.</p>
       ${feeSideHTML("buy","Buy")}
       ${feeSideHTML("sell","Sell")}
-      ${reflectionAssetFieldHTML(reflectionOn ? "Holders accrue their share automatically as trades happen and get paid out automatically too, in batches, with no action needed from them — anyone can also claim their own share immediately at any time, if they don't want to wait." : "Only matters once a reflection % is set above, on either side.")}
+      ${reflectionAssetFieldHTML(reflectionOn ? "Holders accrue their share automatically as trades happen. Paid in ETH or another token, they also receive it automatically, in batches, with no action needed. Paid in the same token, holders claim it themselves from the token page." : "Only matters once a reflection % is set above, on either side.")}
       <div class="field">
         <label for="fMarketingWallet">Marketing wallet ${marketingOn ? "(required — a marketing % is set above)" : "(optional — only needed if you set a marketing % above)"}</label>
         <input id="fMarketingWallet" type="text" placeholder="0x… wallet address" value="${escapeHtml(draft.customFees.marketingWallet)}">
@@ -15199,12 +15203,10 @@
 
           ${sect("Who can launch", "admin only, or anyone with a Solana wallet")}
           <div class="admin-cfg-row">
-            <div class="admin-cfg-label">Launching <span class="info-dot" title="Admin only: just your admin wallet. Anyone: any visitor with a Solana wallet can launch a token. Their requests are signed with their wallet, the relayer verifies every launch on-chain, and uploads are rate-limited. Needs a server RPC URL saved for the live network.">?</span></div>
+            <div class="admin-cfg-label">Launching <span class="info-dot" title="Open to everyone: any visitor with a Solana wallet can launch a token. Their requests are signed with their wallet and the relayer verifies every launch on-chain and rate-limits it. This is always on; there is no admin-only mode in the page.">?</span></div>
             <div class="field" style="grid-column:2 / -1;">
-              <select id="sa_publicLaunch" aria-label="Who can launch">
-                <option value="false"${sv.publicLaunch ? "" : " selected"}>Admin only</option>
-                <option value="true"${sv.publicLaunch ? " selected" : ""}>Anyone with a Solana wallet</option>
-              </select>
+              <input type="hidden" id="sa_publicLaunch" value="true">
+              <div><b>Anyone with a Solana wallet</b> can launch.</div>
               <div class="help-text sa-note" id="sa_publicNote" style="margin-top:6px;"></div>
             </div>
           </div>
