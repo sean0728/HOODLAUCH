@@ -10159,6 +10159,8 @@
     }));
     renderSolanaGrid();
     try{ renderStats(); }catch(e){ /* page still initialising */ }
+    // The admin Recent Launches list reads each Solana row's graduation state from solInfo, so redraw it once that is fresh.
+    try{ if(typeof renderLaunchActivityList==="function") renderLaunchActivityList(); }catch(e){ /* admin panel not open */ }
     if(solDetailMint){ solUpdateDetailStats(); solShowDetailError(); }
   }
 
@@ -14494,7 +14496,13 @@
     }
     list.innerHTML = recent.map(entry => {
       const isLiquidity = !!(entry.pairAddress && entry.pairAddress.toLowerCase()!==ZERO_ADDRESS);
-      const status = statusFromTokenStatus(entry, isLiquidity);
+      let status = statusFromTokenStatus(entry, isLiquidity);
+      // A Solana Quick Launch has a pool from day one (the Meteora bonding curve), so "has a pool" does NOT mean it is
+      // trading on a DEX. It only counts as live once the curve has migrated (graduated); until then it is "Bonding curve".
+      if(entry.chain==="solana"){
+        const sInfo = typeof solInfo!=="undefined" ? solInfo[entry.tokenAddress] : null;
+        status = sInfo && sInfo.migrated ? "graduated" : "curve-trading";
+      }
       const when = entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "Unknown time";
       const label = entry.name || entry.symbol || "Unnamed token";
       return `
