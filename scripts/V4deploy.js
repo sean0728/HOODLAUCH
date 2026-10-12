@@ -298,6 +298,12 @@ async function main() {
   ]);
   const swapRouter = await step("v4SwapRouter", "V4SwapRouter", [poolManager, await A(hook)]);
   const compounder = await step("compounder", "V4LiquidityCompounder", [poolManager, await A(hook)]);
+  // Shared reflection converter: lets a Custom Tax token's creator choose to pay reflections to holders
+  // in ETH or another token. Set WITH_REFLECTION_CONVERTER=false to launch without that choice.
+  const withConverter = (process.env.WITH_REFLECTION_CONVERTER ?? "true") !== "false";
+  const reflectionConverter = withConverter
+    ? await step("reflectionConverter", "V4ReflectionConverter", [poolManager, await A(hook), ownerAddress || deployer.address])
+    : null;
   // A factory saved by an earlier run that predates gasless launches has no launchRelay(); retire
   // it from the saved state so the current code is deployed in its place.
   state.retired = state.retired || [];
@@ -364,6 +370,22 @@ async function main() {
     await send("hook.setLiquidityCompounder(compounder)", () => hook.setLiquidityCompounder(compounderA));
   if (!(await hook.taxExempt(compounderA)))
     await send("factory.setTaxExempt(compounder, true)", () => factory.setTaxExempt(compounderA, true));
+
+  if (withConverter) {
+    const convA = await A(reflectionConverter);
+    if ((await factory.reflectionConverter()).toLowerCase() !== convA.toLowerCase())
+      await send("factory.setReflectionConverter(converter)", () => factory.setReflectionConverter(convA));
+    if (!(await hook.taxExempt(convA)))
+      await send("factory.setTaxExempt(converter, true)", () => factory.setTaxExempt(convA, true));
+    const relayerKeeperC = envAddr("RELAYER_ADDRESS", null);
+    const deployerOwnsC = !ownerAddress || ownerAddress.toLowerCase() === deployer.address.toLowerCase();
+    if (relayerKeeperC && deployerOwnsC) {
+      if (!(await reflectionConverter.keepers(relayerKeeperC)))
+        await send("reflectionConverter.setKeeper(relayer, true)", () => reflectionConverter.setKeeper(relayerKeeperC, true));
+    } else {
+      console.log(`  NOTE: ${deployerOwnsC ? "set RELAYER_ADDRESS, or" : ownerAddress + " owns the converter and"} call setKeeper(relayerWallet, true) on the reflection converter ${convA} so the relayer can convert reflections to ETH / other tokens.`);
+    }
+  }
 
   for (const [label, f] of [["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory]]) {
     const fa = await A(f);
@@ -490,6 +512,11 @@ async function main() {
   check((await hook.factory()).toLowerCase() === factoryA.toLowerCase(), "hook.factory == V4TokenFactory");
   check((await hook.liquidityCompounder()).toLowerCase() === compounderA.toLowerCase(), "hook.liquidityCompounder == compounder");
   check(await hook.taxExempt(compounderA), "compounder is tax-exempt");
+  if (withConverter) {
+    const convA2 = await A(reflectionConverter);
+    check((await factory.reflectionConverter()).toLowerCase() === convA2.toLowerCase(), "factory.reflectionConverter == converter");
+    check(await hook.taxExempt(convA2), "reflection converter is tax-exempt");
+  }
   for (const [label, f] of [["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory]]) {
     const fa = await A(f);
     check(await hook.launchers(fa), `${label} is an allowed launcher on the hook`);
@@ -527,6 +554,7 @@ async function main() {
     v4CustomTokenFactory: await A(customFactory),
     v4CurveFactory: await A(curveFactory),
     v4LiquidityCompounder: compounderA,
+    v4ReflectionConverter: withConverter ? await A(reflectionConverter) : null,
     v4LaunchRelay: relayA,
     plainTokenImpl: await A(plainImpl),
     customTokenImpl: await A(customImpl),
@@ -554,6 +582,7 @@ async function main() {
   console.log(`  V4_CUSTOM_TOKEN_FACTORY_ADDRESS=${summary.v4CustomTokenFactory}`);
   console.log(`  V4_CURVE_FACTORY_ADDRESS=${summary.v4CurveFactory}`);
   console.log(`  V4_COMPOUNDER_ADDRESS=${summary.v4LiquidityCompounder}`);
+  if (withConverter) console.log(`  (reflection converter ${summary.v4ReflectionConverter} is read from the V4 factory by the relayer; no env var needed)`);
   console.log(`  V4_LAUNCH_RELAY_ADDRESS=${summary.v4LaunchRelay}`);
   console.log(`  V4_KEEPER_ENABLED=false    (optional; keeper is ON by default, toggle it in Admin → Relayer settings)`);
   if (!ephemeral) console.log(`\nSaved: ${statePath}`);
@@ -570,6 +599,7 @@ async function main() {
       [summary.v4TokenFactory, [summary.plainTokenImpl, poolManager, summary.v4LiquidityLocker, summary.v4TaxHook, launchFee, treasury, lpLock, platformFeeWallet, priceFeed]],
       [summary.v4SwapRouter, [poolManager, summary.v4TaxHook]],
       [summary.v4LiquidityCompounder, [poolManager, summary.v4TaxHook]],
+      ...(withConverter ? [[summary.v4ReflectionConverter, [poolManager, summary.v4TaxHook, ownerAddress || deployer.address]]] : []),
       [summary.v4CustomTokenFactory, [summary.customTokenImpl, summary.v4TokenFactory, summary.v4LiquidityCompounder, launchFee, lpLock]],
       [summary.v4CurveFactory, [summary.plainTokenImpl, summary.customTokenImpl, summary.v4TokenFactory, summary.v4LiquidityCompounder, curveFee, lpLock]],
       [summary.v4LaunchRelay, [summary.v4CustomTokenFactory, summary.v4CurveFactory, summary.v4TokenFactory]],

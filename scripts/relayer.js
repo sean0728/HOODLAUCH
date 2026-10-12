@@ -285,6 +285,13 @@ const RELAYER_SETTINGS_DEFAULTS = {
   platformBuybackSlippageBps: Number(process.env.PLATFORM_BUYBACK_SLIPPAGE_BPS || 300), // 3%
   platformAirdropBatchSize: Number(process.env.PLATFORM_AIRDROP_BATCH_SIZE || 200),
   platformAirdropMaxBatchesPerTick: Number(process.env.PLATFORM_AIRDROP_MAX_BATCHES_PER_TICK || 10),
+  // Reflection payouts (Custom Tax tokens whose creator chose ETH / another token): the keeper converts the
+  // pending pile, then pays holders automatically in batches of payBatch().
+  reflectionPayoutPollIntervalMs: Number(process.env.REFLECTION_PAYOUT_POLL_INTERVAL_MS || 2 * 60_000),
+  reflectionPayoutSlippageBps: Number(process.env.REFLECTION_PAYOUT_SLIPPAGE_BPS || 300), // 3%
+  reflectionPayoutMinPayoutWei: String(process.env.REFLECTION_PAYOUT_MIN_PAYOUT_WEI || "100000000000000"), // 0.0001 ETH worth
+  reflectionPayoutBatchSize: Number(process.env.REFLECTION_PAYOUT_BATCH_SIZE || 40),
+  reflectionPayoutMaxBatchesPerTick: Number(process.env.REFLECTION_PAYOUT_MAX_BATCHES_PER_TICK || 10),
   // Telegram notification settings — see the big comment above. Kept as
   // ordinary strings (never null) so they round-trip through JSON the same
   // way every other relayerSettings field does; "" means "unset", matching
@@ -326,6 +333,11 @@ const RELAYER_SETTINGS_BOUNDS = {
   platformBuybackSlippageBps: { min: 0, max: 2000 },
   platformAirdropBatchSize: { min: 1, max: 2000 },
   platformAirdropMaxBatchesPerTick: { min: 1, max: 200 },
+  reflectionPayoutPollIntervalMs: { min: 15_000, max: 24 * 60 * 60_000 },
+  reflectionPayoutSlippageBps: { min: 0, max: 2000 },
+  reflectionPayoutMinPayoutWei: { min: 0n },
+  reflectionPayoutBatchSize: { min: 1, max: 200 },
+  reflectionPayoutMaxBatchesPerTick: { min: 1, max: 200 },
   telegramBotToken: { type: "secret", maxLength: 200 },
   telegramLaunchesChatId: { type: "string", maxLength: 64 },
   telegramAlertsChatId: { type: "string", maxLength: 64 },
@@ -344,6 +356,8 @@ function feeWalletClaimMinWeiBig() { return BigInt(relayerSettings.feeWalletClai
 function creatorRewardsClaimMinWeiBig() { return BigInt(relayerSettings.creatorRewardsClaimMinWei); }
 function feeWalletSlippageBpsBig() { return BigInt(relayerSettings.feeWalletSlippageBps); }
 function creatorRewardsSlippageBpsBig() { return BigInt(relayerSettings.creatorRewardsSlippageBps); }
+function reflectionPayoutMinPayoutWeiBig() { return BigInt(relayerSettings.reflectionPayoutMinPayoutWei); }
+function reflectionPayoutSlippageBpsBig() { return BigInt(relayerSettings.reflectionPayoutSlippageBps); }
 function platformBuybackSlippageBpsBig() { return BigInt(relayerSettings.platformBuybackSlippageBps); }
 
 // Clamps one incoming raw value into RELAYER_SETTINGS_BOUNDS[key], returning
@@ -372,7 +386,7 @@ function clampRelayerSetting(key, rawValue) {
     if (str.length > bounds.maxLength) return null;
     return str;
   }
-  if (key === "feeWalletClaimMinWei" || key === "creatorRewardsClaimMinWei") {
+  if (key === "feeWalletClaimMinWei" || key === "creatorRewardsClaimMinWei" || key === "reflectionPayoutMinPayoutWei") {
     let big;
     try {
       big = BigInt(rawValue);
@@ -686,6 +700,31 @@ const V4_FACTORY_SLOTS_ABI = [
   "function creatorRewardsDistributor() view returns (address)",
   "function rewardsDistributor() view returns (address)",
 ];
+const V4_REFLECTION_SLOT_ABI = ["function reflectionConverter() view returns (address)"];
+// V4ReflectionConverter + the payout side of V4CustomToken (see contracts/V4ReflectionConverter.sol).
+const V4_REFLECTION_CONVERTER_ABI = [
+  "function convert(address token, uint256 minEthOut, uint256 minPayoutOut) returns (uint256 deposited)",
+  "function convertThreshold(address) view returns (uint256)",
+  "function maxConvertAmount(address) view returns (uint256)",
+  "function carryEth(address) view returns (uint256)",
+  "function swapSlippageBps() view returns (uint256)",
+  "function keepers(address) view returns (bool)",
+  "function owner() view returns (address)",
+];
+const V4_PAYOUT_TOKEN_ABI = [
+  "function payoutMode() view returns (uint8)",
+  "function payoutToken() view returns (address)",
+  "function converter() view returns (address)",
+  "function pendingConversion() view returns (uint256)",
+  "function payoutHeld() view returns (uint256)",
+  "function holderCount() view returns (uint256)",
+  "function payCursor() view returns (uint256)",
+  "function payBatch(uint256 maxHolders, uint256 minPayout) returns (uint256 processed, uint256 paid)",
+  "function holderAt(uint256 index) view returns (address)",
+  "function pendingReflections(address account) view returns (uint256)",
+  "function claimFor(address[] holders) returns (uint256 total)",
+  "function totalSupply() view returns (uint256)",
+];
 const V4_HOOK_EXEMPT_ABI = ["function taxExempt(address) view returns (bool)"];
 const V4_LP_FEE_PPM = 3000n; // must match V4TokenFactory / V4TokenSeller
 
@@ -840,6 +879,7 @@ const V4_CUSTOM_VOUCHER_FIELDS = [
   "totalSupply",
   "buyFees",
   "sellFees",
+  "payout",
   "marketingWallet",
   "liquidityEthAmount",
   "creatorBuyEthAmount",
@@ -883,6 +923,7 @@ const V4_CUSTOM_CURVE_VOUCHER_FIELDS = [
   "totalSupply",
   "buyFees",
   "sellFees",
+  "payout",
   "marketingWallet",
   "creatorBuyEthAmount",
   "minCreatorTokensOut",
@@ -903,7 +944,17 @@ function normalizeVoucher(rawVoucher, fields, uintFields) {
   }
   if (voucher.buyFees) voucher.buyFees = normalizeFeeSet(voucher.buyFees);
   if (voucher.sellFees) voucher.sellFees = normalizeFeeSet(voucher.sellFees);
+  if (voucher.payout) voucher.payout = normalizePayout(voucher.payout);
   return voucher;
+}
+
+// Reflection payout choice signed into a custom-tax voucher: 0 = in kind, 1 = ETH, 2 = another token.
+function normalizePayout(p) {
+  const mode = Number(p && p.mode);
+  if (!Number.isInteger(mode) || mode < 0 || mode > 2) throw new Error("payout.mode must be 0, 1 or 2");
+  const token = p && p.token ? String(p.token) : "0x0000000000000000000000000000000000000000";
+  if (!/^0x[0-9a-fA-F]{40}$/.test(token)) throw new Error("payout.token must be an address");
+  return { mode, token };
 }
 
 function normalizeFeeSet(feeSet) {
@@ -2047,6 +2098,8 @@ async function main() {
       publicEntry.isCustomCurve = trackedEntry && trackedEntry.isCustomCurve != null ? trackedEntry.isCustomCurve : null;
       publicEntry.marketingWallet = trackedEntry && trackedEntry.marketingWallet != null ? trackedEntry.marketingWallet : null;
       publicEntry.buyFees = trackedEntry && trackedEntry.buyFees ? trackedEntry.buyFees : null;
+      publicEntry.payoutMode = trackedEntry && typeof trackedEntry.payoutMode === "number" ? trackedEntry.payoutMode : 0;
+      publicEntry.payoutToken = trackedEntry && trackedEntry.payoutToken ? trackedEntry.payoutToken : null;
       publicEntry.sellFees = trackedEntry && trackedEntry.sellFees ? trackedEntry.sellFees : null;
       return publicEntry;
     });
@@ -3734,11 +3787,16 @@ async function main() {
           marketingWallet: configuredArgs.marketingWallet,
           buyFees: feeSetToPlain(configuredArgs.buyFees),
           sellFees: feeSetToPlain(configuredArgs.sellFees),
+          ...(await (async () => { const c = await readPayoutChoice(token); return { payoutMode: c.mode, payoutToken: c.mode === 2 ? c.payoutToken : null }; })()),
         };
       }
       const t = await hre.ethers.getContractAt(V4_CUSTOM_TOKEN_CONFIG_ABI, token, hre.ethers.provider);
       const [marketingWallet, buyFees, sellFees] = await Promise.all([t.marketingWallet(), t.buyFees(), t.sellFees()]);
-      return { isCustomCurve: true, customTax: true, marketingWallet, buyFees: feeSetToPlain(buyFees), sellFees: feeSetToPlain(sellFees) };
+      const choice = await readPayoutChoice(token);
+      return {
+        isCustomCurve: true, customTax: true, marketingWallet, buyFees: feeSetToPlain(buyFees), sellFees: feeSetToPlain(sellFees),
+        payoutMode: choice.mode, payoutToken: choice.mode === 2 ? choice.payoutToken : null,
+      };
     } catch (err) {
       console.warn(`[discovery] couldn't read custom-curve config for ${token}: ${err.message}`);
       return {};
@@ -3813,11 +3871,14 @@ async function main() {
       // "v4curve" learns it from CustomCurveConfigured / isCustomCurve().
       let customPatch = {};
       if (watcher.kind === "v4custom") {
+        const choice = await readPayoutChoice(token);
         customPatch = {
           customTax: true,
           marketingWallet: event.args.marketingWallet,
           buyFees: feeSetToPlain(event.args.buyFees),
           sellFees: feeSetToPlain(event.args.sellFees),
+          payoutMode: choice.mode,
+          payoutToken: choice.mode === 2 ? choice.payoutToken : null,
         };
       } else if (watcher.kind === "v4curve") {
         customPatch = await readV4CurveCustomConfig(watcher.factory, token, curveConfigByToken.get(token.toLowerCase()));
@@ -5078,6 +5139,199 @@ async function main() {
     }
   }
 
+
+  // ---- Reflection payouts (ETH / another token) ----
+  // A Custom Tax token whose creator chose to pay reflections in ETH or another token keeps the hook's
+  // reflection share in kind (pendingConversion) until the V4ReflectionConverter sells it. Each tick, for
+  // every such token:
+  //   1. CONVERT: once the pending pile is worth converting, quote the sale from the pool (same off-chain
+  //      floor as the other sweeps), and for another-token payouts also quote the purchase of the target,
+  //      then call converter.convert(token, minEthOut, minPayoutOut).
+  //   2. PAY: walk the token's holder list with token.payBatch(batchSize, minPayout) until a whole round
+  //      has been made (or the per-tick batch limit is reached; the cursor persists on-chain, so an
+  //      unfinished round simply continues next tick). Holders owed less than the minimum keep accruing.
+  // Nobody has to claim; claimReflections() on the token stays available as a fallback.
+  const reflectionModeCache = new Map(); // token -> { mode, payoutToken } (a token's choice never changes)
+
+  async function readPayoutChoice(tokenAddress) {
+    const key = tokenAddress.toLowerCase();
+    if (reflectionModeCache.has(key)) return reflectionModeCache.get(key);
+    try {
+      const t = await hre.ethers.getContractAt(V4_PAYOUT_TOKEN_ABI, tokenAddress, hre.ethers.provider);
+      const choice = { mode: Number(await t.payoutMode()), payoutToken: await t.payoutToken() };
+      reflectionModeCache.set(key, choice);
+      return choice;
+    } catch (err) {
+      // an older token without a payout choice: in kind (cached, it can never gain one)
+      const choice = { mode: 0, payoutToken: hre.ethers.ZeroAddress };
+      reflectionModeCache.set(key, choice);
+      return choice;
+    }
+  }
+
+  // ETH -> `target` token through the target's own (ETH, token) V4 pool, within the converter's price limit
+  // (converter is tax-exempt, so no tax comes off). Returns the expected token output (0n if it can't quote).
+  async function quoteV4ConverterBuy(targetEntry, converterContract, ethIn) {
+    const ctx = await getV4Context();
+    if (!ctx || !targetEntry || !targetEntry.poolId || ethIn <= 0n) return 0n;
+    const { sqrtPriceX96 } = await readV4Slot0(ctx.pm, targetEntry.poolId);
+    if (sqrtPriceX96 === 0n) return 0n;
+    const poolSlot = BigInt(
+      hre.ethers.keccak256(hre.ethers.AbiCoder.defaultAbiCoder().encode(["bytes32", "uint256"], [targetEntry.poolId, V4_POOLS_MAPPING_SLOT]))
+    );
+    const liquidity = BigInt(await ctx.pm.extsload(hre.ethers.toBeHex(poolSlot + 3n, 32))) & ((1n << 128n) - 1n);
+    if (liquidity === 0n) return 0n;
+    let effIn = (ethIn * (1000000n - V4_LP_FEE_PPM)) / 1000000n;
+    // Price limit (V4ReflectionConverter._buyPriceLimit): sqrt price shrinks by sqrt(1 - slippage) while buying.
+    const slippageBps = await converterContract.swapSlippageBps();
+    const factorX4 = bigIntSqrt((10000n - BigInt(slippageBps)) * 10n ** 4n);
+    const limit = (sqrtPriceX96 * factorX4) / 10n ** 4n;
+    if (limit >= sqrtPriceX96) return 0n;
+    const maxEffIn = (liquidity * (sqrtPriceX96 - limit) << 96n) / (sqrtPriceX96 * limit);
+    if (effIn > maxEffIn) effIn = maxEffIn;
+    if (effIn <= 0n) return 0n;
+    const ethReserve = (liquidity << 96n) / sqrtPriceX96;
+    const tokenReserve = (liquidity * sqrtPriceX96) >> 96n;
+    return (tokenReserve * effIn) / (ethReserve + effIn);
+  }
+
+  // The smallest payout (in the payout asset's own units) worth gas: reflectionPayoutMinPayoutWei of ETH value.
+  // For ETH payouts that is the number itself; for another token it is converted at the target pool's spot price.
+  async function reflectionMinPayoutUnits(choice, trackedByAddress) {
+    const minWei = reflectionPayoutMinPayoutWeiBig();
+    if (choice.mode === 1 || minWei === 0n) return minWei > 0n ? minWei : 1n;
+    const ctx = await getV4Context();
+    const target = trackedByAddress[choice.payoutToken.toLowerCase()];
+    if (!ctx || !target || !target.poolId) return 1n;
+    const { sqrtPriceX96 } = await readV4Slot0(ctx.pm, target.poolId);
+    if (sqrtPriceX96 === 0n) return 1n;
+    // tokens per ETH = (sqrtP / 2^96)^2
+    const tokensPerEthX = (sqrtPriceX96 * sqrtPriceX96) >> 96n; // scaled by 2^96
+    const units = (minWei * tokensPerEthX) >> 96n;
+    return units > 0n ? units : 1n;
+  }
+
+  async function sweepV4ReflectionPayoutsOnce() {
+    const ctx = await getV4Context();
+    if (!ctx) return;
+    const slots = await hre.ethers.getContractAt(V4_REFLECTION_SLOT_ABI, ctx.slotsAddress, hre.ethers.provider);
+    const converterAddress = await slots.reflectionConverter().catch(() => hre.ethers.ZeroAddress);
+    const tracked = await readTrackedTokens(network);
+    const entries = Object.values(tracked).filter((e) => e.protocol === "v4" && e.poolId && e.tokenAddress && e.customTax);
+    const byAddress = {};
+    for (const e of Object.values(tracked)) if (e.tokenAddress) byAddress[e.tokenAddress.toLowerCase()] = e;
+
+    let conv = null;
+    let canConvert = false;
+    if (converterAddress && converterAddress !== hre.ethers.ZeroAddress) {
+      conv = await hre.ethers.getContractAt(V4_REFLECTION_CONVERTER_ABI, converterAddress, relayerWallet);
+      try {
+        const isKeeper = await conv.keepers(relayerWallet.address);
+        const ownerAddr = await conv.owner();
+        canConvert = isKeeper || String(ownerAddr).toLowerCase() === relayerWallet.address.toLowerCase();
+        if (!canConvert) {
+          v4KeeperWarnOnce(
+            `keeper:${converterAddress}`,
+            `[v4-reflections] relayer wallet ${relayerWallet.address} is not an approved keeper on the reflection converter ${converterAddress}, ` +
+              "so it cannot convert reflections to ETH / other tokens. Owner: call setKeeper(relayerWallet, true) on the converter. Holder payouts of already-converted funds still run."
+          );
+        }
+      } catch (err) {
+        // best effort
+      }
+      try {
+        const hook = await hre.ethers.getContractAt(V4_HOOK_EXEMPT_ABI, await ctx.hook.getAddress(), hre.ethers.provider);
+        if (!(await hook.taxExempt(converterAddress))) {
+          v4KeeperWarnOnce(
+            `exempt:${converterAddress}`,
+            `[v4-reflections] the reflection converter ${converterAddress} is NOT tax-exempt on the V4 hook, so its sales and purchases are taxed. ` +
+              "Call setTaxExempt(converter, true) on the V4 factory. Conversions are skipped until it is."
+          );
+          canConvert = false;
+        }
+      } catch (err) {
+        // best effort
+      }
+    }
+
+    const slipBps = reflectionPayoutSlippageBpsBig();
+    for (const entry of entries) {
+      const tokenAddress = entry.tokenAddress;
+      try {
+        const choice = await readPayoutChoice(tokenAddress);
+        if (choice.mode === 0) continue;
+        const token = await hre.ethers.getContractAt(V4_PAYOUT_TOKEN_ABI, tokenAddress, relayerWallet);
+
+        // 1. convert the pending pile
+        if (conv && canConvert && String(await token.converter()).toLowerCase() === converterAddress.toLowerCase()) {
+          try {
+            const pending = await token.pendingConversion();
+            const carry = choice.mode === 2 ? await conv.carryEth(tokenAddress) : 0n;
+            if ((pending > 0n && pending >= (await conv.convertThreshold(tokenAddress))) || carry > 0n) {
+              const cap = await conv.maxConvertAmount(tokenAddress);
+              const amountIn = cap > 0n && pending > cap ? cap : pending;
+              let predictedEth = 0n;
+              let minEthOut = 0n;
+              if (amountIn > 0n) {
+                predictedEth = await quoteV4DistributorSale(entry, converterAddress, conv, amountIn);
+                minEthOut = (predictedEth * (10000n - slipBps)) / 10000n;
+              }
+              let minPayoutOut = 0n;
+              let ok = amountIn === 0n || predictedEth > 0n;
+              if (ok && choice.mode === 2) {
+                const target = byAddress[choice.payoutToken.toLowerCase()];
+                const predictedTokens = await quoteV4ConverterBuy(target, conv, predictedEth + carry);
+                if (predictedTokens > 0n) minPayoutOut = (predictedTokens * (10000n - slipBps)) / 10000n;
+                else ok = false;
+              }
+              if (ok && (choice.mode === 2 || minEthOut > 0n)) {
+                const tx = await sendRelayerTx(() => conv.convert(tokenAddress, minEthOut > 0n ? minEthOut : 1n, minPayoutOut));
+                const receipt = await tx.wait();
+                console.log(`[v4-reflections] converted ${tokenAddress} (pending ${pending}, predicted ${predictedEth} wei, mode ${choice.mode}) in tx ${receipt.hash}.`);
+              }
+            }
+          } catch (err) {
+            console.warn(`[v4-reflections] convert skip ${tokenAddress}: ${err.shortMessage || err.message}${err.data ? ` (data ${err.data})` : ""}`);
+          }
+        }
+
+        // 2. pay holders automatically, in batches. Only holders owed at least the minimum are paid (the
+        //    rest keep accruing), so no gas goes on dust. token.claimFor() pays each listed holder their own
+        //    share; payBatch() is the same thing walking the on-chain list, for anyone else who wants to run it.
+        const held = await token.payoutHeld();
+        const holders = Number(await token.holderCount());
+        if (held > 0n && holders > 0) {
+          const minPayout = await reflectionMinPayoutUnits(choice, byAddress);
+          if (held >= minPayout) {
+            const due = [];
+            for (let from = 0; from < holders; from += 100) {
+              const idx = Array.from({ length: Math.min(100, holders - from) }, (_, k) => from + k);
+              const rows = await Promise.all(
+                idx.map(async (i) => {
+                  const h = await token.holderAt(i);
+                  return { h, owed: await token.pendingReflections(h) };
+                })
+              );
+              for (const r of rows) if (r.owed >= minPayout) due.push(r.h);
+            }
+            const batchSize = relayerSettings.reflectionPayoutBatchSize;
+            let paidHolders = 0;
+            for (let i = 0, n = 0; i < due.length && n < relayerSettings.reflectionPayoutMaxBatchesPerTick; i += batchSize, n++) {
+              const slice = due.slice(i, i + batchSize);
+              const tx = await sendRelayerTx(() => token.claimFor(slice));
+              const receipt = await tx.wait();
+              paidHolders += slice.length;
+              console.log(`[v4-reflections] paid ${slice.length} holder(s) of ${tokenAddress} in tx ${receipt.hash}.`);
+            }
+            if (due.length > paidHolders) console.log(`[v4-reflections] ${due.length - paidHolders} more holder(s) of ${tokenAddress} are owed; continuing next tick.`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[v4-reflections] skip ${tokenAddress}: ${err.message}`);
+      }
+    }
+  }
+
   async function v4FeeWalletPollLoop() {
     if (v4KeeperOn()) await sweepV4FeeWalletOnce().catch((err) => console.error(`[v4-fee-wallet] sweep error: ${err.message}`));
     setTimeout(v4FeeWalletPollLoop, relayerSettings.feeWalletPollIntervalMs);
@@ -5085,6 +5339,10 @@ async function main() {
   async function v4CreatorRewardsPollLoop() {
     if (v4KeeperOn()) await sweepV4CreatorRewardsOnce().catch((err) => console.error(`[v4-creator-rewards] sweep error: ${err.message}`));
     setTimeout(v4CreatorRewardsPollLoop, relayerSettings.creatorRewardsPollIntervalMs);
+  }
+  async function v4ReflectionPayoutPollLoop() {
+    if (v4KeeperOn()) await sweepV4ReflectionPayoutsOnce().catch((err) => console.error(`[v4-reflections] sweep error: ${err.message}`));
+    setTimeout(v4ReflectionPayoutPollLoop, relayerSettings.reflectionPayoutPollIntervalMs);
   }
   async function v4PlatformRewardsPollLoop() {
     if (v4KeeperOn()) await sweepV4PlatformRewardsOnce().catch((err) => console.error(`[v4-platform-rewards] sweep error: ${err.message}`));
@@ -5173,6 +5431,11 @@ async function main() {
       v4FeeWalletPollLoop();
       v4CreatorRewardsPollLoop();
       v4PlatformRewardsPollLoop();
+      v4ReflectionPayoutPollLoop();
+      console.log(
+        `V4 reflection payouts: every ${relayerSettings.reflectionPayoutPollIntervalMs}ms the keeper converts pending reflections (ETH / other token) and pays holders ` +
+          `in batches of ${relayerSettings.reflectionPayoutBatchSize}. Needs the converter set on the V4 factory (reflectionConverter), tax-exempt, with this wallet as a keeper.`
+      );
       if (!V4_COMPOUNDER_ADDRESS) {
         console.warn("V4_COMPOUNDER_ADDRESS is not set — the V4 compounder keeper is not started.");
       } else {
