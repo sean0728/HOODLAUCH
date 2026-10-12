@@ -192,7 +192,7 @@ describe("V4CreatorRewardsDistributor security audit", function () {
     it("orphaned balances: only after the creator renounces, never touching other tokens", async () => {
       await (await factory.setTaxDefaults(feeWallet.address, 100, await A(feed), 50_000n, 3600, 0, 10)).wait();
       const s = salt++;
-      await customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(0, 0, 0, 0), fs(0, 0, 0, 0), ZERO, ETH("10"), 0, 0, s, { value: LAUNCH_FEE + ETH("10") });
+      await customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(0, 0, 0, 0), fs(0, 0, 0, 0), [0, "0x0000000000000000000000000000000000000000"], ZERO, ETH("10"), 0, 0, s, { value: LAUNCH_FEE + ETH("10") });
       const ct = await ethers.getContractAt("V4CustomToken", await customFactory.predictTokenAddress(creator.address, s));
       const key = { currency0: ZERO, currency1: await A(ct), fee: 3000, tickSpacing: 60, hooks: await A(hook) };
       await ct.connect(trader).approve(await A(router), ethers.MaxUint256);

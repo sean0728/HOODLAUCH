@@ -73,7 +73,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
     const salt = saltCounter++;
     const value = CURVE_FEE + creatorBuy;
     const rc = custom
-      ? await (await curveFactory.connect(from).createCustomCurveToken("CV", "CV", SUPPLY, buy, sell, marketing.address, creatorBuy, 0, salt, { value })).wait()
+      ? await (await curveFactory.connect(from).createCustomCurveToken("CV", "CV", SUPPLY, buy, sell, [0, "0x0000000000000000000000000000000000000000"], marketing.address, creatorBuy, 0, salt, { value })).wait()
       : await (await curveFactory.connect(from).createCurveToken("CV", "CV", SUPPLY, creatorBuy, 0, salt, { value })).wait();
     const addr = await curveFactory.predictTokenAddress(from.address, salt, custom);
     const token = await ethers.getContractAt(custom ? "V4CustomToken" : "V4LaunchedToken", addr);
@@ -170,7 +170,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
         .to.be.revertedWithCustomError(curveFactory, "EnforcedPause");
       await expect(curveFactory.connect(creator).createCurveToken("P", "P", SUPPLY, 0, 0, saltCounter++, { value: CURVE_FEE }))
         .to.be.revertedWithCustomError(curveFactory, "EnforcedPause");
-      await expect(curveFactory.connect(creator).createCustomCurveToken("P", "P", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), ZERO, 0, 0, saltCounter++, { value: CURVE_FEE }))
+      await expect(curveFactory.connect(creator).createCustomCurveToken("P", "P", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), [0, "0x0000000000000000000000000000000000000000"], ZERO, 0, 0, saltCounter++, { value: CURVE_FEE }))
         .to.be.revertedWithCustomError(curveFactory, "EnforcedPause");
       await curveFactory.unpause();
       await newCurve({ creatorBuy: ETH("0.05") });
@@ -233,7 +233,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       await curveFactory.setCurveSupplyBps(3000); // max reachable real ETH = 3 * 0.3 / 0.8 = 1.125 < 1.5 target
       await expect(curveFactory.connect(creator).createCurveToken("U", "U", SUPPLY, 0, 0, saltCounter++, { value: CURVE_FEE }))
         .to.be.revertedWith("V4CurveFactory: graduation target unreachable with the current curve settings");
-      await expect(curveFactory.connect(creator).createCustomCurveToken("U", "U", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), ZERO, 0, 0, saltCounter++, { value: CURVE_FEE }))
+      await expect(curveFactory.connect(creator).createCustomCurveToken("U", "U", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), [0, "0x0000000000000000000000000000000000000000"], ZERO, 0, 0, saltCounter++, { value: CURVE_FEE }))
         .to.be.revertedWith("V4CurveFactory: graduation target unreachable with the current curve settings");
       await curveFactory.setPoolSeedTargetWei(ETH("1.1")); // reachable again
       const { addr } = await newCurve();
@@ -559,7 +559,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       expect(usdHigh).to.be.gte(50_000n);
       await expect(curveFactory.connect(creator).createCurveToken("H", "H", SUPPLY, 0, 0, saltCounter++, { value: CURVE_FEE }))
         .to.be.revertedWith("V4CurveFactory: curve would graduate above the platform tax target");
-      await expect(curveFactory.connect(creator).createCustomCurveToken("H", "H", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), ZERO, 0, 0, saltCounter++, { value: CURVE_FEE }))
+      await expect(curveFactory.connect(creator).createCustomCurveToken("H", "H", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), [0, "0x0000000000000000000000000000000000000000"], ZERO, 0, 0, saltCounter++, { value: CURVE_FEE }))
         .to.be.revertedWith("V4CurveFactory: curve would graduate above the platform tax target");
       await feed.set(2000n * 10n ** 8n);
       await newCurve(); // back at $2000: fine
@@ -621,7 +621,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       expect(await paid(() => factory.connect(creator).createToken("P", "P", SUPPLY, true, LIQ, 0, 0, saltCounter++, { value: LAUNCH_FEE + LIQ }))).to.deep.equal([LAUNCH_FEE / 2n, LAUNCH_FEE / 2n]);
       // custom tax
       const cs = saltCounter++;
-      expect(await paid(() => customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(100, 0, 0, 100), fs(0, 0, 0, 100), marketing.address, LIQ, 0, 0, cs, { value: LAUNCH_FEE + LIQ }))).to.deep.equal([LAUNCH_FEE / 2n, LAUNCH_FEE / 2n]);
+      expect(await paid(() => customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(100, 0, 0, 100), fs(0, 0, 0, 100), [0, "0x0000000000000000000000000000000000000000"], marketing.address, LIQ, 0, 0, cs, { value: LAUNCH_FEE + LIQ }))).to.deep.equal([LAUNCH_FEE / 2n, LAUNCH_FEE / 2n]);
       // curve (plain and custom): the curve launch fee
       let curveAddr;
       expect(await paid(async () => { curveAddr = (await newCurve()).addr; })).to.deep.equal([CURVE_FEE / 2n, CURVE_FEE / 2n]);

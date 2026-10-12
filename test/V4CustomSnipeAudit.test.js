@@ -75,7 +75,7 @@ describe("Custom-tax / curve snipe protection + V4CustomTokenFactory / V4CustomT
   const warpTo = async (ts) => { await network.provider.send("evm_setNextBlockTimestamp", [Number(ts)]); };
   async function launchCustom({ buy = fs(100, 100, 0, 100), sell = fs(100, 100, 0, 100), liq = ETH("10"), creatorBuy = 0n, from = creator, mw = marketing.address } = {}) {
     const salt = saltCounter++;
-    const rc = await (await customFactory.connect(from).createCustomToken("Custom", "CUS", SUPPLY, buy, sell, mw, liq, creatorBuy, 0, salt, { value: LAUNCH_FEE + liq + creatorBuy })).wait();
+    const rc = await (await customFactory.connect(from).createCustomToken("Custom", "CUS", SUPPLY, buy, sell, [0, "0x0000000000000000000000000000000000000000"], mw, liq, creatorBuy, 0, salt, { value: LAUNCH_FEE + liq + creatorBuy })).wait();
     const token = await ethers.getContractAt("V4CustomToken", await customFactory.predictTokenAddress(from.address, salt));
     for (const w of [trader, sniper, other, third, creator]) {
       await token.connect(w).approve(await A(testRouter), ethers.MaxUint256);
@@ -190,9 +190,9 @@ describe("Custom-tax / curve snipe protection + V4CustomTokenFactory / V4CustomT
   describe("CF. V4CustomTokenFactory", () => {
     it("exact ETH is required: launch fee + liquidity + buy-in; the factory ends every launch empty", async () => {
       const l = ETH("10");
-      await expect(customFactory.connect(creator).createCustomToken("T", "T", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), ZERO, l, 0, 0, saltCounter++, { value: LAUNCH_FEE + l + 1n }))
+      await expect(customFactory.connect(creator).createCustomToken("T", "T", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), [0, "0x0000000000000000000000000000000000000000"], ZERO, l, 0, 0, saltCounter++, { value: LAUNCH_FEE + l + 1n }))
         .to.be.revertedWith("V4CustomTokenFactory: msg.value doesn't match liquidity + buy-in");
-      await expect(customFactory.connect(creator).createCustomToken("T", "T", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), ZERO, l, 0, 0, saltCounter++, { value: LAUNCH_FEE - 1n }))
+      await expect(customFactory.connect(creator).createCustomToken("T", "T", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), [0, "0x0000000000000000000000000000000000000000"], ZERO, l, 0, 0, saltCounter++, { value: LAUNCH_FEE - 1n }))
         .to.be.revertedWith("V4CustomTokenFactory: launch fee not met");
       const { token } = await launchCustom({ creatorBuy: ETH("0.3") });
       expect(await ethers.provider.getBalance(await A(customFactory))).to.equal(0n);
@@ -201,7 +201,7 @@ describe("Custom-tax / curve snipe protection + V4CustomTokenFactory / V4CustomT
 
     it("per-side fees above 5% and a missing marketing wallet are refused", async () => {
       const l = ETH("10");
-      const go = (buy, sell, mw) => customFactory.connect(creator).createCustomToken("T", "T", SUPPLY, buy, sell, mw, l, 0, 0, saltCounter++, { value: LAUNCH_FEE + l });
+      const go = (buy, sell, mw) => customFactory.connect(creator).createCustomToken("T", "T", SUPPLY, buy, sell, [0, "0x0000000000000000000000000000000000000000"], mw, l, 0, 0, saltCounter++, { value: LAUNCH_FEE + l });
       await expect(go(fs(200, 200, 100, 1), fs(0, 0, 0, 0), ZERO)).to.be.reverted; // 501 bps
       await expect(go(fs(0, 0, 0, 0), fs(500, 1, 0, 0), ZERO)).to.be.reverted;
       await expect(go(fs(0, 100, 0, 0), fs(0, 0, 0, 0), ZERO)).to.be.revertedWith("V4CustomToken: marketing wallet required");
@@ -210,10 +210,10 @@ describe("Custom-tax / curve snipe protection + V4CustomTokenFactory / V4CustomT
 
     it("the creator buy-in cap is measured after tax; the clone address is per creator and salt", async () => {
       const l = ETH("1");
-      await expect(customFactory.connect(creator).createCustomToken("T", "T", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), ZERO, l, ETH("1"), 0, saltCounter++, { value: LAUNCH_FEE + ETH("2") }))
+      await expect(customFactory.connect(creator).createCustomToken("T", "T", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), [0, "0x0000000000000000000000000000000000000000"], ZERO, l, ETH("1"), 0, saltCounter++, { value: LAUNCH_FEE + ETH("2") }))
         .to.be.revertedWith("V4CustomTokenFactory: creator buy-in exceeds max allowed share of supply");
       const salt = saltCounter++;
-      const args = ["T", "T", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), ZERO, ETH("10"), 0, 0, salt];
+      const args = ["T", "T", SUPPLY, fs(0, 0, 0, 100), fs(0, 0, 0, 100), [0, ZERO], ZERO, ETH("10"), 0, 0, salt];
       await customFactory.connect(creator).createCustomToken(...args, { value: LAUNCH_FEE + ETH("10") });
       await expect(customFactory.connect(creator).createCustomToken.staticCall(...args, { value: LAUNCH_FEE + ETH("10") })).to.be.reverted;
       await customFactory.connect(other).createCustomToken(...args, { value: LAUNCH_FEE + ETH("10") });

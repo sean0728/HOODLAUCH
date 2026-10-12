@@ -91,7 +91,7 @@ describe("V4 custom tax + bonding curve", function () {
   async function launchCustom({ buy = fs(100, 100, 100, 100), sell = fs(50, 100, 50, 100), liqEth = ETH("10"), buyEth = 0n, wallet = marketing.address, signer = creator } = {}) {
     const salt = nextSalt();
     const tx = await customFactory.connect(signer).createCustomToken(
-      "Custom", "CUS", SUPPLY, buy, sell, wallet, liqEth, buyEth, 0, salt, { value: LAUNCH_FEE + liqEth + buyEth }
+      "Custom", "CUS", SUPPLY, buy, sell, [0, "0x0000000000000000000000000000000000000000"], wallet, liqEth, buyEth, 0, salt, { value: LAUNCH_FEE + liqEth + buyEth }
     );
     const receipt = await tx.wait();
     const token = await ethers.getContractAt("V4CustomToken", await customFactory.predictTokenAddress(signer.address, salt));
@@ -103,7 +103,7 @@ describe("V4 custom tax + bonding curve", function () {
     const salt = nextSalt();
     let tx;
     if (custom) {
-      tx = await curveFactory.connect(signer).createCustomCurveToken("CC", "CC", SUPPLY, buy, sell, marketing.address, creatorBuy, 0, salt, { value: CURVE_FEE + creatorBuy });
+      tx = await curveFactory.connect(signer).createCustomCurveToken("CC", "CC", SUPPLY, buy, sell, [0, "0x0000000000000000000000000000000000000000"], marketing.address, creatorBuy, 0, salt, { value: CURVE_FEE + creatorBuy });
     } else {
       tx = await curveFactory.connect(signer).createCurveToken("CV", "CV", SUPPLY, creatorBuy, 0, salt, { value: CURVE_FEE + creatorBuy });
     }
@@ -142,11 +142,11 @@ describe("V4 custom tax + bonding curve", function () {
   // ================================================================== custom token
   describe("V4CustomToken validation", () => {
     it("rejects >5% per side, and a missing marketing wallet", async () => {
-      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(300, 200, 100, 0), NONE, marketing.address, ETH("10"), 0, 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
+      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(300, 200, 100, 0), NONE, [0, "0x0000000000000000000000000000000000000000"], marketing.address, ETH("10"), 0, 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
         .to.be.revertedWith("V4CustomToken: buy tax exceeds 5%");
-      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, NONE, fs(0, 0, 0, 501), marketing.address, ETH("10"), 0, 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
+      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, NONE, fs(0, 0, 0, 501), [0, "0x0000000000000000000000000000000000000000"], marketing.address, ETH("10"), 0, 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
         .to.be.revertedWith("V4CustomToken: sell tax exceeds 5%");
-      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(0, 100, 0, 0), NONE, ZERO, ETH("10"), 0, 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
+      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(0, 100, 0, 0), NONE, [0, "0x0000000000000000000000000000000000000000"], ZERO, ETH("10"), 0, 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
         .to.be.revertedWith("V4CustomToken: marketing wallet required");
     });
 
@@ -183,9 +183,9 @@ describe("V4 custom tax + bonding curve", function () {
     });
 
     it("needs the exact ETH and the platform terms configured", async () => {
-      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, NONE, NONE, ZERO, ETH("10"), ETH("1"), 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
+      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, NONE, NONE, [0, "0x0000000000000000000000000000000000000000"], ZERO, ETH("10"), ETH("1"), 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
         .to.be.revertedWith("V4CustomTokenFactory: msg.value doesn't match liquidity + buy-in");
-      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, NONE, NONE, ZERO, ETH("10"), 0, 0, nextSalt(), { value: ETH("0.01") }))
+      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, NONE, NONE, [0, "0x0000000000000000000000000000000000000000"], ZERO, ETH("10"), 0, 0, nextSalt(), { value: ETH("0.01") }))
         .to.be.revertedWith("V4CustomTokenFactory: launch fee not met");
     });
 
@@ -195,7 +195,7 @@ describe("V4 custom tax + bonding curve", function () {
       expect(await token.balanceOf(creator.address)).to.equal(ev.args.tokensOut);
       expect(ev.args.tokensOut).to.be.lte((SUPPLY * 500n) / 10_000n);
       expect(await token.balanceOf(marketing.address)).to.be.gt(0n); // marketing share of the buy-in
-      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, NONE, NONE, ZERO, ETH("10"), ETH("2"), 0, nextSalt(), { value: LAUNCH_FEE + ETH("12") }))
+      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, NONE, NONE, [0, "0x0000000000000000000000000000000000000000"], ZERO, ETH("10"), ETH("2"), 0, nextSalt(), { value: LAUNCH_FEE + ETH("12") }))
         .to.be.revertedWith("V4CustomTokenFactory: creator buy-in exceeds max allowed share of supply");
     });
   });
@@ -595,7 +595,7 @@ describe("V4 custom tax + bonding curve", function () {
     });
 
     it("rejects over-limit fees at launch", async () => {
-      await expect(curveFactory.connect(creator).createCustomCurveToken("C", "C", SUPPLY, fs(300, 300, 0, 0), NONE, marketing.address, 0, 0, nextSalt(), { value: CURVE_FEE }))
+      await expect(curveFactory.connect(creator).createCustomCurveToken("C", "C", SUPPLY, fs(300, 300, 0, 0), NONE, [0, "0x0000000000000000000000000000000000000000"], marketing.address, 0, 0, nextSalt(), { value: CURVE_FEE }))
         .to.be.revertedWith("V4CustomToken: buy tax exceeds 5%");
     });
 

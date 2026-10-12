@@ -89,7 +89,7 @@ describe("V4PoolLauncher security audit", function () {
   }
   async function launchCustom({ signer = creator } = {}) {
     const salt = nextSalt();
-    await customFactory.connect(signer).createCustomToken("Custom", "CUS", SUPPLY, fs(100, 100, 0, 0), fs(100, 100, 0, 0), marketing.address,
+    await customFactory.connect(signer).createCustomToken("Custom", "CUS", SUPPLY, fs(100, 100, 0, 0), fs(100, 100, 0, 0), [0, "0x0000000000000000000000000000000000000000"], marketing.address,
       ETH("10"), 0, 0, salt, { value: LAUNCH_FEE + ETH("10") });
     return await customFactory.predictTokenAddress(signer.address, salt);
   }
@@ -135,7 +135,7 @@ describe("V4PoolLauncher security audit", function () {
       await setTerms({ feed: other.address });
       await expect(curveFactory.connect(creator).createCurveToken("CV", "CV", SUPPLY, 0, 0, nextSalt(), { value: CURVE_FEE }))
         .to.be.revertedWith("V4PoolLauncher: price feed is not a contract");
-      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(0,0,0,0), fs(0,0,0,0), ZERO, ETH("10"), 0, 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
+      await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, fs(0,0,0,0), fs(0,0,0,0), [0, "0x0000000000000000000000000000000000000000"], ZERO, ETH("10"), 0, 0, nextSalt(), { value: LAUNCH_FEE + ETH("10") }))
         .to.be.revertedWith("V4PoolLauncher: price feed is not a contract");
     });
 

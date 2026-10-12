@@ -66,7 +66,7 @@ describe("V4LiquidityCompounder / V4SwapRouter / V4Create2Deployer security audi
   }
   async function launchCustom({ buy = fs(0, 0, 300, 0), sell = fs(0, 0, 300, 0), liqEth = ETH("10") } = {}) {
     const salt = saltCounter++;
-    await (await customFactory.connect(creator).createCustomToken("Custom", "CUS", SUPPLY, buy, sell, marketing.address, liqEth, 0n, 0, salt, { value: LAUNCH_FEE + liqEth })).wait();
+    await (await customFactory.connect(creator).createCustomToken("Custom", "CUS", SUPPLY, buy, sell, [0, "0x0000000000000000000000000000000000000000"], marketing.address, liqEth, 0n, 0, salt, { value: LAUNCH_FEE + liqEth })).wait();
     const token = await ethers.getContractAt("V4CustomToken", await customFactory.predictTokenAddress(creator.address, salt));
     for (const w of [trader, attacker]) {
       await token.connect(w).approve(await A(testRouter), ethers.MaxUint256);

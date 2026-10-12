@@ -86,13 +86,14 @@ describe("V4LaunchRelay (gasless custom-tax and curve launches)", function () {
     { name: "reflectionBps", type: "uint16" }, { name: "marketingBps", type: "uint16" },
     { name: "liquidityBps", type: "uint16" }, { name: "burnBps", type: "uint16" },
   ];
+  const PAYOUT_T = [{ name: "mode", type: "uint8" }, { name: "token", type: "address" }];
   const TYPES = {
     custom: { CustomLaunchVoucher: [
       { name: "creator", type: "address" }, { name: "name", type: "string" }, { name: "symbol", type: "string" },
-      { name: "totalSupply", type: "uint256" }, { name: "buyFees", type: "FeeSet" }, { name: "sellFees", type: "FeeSet" },
+      { name: "totalSupply", type: "uint256" }, { name: "buyFees", type: "FeeSet" }, { name: "sellFees", type: "FeeSet" }, { name: "payout", type: "ReflectionPayout" },
       { name: "marketingWallet", type: "address" }, { name: "liquidityEthAmount", type: "uint256" },
       { name: "creatorBuyEthAmount", type: "uint256" }, { name: "minCreatorTokensOut", type: "uint256" },
-      { name: "fee", type: "uint256" }, { name: "salt", type: "uint256" }, { name: "deadline", type: "uint256" } ], FeeSet: FEESET },
+      { name: "fee", type: "uint256" }, { name: "salt", type: "uint256" }, { name: "deadline", type: "uint256" } ], FeeSet: FEESET, ReflectionPayout: PAYOUT_T },
     curve: { CurveLaunchVoucher: [
       { name: "creator", type: "address" }, { name: "name", type: "string" }, { name: "symbol", type: "string" },
       { name: "totalSupply", type: "uint256" }, { name: "creatorBuyEthAmount", type: "uint256" },
@@ -100,10 +101,10 @@ describe("V4LaunchRelay (gasless custom-tax and curve launches)", function () {
       { name: "salt", type: "uint256" }, { name: "deadline", type: "uint256" } ] },
     customCurve: { CustomCurveLaunchVoucher: [
       { name: "creator", type: "address" }, { name: "name", type: "string" }, { name: "symbol", type: "string" },
-      { name: "totalSupply", type: "uint256" }, { name: "buyFees", type: "FeeSet" }, { name: "sellFees", type: "FeeSet" },
+      { name: "totalSupply", type: "uint256" }, { name: "buyFees", type: "FeeSet" }, { name: "sellFees", type: "FeeSet" }, { name: "payout", type: "ReflectionPayout" },
       { name: "marketingWallet", type: "address" }, { name: "creatorBuyEthAmount", type: "uint256" },
       { name: "minCreatorTokensOut", type: "uint256" }, { name: "fee", type: "uint256" },
-      { name: "salt", type: "uint256" }, { name: "deadline", type: "uint256" } ], FeeSet: FEESET },
+      { name: "salt", type: "uint256" }, { name: "deadline", type: "uint256" } ], FeeSet: FEESET, ReflectionPayout: PAYOUT_T },
   };
   const hashFn = { custom: "hashCustomVoucher", curve: "hashCurveVoucher", customCurve: "hashCustomCurveVoucher" };
   const relayFn = { custom: "relayedCreateCustomToken", curve: "relayedCreateCurveToken", customCurve: "relayedCreateCustomCurveToken" };
@@ -119,7 +120,7 @@ describe("V4LaunchRelay (gasless custom-tax and curve launches)", function () {
       fee: kind === "custom" ? LAUNCH_FEE : CURVE_FEE,
       salt: nextSalt(), deadline: (await now()) + 10n * 24n * 3600n,
     };
-    if (kind !== "curve") Object.assign(base, { buyFees: fs(100, 100, 100, 100), sellFees: fs(50, 100, 50, 100), marketingWallet: marketing.address });
+    if (kind !== "curve") Object.assign(base, { buyFees: fs(100, 100, 100, 100), sellFees: fs(50, 100, 50, 100), payout: { mode: 0, token: ZERO }, marketingWallet: marketing.address });
     if (kind === "custom") base.liquidityEthAmount = ETH("10");
     // keep struct field order stable for ethers' tuple encoding
     return { ...base, ...over };
@@ -290,10 +291,19 @@ describe("V4LaunchRelay (gasless custom-tax and curve launches)", function () {
       await expect(relay.connect(relayerW).relayedCreateCustomToken(tampered, sig)).to.be.reverted;
     });
 
+    it("the reflection payout choice is part of what the creator signs", async () => {
+      for (const kind of ["custom", "customCurve"]) {
+        const v = await voucher(kind); await deposit(kind, v);
+        const sig = await sign(kind, v);
+        const tampered = { ...orderFor(kind, v), payout: { mode: 1, token: ZERO } };
+        await expect(relay.connect(relayerW)[relayFn[kind]](tampered, sig)).to.be.revertedWith("V4LaunchRelay: signature does not match voucher creator");
+      }
+    });
+
     it("rejects a signature from one voucher type replayed as another", async () => {
       const v = await voucher("curve"); await deposit("curve", v);
       const sig = await sign("curve", v);
-      const asCustomCurve = { ...v, buyFees: fs(0, 0, 0, 0), sellFees: fs(0, 0, 0, 0), marketingWallet: ZERO };
+      const asCustomCurve = { ...v, buyFees: fs(0, 0, 0, 0), sellFees: fs(0, 0, 0, 0), payout: { mode: 0, token: ZERO }, marketingWallet: ZERO };
       await expect(relay.connect(relayerW).relayedCreateCustomCurveToken(orderFor("customCurve", asCustomCurve), sig)).to.be.reverted;
     });
 
@@ -379,7 +389,7 @@ describe("V4LaunchRelay (gasless custom-tax and curve launches)", function () {
     it("a direct caller cannot name another creator by appending an address", async () => {
       const salt = nextSalt();
       const data = customFactory.interface.encodeFunctionData("createCustomToken", [
-        "X", "X", SUPPLY, fs(0, 0, 0, 0), fs(0, 0, 0, 0), marketing.address, ETH("10"), 0, 0, salt]);
+        "X", "X", SUPPLY, fs(0, 0, 0, 0), fs(0, 0, 0, 0), [0, ZERO], marketing.address, ETH("10"), 0, 0, salt]);
       const forged = data + stranger.address.slice(2).toLowerCase();
       await (await creator.sendTransaction({ to: await A(customFactory), data: forged, value: LAUNCH_FEE + ETH("10") })).wait();
       // msg.sender (creator) is the creator, not the appended address
@@ -390,7 +400,7 @@ describe("V4LaunchRelay (gasless custom-tax and curve launches)", function () {
 
     it("a direct caller still pays the full launch fee", async () => {
       await expect(customFactory.connect(creator).createCustomToken(
-        "X", "X", SUPPLY, fs(0, 0, 0, 0), fs(0, 0, 0, 0), marketing.address, ETH("10"), 0, 0, nextSalt(), { value: ETH("10") }
+        "X", "X", SUPPLY, fs(0, 0, 0, 0), fs(0, 0, 0, 0), [0, ZERO], marketing.address, ETH("10"), 0, 0, nextSalt(), { value: ETH("10") }
       )).to.be.revertedWith("V4CustomTokenFactory: msg.value doesn't match liquidity + buy-in");
       await expect(curveFactory.connect(creator).createCurveToken("X", "X", SUPPLY, 0, 0, nextSalt(), { value: 0 }))
         .to.be.revertedWith("V4CurveFactory: incorrect ETH sent");

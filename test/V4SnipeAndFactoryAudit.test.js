@@ -74,7 +74,7 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
   }
   async function customLaunch({ buy = fs(0, 0, 0, 100), sell = fs(0, 0, 0, 100), liq = ETH("10"), creatorBuy = 0n } = {}) {
     const salt = saltCounter++;
-    const rc = await (await customFactory.connect(creator).createCustomToken("Custom", "CUS", SUPPLY, buy, sell, marketing.address, liq, creatorBuy, 0, salt, { value: LAUNCH_FEE + liq + creatorBuy })).wait();
+    const rc = await (await customFactory.connect(creator).createCustomToken("Custom", "CUS", SUPPLY, buy, sell, [0, "0x0000000000000000000000000000000000000000"], marketing.address, liq, creatorBuy, 0, salt, { value: LAUNCH_FEE + liq + creatorBuy })).wait();
     const token = await ethers.getContractAt("V4CustomToken", await customFactory.predictTokenAddress(creator.address, salt));
     for (const w of [trader, sniper]) await token.connect(w).approve(await A(testRouter), ethers.MaxUint256);
     const key = await keyOf(await A(token));
