@@ -888,6 +888,34 @@
   .admin-action-row .field{flex:1; min-width:120px; margin-bottom:0;}
   .admin-action-row .btn{flex:none;}
   .admin-empty{color:var(--paper-500); font-size:.86rem;}
+  /* Revenue tab */
+  .rev-toolbar{display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:16px;}
+  .rev-periods{display:inline-flex; border:1px solid var(--line-strong); border-radius:var(--radius-sm); overflow:hidden;}
+  .rev-periods button{font-family:var(--font-mono); font-size:.72rem; letter-spacing:.04em; color:var(--paper-500); background:var(--ink-900); border:none; border-right:1px solid var(--line); padding:8px 14px; cursor:pointer;}
+  .rev-periods button:last-child{border-right:none;}
+  .rev-periods button:hover{color:var(--paper-100);}
+  .rev-periods button.active{color:var(--signal-300); background:var(--signal-wash);}
+  .rev-tiles{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:20px;}
+  @media (max-width: 980px){ .rev-tiles{grid-template-columns:repeat(2,1fr);} }
+  @media (max-width: 520px){ .rev-tiles{grid-template-columns:1fr;} }
+  .rev-tile{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-md); padding:16px 18px;}
+  .rev-tile.lead{border-color:rgba(255,160,58,.35); background:linear-gradient(180deg, rgba(255,160,58,.07), var(--ink-900));}
+  .rev-tile .l{font-family:var(--font-mono); font-size:.64rem; text-transform:uppercase; letter-spacing:.06em; color:var(--paper-500); margin-bottom:8px;}
+  .rev-tile .v{font-family:var(--font-display); font-size:1.5rem; font-weight:700; color:var(--paper-100); font-variant-numeric:tabular-nums; word-break:break-all;}
+  .rev-tile .v small{font-family:var(--font-mono); font-size:.7rem; font-weight:500; color:var(--paper-500); margin-left:4px;}
+  .rev-tile .v.neg{color:var(--critical-500);}
+  .rev-tile .v.pos{color:var(--good-500);}
+  .rev-tile .s{font-size:.74rem; color:var(--paper-500); margin-top:6px; line-height:1.45;}
+  .rev-two{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:20px; align-items:start; margin-bottom:20px;}
+  @media (max-width: 980px){ .rev-two{grid-template-columns:minmax(0,1fr);} }
+  .rev-two > *, .rev-tiles > *{min-width:0;}
+  #revenueWrap .dc-wrap{overflow-x:auto;}
+  .rev-table td.n, .rev-table th.n{text-align:right;}
+  .rev-table td.sub{color:var(--paper-500);}
+  .rev-table tr.total td{color:var(--paper-100); font-weight:600; border-top:1px solid var(--line-strong);}
+  .rev-books{font-family:var(--font-mono); font-size:.72rem; margin-top:10px;}
+  .rev-books.ok{color:var(--good-500);}
+  .rev-books.bad{color:var(--critical-500);}
   .admin-locked{max-width:480px; margin:60px auto; text-align:center;}
   .admin-locked .glyph{font-size:2rem; margin-bottom:14px;}
   .admin-status-badge{display:inline-block; font-family:var(--font-mono); font-size:.66rem; letter-spacing:.05em; padding:2px 9px; border-radius:999px; margin-left:10px; vertical-align:middle; border:1px solid var(--line-strong); background:var(--ink-800); color:var(--paper-500);}
@@ -14642,6 +14670,7 @@
     { key: "contracts", label: "Contracts" },
     { key: "deployed", label: "Deployed contracts" },
     { key: "rewards", label: "Rewards" },
+    { key: "revenue", label: "Revenue" },
     { key: "relayer", label: "Relayer settings" },
     { key: "solana", label: "Solana" },
     { key: "deploy", label: "Deploy" },
@@ -16887,6 +16916,229 @@
     }
   }
 
+  // ---------------- Revenue tab ----------------
+  // Where the platform's fee money went, from the relayer's GET /revenue: the V4FeeWalletDistributor's own
+  // accounting (all-time counters read from the contract, plus its events summed for the chosen period) and the gas
+  // the relayer wallet paid to run the fee jobs. "Net to fee wallet" = ETH actually paid to the fee wallet minus that gas.
+  // Plain server read over fetch(), so like the other server-fed panels it works with no wallet connected.
+  let revenuePeriod = "7d";
+  let revenueData = null;
+  const REV_PERIODS = [["24h","24 hours"],["7d","7 days"],["30d","30 days"],["all","All time"]];
+  const REV_KIND_LABELS = {
+    fee_in: "Fees received", conversion: "In-kind sale", buyback: "Platform-token buyback", buyback_failed: "Buyback failed, ETH kept for fee wallet",
+    tokens_split: "Burn / airdrop split", airdrop_done: "Airdrop round paid", paid: "Paid to fee wallet",
+  };
+  const REV_GAS_LABELS = { "flush": "Fee payout (flush)", "fee-wallet-swap": "Fee-wallet conversion", "fee-wallet-claim": "Claim to fee wallet", "buyback": "Platform-token buyback", "airdrop": "Airdrop round" };
+
+  function revBig(v){ try{ return BigInt(v==null ? 0 : v); }catch(e){ return 0n; } }
+  // 18-decimal amount (ETH or platform token) as text, keeping a sign; at least `d` significant decimals for tiny values.
+  function revAmt(v, d=6){
+    const b = revBig(v);
+    const neg = b < 0n;
+    const abs = neg ? -b : b;
+    let out = weiToEtherString(abs, d);
+    if(out==="0" && abs>0n) out = "<" + (d>0 ? "0."+"0".repeat(d-1)+"1" : "1");
+    return (neg ? "−" : "") + out;
+  }
+  function revTxLink(hash){
+    const base = ((NETWORKS[appMode] && NETWORKS[appMode].blockExplorerUrls && NETWORKS[appMode].blockExplorerUrls[0]) || "").replace(/\/+$/,"");
+    const short = String(hash).slice(0,10)+"…";
+    return base && /^0x[0-9a-fA-F]{64}$/.test(hash)
+      ? `<a href="${escapeHtml(base)}/tx/${escapeHtml(hash)}" target="_blank" rel="noopener noreferrer">${escapeHtml(short)}</a>`
+      : `<span>${escapeHtml(short)}</span>`;
+  }
+  function revEventDetail(e){
+    const d = e.data || {};
+    switch(e.kind){
+      case "fee_in": return { amt: revAmt(d.amount)+" ETH", note: `${revAmt(d.credited)} owed to fee wallet · ${revAmt(d.earmarked)} earmarked for buyback` };
+      case "conversion": return { amt: revAmt(d.credited)+" ETH", note: `sold ${revAmt(d.tokensSold,2)} of the fee token` };
+      case "buyback": return { amt: revAmt(d.ethIn)+" ETH", note: `bought ${revAmt(d.tokensOut,2)} platform token` };
+      case "buyback_failed": return { amt: revAmt(d.ethKept)+" ETH", note: "the buy could not run; the ETH went to the fee wallet" };
+      case "tokens_split": return { amt: revAmt(d.tokensIn,2)+" tokens", note: `${revAmt(d.burned,2)} burned · ${revAmt(d.toAirdrop,2)} queued for airdrop` };
+      case "airdrop_done": return { amt: revAmt(d.totalDistributed,2)+" tokens", note: "airdropped to platform-token holders" };
+      case "paid": return { amt: revAmt(d.amount)+" ETH", note: `to ${fmtAddrSafe(d.feeWallet)}` };
+      default: return { amt: "", note: "" };
+    }
+  }
+  function revCsv(data){
+    const q = (v) => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
+    const s = data.summary || {};
+    const rows = [["section","item","value"]];
+    rows.push(["period","period",data.period]);
+    for(const k of ["feesInEth","creditedToFeeWallet","paidToFeeWallet","gasWei","netToFeeWallet","netAccrued","buybackEthSpent","platformTokensBought","tokensBurned","tokensQueuedForAirdrop","airdropDistributed"]){
+      rows.push(["summary",k,s[k]]);
+    }
+    for(const [c,x] of Object.entries(s.gasByCategory||{})) rows.push(["gas",c+" (wei)",x.wei],["gas",c+" (txs)",x.count]);
+    if(data.onchain) for(const [k,v] of Object.entries(data.onchain)) rows.push(["on-chain all-time",k,v]);
+    rows.push([]);
+    rows.push(["time","kind","tx","detail"]);
+    for(const e of (data.recent||[])) rows.push([new Date(e.t).toISOString(), e.kind, e.txHash, JSON.stringify(e.data)]);
+    for(const g of (data.gasRecent||[])) rows.push([new Date(g.t).toISOString(), "gas:"+g.category, g.txHash, g.costWei]);
+    return rows.map(r=>r.map(q).join(",")).join("\n");
+  }
+
+  function revenueHTML(data){
+    const s = data.summary;
+    const on = data.onchain;
+    const periodLabel = (REV_PERIODS.find(p=>p[0]===data.period)||[,data.period])[1];
+    const net = revBig(s.netToFeeWallet);
+    const netAcc = revBig(s.netAccrued);
+    const claimable = on ? revBig(on.ethClaimable) : null;
+    const gasRows = Object.entries(s.gasByCategory||{})
+      .filter(([c,x])=> x.count>0 || REV_GAS_LABELS[c])
+      .map(([c,x])=>`<tr><td>${escapeHtml(REV_GAS_LABELS[c]||c)}</td><td class="n">${x.count}</td><td class="n">${revAmt(x.wei,6)}</td></tr>`).join("");
+    const events = (data.recent||[]).map(e=>{
+      const d = revEventDetail(e);
+      return `<tr><td>${escapeHtml(new Date(e.t).toLocaleString())}</td><td>${escapeHtml(REV_KIND_LABELS[e.kind]||e.kind)}</td><td class="n">${escapeHtml(d.amt)}</td><td class="sub" style="white-space:normal;">${d.note}</td><td>${revTxLink(e.txHash)}</td></tr>`;
+    }).join("");
+    const gasLog = (data.gasRecent||[]).map(g=>`<tr><td>${escapeHtml(new Date(g.t).toLocaleString())}</td><td>${escapeHtml(REV_GAS_LABELS[g.category]||g.category)}</td><td class="n">${revAmt(g.costWei,7)} ETH</td><td>${revTxLink(g.txHash)}</td></tr>`).join("");
+
+    let books = "";
+    let allTime = "";
+    if(on){
+      const recv = revBig(on.ethReceived), conv = revBig(on.ethFromConversions), cred = revBig(on.ethCreditedToFeeWallet), paid = revBig(on.ethPaidToFeeWallet);
+      const spent = revBig(on.ethSpentOnBuyback), pend = revBig(on.ethPendingBuyback), acq = revBig(on.platformTokensAcquired);
+      const burned = revBig(on.platformTokensBurned), queued = revBig(on.platformTokensQueuedForAirdrop);
+      const balanced = (recv + conv === cred + spent + pend) && (paid + revBig(on.ethClaimable) === cred) && (acq === burned + queued);
+      books = `<div class="rev-books ${balanced?"ok":"bad"}">${balanced ? "✓ The contract's books balance: ETH in = owed to the fee wallet + spent on buyback + still earmarked; paid + unclaimed = owed; tokens bought = burned + queued." : "✗ The contract's counters do not add up — check the distributor before trusting these figures."}</div>`;
+      allTime = `
+        <div class="panel admin-panel" style="margin-bottom:20px;">
+          <div class="admin-panel-head"><h3>All-time totals <span class="admin-status-badge on">on-chain</span></h3></div>
+          <p class="admin-empty" style="margin-bottom:12px;">Read straight from the fee-wallet distributor's own counters, so they cover its whole life regardless of the period above (gas is not on-chain, so it is only in the period figures).</p>
+          <div class="dc-wrap"><table class="dc-table rev-table"><tbody>
+            <tr><td>ETH received (platform fee payouts, curve fees)</td><td class="n">${revAmt(on.ethReceived)} ETH</td></tr>
+            <tr><td>ETH from selling in-kind fee tokens (older pools)</td><td class="n">${revAmt(on.ethFromConversions)} ETH</td></tr>
+            <tr><td>Owed to the fee wallet</td><td class="n">${revAmt(on.ethCreditedToFeeWallet)} ETH</td></tr>
+            <tr><td class="sub">of which already paid out</td><td class="n sub">${revAmt(on.ethPaidToFeeWallet)} ETH</td></tr>
+            <tr><td class="sub">of which waiting to be claimed</td><td class="n sub">${revAmt(on.ethClaimable)} ETH</td></tr>
+            <tr><td>Spent on platform-token buyback</td><td class="n">${revAmt(on.ethSpentOnBuyback)} ETH</td></tr>
+            <tr><td class="sub">earmarked, buyback not run yet</td><td class="n sub">${revAmt(on.ethPendingBuyback)} ETH</td></tr>
+            <tr><td class="sub">buyback ETH sent to the fee wallet instead (buy failed)</td><td class="n sub">${revAmt(on.ethBuybackFallback)} ETH</td></tr>
+            <tr><td>Platform token acquired</td><td class="n">${revAmt(on.platformTokensAcquired,2)}</td></tr>
+            <tr><td class="sub">burned</td><td class="n sub">${revAmt(on.platformTokensBurned,2)}</td></tr>
+            <tr><td class="sub">queued for holder airdrop</td><td class="n sub">${revAmt(on.platformTokensQueuedForAirdrop,2)} (${revAmt(on.platformTokensPendingAirdrop,2)} still waiting for a round)</td></tr>
+          </tbody></table></div>
+          ${books}
+        </div>`;
+    } else {
+      allTime = `<div class="panel admin-panel" style="margin-bottom:20px;"><p class="admin-empty">This fee-wallet distributor was deployed before the accounting counters existed, so there are no on-chain all-time totals. The figures above are summed from its events since the relayer started indexing (block ${escapeHtml(String((data.indexer||{}).cursor==null?"…":"up to "+data.indexer.cursor))}); redeploy to get verifiable all-time totals.</p></div>`;
+    }
+
+    return `
+      <div class="rev-toolbar">
+        <div class="rev-periods" role="group" aria-label="Period">${REV_PERIODS.map(([k,l])=>`<button type="button" data-rev-period="${k}" class="${k===data.period?"active":""}">${escapeHtml(l)}</button>`).join("")}</div>
+        <button class="btn btn-ghost" type="button" id="revRefresh">Refresh</button>
+        <button class="btn btn-ghost" type="button" id="revCsv">Export CSV</button>
+        <span class="admin-empty" style="margin-left:auto;">Fee-wallet distributor ${explorerAddrHTML(data.distributor)} · fee wallet ${explorerAddrHTML(data.feeWallet)}</span>
+      </div>
+
+      <div class="rev-tiles">
+        <div class="rev-tile lead">
+          <div class="l">Net to fee wallet · ${escapeHtml(periodLabel)}</div>
+          <div class="v ${net<0n?"neg":net>0n?"pos":""}">${revAmt(s.netToFeeWallet)}<small>ETH</small></div>
+          <div class="s">${revAmt(s.paidToFeeWallet)} paid out − ${revAmt(s.gasWei)} keeper gas${claimable!==null && claimable>0n ? `<br>${revAmt(claimable)} more is owed and not yet claimed (net ${revAmt(s.netAccrued)} counting it)` : ""}</div>
+        </div>
+        <div class="rev-tile">
+          <div class="l">Paid to fee wallet</div>
+          <div class="v">${revAmt(s.paidToFeeWallet)}<small>ETH</small></div>
+          <div class="s">${s.paidCount} claim${s.paidCount===1?"":"s"} · ${revAmt(s.creditedToFeeWallet)} became owed this period</div>
+        </div>
+        <div class="rev-tile">
+          <div class="l">Keeper gas</div>
+          <div class="v">${revAmt(s.gasWei)}<small>ETH</small></div>
+          <div class="s">${s.gasTxCount} fee-job transaction${s.gasTxCount===1?"":"s"} paid by the relayer wallet</div>
+        </div>
+        <div class="rev-tile">
+          <div class="l">Used for platform token</div>
+          <div class="v">${revAmt(s.buybackEthSpent)}<small>ETH</small></div>
+          <div class="s">${revAmt(s.platformTokensBought,2)} bought · ${revAmt(s.tokensBurned,2)} burned · ${revAmt(s.tokensQueuedForAirdrop,2)} queued for airdrop</div>
+        </div>
+      </div>
+
+      <div class="rev-two">
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>Fee wallet · ${escapeHtml(periodLabel)}</h3></div>
+          <div class="dc-wrap"><table class="dc-table rev-table"><tbody>
+            <tr><td>Fees received by the distributor</td><td class="n">${revAmt(s.feesInEth)} ETH</td></tr>
+            <tr><td>Owed to the fee wallet</td><td class="n">${revAmt(s.creditedToFeeWallet)} ETH</td></tr>
+            <tr><td>Paid to the fee wallet</td><td class="n">${revAmt(s.paidToFeeWallet)} ETH</td></tr>
+            <tr><td>− Keeper gas</td><td class="n">${revAmt(s.gasWei)} ETH</td></tr>
+            <tr class="total"><td>Net to fee wallet</td><td class="n">${revAmt(s.netToFeeWallet)} ETH</td></tr>
+            <tr><td class="sub">Net counting unclaimed (owed − gas)</td><td class="n sub">${revAmt(netAcc)} ETH</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>Platform token · ${escapeHtml(periodLabel)}</h3></div>
+          <div class="dc-wrap"><table class="dc-table rev-table"><tbody>
+            <tr><td>ETH spent on buybacks</td><td class="n">${revAmt(s.buybackEthSpent)} ETH</td></tr>
+            <tr><td>Platform token bought</td><td class="n">${revAmt(s.platformTokensBought,2)}</td></tr>
+            <tr><td class="sub">burned</td><td class="n sub">${revAmt(s.tokensBurned,2)}</td></tr>
+            <tr><td class="sub">queued for holder airdrop</td><td class="n sub">${revAmt(s.tokensQueuedForAirdrop,2)}</td></tr>
+            <tr><td>Airdropped to holders (rounds completed)</td><td class="n">${revAmt(s.airdropDistributed,2)}</td></tr>
+            ${on ? `<tr><td>ETH earmarked, buyback not yet run</td><td class="n">${revAmt(on.ethPendingBuyback)} ETH</td></tr>` : ""}
+          </tbody></table></div>
+        </div>
+      </div>
+
+      <div class="rev-two">
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>Keeper gas by job · ${escapeHtml(periodLabel)}</h3></div>
+          <div class="dc-wrap"><table class="dc-table rev-table"><thead><tr><th>Job</th><th class="n">Txs</th><th class="n">Gas cost (ETH)</th></tr></thead><tbody>${gasRows}
+            <tr class="total"><td>Total</td><td class="n">${s.gasTxCount}</td><td class="n">${revAmt(s.gasWei,6)}</td></tr></tbody></table></div>
+          <p class="admin-empty" style="margin-top:10px;">${escapeHtml(data.note||"")}</p>
+        </div>
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>Latest gas payments</h3></div>
+          ${gasLog ? `<div class="dc-wrap"><table class="dc-table rev-table"><thead><tr><th>Time</th><th>Job</th><th class="n">Cost</th><th>Tx</th></tr></thead><tbody>${gasLog}</tbody></table></div>` : `<p class="admin-empty">No fee-job gas recorded in this period yet.</p>`}
+        </div>
+      </div>
+
+      ${allTime}
+
+      <div class="panel admin-panel">
+        <div class="admin-panel-head"><h3>Recent activity · ${escapeHtml(periodLabel)}</h3></div>
+        ${events ? `<div class="dc-wrap"><table class="dc-table rev-table"><thead><tr><th>Time</th><th>Event</th><th class="n">Amount</th><th>Detail</th><th>Tx</th></tr></thead><tbody>${events}</tbody></table></div>` : `<p class="admin-empty">No fee-wallet activity recorded in this period.${data.indexer && data.indexer.error ? " Indexer error: "+escapeHtml(data.indexer.error) : ""}</p>`}
+      </div>`;
+  }
+
+  async function renderRevenuePanel(){
+    const wrap = document.getElementById("revenueWrap");
+    if(!wrap) return;
+    const box = (msg, retry) => `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">${msg}</p>${retry?`<p style="margin-top:12px;"><button class="btn btn-ghost" type="button" id="revRefresh">Try again</button></p>`:""}</div>`;
+    const rewire = () => { const rf = document.getElementById("revRefresh"); if(rf) rf.addEventListener("click", ()=> renderRevenuePanel()); };
+    const url = relayerApiUrl(appMode);
+    if(!url){ wrap.innerHTML = box(`No relayer configured for ${escapeHtml(NETWORKS[appMode].label)} yet.`); return; }
+    wrap.innerHTML = box("Loading…");
+    let data = null;
+    try{
+      const r = await fetch(`${url}/revenue?period=${encodeURIComponent(revenuePeriod)}`);
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      data = await r.json();
+    }catch(e){
+      wrap.innerHTML = box(`Couldn't load revenue from the relayer (${escapeHtml(e.message||"network error")}). If this relayer predates the Revenue tab, update and restart it.`, true);
+      rewire(); return;
+    }
+    revenueData = data;
+    if(!data.configured){
+      wrap.innerHTML = box("No fee-wallet distributor is set on the V4 factory yet (Admin → Rewards), so there is no fee revenue to report. Set it, and this tab fills in.", true);
+      rewire(); return;
+    }
+    wrap.innerHTML = revenueHTML(data);
+    wrap.querySelectorAll("[data-rev-period]").forEach(b=>b.addEventListener("click", ()=>{ revenuePeriod = b.dataset.revPeriod; renderRevenuePanel(); }));
+    const rf = document.getElementById("revRefresh"); if(rf) rf.addEventListener("click", ()=> renderRevenuePanel());
+    const cv = document.getElementById("revCsv");
+    if(cv) cv.addEventListener("click", ()=>{
+      try{
+        const blob = new Blob([revCsv(revenueData)], { type:"text/csv;charset=utf-8" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `ignitionx-revenue-${revenueData.period}-${new Date().toISOString().slice(0,10)}.csv`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+      }catch(e){ toast("Couldn't build the CSV: "+(e.message||e)); }
+    });
+  }
+
   async function renderAdmin(){
     const wrap = document.getElementById("adminWrap");
     if(!isAdminWallet(wallet)){
@@ -16948,6 +17200,13 @@
         </div>
       </div>
 
+      <div class="admin-tab-panel" data-admin-panel="revenue" ${adminTab==="revenue"?"":"hidden"}>
+        <div class="section-head"><h2>Revenue</h2></div>
+        <div id="revenueWrap">
+          <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
+        </div>
+      </div>
+
       <div class="admin-tab-panel" data-admin-panel="relayer" ${adminTab==="relayer"?"":"hidden"}>
         <div class="section-head"><h2>Relayer settings</h2></div>
         <div id="relayerSettingsWrap">
@@ -16999,6 +17258,7 @@
     // panels' initial GETs are plain server reads that work with no wallet
     // connected at all (same reasoning as "Platform contracts" above).
     renderRelayerSettingsPanel();
+    renderRevenuePanel();
     renderSolanaAdminPanel();
     renderDeployedContractsPanel();
     renderV4AdminSections();
