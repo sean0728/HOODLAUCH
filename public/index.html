@@ -16928,7 +16928,7 @@
     fee_in: "Fees received", conversion: "In-kind sale", buyback: "Platform-token buyback", buyback_failed: "Buyback failed, ETH kept for fee wallet",
     tokens_split: "Burn / airdrop split", airdrop_done: "Airdrop round paid", paid: "Paid to fee wallet",
   };
-  const REV_GAS_LABELS = { "flush": "Fee payout (flush)", "fee-wallet-swap": "Fee-wallet conversion", "fee-wallet-claim": "Claim to fee wallet", "buyback": "Platform-token buyback", "airdrop": "Airdrop round" };
+  const REV_GAS_LABELS = { "flush": "Fee payout (flush)", "fee-wallet-swap": "Fee-wallet conversion", "fee-wallet-claim": "Claim to fee wallet", "buyback": "Platform-token buyback", "airdrop": "Airdrop round", "rewards-buyback": "Rewards buyback", "rewards-airdrop": "Rewards airdrop round" };
 
   function revBig(v){ try{ return BigInt(v==null ? 0 : v); }catch(e){ return 0n; } }
   // 18-decimal amount (ETH or platform token) as text, keeping a sign; at least `d` significant decimals for tiny values.
@@ -16970,11 +16970,117 @@
     }
     for(const [c,x] of Object.entries(s.gasByCategory||{})) rows.push(["gas",c+" (wei)",x.wei],["gas",c+" (txs)",x.count]);
     if(data.onchain) for(const [k,v] of Object.entries(data.onchain)) rows.push(["on-chain all-time",k,v]);
+    if(data.launches && data.launches.summary) for(const [k,v] of Object.entries(data.launches.summary)) rows.push(["launch fees",k,v]);
+    if(data.rewards && data.rewards.configured){
+      for(const [k,v] of Object.entries(data.rewards.summary||{})) if(k!=="gasByCategory") rows.push(["rewards distributor",k,v]);
+      for(const [k,v] of Object.entries(data.rewards.allTime||{})) rows.push(["rewards distributor all-time",k,v]);
+      rows.push(["rewards distributor","waitingWei",data.rewards.waitingWei]);
+    }
     rows.push([]);
     rows.push(["time","kind","tx","detail"]);
     for(const e of (data.recent||[])) rows.push([new Date(e.t).toISOString(), e.kind, e.txHash, JSON.stringify(e.data)]);
     for(const g of (data.gasRecent||[])) rows.push([new Date(g.t).toISOString(), "gas:"+g.category, g.txHash, g.costWei]);
     return rows.map(r=>r.map(q).join(",")).join("\n");
+  }
+
+  function revToolbarHTML(data){
+    return `<div class="rev-toolbar">
+        <div class="rev-periods" role="group" aria-label="Period">${REV_PERIODS.map(([k,l])=>`<button type="button" data-rev-period="${k}" class="${k===data.period?"active":""}">${escapeHtml(l)}</button>`).join("")}</div>
+        <button class="btn btn-ghost" type="button" id="revRefresh">Refresh</button>
+        <button class="btn btn-ghost" type="button" id="revCsv">Export CSV</button>
+        <span class="admin-empty" style="margin-left:auto;">${data.configured ? `Fee-wallet distributor ${explorerAddrHTML(data.distributor)} · fee wallet ${explorerAddrHTML(data.feeWallet)}` : ""}</span>
+      </div>`;
+  }
+
+  // Launch fees (gasless launches) and the platform-rewards distributor. Both come from on-chain events the relayer indexes.
+  function revPct(part, whole){
+    const w = revBig(whole); if(w<=0n) return "–";
+    return (Number((revBig(part)*1000n)/w)/10).toFixed(1)+"%";
+  }
+  function revenuePlatformHTML(data){
+    const periodLabel = (REV_PERIODS.find(p=>p[0]===data.period)||[,data.period])[1];
+    const L = data.launches && data.launches.summary ? data.launches.summary : null;
+    const R = data.rewards && data.rewards.configured ? data.rewards : null;
+    let out = "";
+    if(L){
+      const launchRows = ((data.launches && data.launches.recent) || []).map(e=>{
+        const d = e.data || {};
+        return `<tr><td>${escapeHtml(new Date(e.t).toLocaleString())}</td><td class="n">${revAmt(d.feeCollected)}</td><td class="n">${revAmt(d.gasReimbursed)}</td><td class="n">${revAmt(d.toTreasury)}</td><td class="n">${revAmt(d.toRewards)}</td><td>${revTxLink(e.txHash)}</td></tr>`;
+      }).join("");
+      out += `
+      <h3 class="admin-section-label" style="margin-top:28px;">Launch fees · ${escapeHtml(periodLabel)}</h3>
+      <div class="rev-tiles">
+        <div class="rev-tile">
+          <div class="l">Launch fees collected</div>
+          <div class="v">${revAmt(L.feeCollected)}<small>ETH</small></div>
+          <div class="s">${L.launches} gasless launch${L.launches===1?"":"es"}</div>
+        </div>
+        <div class="rev-tile">
+          <div class="l">Repaid to relayer (launch gas)</div>
+          <div class="v">${revAmt(L.gasReimbursed)}<small>ETH</small></div>
+          <div class="s">${revPct(L.gasReimbursed, L.feeCollected)} of the fees went to gas</div>
+        </div>
+        <div class="rev-tile">
+          <div class="l">Left for the platform</div>
+          <div class="v">${revAmt(L.netToPlatform)}<small>ETH</small></div>
+          <div class="s">${revAmt(L.toTreasury)} to the fee treasury · ${revAmt(L.toRewards)} to the rewards distributor</div>
+        </div>
+        <div class="rev-tile">
+          <div class="l">Per launch, on average</div>
+          <div class="v">${L.launches ? revAmt(revBig(L.netToPlatform)/BigInt(L.launches)) : "0"}<small>ETH</small></div>
+          <div class="s">left after gas${L.launches ? ` (fee ${revAmt(revBig(L.feeCollected)/BigInt(L.launches))} − gas ${revAmt(revBig(L.gasReimbursed)/BigInt(L.launches))})` : ""}</div>
+        </div>
+      </div>
+      <div class="panel admin-panel" style="margin-bottom:20px;">
+        <div class="admin-panel-head"><h3>Latest gasless launches</h3></div>
+        ${launchRows ? `<div class="dc-wrap"><table class="dc-table rev-table"><thead><tr><th>Time</th><th class="n">Fee</th><th class="n">Gas repaid</th><th class="n">Treasury</th><th class="n">Rewards</th><th>Tx</th></tr></thead><tbody>${launchRows}</tbody></table></div>` : `<p class="admin-empty">No gasless launches settled in this period.</p>`}
+        <p class="admin-empty" style="margin-top:10px;">Each launch fee first repays the relayer's gas for that launch; what is left is split 50/50 between the fee treasury and the platform-rewards distributor. A launch the creator paid gas for directly isn't counted here. Amounts are in ETH — fiat values move with the ETH price.</p>
+      </div>`;
+    }
+    if(R){
+      const rs = R.summary || {};
+      const at = R.allTime || {};
+      const gasRows = Object.entries(rs.gasByCategory||{}).map(([c,x])=>`<tr><td>${escapeHtml(REV_GAS_LABELS[c]||c)}</td><td class="n">${x.count}</td><td class="n">${revAmt(x.wei,6)}</td></tr>`).join("");
+      out += `
+      <h3 class="admin-section-label" style="margin-top:28px;">Platform rewards distributor · ${escapeHtml(periodLabel)}</h3>
+      <div class="rev-two">
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>Buybacks · ${escapeHtml(periodLabel)}</h3></div>
+          <div class="dc-wrap"><table class="dc-table rev-table"><tbody>
+            <tr><td>ETH spent on buybacks</td><td class="n">${revAmt(rs.ethSpentOnBuyback)} ETH</td></tr>
+            <tr><td class="sub">${rs.buybackCount||0} buyback${rs.buybackCount===1?"":"s"}</td><td class="n sub"></td></tr>
+            <tr><td>Platform token bought</td><td class="n">${revAmt(rs.platformTokensBought,2)}</td></tr>
+            <tr><td class="sub">burned</td><td class="n sub">${revAmt(rs.tokensBurned,2)}</td></tr>
+            <tr><td class="sub">queued for holder airdrop</td><td class="n sub">${revAmt(rs.tokensQueuedForAirdrop,2)}</td></tr>
+            <tr><td>Airdropped to holders (rounds completed)</td><td class="n">${revAmt(rs.airdropDistributed,2)}</td></tr>
+            <tr><td>ETH waiting for the next buyback</td><td class="n">${revAmt(R.waitingWei)} ETH</td></tr>
+            ${R.pendingAirdropTokens!=null ? `<tr><td>Platform tokens waiting for an airdrop round</td><td class="n">${revAmt(R.pendingAirdropTokens,2)}</td></tr>` : ""}
+          </tbody></table></div>
+          ${revBig(rs.legacySaleEth)>0n ? `<p class="admin-empty" style="margin-top:10px;">Includes ${revAmt(rs.legacySaleEth)} ETH from selling in-kind tokens (${rs.legacySaleCount} sale${rs.legacySaleCount===1?"":"s"}) — the older path for pools from before the ETH-fee hook.</p>` : ""}
+        </div>
+        <div class="panel admin-panel">
+          <div class="admin-panel-head"><h3>Keeper gas · ${escapeHtml(periodLabel)}</h3></div>
+          <div class="dc-wrap"><table class="dc-table rev-table"><thead><tr><th>Job</th><th class="n">Txs</th><th class="n">Gas cost (ETH)</th></tr></thead><tbody>${gasRows}
+            <tr class="total"><td>Total</td><td class="n">${rs.gasTxCount||0}</td><td class="n">${revAmt(rs.gasWei,6)}</td></tr></tbody></table></div>
+          <p class="admin-empty" style="margin-top:10px;">The ETH the rewards distributor receives is the hook's reward share and half of each launch fee. Gas for its buybacks and airdrop rounds is paid by the relayer wallet and shown here, not netted into the fee wallet's income.</p>
+        </div>
+      </div>
+      <div class="panel admin-panel" style="margin-bottom:20px;">
+        <div class="admin-panel-head"><h3>All-time (since the relayer started indexing)</h3></div>
+        <div class="dc-wrap"><table class="dc-table rev-table"><tbody>
+          <tr><td>ETH in <span class="sub">(spent + rescued + still waiting)</span></td><td class="n">${revAmt(at.ethIn)} ETH</td></tr>
+          <tr><td class="sub">spent on buybacks</td><td class="n sub">${revAmt(at.ethSpentOnBuyback)} ETH</td></tr>
+          <tr><td class="sub">rescued by the owner</td><td class="n sub">${revAmt(at.ethRescued)} ETH</td></tr>
+          <tr><td class="sub">waiting for the next buyback</td><td class="n sub">${revAmt(R.waitingWei)} ETH</td></tr>
+          <tr><td>Platform token bought</td><td class="n">${revAmt(at.platformTokensBought,2)}</td></tr>
+          <tr><td class="sub">burned</td><td class="n sub">${revAmt(at.tokensBurned,2)}</td></tr>
+          <tr><td class="sub">queued for holder airdrop</td><td class="n sub">${revAmt(at.tokensQueuedForAirdrop,2)}</td></tr>
+          <tr><td>Airdropped to holders</td><td class="n">${revAmt(at.airdropDistributed,2)}</td></tr>
+        </tbody></table></div>
+        <p class="admin-empty" style="margin-top:10px;">This distributor has no counters of its own (it receives plain ETH), so "ETH in" is worked out from what it spent and what is still in it. Earlier history is only included back to the relayer's first indexed block.</p>
+      </div>`;
+    }
+    return out;
   }
 
   function revenueHTML(data){
@@ -17025,12 +17131,7 @@
     }
 
     return `
-      <div class="rev-toolbar">
-        <div class="rev-periods" role="group" aria-label="Period">${REV_PERIODS.map(([k,l])=>`<button type="button" data-rev-period="${k}" class="${k===data.period?"active":""}">${escapeHtml(l)}</button>`).join("")}</div>
-        <button class="btn btn-ghost" type="button" id="revRefresh">Refresh</button>
-        <button class="btn btn-ghost" type="button" id="revCsv">Export CSV</button>
-        <span class="admin-empty" style="margin-left:auto;">Fee-wallet distributor ${explorerAddrHTML(data.distributor)} · fee wallet ${explorerAddrHTML(data.feeWallet)}</span>
-      </div>
+      ${revToolbarHTML(data)}
 
       <div class="rev-tiles">
         <div class="rev-tile lead">
@@ -17119,11 +17220,12 @@
       rewire(); return;
     }
     revenueData = data;
-    if(!data.configured){
-      wrap.innerHTML = box("No fee-wallet distributor is set on the V4 factory yet (Admin → Rewards), so there is no fee revenue to report. Set it, and this tab fills in.", true);
+    const hasRewards = !!(data.rewards && data.rewards.configured);
+    if(!data.configured && !hasRewards){
+      wrap.innerHTML = box("No fee-wallet distributor or platform-rewards distributor is set on the V4 factory yet (Admin → Rewards), so there is no fee revenue to report. Set them, and this tab fills in.", true);
       rewire(); return;
     }
-    wrap.innerHTML = revenueHTML(data);
+    wrap.innerHTML = (data.configured ? revenueHTML(data) : revToolbarHTML(data) + `<div class="panel admin-panel" style="margin-bottom:20px;"><p class="admin-empty">No fee-wallet distributor is set on the V4 factory yet (Admin → Rewards), so there are no fee-wallet figures. The sections below still work.</p></div>`) + revenuePlatformHTML(data);
     wrap.querySelectorAll("[data-rev-period]").forEach(b=>b.addEventListener("click", ()=>{ revenuePeriod = b.dataset.revPeriod; renderRevenuePanel(); }));
     const rf = document.getElementById("revRefresh"); if(rf) rf.addEventListener("click", ()=> renderRevenuePanel());
     const cv = document.getElementById("revCsv");
