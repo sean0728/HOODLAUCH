@@ -695,6 +695,19 @@ const V4_REVENUE_ABI = [
   "event PlatformTokensProcessed(uint256 tokensIn, uint256 burned, uint256 toAirdrop)",
   "event AirdropRoundCompleted(uint256 totalDistributed)",
 ];
+// Revenue tab: the platform-rewards distributor's events, and the launch-fee settlement event of the factory / launch relay.
+const V4_REWARDS_REVENUE_ABI = [
+  "function pendingAirdropTokens() view returns (uint256)",
+  "function platformToken() view returns (address)",
+  "event EthBuybackTriggered(uint256 ethIn, uint256 tokensOut)",
+  "event TokenBuybackTriggered(address indexed token, uint256 amountIn, uint256 ethOut, uint256 tokensOut)",
+  "event PlatformTokensProcessed(uint256 tokensIn, uint256 burned, uint256 toAirdrop)",
+  "event AirdropRoundCompleted(uint256 totalDistributed)",
+  "event EthRescued(address indexed to, uint256 amount)",
+];
+const V4_LAUNCH_FEE_EVENTS_ABI = [
+  "event RelayedFeeSettled(bytes32 indexed voucherHash, address indexed token, uint256 feeCollected, uint256 gasReimbursed, uint256 toTreasury, uint256 toRewards)",
+];
 const V4_CREATOR_REWARDS_DISTRIBUTOR_ABI = [
   ...V4_SELLER_ABI,
   "function swapThreshold(address) view returns (uint256)",
@@ -4797,6 +4810,12 @@ async function main() {
   }
 
   // Shared airdrop-round driver for the two distributors that have one.
+  // Gas for an airdrop transaction is booked against the distributor whose round it is (the fee wallet's, or the platform
+  // rewards distributor's); any other caller is not part of the revenue accounting.
+  async function recordAirdropGas(label, receipt) {
+    if (label === "v4-fee-wallet") await recordFeeGas("airdrop", receipt);
+    else if (label === "v4-platform-rewards") await recordFeeGas("rewards-airdrop", receipt);
+  }
   async function v4KeeperAirdropRound(label, distributor, batchSize, maxBatches) {
     const platformTokenAddress = await distributor.platformToken();
     if (platformTokenAddress === hre.ethers.ZeroAddress) return;
@@ -4810,7 +4829,7 @@ async function main() {
       try {
         const tx = await sendRelayerTx(() => distributor.runAirdropRound(batchSize));
         const receipt = await tx.wait();
-        if (label === "v4-fee-wallet") await recordFeeGas("airdrop", receipt);
+        await recordAirdropGas(label, receipt);
         console.log(`[${label}] airdrop round started and first batch paid (${pending} platformToken pending) in tx ${receipt.hash}.`);
         startedAtomically = true;
       } catch (err) {
@@ -4820,7 +4839,7 @@ async function main() {
       if (!startedAtomically) {
         const tx = await sendRelayerTx(() => distributor.startAirdropRound());
         const receipt = await tx.wait();
-        if (label === "v4-fee-wallet") await recordFeeGas("airdrop", receipt);
+        await recordAirdropGas(label, receipt);
         console.log(`[${label}] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
       }
       roundActive = await distributor.roundActive();
@@ -4828,7 +4847,7 @@ async function main() {
     for (let i = 0; i < maxBatches && roundActive; i++) {
       const tx = await sendRelayerTx(() => distributor.processAirdropBatch(batchSize));
       const receipt = await tx.wait();
-      if (label === "v4-fee-wallet") await recordFeeGas("airdrop", receipt);
+      await recordAirdropGas(label, receipt);
       roundActive = await distributor.roundActive();
       console.log(`[${label}] airdrop batch processed in tx ${receipt.hash}` + (roundActive ? " (round continues next tick)." : " (round completed)."));
     }
@@ -5047,6 +5066,7 @@ async function main() {
           const minTokensOut = (quoted * (10000n - slipBps)) / 10000n;
           const tx = await sendRelayerTx(() => d.contract.triggerEthBuyback(minTokensOut));
           const receipt = await tx.wait();
+          await recordFeeGas("rewards-buyback", receipt);
           console.log(`[v4-platform-rewards] ETH buyback: ${ethIn} wei -> ~${quoted} platformToken in tx ${receipt.hash}.`);
         }
       }
@@ -5085,6 +5105,7 @@ async function main() {
         }
         const tx = await sendRelayerTx(() => d.contract.triggerTokenBuyback(tokenAddress, minTokensOut));
         const receipt = await tx.wait();
+        await recordFeeGas("rewards-buyback", receipt);
         console.log(`[v4-platform-rewards] token buyback ${tokenAddress} (amountIn ${amountIn}) in tx ${receipt.hash}.`);
       } catch (err) {
         if (err && err.code !== "BAD_DATA") console.warn(`[v4-platform-rewards] token buyback skip ${tokenAddress}: ${err.message}`);
@@ -5390,17 +5411,31 @@ async function main() {
     return a && a !== hre.ethers.ZeroAddress ? a : null;
   }
 
-  // Reads the distributor's logs a chunk at a time from a saved cursor and stores the accounting events. The first run
-  // starts REVENUE_LOOKBACK_BLOCKS behind the tip (or at REVENUE_START_BLOCK): on a redeployed distributor that covers its
-  // whole life; the contract's own accounting() totals are always all-time regardless.
+  async function revenueRewardsAddress() {
+    const ctx = await getV4Context();
+    if (!ctx) return null;
+    const slots = await hre.ethers.getContractAt(V4_FACTORY_SLOTS_ABI, ctx.slotsAddress, hre.ethers.provider);
+    const a = await slots.rewardsDistributor();
+    return a && a !== hre.ethers.ZeroAddress ? a : null;
+  }
+  // Contracts that settle a gasless launch's fee and emit RelayedFeeSettled: the V4TokenFactory and, for custom-tax and
+  // curve launches, the V4LaunchRelay.
+  async function revenueLaunchFeeSources() {
+    const ctx = await getV4Context();
+    if (!ctx) return [];
+    const list = [ctx.slotsAddress];
+    if (v4LaunchRelayAddress) list.push(v4LaunchRelayAddress);
+    return [...new Set(list.map((a) => a.toLowerCase()))].map((a) => hre.ethers.getAddress(a));
+  }
+
+  // Reads one contract's logs a chunk at a time from a saved cursor and stores the events `normalize` recognises. The first
+  // run starts REVENUE_LOOKBACK_BLOCKS behind the tip (or at REVENUE_START_BLOCK): on a redeployed contract that covers its
+  // whole life; the fee-wallet distributor's own accounting() totals are always all-time regardless.
   const REVENUE_MAX_BLOCK_RANGE = Number(process.env.REVENUE_MAX_BLOCK_RANGE || 20_000);
   const REVENUE_LOOKBACK_BLOCKS = Number(process.env.REVENUE_LOOKBACK_BLOCKS || 200_000);
   let revenueIndexStatus = { cursor: null, tip: null, error: null };
-  async function revenueIndexOnce() {
-    const addr = await revenueDistributorAddress();
-    if (!addr) return;
+  async function revenueIndexSource(addr, iface, normalize) {
     const network = hre.network.name;
-    const iface = new hre.ethers.Interface(V4_REVENUE_ABI);
     const tip = await hre.ethers.provider.getBlockNumber();
     let cursor = await revenueStore.getEventCursor(network, addr);
     if (cursor === null) {
@@ -5417,7 +5452,7 @@ async function main() {
       for (const log of logs) {
         let parsed = null;
         try { parsed = iface.parseLog(log); } catch (err) { parsed = null; }
-        const norm = revenueSummary.normalizeEvent(parsed);
+        const norm = normalize(parsed);
         if (!norm) continue;
         if (!blockTimes.has(log.blockNumber)) {
           const blk = await hre.ethers.provider.getBlock(log.blockNumber);
@@ -5429,7 +5464,25 @@ async function main() {
       cursor = to;
       await revenueStore.setEventCursor(network, addr, cursor);
     }
-    revenueIndexStatus = { cursor, tip, error: null };
+    return { cursor, tip };
+  }
+  async function revenueIndexOnce() {
+    const errors = [];
+    let status = null;
+    const run = async (label, getAddrs, abi, normalize) => {
+      try {
+        const addrs = await getAddrs();
+        const iface = new hre.ethers.Interface(abi);
+        for (const addr of addrs) status = (await revenueIndexSource(addr, iface, normalize)) || status;
+      } catch (err) {
+        errors.push(`${label}: ${err.message}`);
+      }
+    };
+    await run("fee-wallet distributor", async () => { const a = await revenueDistributorAddress(); return a ? [a] : []; }, V4_REVENUE_ABI, revenueSummary.normalizeEvent);
+    await run("rewards distributor", async () => { const a = await revenueRewardsAddress(); return a ? [a] : []; }, V4_REWARDS_REVENUE_ABI, revenueSummary.normalizeRewardsEvent);
+    await run("launch fees", revenueLaunchFeeSources, V4_LAUNCH_FEE_EVENTS_ABI, revenueSummary.normalizeLaunchEvent);
+    revenueIndexStatus = { cursor: status ? status.cursor : null, tip: status ? status.tip : null, error: errors.length ? errors.join("; ") : null };
+    if (errors.length) throw new Error(errors.join("; "));
   }
   const REVENUE_INDEX_INTERVAL_MS = () => (Number(process.env.REVENUE_INDEX_INTERVAL_MS) > 0 ? Number(process.env.REVENUE_INDEX_INTERVAL_MS) : 60_000);
   async function revenueIndexLoop() {
@@ -5473,10 +5526,59 @@ async function main() {
       try { feeWallet = await c.feeWallet(); } catch (err) { feeWallet = null; }
       try { balanceWei = (await hre.ethers.provider.getBalance(addr)).toString(); } catch (err) { balanceWei = null; }
     }
+    // Platform-rewards distributor: its period figures come from events; "ETH in" all-time is derived as
+    // spent + rescued + still waiting, because plain ETH transfers into it emit no event.
+    let rewards = { configured: false };
+    try {
+      const raddr = await revenueRewardsAddress();
+      if (raddr) {
+        const rc = await hre.ethers.getContractAt(V4_REWARDS_REVENUE_ABI, raddr, hre.ethers.provider);
+        const periodEvents = await revenueStore.listEvents(network, raddr, since);
+        const allEvents = since === 0 ? periodEvents : await revenueStore.listEvents(network, raddr, 0);
+        const rgas = gas; // already the period's rows; rewards-* categories are split out by summarizeRewards
+        const waiting = await hre.ethers.provider.getBalance(raddr);
+        let pendingAirdrop = null;
+        try { pendingAirdrop = (await rc.pendingAirdropTokens()).toString(); } catch (err) { pendingAirdrop = null; }
+        const allTime = revenueSummary.summarizeRewards(allEvents, []);
+        rewards = {
+          configured: true,
+          address: raddr,
+          waitingWei: waiting.toString(),
+          pendingAirdropTokens: pendingAirdrop,
+          summary: revenueSummary.toJson(revenueSummary.summarizeRewards(periodEvents, rgas)),
+          allTime: {
+            ethSpentOnBuyback: allTime.ethSpentOnBuyback.toString(),
+            ethRescued: allTime.ethRescued.toString(),
+            ethIn: (allTime.ethSpentOnBuyback + allTime.ethRescued + waiting).toString(),
+            platformTokensBought: allTime.platformTokensBought.toString(),
+            tokensBurned: allTime.tokensBurned.toString(),
+            tokensQueuedForAirdrop: allTime.tokensQueuedForAirdrop.toString(),
+            airdropDistributed: allTime.airdropDistributed.toString(),
+            sinceIndexStart: true,
+          },
+        };
+      }
+    } catch (err) {
+      rewards = { configured: false, error: err.message };
+    }
+    // Launch fees settled by the relayer (gasless launches).
+    let launches = null;
+    try {
+      const sources = await revenueLaunchFeeSources();
+      const launchEvents = [];
+      for (const a of sources) launchEvents.push(...(await revenueStore.listEvents(network, a, since)));
+      launchEvents.sort((x, y) => x.t - y.t);
+      launches = {
+        summary: revenueSummary.toJson(revenueSummary.summarizeLaunches(launchEvents)),
+        recent: launchEvents.slice(-15).reverse().map((e) => ({ t: e.t, txHash: e.txHash, data: e.data })),
+      };
+    } catch (err) {
+      launches = { error: err.message };
+    }
     const recent = events.slice(-40).reverse().map((e) => ({ t: e.t, kind: e.kind, txHash: e.txHash, data: e.data }));
-    const gasRecent = gas.slice(-25).reverse().map((g) => ({ t: g.t, category: g.category, txHash: g.txHash, costWei: g.costWei, gasUsed: g.gasUsed }));
+    const gasRecent = gas.filter((g) => !String(g.category).startsWith("rewards-")).slice(-25).reverse().map((g) => ({ t: g.t, category: g.category, txHash: g.txHash, costWei: g.costWei, gasUsed: g.gasUsed }));
     sendJson(res, 200, {
-      network, period, since, configured: !!addr, distributor: addr, feeWallet, balanceWei, onchain, summary, recent, gasRecent,
+      network, period, since, configured: !!addr, distributor: addr, feeWallet, balanceWei, onchain, summary, recent, gasRecent, rewards, launches,
       indexer: revenueIndexStatus,
       note: "Gas covers only the fee jobs the relayer ran (payout flush, fee-wallet conversions and claims, buybacks, airdrop rounds), from transaction receipts.",
     });
