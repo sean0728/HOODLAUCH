@@ -116,6 +116,8 @@ const { readTrackedTokens, upsertTrackedToken, deleteTrackedToken } = require(".
 const { classifyDiscoveredLaunch } = require("../lib/launchAnnouncement");
 const { readActivity, appendActivity } = require("../lib/activityStore");
 const tradeStore = require("../lib/tradeStore");
+const revenueStore = require("../lib/revenueStore");
+const revenueSummary = require("../lib/revenueSummary");
 const pnlLib = require("../lib/pnl");
 const { readPriceHistory, appendPricePoint } = require("../lib/priceHistoryStore");
 const { registerSolanaRoutes, isSolanaAddress } = require("../lib/solanaApi");
@@ -677,6 +679,21 @@ const V4_FEE_WALLET_DISTRIBUTOR_ABI = [
   // keepers may convert. Older deployments lack these.
   "function keepers(address) view returns (bool)",
   "function owner() view returns (address)",
+];
+// Revenue tab: the fee-wallet distributor's accounting view and the events the indexer reads.
+const V4_REVENUE_ABI = [
+  "function accounting() view returns (tuple(uint256 ethReceived, uint256 ethFromConversions, uint256 ethCreditedToFeeWallet, uint256 ethPaidToFeeWallet, uint256 ethSpentOnBuyback, uint256 ethBuybackFallback, uint256 platformTokensAcquired, uint256 platformTokensBurned, uint256 platformTokensQueuedForAirdrop) totals, uint256 ethClaimable, uint256 ethPendingBuyback, uint256 platformTokensPendingAirdrop)",
+  "function feeWallet() view returns (address)",
+  "function pendingBuybackEth() view returns (uint256)",
+  "event CurveFeeReceived(address indexed from, uint256 amount, uint256 creditedToFeeWallet, uint256 earmarkedForBuyback)",
+  "event FeeWalletSwapTriggered(address indexed token, uint256 amountIn, uint256 ethOut)",
+  "event FeeWalletRewardsClaimed(address indexed token, address indexed feeWallet, address indexed caller, uint256 amount)",
+  "event PlatformTokenBuybackTriggered(address indexed token, uint256 ethIn, uint256 tokensOut)",
+  "event PlatformTokenBuybackFailed(address indexed token, uint256 ethKept)",
+  "event PendingBuybackRun(uint256 ethIn, uint256 platformTokensOut)",
+  "event PendingBuybackFailed(uint256 ethKept)",
+  "event PlatformTokensProcessed(uint256 tokensIn, uint256 burned, uint256 toAirdrop)",
+  "event AirdropRoundCompleted(uint256 totalDistributed)",
 ];
 const V4_CREATOR_REWARDS_DISTRIBUTOR_ABI = [
   ...V4_SELLER_ABI,
@@ -4793,6 +4810,7 @@ async function main() {
       try {
         const tx = await sendRelayerTx(() => distributor.runAirdropRound(batchSize));
         const receipt = await tx.wait();
+        if (label === "v4-fee-wallet") await recordFeeGas("airdrop", receipt);
         console.log(`[${label}] airdrop round started and first batch paid (${pending} platformToken pending) in tx ${receipt.hash}.`);
         startedAtomically = true;
       } catch (err) {
@@ -4802,6 +4820,7 @@ async function main() {
       if (!startedAtomically) {
         const tx = await sendRelayerTx(() => distributor.startAirdropRound());
         const receipt = await tx.wait();
+        if (label === "v4-fee-wallet") await recordFeeGas("airdrop", receipt);
         console.log(`[${label}] airdrop round started (${pending} platformToken pending) in tx ${receipt.hash}.`);
       }
       roundActive = await distributor.roundActive();
@@ -4809,6 +4828,7 @@ async function main() {
     for (let i = 0; i < maxBatches && roundActive; i++) {
       const tx = await sendRelayerTx(() => distributor.processAirdropBatch(batchSize));
       const receipt = await tx.wait();
+      if (label === "v4-fee-wallet") await recordFeeGas("airdrop", receipt);
       roundActive = await distributor.roundActive();
       console.log(`[${label}] airdrop batch processed in tx ${receipt.hash}` + (roundActive ? " (round continues next tick)." : " (round completed)."));
     }
@@ -4877,6 +4897,7 @@ async function main() {
               tx = await sendRelayerTx(() => d.contract["triggerFeeWalletSwap(address,uint256)"](tokenAddress, minEthOut));
             }
             const receipt = await tx.wait();
+            await recordFeeGas("fee-wallet-swap", receipt);
             console.log(`[v4-fee-wallet] swept ${tokenAddress} (balance ${balance}, predicted ${predictedEth} wei, minEthOut ${minEthOut}) in tx ${receipt.hash}.`);
           }
         }
@@ -4888,6 +4909,7 @@ async function main() {
         if (claimable > 0n && claimable >= feeWalletClaimMinWeiBig()) {
           const tx = await sendRelayerTx(() => d.contract.claimFeeWalletRewards(tokenAddress));
           const receipt = await tx.wait();
+          await recordFeeGas("fee-wallet-claim", receipt);
           console.log(`[v4-fee-wallet] claimed ${claimable} wei for ${tokenAddress} in tx ${receipt.hash}.`);
         }
       } catch (err) {
@@ -4911,6 +4933,7 @@ async function main() {
           if (!skip) {
             const tx = await sendRelayerTx(() => d.contract.triggerPendingBuyback(0, minPlatform));
             const receipt = await tx.wait();
+            await recordFeeGas("buyback", receipt);
             console.log(`[v4-fee-wallet] curve-fee buyback of ${pendingEth} wei (floor ${minPlatform}) in tx ${receipt.hash}.`);
           }
         }
@@ -4923,6 +4946,7 @@ async function main() {
       if (curveClaimable > 0n && curveClaimable >= feeWalletClaimMinWeiBig()) {
         const tx = await sendRelayerTx(() => d.contract.claimFeeWalletRewards(hre.ethers.ZeroAddress));
         const receipt = await tx.wait();
+        await recordFeeGas("fee-wallet-claim", receipt);
         console.log(`[v4-fee-wallet] claimed ${curveClaimable} wei of curve-phase fees in tx ${receipt.hash}.`);
       }
     } catch (err) {
@@ -5341,6 +5365,123 @@ async function main() {
     }
   }
 
+  // ---- Revenue tab: keeper gas ledger + fee-wallet distributor event index (GET /revenue) ----
+  // recordFeeGas: what the relayer wallet paid for one fee-job transaction, from its receipt (gas used x effective gas
+  // price). Never throws: bookkeeping must not break a keeper sweep. Only the fee jobs call it (flush, fee-wallet
+  // swap/claim, buyback, airdrop), so gasless-launch and reflection-payout gas stay out of the revenue figures.
+  async function recordFeeGas(category, receipt) {
+    try {
+      if (!receipt || !receipt.hash) return;
+      const gasUsed = BigInt(receipt.gasUsed);
+      const gasPrice = BigInt(receipt.gasPrice != null ? receipt.gasPrice : receipt.effectiveGasPrice != null ? receipt.effectiveGasPrice : 0);
+      await revenueStore.addGas(hre.network.name, {
+        txHash: receipt.hash, category, gasUsed: gasUsed.toString(), gasPriceWei: gasPrice.toString(), costWei: (gasUsed * gasPrice).toString(), t: Date.now(),
+      });
+    } catch (err) {
+      console.warn(`[revenue] could not record gas for ${category}: ${err.message}`);
+    }
+  }
+
+  async function revenueDistributorAddress() {
+    const ctx = await getV4Context();
+    if (!ctx) return null;
+    const slots = await hre.ethers.getContractAt(V4_FACTORY_SLOTS_ABI, ctx.slotsAddress, hre.ethers.provider);
+    const a = await slots.feeWalletDistributor();
+    return a && a !== hre.ethers.ZeroAddress ? a : null;
+  }
+
+  // Reads the distributor's logs a chunk at a time from a saved cursor and stores the accounting events. The first run
+  // starts REVENUE_LOOKBACK_BLOCKS behind the tip (or at REVENUE_START_BLOCK): on a redeployed distributor that covers its
+  // whole life; the contract's own accounting() totals are always all-time regardless.
+  const REVENUE_MAX_BLOCK_RANGE = Number(process.env.REVENUE_MAX_BLOCK_RANGE || 20_000);
+  const REVENUE_LOOKBACK_BLOCKS = Number(process.env.REVENUE_LOOKBACK_BLOCKS || 200_000);
+  let revenueIndexStatus = { cursor: null, tip: null, error: null };
+  async function revenueIndexOnce() {
+    const addr = await revenueDistributorAddress();
+    if (!addr) return;
+    const network = hre.network.name;
+    const iface = new hre.ethers.Interface(V4_REVENUE_ABI);
+    const tip = await hre.ethers.provider.getBlockNumber();
+    let cursor = await revenueStore.getEventCursor(network, addr);
+    if (cursor === null) {
+      const envStart = process.env.REVENUE_START_BLOCK;
+      const start = envStart !== undefined && envStart !== "" && Number(envStart) >= 0 ? Number(envStart) : Math.max(0, tip - REVENUE_LOOKBACK_BLOCKS);
+      cursor = start - 1;
+    }
+    const blockTimes = new Map();
+    for (let i = 0; i < 10 && cursor < tip; i++) {
+      const from = cursor + 1;
+      const to = Math.min(tip, cursor + REVENUE_MAX_BLOCK_RANGE);
+      const logs = await hre.ethers.provider.getLogs({ address: addr, fromBlock: from, toBlock: to });
+      const rows = [];
+      for (const log of logs) {
+        let parsed = null;
+        try { parsed = iface.parseLog(log); } catch (err) { parsed = null; }
+        const norm = revenueSummary.normalizeEvent(parsed);
+        if (!norm) continue;
+        if (!blockTimes.has(log.blockNumber)) {
+          const blk = await hre.ethers.provider.getBlock(log.blockNumber);
+          blockTimes.set(log.blockNumber, blk ? Number(blk.timestamp) * 1000 : Date.now());
+        }
+        rows.push({ distributor: addr, txHash: log.transactionHash, logIndex: log.index, blockNumber: log.blockNumber, t: blockTimes.get(log.blockNumber), kind: norm.kind, data: norm.data });
+      }
+      await revenueStore.addEvents(network, rows);
+      cursor = to;
+      await revenueStore.setEventCursor(network, addr, cursor);
+    }
+    revenueIndexStatus = { cursor, tip, error: null };
+  }
+  const REVENUE_INDEX_INTERVAL_MS = () => (Number(process.env.REVENUE_INDEX_INTERVAL_MS) > 0 ? Number(process.env.REVENUE_INDEX_INTERVAL_MS) : 60_000);
+  async function revenueIndexLoop() {
+    await revenueIndexOnce().catch((err) => {
+      revenueIndexStatus = { ...revenueIndexStatus, error: err.message };
+      console.warn(`[revenue] index error: ${err.message}`);
+    });
+    setTimeout(revenueIndexLoop, REVENUE_INDEX_INTERVAL_MS());
+  }
+
+  // GET /revenue?period=24h|7d|30d|all — the admin Revenue tab. Public like the other admin reads: everything in it is
+  // either on-chain or the relayer's own gas totals.
+  app.get("/revenue", asyncRoute(async (req, res) => {
+    const period = String(req.query.period || "7d");
+    const since = revenueSummary.periodSince(period);
+    if (since === null) return sendJson(res, 400, { error: "period must be 24h, 7d, 30d or all" });
+    const network = hre.network.name;
+    const gas = await revenueStore.listGas(network, since);
+    let addr = null;
+    try { addr = await revenueDistributorAddress(); } catch (err) { addr = null; }
+    const events = addr ? await revenueStore.listEvents(network, addr, since) : [];
+    const summary = revenueSummary.toJson(revenueSummary.summarize(events, gas));
+    let onchain = null;
+    let feeWallet = null;
+    let balanceWei = null;
+    if (addr) {
+      const c = await hre.ethers.getContractAt(V4_REVENUE_ABI, addr, hre.ethers.provider);
+      try {
+        const r = await c.accounting();
+        const t = r[0];
+        onchain = {
+          ethReceived: t.ethReceived.toString(), ethFromConversions: t.ethFromConversions.toString(), ethCreditedToFeeWallet: t.ethCreditedToFeeWallet.toString(),
+          ethPaidToFeeWallet: t.ethPaidToFeeWallet.toString(), ethSpentOnBuyback: t.ethSpentOnBuyback.toString(), ethBuybackFallback: t.ethBuybackFallback.toString(),
+          platformTokensAcquired: t.platformTokensAcquired.toString(), platformTokensBurned: t.platformTokensBurned.toString(),
+          platformTokensQueuedForAirdrop: t.platformTokensQueuedForAirdrop.toString(),
+          ethClaimable: r[1].toString(), ethPendingBuyback: r[2].toString(), platformTokensPendingAirdrop: r[3].toString(),
+        };
+      } catch (err) {
+        onchain = null; // a distributor from before the accounting counters
+      }
+      try { feeWallet = await c.feeWallet(); } catch (err) { feeWallet = null; }
+      try { balanceWei = (await hre.ethers.provider.getBalance(addr)).toString(); } catch (err) { balanceWei = null; }
+    }
+    const recent = events.slice(-40).reverse().map((e) => ({ t: e.t, kind: e.kind, txHash: e.txHash, data: e.data }));
+    const gasRecent = gas.slice(-25).reverse().map((g) => ({ t: g.t, category: g.category, txHash: g.txHash, costWei: g.costWei, gasUsed: g.gasUsed }));
+    sendJson(res, 200, {
+      network, period, since, configured: !!addr, distributor: addr, feeWallet, balanceWei, onchain, summary, recent, gasRecent,
+      indexer: revenueIndexStatus,
+      note: "Gas covers only the fee jobs the relayer ran (payout flush, fee-wallet conversions and claims, buybacks, airdrop rounds), from transaction receipts.",
+    });
+  }));
+
   // ---- V4 hook ETH payout keeper ----
   // Swaps never pay anyone: the hook books the ETH fee per pool and `flush` delivers it (platform tax -> rewards /
   // creator / fee-wallet distributor; a custom token's marketing share -> its marketing wallet). This sweep reads
@@ -5381,6 +5522,7 @@ async function main() {
       try {
         const tx = await sendRelayerTx(() => flusher.flushMany(slice.map((d) => d.poolId)));
         const receipt = await tx.wait();
+        await recordFeeGas("flush", receipt);
         for (const d of slice) v4FlushFirstSeen.delete(d.poolId);
         const total = slice.reduce((a, d) => a + d.pending, 0n);
         console.log(`[v4-flush] paid out ${hre.ethers.formatEther(total)} ETH of booked swap fees across ${slice.length} pool(s) in tx ${receipt.hash}.`);
@@ -5492,6 +5634,7 @@ async function main() {
           `creator rewards every ${relayerSettings.creatorRewardsPollIntervalMs}ms, platform rewards every ${relayerSettings.platformRewardsPollIntervalMs}ms ` +
           "(distributor addresses are read from the factory each tick; a slot that's unset just idles; while the switch is OFF every tick is skipped)."
       );
+      revenueIndexLoop();
       v4HookFlushPollLoop();
       console.log(
         `V4 swap-fee payouts: every ${V4_FLUSH_POLL_INTERVAL_MS()}ms the keeper calls flush on the hook for pools with at least ` +
