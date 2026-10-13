@@ -137,6 +137,7 @@ class State:
         self.saved = fresh_saved_dict()
         self.status = dict(running=True, rpcHost="api.devnet.solana.com", pollMs=60000, lastRunAt=None, lastSampled=2, lastFailed=0, lastError=None, source="vendor bundle")
         self.settings_posts = []
+        self.profiles = {}; self.profile_posts = []
         self.ledger = []; self.sol_activity = []; self.evm_activity = []   # the shared /launches ledger + the two activity feeds
 S = State()
 
@@ -201,6 +202,11 @@ def route(r):
                        "banner": f"{BASE}/solana/metadata/{body.get('metadataId')}/banner.png" if body.get("metadataId") else None}
                 S.launches = [rec]; return j({"created": True, "launch": rec})
             if path == "/solana/launches/delete": S.launches = []; return j({"ok": True})
+    if path.startswith("/profiles"): return j({"profiles": S.profiles, "links": {}})
+    if path == "/profile" and m == "POST":
+        body = json.loads(r.request.post_data or "{}"); S.profile_posts.append(body)
+        S.profiles[body["address"]] = {"name": body.get("name") or ""}
+        return j({"profile": S.profiles[body["address"]], "account": body["address"]})
     if path.startswith("/launches"): return j({"launches": S.ledger, "deleted": []})
     if path.startswith("/activity"): return j({"network": "robinhoodTestnet", "activity": S.evm_activity})
     if path.startswith("/price-history/"): return j({"history": []})
@@ -988,6 +994,60 @@ with sync_playwright() as p:
     check("20j claim platform fees call for that token only", len(cc) == 1 and cc[0][1]["who"] == "partner" and cc[0][1]["pool"] == POOL, cc)
     if SHOTS: pg.locator("#saFeesPanel").screenshot(path=os.path.join(SHOTS, "sol_admin_fees.png"))
     check("20k no page errors", not pg.errors, pg.errors)
+    pg.context.close()
+
+
+    # ---------- 21. logging in with ONLY a Solana wallet (no Robinhood wallet, no window.ethereum at all) ----------
+    def solo_page(vp=None):
+        ctx = b.new_context(viewport=vp or {"width": 1360, "height": 1000})
+        q = ctx.new_page(); q.errors = []
+        q.on("pageerror", lambda e: q.errors.append(str(e)))
+        q.route(BASE + "/**", route)
+        return q
+    fresh_saved(); S.settings_api = True; S.saved["publicLaunch"] = True; S.profiles = {}; S.profile_posts = []
+    S.launches = [{"mint": MINT, "pool": POOL, "creator": CREATOR, "name": "Ignition Cat", "symbol": "IGCAT", "cluster": "devnet", "createdAt": int(time.time() * 1000) - 60000, "metadataId": None, "image": None}]
+    pg = solo_page(); pg.goto(BASE + "/index.html"); pg.wait_for_timeout(1500)
+    pg.click("[data-view='portfolio']"); pg.wait_for_timeout(400)
+    t = pg.inner_text("#portfolioWrap")
+    check("21a nobody logged in: Portfolio offers both a Robinhood and a Solana login", pg.locator("#portfolioWrap [data-connect-evm]").count() == 1 and pg.locator("#portfolioWrap [data-connect-sol]").count() == 1, t)
+    pg.click("#solLoginBtn"); pg.wait_for_timeout(1500)
+    check("21b header shows the Solana account", pg.inner_text("#solLoginBtn").startswith("◎ Geb9"), pg.inner_text("#solLoginBtn"))
+    check("21c the Robinhood button becomes a quiet optional extra", "Robinhood" in pg.inner_text("#walletBtn") and "optional" in (pg.get_attribute("#walletBtn", "class") or ""), pg.inner_text("#walletBtn"))
+    t = pg.inner_text("#portfolioWrap")
+    check("21d Portfolio no longer says 'No wallet connected' for a Solana login", "No wallet connected" not in t and "Connect Wallet" not in t, t)
+    check("21e Portfolio shows the Solana account's launches with the creator claim", "Ignition Cat" in t and "0.0123" in t and pg.locator("#portfolioWrap [data-solp-claim]").count() == 1, t)
+    pg.wait_for_timeout(800)
+    hold = pg.inner_text("#solHoldingsBody"); tv = pg.inner_text("#solPortTotal")
+    check("21e2 Portfolio has a wallet card like the Robinhood one (address, network, value in SOL)", "connected solana wallet" in pg.inner_text("#portfolioWrap").lower() and "4.2" in tv and "SOL" in tv, tv)
+    check("21e3 Holdings lists SOL and the Solana tokens held", "SOL" in hold and "4.2" in hold and "IGCAT" in hold and "1,234" in hold, hold)
+    check("21f the Robinhood side is offered as optional", "doesn't need one" in t and pg.locator("#portfolioWrap [data-connect-evm]").count() == 1, t)
+    pg.click("#solLoginBtn"); pg.wait_for_timeout(300)
+    check("21g clicking the Solana account button opens a menu instead of disconnecting", pg.locator("#solAcctMenu").count() == 1 and "Geb9" in pg.inner_text("#solLoginBtn"), pg.inner_text("#solAcctMenu") if pg.locator("#solAcctMenu").count() else "no menu")
+    pg.click("[data-solacct='profile']"); pg.wait_for_timeout(800)
+    t = pg.inner_text("#profileWrap")
+    check("21h the menu opens the Solana wallet's own profile", "YOUR PROFILE" in t.upper() and CREATOR in t and pg.locator("#pfName").count() == 1, t[:200])
+    pg.fill("#pfName", "SolOnlySean"); pg.wait_for_timeout(200); pg.click("#pfSave"); pg.wait_for_timeout(1200)
+    calls = [c for c in pg.evaluate("window.__solCalls") if c[0] == "signMessage"]
+    check("21i saving a name is signed by the Solana wallet", len(calls) == 1 and "SolOnlySean" in calls[0][1], calls)
+    check("21j the profile is stored under the Solana address", S.profile_posts and S.profile_posts[-1]["address"] == CREATOR and S.profile_posts[-1]["name"] == "SolOnlySean", S.profile_posts)
+    check("21k the header now shows the name", "SolOnlySean" in pg.inner_text("#solLoginBtn"), pg.inner_text("#solLoginBtn"))
+    pg.click("[data-view='create']"); pg.wait_for_timeout(500)
+    check("21l Launch starts on Solana for a Solana-only login", pg.get_attribute("[data-launchnet='solana']", "aria-pressed") == "true")
+    pg.click("[data-view='portfolio']"); pg.wait_for_timeout(300)
+    pg.click("#solLoginBtn"); pg.click("[data-solacct='disconnect']"); pg.wait_for_timeout(600)
+    check("21m disconnect from the menu logs out and restores the normal header", pg.inner_text("#solLoginBtn") == "Connect Solana" and pg.inner_text("#walletBtn") == "Connect Wallet", [pg.inner_text("#solLoginBtn"), pg.inner_text("#walletBtn")])
+    check("21n no page errors", not pg.errors, pg.errors)
+    pg.context.close()
+    # Solana not open to the public yet: the login and profile still work, Portfolio says why there are no Solana launches
+    fresh_saved(); S.settings_api = True; S.saved["publicLaunch"] = False
+    pg = solo_page(); pg.goto(BASE + "/index.html"); pg.wait_for_timeout(1500)
+    pg.click("#solLoginBtn"); pg.wait_for_timeout(1500)
+    pg.click("[data-view='portfolio']"); pg.wait_for_timeout(500)
+    t = pg.inner_text("#portfolioWrap")
+    check("21o Solana private-testing: Portfolio still isn't 'No wallet connected' and explains itself", "No wallet connected" not in t and "isn't open to the public" in t, t)
+    pg.click("[data-view='profile']"); pg.wait_for_timeout(600)
+    check("21p ...and the profile is available", pg.locator("#pfName").count() == 1)
+    check("21q no page errors", not pg.errors, pg.errors)
     pg.context.close()
 
     # ---------- 13. the REAL bundle under the real CSP ----------
