@@ -256,7 +256,7 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
     }
 
     /// @dev Expected output after the LP fee AND every tax on a buy (platform
-    /// + creator buy fees), less buyInSlippageBps; the caller's own minimum
+    /// + creator buy fees; the ETH-side ones come off the ETH paid in, the token-side ones off the output), less buyInSlippageBps; the caller's own minimum
     /// wins if stricter.
     function _effectiveMinBuyOut(
         uint256 ethIn,
@@ -265,10 +265,14 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         uint256 callerMinOut,
         V4CustomToken.FeeSet calldata buyFees
     ) private view returns (uint256) {
-        uint256 withFee = ethIn * (1_000_000 - LP_FEE);
+        // The platform fee and the creator's marketing share are taken in ETH off the amount paid in; the reflection /
+        // liquidity / burn shares are taken in tokens off the pool's output.
+        uint256 ethBps = taxSource.feeBps() + buyFees.marketingBps;
+        uint256 tokenBps = uint256(buyFees.reflectionBps) + buyFees.liquidityBps + buyFees.burnBps;
+        uint256 ethNet = ethIn - (ethIn * ethBps) / 10_000;
+        uint256 withFee = ethNet * (1_000_000 - LP_FEE);
         uint256 grossOut = (withFee * tokenReserve) / (ethReserve * 1_000_000 + withFee);
-        uint256 totalBps = taxSource.feeBps() + buyFees.reflectionBps + buyFees.marketingBps + buyFees.liquidityBps + buyFees.burnBps;
-        uint256 expectedNetOut = grossOut - (grossOut * totalBps) / 10_000;
+        uint256 expectedNetOut = grossOut - (grossOut * tokenBps) / 10_000;
         uint256 floor = expectedNetOut - (expectedNetOut * buyInSlippageBps) / 10_000;
         return callerMinOut > floor ? callerMinOut : floor;
     }

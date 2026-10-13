@@ -213,7 +213,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         tokenImplementation = tokenImplementation_;
         poolManager = IPoolManager(poolManager_);
         locker = V4LiquidityLocker(locker_);
-        hook = V4TaxHook(hook_);
+        hook = V4TaxHook(payable(hook_));
         launchFee = launchFee_;
         feeTreasury = feeTreasury_;
         lpLockDuration = lpLockDuration_;
@@ -665,7 +665,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     }
 
     /// @dev Same idea as V2: the floor is the expected output after the LP fee
-    /// AND after the hook's tax (so the tax is never mistaken for hostile
+    /// AND after the hook's tax (taken in ETH, off the amount paid in) (so the tax is never mistaken for hostile
     /// slippage), less buyInSlippageBps; the caller's own minimum wins if
     /// stricter. The seeded position's real reserves are the quote's reserves.
     function _effectiveMinBuyOut(uint256 ethIn, uint256 ethReserve, uint256 tokenReserve, uint256 callerMinOut)
@@ -673,8 +673,8 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         view
         returns (uint256)
     {
-        uint256 grossOut = _getAmountOut(ethIn, ethReserve, tokenReserve);
-        uint256 expectedNetOut = grossOut - (grossOut * feeBps) / 10_000;
+        // the hook takes its fee from the ETH leg (off the ETH paid in), so the pool prices ethIn net of that fee
+        uint256 expectedNetOut = _getAmountOut(ethIn - (ethIn * feeBps) / 10_000, ethReserve, tokenReserve);
         uint256 floor = expectedNetOut - (expectedNetOut * buyInSlippageBps) / 10_000;
         return callerMinOut > floor ? callerMinOut : floor;
     }

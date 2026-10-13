@@ -24,6 +24,15 @@ interface IV4CustomTokenHooked {
     function burn(uint256 amount) external;
 }
 
+/// @dev ETH intake on the platform distributors that the hook pays into.
+interface IV4CreatorDeposit {
+    function depositFor(address token) external payable;
+}
+
+interface IV4FeeDeposit {
+    function depositFee() external payable;
+}
+
 /// @title V4TaxHook
 /// @notice The Uniswap V4 hook that collects HoodLaunch's trading tax at the
 /// pool, as part of each swap. It replaces the V2 design where the token's own
@@ -422,64 +431,49 @@ contract V4TaxHook {
         return currentSnipeBps(id);
     }
 
-    /// @dev Total tax for one direction of one pool, split into the platform's
-    /// part (switched off at graduation) and the creator's custom part (never
-    /// switched off). A buy is zeroForOne (ETH in, token out).
-    function _bps(PoolId id, PoolTax storage p, bool isBuy) private view returns (uint256 platformBps, uint256 customBps) {
-        platformBps = p.taxActive ? p.feeBps : 0;
-        if (hasCustomFees[id]) {
-            CustomFees storage f = customFees[id];
-            customBps = isBuy
-                ? uint256(f.buyReflectionBps) + f.buyMarketingBps + f.buyLiquidityBps + f.buyBurnBps
-                : uint256(f.sellReflectionBps) + f.sellMarketingBps + f.sellLiquidityBps + f.sellBurnBps;
-        }
-    }
+    // ---------------------------------------------------------------
+    // Swap callbacks: where each fee is taken
+    // ---------------------------------------------------------------
+    //
+    // The platform's trading tax, the anti-snipe surcharge and a custom token's
+    // MARKETING share are all taken in ETH, from the ETH leg of the swap. That
+    // means nothing ever has to be sold afterwards, so collecting fees puts no
+    // sell on the chart. A custom token's reflection / liquidity / burn shares
+    // are inherently in the token (holders get tokens, LP needs tokens, burn
+    // destroys tokens) and are still taken from the token leg.
+    //
+    // Exactly one of the two currencies is the "specified" one in any swap
+    // (the side the trader fixed), the other is "unspecified" (computed by the
+    // pool). beforeSwap can only carry a fee on the specified currency and
+    // afterSwap only on the unspecified one, so each leg is handled by
+    // whichever callback matches it:
+    //
+    //            ETH leg                          token leg
+    //   buy  exact-in   beforeSwap (specified)    afterSwap (unspecified)
+    //   buy  exact-out  afterSwap  (unspecified)  beforeSwap (specified)
+    //   sell exact-in   afterSwap  (unspecified)  beforeSwap (specified)
+    //   sell exact-out  beforeSwap (specified)    afterSwap  (unspecified)
 
-    /// @dev Handles the two cases where the TOKEN is the specified currency:
-    ///  - exact-in SELL  (token in,  amountSpecified < 0): fee = amt * bps / 1e4,
-    ///    carved off the input so the pool swaps (amt - fee).
-    ///  - exact-out BUY  (token out, amountSpecified > 0): fee = net * bps / (1e4 - bps),
-    ///    added to the output the pool pays so the buyer still nets `net`.
-    /// Both return +fee as the hook's specified-currency delta (a credit the
-    /// hook then take()s). Every other case returns zero here and is handled
-    /// in afterSwap, where the pool's computed token amount is known.
     function beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata)
         external
         onlyPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        PoolId id = key.toId();
-        PoolTax storage p = poolTax[id];
-        bool exactIn = params.amountSpecified < 0;
-        // token is currency1: specified iff !(specifiedIsCurrency0)
-        bool tokenSpecified = exactIn != params.zeroForOne;
-        if (tokenSpecified && !taxExempt[sender]) {
-            (uint256 platformBps, uint256 customBps) = _bps(id, p, params.zeroForOne);
-            uint256 snipeBps = _snipeFor(id, sender, params.zeroForOne);
-            uint256 bps = platformBps + customBps + snipeBps;
-            if (bps > 0) {
-                uint256 fee;
-                if (exactIn) {
-                    // SELL exact-in
-                    fee = (uint256(-params.amountSpecified) * bps) / 10_000;
-                } else {
-                    // BUY exact-out
-                    fee = (uint256(params.amountSpecified) * bps) / (10_000 - bps);
-                }
-                fee = _affordable(p.token, fee);
-                if (fee > 0) {
-                    _distribute(id, p, fee, platformBps, customBps, snipeBps, params.zeroForOne);
-                    return (IHooks.beforeSwap.selector, toBeforeSwapDelta(fee.toInt128(), 0), 0);
-                }
-            }
+        if (!taxExempt[sender]) {
+            PoolId id = key.toId();
+            PoolTax storage p = poolTax[id];
+            bool exactIn = params.amountSpecified < 0;
+            // token is currency1, ETH is currency0
+            bool tokenSpecified = exactIn != params.zeroForOne;
+            uint256 amt = exactIn ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
+            uint256 fee = tokenSpecified
+                ? _tokenLegFee(id, p, params.zeroForOne, exactIn, amt)
+                : _ethLegFee(id, p, sender, params.zeroForOne, exactIn, amt);
+            if (fee > 0) return (IHooks.beforeSwap.selector, toBeforeSwapDelta(fee.toInt128(), 0), 0);
         }
         return (IHooks.beforeSwap.selector, BeforeSwapDelta.wrap(0), 0);
     }
 
-    /// @dev Handles the two cases where the token is the UNSPECIFIED currency:
-    ///  - exact-in BUY   (ETH in, token out): fee = out * bps / 1e4
-    ///  - exact-out SELL (ETH out, token in):  fee = in  * bps / (1e4 - bps)
-    /// Returns +fee as the unspecified delta. Then runs the graduation check.
     function afterSwap(address sender, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
         external
         onlyPoolManager
@@ -487,130 +481,116 @@ contract V4TaxHook {
     {
         PoolId id = key.toId();
         PoolTax storage p = poolTax[id];
-        bool exactIn = params.amountSpecified < 0;
-        bool tokenUnspecified = (exactIn == params.zeroForOne);
-        // The snipe surcharge applies even to a pool whose normal tax is off.
-        uint256 snipeBps = tokenUnspecified ? _snipeFor(id, sender, params.zeroForOne) : 0;
-        if (!p.taxActive && !hasCustomFees[id] && snipeBps == 0) return (IHooks.afterSwap.selector, 0);
-
         uint256 fee;
-        if (tokenUnspecified && !taxExempt[sender]) {
-            fee = _afterSwapFee(id, p, params.zeroForOne, exactIn, delta.amount1(), snipeBps);
+        if (!taxExempt[sender]) {
+            bool exactIn = params.amountSpecified < 0;
+            // exact-in buy / exact-out sell leave the token unspecified, the others leave ETH unspecified
+            bool tokenUnspecified = (exactIn == params.zeroForOne);
+            int128 d = tokenUnspecified ? delta.amount1() : delta.amount0();
+            // unspecified amount the pool computed: received by the swapper when positive, paid when negative
+            uint256 amt;
+            if (exactIn) {
+                if (d > 0) amt = uint256(uint128(d));
+            } else {
+                if (d < 0) amt = uint256(uint128(-d));
+            }
+            if (amt > 0) {
+                fee = tokenUnspecified
+                    ? _tokenLegFee(id, p, params.zeroForOne, exactIn, amt)
+                    : _ethLegFee(id, p, sender, params.zeroForOne, exactIn, amt);
+            }
         }
-
         if (p.taxActive) _maybeDisableTax(id, p);
         return (IHooks.afterSwap.selector, fee.toInt128());
     }
 
-    function _afterSwapFee(PoolId id, PoolTax storage p, bool isBuy, bool exactIn, int128 tokenDelta, uint256 snipeBps)
+    /// @dev fee = bps of the gross amount moved: for an exact-in leg that is
+    /// amt * bps / 1e4 (carved off what comes in / goes out); for an exact-out
+    /// leg the fee is added on top, amt * bps / (1e4 - bps), so it is bps of the
+    /// total the trader ends up paying or giving up.
+    function _feeOn(uint256 amt, uint256 bps, bool exactIn) private pure returns (uint256) {
+        return exactIn ? (amt * bps) / 10_000 : (amt * bps) / (10_000 - bps);
+    }
+
+    /// @dev ETH leg: platform tax (while active) + snipe surcharge (buys) +
+    /// the custom token's marketing share. Taken from the pool manager as ETH
+    /// into this hook and booked per pool until flush().
+    function _ethLegFee(PoolId id, PoolTax storage p, address sender, bool isBuy, bool exactIn, uint256 amt)
         private
         returns (uint256 fee)
     {
-        (uint256 platformBps, uint256 customBps) = _bps(id, p, isBuy);
-        uint256 bps = platformBps + customBps + snipeBps;
+        uint256 platformBps = p.taxActive ? p.feeBps : 0;
+        uint256 snipeBps = _snipeFor(id, sender, isBuy);
+        uint256 marketingBps;
+        if (hasCustomFees[id]) {
+            CustomFees storage f = customFees[id];
+            marketingBps = isBuy ? f.buyMarketingBps : f.sellMarketingBps;
+        }
+        uint256 bps = platformBps + snipeBps + marketingBps;
         if (bps == 0) return 0;
-        if (exactIn) {
-            // BUY exact-in: the swapper receives tokenDelta > 0
-            if (tokenDelta > 0) fee = (uint256(uint128(tokenDelta)) * bps) / 10_000;
-        } else {
-            // SELL exact-out: the swapper pays -tokenDelta
-            if (tokenDelta < 0) fee = (uint256(uint128(-tokenDelta)) * bps) / (10_000 - bps);
-        }
-        fee = _affordable(p.token, fee);
-        if (fee > 0) _distribute(id, p, fee, platformBps, customBps, snipeBps, isBuy);
-    }
-
-    // ---------------------------------------------------------------
-    // Fee payout
-    // ---------------------------------------------------------------
-
-    /// @dev The fee is paid from the PoolManager's own token balance, so no more
-    /// than that balance can be taken. On any realistic pool the balance is far
-    /// larger than the fee. In the absurd edge (a sell many times larger than
-    /// what is left in a nearly bought-out pool) the fee is CAPPED at what the
-    /// manager holds instead of being skipped, so the swap neither reverts nor
-    /// escapes the tax entirely.
-    function _affordable(address token, uint256 fee) private view returns (uint256) {
+        fee = _feeOn(amt, bps, exactIn);
+        // the fee is paid from the pool manager's own ETH; cap it at what it holds instead of reverting
+        uint256 bal = address(poolManager).balance;
+        if (fee > bal) fee = bal;
         if (fee == 0) return 0;
-        uint256 bal = IERC20(token).balanceOf(address(poolManager));
-        return fee <= bal ? fee : bal;
+
+        // Split the fee in proportion to its parts; rounding dust goes to the first part that is active.
+        uint256 marketingFee = (fee * marketingBps) / bps;
+        uint256 snipeFee = (fee * snipeBps) / bps;
+        uint256 platformFee = (fee * platformBps) / bps;
+        uint256 dust = fee - marketingFee - snipeFee - platformFee;
+        if (platformBps > 0) platformFee += dust;
+        else if (marketingBps > 0) marketingFee += dust;
+        else snipeFee += dust;
+
+        poolManager.take(Currency.wrap(address(0)), address(this), fee);
+        Accrued storage a = accrued[id];
+        a.platform = _sat80(uint256(a.platform) + platformFee);
+        a.snipe = _sat80(uint256(a.snipe) + snipeFee);
+        a.marketing = _sat80(uint256(a.marketing) + marketingFee);
+        emit EthFeeAccrued(id, platformFee, snipeFee, marketingFee);
+        if (snipeFee > 0) emit SnipeFeeCollected(id, snipeFee, snipeBps);
     }
 
-    /// @dev Splits `fee` (a token amount) between the platform's part and the
-    /// creator's custom part in proportion to their bps, then pays each out of
-    /// the PoolManager. take() books a debt against this hook which the swap's
-    /// returned delta credits back at the end of the swap, netting to zero.
-    function _distribute(
-        PoolId id,
-        PoolTax storage p,
-        uint256 fee,
-        uint256 platformBps,
-        uint256 customBps,
-        uint256 snipeBps,
-        bool isBuy
-    ) private {
-        // The snipe surcharge is carved off first, in proportion to its bps;
-        // what is left is split exactly as before. With no surcharge running
-        // (snipeBps == 0) the arithmetic below is the original, unchanged.
-        if (snipeBps > 0) {
-            uint256 snipeFee = (platformBps + customBps == 0)
-                ? fee
-                : (fee * snipeBps) / (platformBps + customBps + snipeBps);
-            fee -= snipeFee;
-            if (snipeFee > 0) {
-                poolManager.take(
-                    Currency.wrap(p.token), p.feeWalletDistributor != address(0) ? p.feeWalletDistributor : p.feeWallet, snipeFee
-                );
-                emit SnipeFeeCollected(id, snipeFee, snipeBps);
-            }
-            if (fee == 0) return;
-        }
-        uint256 totalBps = platformBps + customBps;
-        uint256 platformFee = customBps == 0 ? fee : (platformBps == 0 ? 0 : (fee * platformBps) / totalBps);
-        uint256 customFee = fee - platformFee;
-        // Creator part first: its reflection share must be booked before any
-        // other token delivery changes who is eligible for it.
-        if (customFee > 0) _distributeCustom(id, p, customFee, customBps, isBuy);
-        if (platformFee > 0) _distributePlatform(id, p, platformFee, platformBps);
+    function _sat80(uint256 v) private pure returns (uint80) {
+        return v > type(uint80).max ? type(uint80).max : uint80(v);
     }
 
-    function _distributePlatform(PoolId id, PoolTax storage p, uint256 fee, uint256 platformBps) private {
-        // Same split rule as V2: cuts are carved OUT OF the fee, derived from
-        // the fee itself (not from a gross amount), so they can never add up to
-        // more than the fee.
-        uint256 rewardCut =
-            (p.rewardsDistributor != address(0) && p.rewardBps > 0) ? (fee * p.rewardBps) / platformBps : 0;
-        uint256 creatorCut = (p.creatorRewardsDistributor != address(0) && p.creatorRewardBps > 0)
-            ? (fee * p.creatorRewardBps) / platformBps
-            : 0;
-        uint256 rest = fee - rewardCut - creatorCut;
-
-        Currency token = Currency.wrap(p.token);
-        if (rewardCut > 0) poolManager.take(token, p.rewardsDistributor, rewardCut);
-        if (creatorCut > 0) poolManager.take(token, p.creatorRewardsDistributor, creatorCut);
-        if (rest > 0) {
-            poolManager.take(token, p.feeWalletDistributor != address(0) ? p.feeWalletDistributor : p.feeWallet, rest);
-        }
-        emit TaxCollected(id, fee, rewardCut, creatorCut, rest);
-    }
-
-    /// @dev The creator's part. Reflection -> the token itself (shared out to
-    /// holders by the token), marketing -> the token's marketing wallet (burned
-    /// if the creator has renounced it to nobody), liquidity -> the compounder,
-    /// burn -> destroyed on the spot. Rounding dust goes to the first active
-    /// component so the whole customFee is always spent.
-    function _distributeCustom(PoolId id, PoolTax storage p, uint256 fee, uint256 customBps, bool isBuy) private {
+    /// @dev Token leg: a custom token's reflection / liquidity / burn shares.
+    /// Plain (non-custom) pools have none, so they return zero here.
+    function _tokenLegFee(PoolId id, PoolTax storage p, bool isBuy, bool exactIn, uint256 amt)
+        private
+        returns (uint256 fee)
+    {
+        if (!hasCustomFees[id]) return 0;
         CustomFees storage f = customFees[id];
-        uint256[4] memory bpsParts = isBuy
-            ? [uint256(f.buyReflectionBps), f.buyMarketingBps, f.buyLiquidityBps, f.buyBurnBps]
-            : [uint256(f.sellReflectionBps), f.sellMarketingBps, f.sellLiquidityBps, f.sellBurnBps];
-        uint256[4] memory amt;
+        uint256 bps = isBuy
+            ? uint256(f.buyReflectionBps) + f.buyLiquidityBps + f.buyBurnBps
+            : uint256(f.sellReflectionBps) + f.sellLiquidityBps + f.sellBurnBps;
+        if (bps == 0) return 0;
+        fee = _feeOn(amt, bps, exactIn);
+        // paid from the pool manager's own token balance: cap rather than revert (absurd edge only)
+        uint256 bal = IERC20(p.token).balanceOf(address(poolManager));
+        if (fee > bal) fee = bal;
+        if (fee > 0) _distributeCustomToken(id, p, fee, isBuy);
+    }
+
+    /// @dev Reflection -> the token itself (shared out to holders by the token),
+    /// liquidity -> the compounder, burn -> destroyed on the spot. Rounding dust
+    /// goes to the first active component so the whole fee is always spent.
+    function _distributeCustomToken(PoolId id, PoolTax storage p, uint256 fee, bool isBuy) private {
+        CustomFees storage f = customFees[id];
+        uint256[3] memory bpsParts = isBuy
+            ? [uint256(f.buyReflectionBps), f.buyLiquidityBps, f.buyBurnBps]
+            : [uint256(f.sellReflectionBps), f.sellLiquidityBps, f.sellBurnBps];
+        uint256 totalBps = bpsParts[0] + bpsParts[1] + bpsParts[2];
+        uint256[3] memory amt;
         uint256 spent;
-        uint256 firstActive = 4;
-        for (uint256 i = 0; i < 4; i++) {
+        uint256 firstActive = 3;
+        for (uint256 i = 0; i < 3; i++) {
             if (bpsParts[i] == 0) continue;
-            if (firstActive == 4) firstActive = i;
-            amt[i] = (fee * bpsParts[i]) / customBps;
+            if (firstActive == 3) firstActive = i;
+            amt[i] = (fee * bpsParts[i]) / totalBps;
             spent += amt[i];
         }
         amt[firstActive] += fee - spent;
@@ -621,18 +601,149 @@ contract V4TaxHook {
             poolManager.take(cur, token, amt[0]);
             IV4CustomTokenHooked(token).notifyReflection(amt[0]);
         }
-        uint256 burnAmt = amt[3];
-        if (amt[1] > 0) {
-            address wallet = IV4CustomTokenHooked(token).marketingWallet();
-            if (wallet == address(0)) burnAmt += amt[1];
-            else poolManager.take(cur, wallet, amt[1]);
+        if (amt[1] > 0) poolManager.take(cur, liquidityCompounder, amt[1]);
+        if (amt[2] > 0) {
+            poolManager.take(cur, address(this), amt[2]);
+            IV4CustomTokenHooked(token).burn(amt[2]);
         }
-        if (amt[2] > 0) poolManager.take(cur, liquidityCompounder, amt[2]);
-        if (burnAmt > 0) {
-            poolManager.take(cur, address(this), burnAmt);
-            IV4CustomTokenHooked(token).burn(burnAmt);
+        // marketing is taken in ETH now (see EthFeeAccrued), so the token-side marketing figure is always zero
+        emit CustomTaxCollected(id, amt[0], 0, amt[1], amt[2]);
+    }
+
+    // ---------------------------------------------------------------
+    // Paying out the accrued ETH
+    // ---------------------------------------------------------------
+
+    /// @notice ETH taken from swaps and not yet paid out, per pool. 80 bits each
+    /// (over a million ETH), packed into one storage slot so a swap pays for a
+    /// single storage write.
+    struct Accrued {
+        uint80 platform;  // the platform tax: split at payout into rewards / creator / fee wallet
+        uint80 snipe;     // anti-snipe surcharge: all to the fee wallet side
+        uint80 marketing; // a custom token's marketing share: to its marketing wallet
+    }
+    mapping(PoolId => Accrued) public accrued;
+
+    /// @dev Gas given to the marketing wallet (an arbitrary address the creator
+    /// chose) and to the platform's own destinations on payout.
+    uint256 public constant FLUSH_CALL_GAS = 150_000;
+    bool private _flushing;
+
+    event EthFeeAccrued(PoolId indexed poolId, uint256 platform, uint256 snipe, uint256 marketing);
+    event MarketingPaid(PoolId indexed poolId, address indexed wallet, uint256 amount);
+    event FlushFailed(PoolId indexed poolId, bool platformPart, bool marketingPart);
+
+    /// @notice The ETH `flush` would pay out for this pool right now.
+    function pendingEth(PoolId id) external view returns (uint256) {
+        Accrued storage a = accrued[id];
+        return uint256(a.platform) + a.snipe + a.marketing;
+    }
+
+    /// @notice Pays this pool's accrued ETH to its destinations. Anyone may call
+    /// it (the destinations are fixed by the pool's configuration, nothing a
+    /// caller chooses), and nothing here touches a price, so there is nothing to
+    /// manipulate. The relayer does this on a timer.
+    ///
+    /// A part that cannot be delivered (a marketing wallet that refuses ETH, say)
+    /// is put back and retried on the next call; it never reverts the call and
+    /// never affects trading, which does not call this at all.
+    function flush(PoolId id) public {
+        require(!_flushing, "V4TaxHook: flush in progress");
+        _flushing = true;
+        Accrued memory a = accrued[id];
+        if (a.platform == 0 && a.snipe == 0 && a.marketing == 0) {
+            _flushing = false;
+            return;
         }
-        emit CustomTaxCollected(id, amt[0], amt[1], amt[2], burnAmt);
+        delete accrued[id];
+        PoolTax storage p = poolTax[id];
+
+        // Marketing: to the token's CURRENT marketing wallet. If the creator renounced it (zero address) there is nobody
+        // to pay, so it goes to the platform side like the snipe surcharge does.
+        uint256 toPlatformExtra = a.snipe;
+        uint256 marketingOwed = a.marketing;
+        bool marketingFailed;
+        if (marketingOwed > 0) {
+            address wallet = _marketingWalletOf(p.token);
+            if (wallet == address(0)) {
+                toPlatformExtra += marketingOwed;
+                marketingOwed = 0;
+            } else {
+                (bool ok,) = wallet.call{value: marketingOwed, gas: FLUSH_CALL_GAS}("");
+                if (ok) emit MarketingPaid(id, wallet, marketingOwed);
+                else marketingFailed = true;
+            }
+        }
+
+        bool platformFailed;
+        if (a.platform > 0 || toPlatformExtra > 0) {
+            try this.payPlatform(id, a.platform, toPlatformExtra) {} catch {
+                platformFailed = true;
+            }
+        }
+
+        // re-book anything that could not be delivered
+        if (platformFailed || marketingFailed) {
+            Accrued storage s = accrued[id];
+            if (platformFailed) {
+                s.platform = _sat80(uint256(s.platform) + a.platform);
+                // the extra is made of the snipe amount and (renounced case) the marketing amount; keep them in their own buckets
+                s.snipe = _sat80(uint256(s.snipe) + a.snipe);
+                if (toPlatformExtra > a.snipe) s.marketing = _sat80(uint256(s.marketing) + (toPlatformExtra - a.snipe));
+            }
+            if (marketingFailed) s.marketing = _sat80(uint256(s.marketing) + marketingOwed);
+            emit FlushFailed(id, platformFailed, marketingFailed);
+        }
+        _flushing = false;
+    }
+
+    function flushMany(PoolId[] calldata ids) external {
+        for (uint256 i = 0; i < ids.length; i++) flush(ids[i]);
+    }
+
+    /// @dev The platform's part of a payout, all-or-nothing (flush catches a revert
+    /// and re-books the amounts). External only so it can be try/catch'd; callable
+    /// only by this contract. `platformFee` is split with the pool's snapshotted
+    /// reward / creator ratios, `extra` (snipe etc.) all goes to the fee wallet side.
+    function payPlatform(PoolId id, uint256 platformFee, uint256 extra) external {
+        require(msg.sender == address(this), "V4TaxHook: internal only");
+        PoolTax storage p = poolTax[id];
+        uint256 rewardCut;
+        uint256 creatorCut;
+        if (platformFee > 0 && p.feeBps > 0) {
+            if (p.rewardsDistributor != address(0) && p.rewardBps > 0) rewardCut = (platformFee * p.rewardBps) / p.feeBps;
+            if (p.creatorRewardsDistributor != address(0) && p.creatorRewardBps > 0) {
+                creatorCut = (platformFee * p.creatorRewardBps) / p.feeBps;
+            }
+        }
+        uint256 rest = platformFee - rewardCut - creatorCut + extra;
+
+        if (rewardCut > 0) {
+            (bool ok,) = p.rewardsDistributor.call{value: rewardCut, gas: FLUSH_CALL_GAS}("");
+            require(ok, "V4TaxHook: rewards payout failed");
+        }
+        if (creatorCut > 0) {
+            IV4CreatorDeposit(p.creatorRewardsDistributor).depositFor{value: creatorCut, gas: FLUSH_CALL_GAS}(p.token);
+        }
+        if (rest > 0) {
+            if (p.feeWalletDistributor != address(0)) {
+                IV4FeeDeposit(p.feeWalletDistributor).depositFee{value: rest, gas: FLUSH_CALL_GAS}();
+            } else {
+                (bool ok,) = p.feeWallet.call{value: rest, gas: FLUSH_CALL_GAS}("");
+                require(ok, "V4TaxHook: fee wallet payout failed");
+            }
+        }
+        emit TaxCollected(id, platformFee + extra, rewardCut, creatorCut, rest);
+    }
+
+    function _marketingWalletOf(address token) private view returns (address w) {
+        (bool ok, bytes memory ret) = token.staticcall{gas: 50_000}(abi.encodeWithSelector(IV4CustomTokenHooked.marketingWallet.selector));
+        if (ok && ret.length >= 32) w = abi.decode(ret, (address));
+    }
+
+    /// @dev ETH only ever arrives here from the pool manager (taking a swap fee).
+    receive() external payable {
+        require(msg.sender == address(poolManager), "V4TaxHook: ETH only from the pool manager");
     }
 
     // ---------------------------------------------------------------

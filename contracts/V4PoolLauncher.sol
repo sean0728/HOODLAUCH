@@ -118,7 +118,7 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
         require(pm_ != address(0) && locker_ != address(0) && hook_ != address(0), "V4PoolLauncher: tax source not fully wired");
         poolManager = IPoolManager(pm_);
         locker = V4LiquidityLocker(locker_);
-        hook = V4TaxHook(hook_);
+        hook = V4TaxHook(payable(hook_));
         lpLockDuration = lpLockDuration_;
     }
 
