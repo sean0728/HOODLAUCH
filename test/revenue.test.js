@@ -9,7 +9,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "revenue-"));
 process.env.RELAYER_DATA_DIR = tmp;
 delete process.env.DATABASE_URL; delete process.env.DB_HOST; delete process.env.DB_NAME;
 
-const { normalizeEvent, summarize, toJson, periodSince } = require("../lib/revenueSummary");
+const { normalizeEvent, summarize, normalizeRewardsEvent, summarizeRewards, normalizeLaunchEvent, summarizeLaunches, toJson, periodSince } = require("../lib/revenueSummary");
 const store = require("../lib/revenueStore");
 
 const E = (n) => (BigInt(Math.round(n * 1e6)) * 10n ** 12n).toString(); // n ETH as wei string (6 decimals)
@@ -94,6 +94,70 @@ describe("revenueSummary", () => {
     expect(periodSince("30d", now)).to.equal(now - 30 * 86_400_000);
     expect(periodSince("all", now)).to.equal(0);
     expect(periodSince("1y", now)).to.equal(null);
+  });
+});
+
+
+describe("revenueSummary: launch fees and the platform-rewards distributor", () => {
+  const gasRow = (cat, wei) => ({ category: cat, costWei: wei });
+
+  it("normalizes the rewards distributor's events and the launch-fee settlement, ignoring anything else", () => {
+    const n = (name, args) => normalizeRewardsEvent({ name, args });
+    expect(n("EthBuybackTriggered", { ethIn: 5n, tokensOut: 50n })).to.deep.equal({ kind: "r_buyback", data: { ethIn: "5", tokensOut: "50" } });
+    expect(n("PlatformTokensProcessed", { tokensIn: 50n, burned: 25n, toAirdrop: 25n }).kind).to.equal("r_tokens_split");
+    expect(n("AirdropRoundCompleted", { totalDistributed: 20n }).kind).to.equal("r_airdrop_done");
+    expect(n("EthRescued", { to: "0xa", amount: 3n }).data).to.deep.equal({ to: "0xa", amount: "3" });
+    expect(n("TokenBuybackTriggered", { token: "0xt", amountIn: 9n, ethOut: 2n, tokensOut: 4n }).kind).to.equal("r_legacy_sale");
+    expect(n("OwnershipTransferred", {})).to.equal(null);
+    expect(normalizeRewardsEvent(null)).to.equal(null);
+    expect(normalizeLaunchEvent({ name: "TokenCreated", args: {} })).to.equal(null);
+    const l = normalizeLaunchEvent({ name: "RelayedFeeSettled", args: { voucherHash: "0xv", token: "0xt", feeCollected: 25n, gasReimbursed: 15n, toTreasury: 5n, toRewards: 5n } });
+    expect(l).to.deep.equal({ kind: "launch_settled", data: { token: "0xt", voucherHash: "0xv", feeCollected: "25", gasReimbursed: "15", toTreasury: "5", toRewards: "5" } });
+  });
+
+  it("launch economics: $25 fee, $15 gas -> $10 left, split $5 treasury / $5 rewards", () => {
+    const ev = (fee, gas, tr, rw) => ({ kind: "launch_settled", data: { feeCollected: String(fee), gasReimbursed: String(gas), toTreasury: String(tr), toRewards: String(rw) } });
+    const sum = summarizeLaunches([ev(25, 15, 5, 5), ev(25, 15, 5, 5), ev(25, 25, 0, 0), { kind: "other", data: {} }]);
+    expect(sum.launches).to.equal(3);
+    expect(sum.feeCollected).to.equal(75n);
+    expect(sum.gasReimbursed).to.equal(55n);
+    expect(sum.toTreasury).to.equal(10n);
+    expect(sum.toRewards).to.equal(10n);
+    expect(sum.netToPlatform).to.equal(20n);
+    expect(sum.feeCollected - sum.gasReimbursed).to.equal(sum.netToPlatform); // nothing leaks between fee, gas and the two shares
+    expect(toJson(sum).netToPlatform).to.equal("20");
+  });
+
+  it("rewards summary adds buybacks, the burn / airdrop split and its own keeper gas", () => {
+    const events = [
+      { kind: "r_buyback", data: { ethIn: "100", tokensOut: "1000" } },
+      { kind: "r_buyback", data: { ethIn: "50", tokensOut: "400" } },
+      { kind: "r_tokens_split", data: { tokensIn: "1000", burned: "500", toAirdrop: "500" } },
+      { kind: "r_tokens_split", data: { tokensIn: "400", burned: "200", toAirdrop: "200" } },
+      { kind: "r_airdrop_done", data: { totalDistributed: "700" } },
+      { kind: "r_rescued", data: { amount: "7" } },
+      { kind: "r_legacy_sale", data: { ethOut: "10", tokensOut: "80" } },
+    ];
+    const r = summarizeRewards(events, [gasRow("rewards-buyback", "3"), gasRow("rewards-airdrop", "4"), gasRow("rewards-buyback", "3"), gasRow("flush", "99")]);
+    expect(r.ethSpentOnBuyback).to.equal(160n);       // 100 + 50 + 10 from the old in-kind path
+    expect(r.legacySaleEth).to.equal(10n);
+    expect(r.platformTokensBought).to.equal(1480n);
+    expect(r.tokensBurned).to.equal(700n);
+    expect(r.tokensQueuedForAirdrop).to.equal(700n);
+    expect(r.airdropDistributed).to.equal(700n);
+    expect(r.ethRescued).to.equal(7n);
+    expect(r.buybackCount).to.equal(2);
+    expect(r.gasWei).to.equal(10n);                    // only rewards-* rows; the fee wallet's flush gas is not counted here
+    expect(r.gasTxCount).to.equal(3);
+    expect(r.gasByCategory["rewards-buyback"]).to.deep.equal({ wei: 6n, count: 2 });
+  });
+
+  it("the fee wallet's summary no longer counts the rewards distributor's gas", () => {
+    const s = summarize([], [gasRow("flush", "10"), gasRow("rewards-buyback", "1000"), gasRow("rewards-airdrop", "1000")]);
+    expect(s.gasWei).to.equal(10n);
+    expect(s.gasTxCount).to.equal(1);
+    expect(s.netToFeeWallet).to.equal(-10n);
+    expect(Object.keys(s.gasByCategory).some((c) => c.startsWith("rewards-"))).to.equal(false);
   });
 });
 
