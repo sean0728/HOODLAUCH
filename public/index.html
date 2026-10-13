@@ -426,9 +426,9 @@
   .sol-status.err{color:var(--critical-500);}
   .sol-status code, .sol-config-box code{font-family:var(--font-mono); font-size:.78rem; background:var(--ink-800); padding:1px 5px; border-radius:4px; color:var(--paper-100);}
   .sol-status a{color:inherit; text-decoration:underline;}
-  #solanaLaunchPanel .hint, #solDetailRoot .hint, #solTradePanel .hint, #solFeesPanel .hint{font-size:.74rem; line-height:1.5; color:var(--paper-500); font-family:var(--font-mono);}
+  #solanaLaunchPanel .hint, #solDetailRoot .hint, #solTradePanel .hint{font-size:.74rem; line-height:1.5; color:var(--paper-500); font-family:var(--font-mono);}
   #solanaLaunchPanel{margin-bottom:18px;}
-  #solanaLaunchPanel .hint a, #solTradePanel .hint a, #solFeesPanel .hint a{color:inherit; text-decoration:underline;}
+  #solanaLaunchPanel .hint a, #solTradePanel .hint a{color:inherit; text-decoration:underline;}
   #solanaLaunchPanel .sol-form .field .hint{margin-top:5px; color:var(--paper-700);}
 
   /* ---------------- Detail view ---------------- */
@@ -10160,10 +10160,12 @@
   }
   function solRefreshWalletUi(){
     if(document.getElementById("saWalletRow") && typeof saRefreshWalletRow === "function") saRefreshWalletRow();
+    if(document.getElementById("saFeesWallet") && typeof renderSaFees === "function") renderSaFees();
+    if(document.getElementById("solPortfolioWrap") && typeof renderSolPortfolio === "function") renderSolPortfolio();
     const row = document.getElementById("solWalletRow");
     if(row){ row.innerHTML = solWalletRowHTML(); solWireWalletRow(row, renderSolanaLaunchPanel); }
     const trow = document.getElementById("solTradeWallet");
-    if(trow){ trow.innerHTML = solWalletRowHTML(); solWireWalletRow(trow, ()=>{ solRenderTradePanel(); solRenderFeesPanel(); }); }
+    if(trow){ trow.innerHTML = solWalletRowHTML(); solWireWalletRow(trow, ()=>{ solRenderTradePanel(); }); }
     if(solDetailMint && typeof solRefreshSocial === "function") solRefreshSocial();   // a connected, linked Solana wallet can comment
     const pl = document.getElementById("pfLinkRow");
     if(pl && typeof pfRefreshLinkRow === "function") pfRefreshLinkRow();
@@ -10742,7 +10744,6 @@
       </div>
       <div style="display:flex; flex-direction:column; gap:20px;">
         <div class="panel" id="solTradePanel"></div>
-        <div class="panel" id="solFeesPanel"></div>
         <div class="panel" id="calloutPanel">
           <div class="eyebrow" style="margin-bottom:10px;">Callout</div>
           <div id="calloutMount"></div>
@@ -10755,7 +10756,6 @@
       </div>`;
     showView("detail");
     solRenderTradePanel();
-    solRenderFeesPanel();
     solRefreshSocial();
     const rmBtn = document.getElementById("solRemoveBtn");
     if(rmBtn) rmBtn.addEventListener("click", ()=> solRemoveLaunch(l));
@@ -10813,7 +10813,6 @@
       set("solDGaugeHint", "This token reached its target and moved to a Meteora DAMM v2 pool — it no longer trades on the bonding curve.");
     }
     solRenderTradePanel();
-    solRenderFeesPanel();
   }
 
   // ---- trade panel ----
@@ -10846,7 +10845,7 @@
       <button class="btn btn-primary" id="solTradeBtn" style="width:100%; margin-top:10px;">${buy ? "Buy" : "Sell"}</button>
       <div class="hint" id="solTradeMsg" style="margin-top:8px;">${solTradeNote || (info ? "" : escapeHtml(solLibErr || solInfoErr[solDetailMint] ? "Pool data isn't available: "+(solLibErr || solInfoErr[solDetailMint]) : "Loading pool data…"))}</div>`;
     panel.querySelectorAll("[data-sol-side]").forEach(b=> b.addEventListener("click", ()=>{ solTradeSide = b.dataset.solSide; solTradeAmount = ""; solTradeNote = ""; solRenderTradePanel(); }));
-    solWireWalletRow(document.getElementById("solTradeWallet"), ()=>{ solRenderTradePanel(); solRenderFeesPanel(); });
+    solWireWalletRow(document.getElementById("solTradeWallet"), ()=>{ solRenderTradePanel(); });
     const inp = document.getElementById("solTradeAmount");
     let timer = null;
     inp.addEventListener("input", ()=>{
@@ -10916,39 +10915,165 @@
   }
 
   // ---- fee claims ----
-  async function solRenderFeesPanel(){
-    const panel = document.getElementById("solFeesPanel");
-    const info = solInfo[solDetailMint];
-    if(!panel) return;
-    if(!info){ panel.innerHTML = `<div class="eyebrow">Trading fees</div><div class="hint" style="margin-top:8px;">Loading…</div>`; return; }
+  // Not on the token page. A creator claims their share from their own Portfolio ("Your Solana launches"); the platform's
+  // share is claimed token by token from Admin → Solana ("Platform trading fees").
+  var solFeeCache = {};            // pool -> { f, err, at }
+  async function solReadFees(pool, force){
+    const c = solFeeCache[pool];
+    if(!force && c && c.f && Date.now() - c.at < 30000) return c;
+    let lib;
+    try{ lib = await solLoadLib(); }
+    catch(e){ return (solFeeCache[pool] = { f:null, err:solErr(e), at:Date.now() }); }
+    try{ return (solFeeCache[pool] = { f: await lib.getFeeBreakdown(pool), at:Date.now() }); }
+    catch(e){ return (solFeeCache[pool] = { f:null, err:solErr(e), at:Date.now() }); }
+  }
+  // Runs fn over items a few at a time so a long list doesn't fire every RPC read at once.
+  async function solEachLimited(items, limit, fn){
+    let i = 0;
+    const worker = async ()=>{ while(i < items.length){ const it = items[i++]; await fn(it); } };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  }
+  function solFeeAmt(n){ return n==null || !isFinite(n) ? "—" : (n > 0 && n < 0.0001 ? n.toFixed(7) : n.toFixed(4)); }
+  function solStatusWord(l){ const i = solInfo[l.mint]; return i ? (i.migrated ? "Graduated" : "Curve") : "—"; }
+  function solMiniLogo(l){
+    const img = solSafeImg(l.image);
+    return img ? `<img src="${img}" alt="" width="34" height="34" style="border-radius:8px; object-fit:cover; flex:none;">`
+               : `<div style="width:34px; height:34px; border-radius:8px; background:#ffa03a; color:#111; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:.8rem; flex:none;">${escapeHtml((l.symbol||"??").slice(0,2))}</div>`;
+  }
+  // Claim one share of one token. `who` is "creator" or "partner"; `msgEl` shows progress; onDone() redraws the row.
+  async function solClaimShare(pool, who, btn, msgEl, onDone){
+    if(solBusy) return;
     const lib = window.IgnitionSol;
-    let f = null;
-    try{ f = lib ? await lib.getFeeBreakdown(info.pool) : null; }catch(e){}
-    if(!document.getElementById("solFeesPanel") || solDetailMint !== info.mint) return;
-    if(!f){ panel.innerHTML = `<div class="eyebrow">Trading fees</div><div class="hint" style="margin-top:8px;">Fee figures unavailable right now.</div>`; return; }
-    panel.innerHTML = `
-      <div class="eyebrow" style="margin-bottom:10px;">Trading fees (SOL)</div>
-      <div class="stat-mini-row" style="grid-template-columns:repeat(2,1fr); margin-top:0;">
-        <div class="stat-mini"><div class="v num">${f.creatorUnclaimedSol.toFixed(4)}</div><div class="l">Creator · unclaimed</div></div>
-        <div class="stat-mini"><div class="v num">${f.partnerUnclaimedSol.toFixed(4)}</div><div class="l">Platform · unclaimed</div></div>
-      </div>
-      <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
-        <button class="btn btn-ghost btn-sm" data-sol-claim="creator">Claim creator fees</button>
-        <button class="btn btn-ghost btn-sm" data-sol-claim="partner">Claim platform fees</button>
-      </div>
-      <div class="hint" id="solClaimMsg" style="margin-top:8px;">The program only pays out to the creator / fee-claimer wallet that owns each share; the other button will fail.</div>`;
-    panel.querySelectorAll("[data-sol-claim]").forEach(b=> b.addEventListener("click", async ()=>{
-      if(solBusy) return;
-      const msg = document.getElementById("solClaimMsg");
-      if(!lib.currentWallet()){ solNeedWallet(); return; }
-      solBusy = true; b.disabled = true; msg.textContent = "Approve the transaction in your Solana wallet…";
-      try{
-        const r = await solGuarded(()=> lib.claimFees({ pool: info.pool, who: b.dataset.solClaim }));
-        msg.innerHTML = `Claimed · <a href="${solExplorer("tx", r.signature)}" target="_blank" rel="noopener noreferrer">view transaction</a>`;
-        solRenderFeesPanel();
-      }catch(e){ msg.textContent = solErr(e); }
-      finally{ solBusy = false; b.disabled = false; }
+    if(!lib || !lib.currentWallet()){ solNeedWallet(); return; }
+    solBusy = true; btn.disabled = true; msgEl.textContent = "Approve the transaction in your Solana wallet…";
+    try{
+      const r = await solGuarded(()=> lib.claimFees({ pool, who }));
+      msgEl.innerHTML = `Claimed · <a href="${solExplorer("tx", r.signature)}" target="_blank" rel="noopener noreferrer">view transaction</a>`;
+      await solReadFees(pool, true);
+    }catch(e){
+      msgEl.textContent = solErr(e) + (who === "partner" ? " (Only the platform fee-claimer wallet can claim this share.)" : " (Only the wallet that launched the token can claim this share.)");
+    }finally{
+      solBusy = false;
+    }
+    onDone();
+  }
+
+  // Portfolio: the connected Solana wallet's own launches, each with its unclaimed creator fees and a Claim button.
+  async function renderSolPortfolio(){
+    const wrap = document.getElementById("solPortfolioWrap");
+    if(!wrap) return;
+    if(!solVisible()){ wrap.innerHTML = ""; return; }
+    if(!solLaunchesLoaded){ solLoadLaunches().then(()=> renderSolPortfolio()); }
+    const addr = solConnectedAddr();
+    if(!addr){
+      wrap.innerHTML = `<div class="panel" style="margin-bottom:20px;">
+        <div class="eyebrow" style="margin-bottom:6px;">Your Solana launches</div>
+        <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 12px;">Connect the Solana wallet you launched from to see your tokens here and claim your creator trading fees.</p>
+        <button class="btn btn-primary btn-sm" type="button" data-connect-sol>Connect Solana wallet</button>
+      </div>`;
+      return;
+    }
+    const mine = solLaunches.filter(l=> l.creator === addr);
+    if(!mine.length){
+      wrap.innerHTML = `<div class="panel" style="margin-bottom:20px;">
+        <div class="eyebrow" style="margin-bottom:6px;">Your Solana launches</div>
+        <p style="color:var(--paper-500); font-size:.86rem; margin:0;">${solLaunchesLoaded ? `No Solana tokens launched from ${escapeHtml(addr.slice(0,4)+"…"+addr.slice(-4))} on ${escapeHtml(solNetWord())}.` : "Loading…"}</p>
+      </div>`;
+      return;
+    }
+    wrap.innerHTML = `<div class="panel" style="margin-bottom:20px;">
+      <div class="eyebrow" style="margin-bottom:6px;">Your Solana launches <span style="color:var(--paper-700); font-weight:400;">· ${escapeHtml(solNetWord())}</span></div>
+      <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 4px;">Tokens launched from ${escapeHtml(addr.slice(0,4)+"…"+addr.slice(-4))}. The creator's share of each token's trading fees builds up in SOL; claim it here whenever you like.</p>
+      ${mine.map(l=>`
+        <div class="my-token-row" data-solp-row="${escapeHtml(l.pool)}">
+          ${solMiniLogo(l)}
+          <div>
+            <div class="mtr-name">${escapeHtml(l.name)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(l.symbol)}</span> ${chainBadgeHTML("solana")}</div>
+            <div class="mtr-meta">${escapeHtml(solStatusWord(l))} · <span data-solp-fee>Checking creator fees…</span></div>
+            <div class="mtr-meta" data-solp-msg style="margin-top:3px;"></div>
+          </div>
+          <div class="mtr-actions">
+            <button class="btn btn-primary" style="padding:7px 12px; font-size:.8rem;" type="button" data-solp-claim="${escapeHtml(l.pool)}" disabled>Claim creator fees</button>
+            <button class="btn btn-ghost" style="padding:7px 12px; font-size:.8rem;" type="button" data-solp-view="${escapeHtml(l.mint)}">View</button>
+          </div>
+        </div>`).join("")}
+    </div>`;
+    wrap.querySelectorAll("[data-solp-view]").forEach(b=> b.addEventListener("click", ()=> openSolanaDetail(b.dataset.solpView)));
+    const paint = (l)=>{
+      const row = wrap.querySelector(`[data-solp-row="${CSS.escape(l.pool)}"]`);
+      if(!row) return;
+      const c = solFeeCache[l.pool] || {};
+      const lab = row.querySelector("[data-solp-fee]");
+      const btn = row.querySelector("[data-solp-claim]");
+      if(!c.f){ lab.textContent = c.err ? "fee figures unavailable right now" : "Checking creator fees…"; btn.disabled = true; return; }
+      const un = c.f.creatorUnclaimedSol;
+      lab.innerHTML = `<b>${solFeeAmt(un)} SOL</b> unclaimed · ${solFeeAmt(c.f.creatorTotalSol)} SOL earned in total`;
+      btn.disabled = !(un > 0);
+    };
+    wrap.querySelectorAll("[data-solp-claim]").forEach(btn=> btn.addEventListener("click", ()=>{
+      const l = mine.find(x=> x.pool === btn.dataset.solpClaim); if(!l) return;
+      const row = btn.closest("[data-solp-row]");
+      solClaimShare(l.pool, "creator", btn, row.querySelector("[data-solp-msg]"), ()=> paint(l));
     }));
+    await solEachLimited(mine, 3, async (l)=>{ await solReadFees(l.pool, false); paint(l); });
+  }
+
+  // Admin → Solana: every token with the platform's unclaimed share and its own Claim button.
+  async function renderSaFees(force){
+    const body = document.getElementById("saFeesBody");
+    if(!body) return;
+    const wrow = document.getElementById("saFeesWallet");
+    if(wrow){
+      wrow.innerHTML = saWalletRowHTML();
+      solWireWalletRow(wrow, ()=>{ solRefreshWalletUi(); });
+      wrow.querySelectorAll("[data-sa-loadlib]").forEach(b=> b.addEventListener("click", async ()=>{ b.disabled = true; try{ await saEnsureLib(); }catch(e){ toast(solErr(e)); } solRefreshWalletUi(); }));
+    }
+    if(!solLaunchesLoaded){
+      body.innerHTML = `<p class="admin-empty">Loading tokens…</p>`;
+      await solLoadLaunches();
+      if(!document.getElementById("saFeesBody")) return;
+    }
+    if(!solLaunches.length){ body.innerHTML = `<p class="admin-empty">No Solana tokens have been launched on ${escapeHtml(solNetWord())} yet.</p>`; return; }
+    const list = solLaunches.slice().sort((x,y)=> (y.createdAt||0) - (x.createdAt||0));
+    body.innerHTML = `
+      <div class="admin-empty" style="margin-bottom:10px;">Total unclaimed across ${list.length} token${list.length===1?"":"s"}: <span id="safTotal">…</span></div>
+      ${list.map(l=>`
+        <div class="my-token-row" data-saf-row="${escapeHtml(l.pool)}" style="flex-wrap:wrap;">
+          ${solMiniLogo(l)}
+          <div style="min-width:0; flex:1 1 180px;">
+            <div class="mtr-name">${escapeHtml(l.name)} <span style="color:var(--paper-700); font-weight:400;">$${escapeHtml(l.symbol)}</span></div>
+            <div class="mtr-meta">${escapeHtml(solStatusWord(l))} · <a href="${solExplorer("address", l.mint)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.mint.slice(0,4)+"…"+l.mint.slice(-4))}</a></div>
+            <div class="mtr-meta" data-saf-msg style="margin-top:3px;"></div>
+          </div>
+          <div style="text-align:right; flex:0 1 auto;">
+            <div class="mtr-name" data-saf-un>…</div>
+            <div class="mtr-meta" data-saf-tot>…</div>
+          </div>
+          <div class="mtr-actions"><button class="btn btn-ghost btn-sm" type="button" data-saf-claim="${escapeHtml(l.pool)}" disabled>Claim platform fees</button></div>
+        </div>`).join("")}`;
+    const paint = (l)=>{
+      const row = body.querySelector(`[data-saf-row="${CSS.escape(l.pool)}"]`);
+      if(!row) return;
+      const c = solFeeCache[l.pool] || {};
+      const un = row.querySelector("[data-saf-un]"), tot = row.querySelector("[data-saf-tot]"), btn = row.querySelector("[data-saf-claim]");
+      if(!c.f){ un.textContent = c.err ? "n/a" : "…"; tot.textContent = c.err ? "fee figures unavailable" : "unclaimed"; btn.disabled = true; if(c.err) un.title = c.err; return; }
+      un.innerHTML = `${solFeeAmt(c.f.partnerUnclaimedSol)} SOL`;
+      tot.textContent = "unclaimed · " + solFeeAmt(c.f.partnerTotalSol) + " earned";
+      btn.disabled = !(c.f.partnerUnclaimedSol > 0);
+    };
+    const paintTotal = ()=>{
+      const el = document.getElementById("safTotal"); if(!el) return;
+      let sum = 0, missing = 0;
+      for(const l of list){ const c = solFeeCache[l.pool]; if(c && c.f) sum += c.f.partnerUnclaimedSol; else missing++; }
+      el.innerHTML = `<b>${solFeeAmt(sum)} SOL</b>${missing ? ` (${missing} not read yet)` : ""}`;
+    };
+    body.querySelectorAll("[data-saf-claim]").forEach(btn=> btn.addEventListener("click", ()=>{
+      const l = list.find(x=> x.pool === btn.dataset.safClaim); if(!l) return;
+      const row = btn.closest("[data-saf-row]");
+      solClaimShare(l.pool, "partner", btn, row.querySelector("[data-saf-msg]"), ()=>{ paint(l); paintTotal(); });
+    }));
+    await solEachLimited(list, 3, async (l)=>{ await solReadFees(l.pool, !!force); paint(l); paintTotal(); });
+    paintTotal();
   }
   async function solRemoveLaunch(l){
     if(!confirmRemove(l)) return;
@@ -12358,6 +12483,9 @@
           <button class="btn btn-primary" id="portConnect">Connect Wallet</button>
         </div>`;
       document.getElementById("portConnect").addEventListener("click", ()=> walletBtn.click() );
+      // A Solana-only creator has no EVM wallet connected; their Solana launches (and creator fee claims) still show here.
+      wrap.insertAdjacentHTML("beforeend", `<div id="solPortfolioWrap" style="max-width:720px; margin:0 auto;"></div>`);
+      renderSolPortfolio();
       return;
     }
 
@@ -12423,6 +12551,8 @@
 
       ${myTokensHTML}
 
+      <div id="solPortfolioWrap"></div>
+
       <div id="stuckDepositsWrap"></div>
 
       <div class="panel">
@@ -12445,6 +12575,7 @@
     loadRealPortfolio(wallet, myTokens);
     loadCreatorRewardsForMyTokens(wallet, myTokens);
     loadMyStuckDeposits(wallet);
+    renderSolPortfolio();
   }
 
   // "Stuck deposits" — Portfolio's self-service counterpart to the admin
@@ -15346,6 +15477,14 @@
 
         <button class="btn btn-primary" id="solanaSettingsSaveBtn" style="margin-top:6px;">Save Solana settings</button>
         <div class="help-text" id="sa_result" style="margin-top:10px;" aria-live="polite"></div>
+      </div>
+
+      <div class="panel admin-panel" style="grid-column:1 / -1; margin-top:20px;" id="saFeesPanel">
+        <div class="admin-panel-head"><h3>Platform trading fees <span class="tc-quicklaunch-badge${live ? " live" : ""}">${live ? "Mainnet" : "Devnet"}</span></h3>
+          <button class="btn btn-ghost btn-sm" type="button" id="saFeesRefresh">Refresh</button></div>
+        <p class="help-text" style="margin:2px 0 12px; font-size:.8rem; color:var(--paper-500); line-height:1.5;">The platform's share of each token's trading fees, in SOL, with a Claim button per token. Only the platform fee-claimer wallet named in the platform config can claim — connect it here; any other wallet's claim is refused by the program. The creator's share is claimed by each creator from their own Portfolio.</p>
+        <div id="saFeesWallet" style="margin-bottom:12px;"></div>
+        <div id="saFeesBody"><p class="admin-empty">Loading…</p></div>
       </div>`;
   }
   /* ---------------- Solana login ----------------
@@ -15656,6 +15795,9 @@
     if(save) save.addEventListener("click", ()=> runSolanaSettingsSave(save));
     saRefreshWalletRow();
     saUpdateForm();
+    const fr = document.getElementById("saFeesRefresh");
+    if(fr) fr.addEventListener("click", ()=> renderSaFees(true));
+    renderSaFees();
   }
   async function runSolanaSettingsSave(btnEl){
     if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
