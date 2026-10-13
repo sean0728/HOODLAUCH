@@ -398,10 +398,8 @@ with sync_playwright() as p:
     pg.click("#solTradeBtn"); pg.wait_for_timeout(900)
     tc = [c for c in pg.evaluate("window.__solCalls") if c[0] == "trade"]
     check("7e sell trade call", tc[-1][1]["side"] == "sell" and tc[-1][1]["amount"] == "1000", tc)
-    check("7f fees panel shows unclaimed amounts", "0.0123" in pg.inner_text("#solFeesPanel") and "0.0456" in pg.inner_text("#solFeesPanel"), pg.inner_text("#solFeesPanel"))
-    pg.click("[data-sol-claim='creator']"); pg.wait_for_timeout(600)
-    cc = [c for c in pg.evaluate("window.__solCalls") if c[0] == "claimFees"]
-    check("7g claim creator fees call", cc and cc[-1][1]["who"] == "creator" and cc[-1][1]["pool"] == POOL, cc)
+    dtxt = pg.inner_text("#view-detail")
+    check("7f the token page has no fee panel and no claim buttons", pg.locator("#solFeesPanel, [data-sol-claim]").count() == 0 and "Claim creator fees" not in dtxt and "Claim platform fees" not in dtxt and "Trading fees" not in dtxt, dtxt[:400])
 
     # graduated pool -> trading UI replaced
     pg.evaluate("window.__solInfo.migrated = true; window.__solInfo.progressPct = 100;")
@@ -808,9 +806,8 @@ with sync_playwright() as p:
     # ---------- 17. Admin -> Solana: who can launch, supply, curve ----------
     pub_state(public=False)
     pg = new_page(b, ADMIN); connect_evm(pg); open_sol_admin(pg)
-    check("17a 'Who can launch' defaults to Admin only", pg.input_value("#sa_publicLaunch") == "false" and "Only your admin wallet" in pg.inner_text("#sa_publicNote"))
-    pg.select_option("#sa_publicLaunch", "true"); pg.wait_for_timeout(150)
-    check("17b choosing Anyone explains what that means", "devnet test token" in pg.inner_text("#sa_publicNote"), pg.inner_text("#sa_publicNote"))
+    check("17a 'Who can launch' is always Anyone (admin-only mode is gone)", pg.input_value("#sa_publicLaunch") == "true" and "Anyone" in pg.inner_text("#sa_publicNote") + pg.inner_text("[data-admin-panel='solana']"), pg.input_value("#sa_publicLaunch"))
+    check("17b the note explains what that means", "devnet test token" in pg.inner_text("#sa_publicNote"), pg.inner_text("#sa_publicNote"))
     check("17c curve fields are prefilled from the saved settings",
           pg.input_value("#sa_curveStart") == "30" and pg.input_value("#sa_curveGrad") == "300" and pg.input_value("#sa_curveFee") == "1" and pg.input_value("#sa_curveCreator") == "10" and pg.input_value("#sa_supplyMin") == "1000000",
           [pg.input_value(i) for i in ("#sa_curveStart", "#sa_curveGrad", "#sa_curveFee", "#sa_curveCreator", "#sa_supplyMin")])
@@ -953,6 +950,45 @@ with sync_playwright() as p:
     check("19n ...and no longer under 'Launched'", pg.locator("#tokenGrid .token-card[data-solmint]").count() == 0)
     pg.context.close()
     S.settings_api = False
+
+    # ---------- 20. fee claims live in the creator's Portfolio and in Admin -> Solana (one Claim button per token) ----------
+    S.settings_api = True; fresh_saved()
+    S.launches = [
+        {"mint": MINT, "pool": POOL, "creator": CREATOR, "name": "Ignition Cat", "symbol": "IGCAT", "cluster": "devnet", "createdAt": int(time.time() * 1000) - 60000, "metadataId": None, "image": None},
+        {"mint": addr(61), "pool": addr(62), "creator": addr(63), "name": "Other Creator", "symbol": "OTH", "cluster": "devnet", "createdAt": int(time.time() * 1000) - 120000, "metadataId": None, "image": None},
+    ]
+    pg = new_page(b, ADMIN); connect_evm(pg)
+    pg.click("#adminTabBtn"); pg.wait_for_timeout(600)
+    # Portfolio, Solana wallet not connected yet
+    pg.click("[data-view='portfolio']"); pg.wait_for_timeout(1200)
+    ptxt = pg.inner_text("#portfolioWrap")
+    check("20a portfolio asks for the Solana wallet before showing creator fees", "your solana launches" in ptxt.lower() and pg.locator("#solPortfolioWrap [data-connect-sol]").count() == 1, ptxt[:300])
+    # connect the Solana wallet (the mock connects as CREATOR) through the header button
+    pg.click("#solLoginBtn"); pg.wait_for_timeout(1500)
+    if pg.locator("[data-sol-wallet]").count(): pg.click("[data-sol-wallet]"); pg.wait_for_timeout(1500)
+    pg.click("[data-view='portfolio']"); pg.wait_for_timeout(1500)
+    ptxt = pg.inner_text("#solPortfolioWrap")
+    check("20b portfolio lists only the connected wallet's own Solana tokens", "Ignition Cat" in ptxt and "Other Creator" not in ptxt, ptxt)
+    check("20c it shows the creator's unclaimed fees", "0.0123" in ptxt and "unclaimed" in ptxt, ptxt)
+    check("20d no platform share is shown to the creator", "0.0456" not in ptxt and "latform" not in ptxt, ptxt)
+    pg.click("#solPortfolioWrap [data-solp-claim]"); pg.wait_for_timeout(900)
+    cc = [c for c in pg.evaluate("window.__solCalls") if c[0] == "claimFees"]
+    check("20e claim creator fees call", cc and cc[-1][1]["who"] == "creator" and cc[-1][1]["pool"] == POOL, cc)
+    check("20f portfolio shows the claim result", "Claimed" in pg.inner_text("#solPortfolioWrap"), pg.inner_text("#solPortfolioWrap"))
+    if SHOTS: pg.screenshot(path=os.path.join(SHOTS, "sol_portfolio_fees.png"), full_page=True)
+    # Admin -> Solana: platform share per token
+    pg.evaluate("window.__solCalls.length = 0")
+    open_sol_admin(pg); pg.wait_for_timeout(1800)
+    atxt = pg.inner_text("#saFeesPanel")
+    check("20g admin lists every token with its platform fees", "Ignition Cat" in atxt and "Other Creator" in atxt and "0.0456" in atxt, atxt)
+    check("20h one Claim button per token", pg.locator("#saFeesBody [data-saf-claim]").count() == 2, pg.locator("#saFeesBody [data-saf-claim]").count())
+    check("20i total unclaimed adds the tokens up (2 x 0.0456)", "0.0912" in pg.inner_text("#safTotal"), pg.inner_text("#safTotal"))
+    pg.click(f"#saFeesBody [data-saf-claim='{POOL}']"); pg.wait_for_timeout(900)
+    cc = [c for c in pg.evaluate("window.__solCalls") if c[0] == "claimFees"]
+    check("20j claim platform fees call for that token only", len(cc) == 1 and cc[0][1]["who"] == "partner" and cc[0][1]["pool"] == POOL, cc)
+    if SHOTS: pg.locator("#saFeesPanel").screenshot(path=os.path.join(SHOTS, "sol_admin_fees.png"))
+    check("20k no page errors", not pg.errors, pg.errors)
+    pg.context.close()
 
     # ---------- 13. the REAL bundle under the real CSP ----------
     USE_MOCK_LIB = False
