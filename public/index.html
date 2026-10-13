@@ -209,6 +209,8 @@
   }
   .wallet-btn:hover{background:rgba(255,74,28,.2); box-shadow:var(--glow-signal);}
   .wallet-btn:active{transform:translateY(1px);}
+  .wallet-btn.optional{background:transparent; border-color:var(--line-strong); color:var(--paper-500); font-weight:500;}
+  .wallet-btn.optional:hover{color:var(--paper-100);}
   .wallet-btn.connected{border-color:var(--line-strong); background:var(--ink-800); color:var(--paper-100);}
   .wallet-btn.connected:hover{box-shadow:var(--glow-cyan);}
 
@@ -2253,6 +2255,8 @@
   function refreshWalletBtn(){
     if(wallet){ walletBtn.textContent = fmtAddr(wallet); walletBtn.classList.add("connected"); }
     else { walletBtn.textContent = "Connect Wallet"; walletBtn.classList.remove("connected"); }
+    walletBtn.classList.remove("optional");
+    try{ refreshSolBtn(); }catch(e){ /* the Solana login button isn't set up yet */ }
     if(typeof renderProfileIfActive==="function") renderProfileIfActive();
     if(typeof loadMyFollows==="function") loadMyFollows();
   }
@@ -10171,6 +10175,7 @@
     if(pl && typeof pfRefreshLinkRow === "function") pfRefreshLinkRow();
     // the Solana wallet is part of who the visitor is logged in as
     if(typeof refreshSolBtn === "function") refreshSolBtn();
+    if(views.portfolio.classList.contains("active") && typeof renderPortfolio === "function") renderPortfolio();
     if(typeof loadMyFollows === "function") loadMyFollows();
     if(typeof renderProfileIfActive === "function") renderProfileIfActive();
     if(typeof currentCommentToken !== "undefined" && currentCommentToken && !solDetailMint && views.detail.classList.contains("active")){
@@ -10959,10 +10964,52 @@
   }
 
   // Portfolio: the connected Solana wallet's own launches, each with its unclaimed creator fees and a Claim button.
+  // Holdings table for a Solana-only Portfolio: SOL plus every IgnitionX Solana token this wallet holds, valued in SOL.
+  async function renderSolHoldings(){
+    const body = document.getElementById("solHoldingsBody");
+    const tot = document.getElementById("solPortTotal");
+    if(!body) return;
+    const addr = solConnectedAddr();
+    if(!addr) return;
+    const still = ()=> solConnectedAddr()===addr && document.getElementById("solHoldingsBody")===body;
+    const fmt = (n, d)=> (n > 0 && n < Math.pow(10, -d)) ? Number(n).toPrecision(2) : Number(n).toLocaleString("en-US", { maximumFractionDigits: d });
+    let lib;
+    try{ lib = await solLoadLib(); }
+    catch(e){ body.innerHTML = `<tr><td colspan="4" style="color:var(--paper-700);">${escapeHtml(solErr(e))}</td></tr>`; if(tot) tot.textContent = "—"; return; }
+    let sol = null;
+    try{ sol = (await lib.getBalances(null)).sol; }catch(e){ /* shown as unavailable below */ }
+    if(!still()) return;
+    const rows = [];
+    let total = sol || 0;
+    if(solVisible()){
+      if(!solLaunchesLoaded) await solLoadLaunches();
+      const mine = solLaunches.slice(0, 40);
+      await solEachLimited(mine, 4, async (l)=>{
+        try{
+          const b = await lib.getBalances(l.mint);
+          if(!(b.token > 0)) return;
+          let price = null;
+          try{ const i = solInfo[l.mint] && Date.now() - (solInfo[l.mint]._at||0) < 60000 ? solInfo[l.mint] : await lib.getPoolInfo(l.pool); if(i && isFinite(i.priceSol)) price = i.priceSol; }catch(e){}
+          rows.push({ l, amount: b.token, price, value: price==null ? null : b.token*price });
+          if(price!=null) total += b.token*price;
+        }catch(e){ /* one token's balance failing shouldn't hide the rest */ }
+      });
+    }
+    if(!still()) return;
+    rows.sort((a,b)=> (b.value||0)-(a.value||0));
+    body.innerHTML = `<tr><td><b>SOL</b></td><td class="num">${sol==null ? "—" : fmt(sol, 4)}</td><td class="num">—</td><td class="num">${sol==null ? "—" : fmt(sol, 4)+" SOL"}</td></tr>`
+      + rows.map(r=>`<tr><td><button type="button" class="pf-chip link" data-pf-sol="${escapeHtml(r.l.mint)}"><span class="pf-chip-name">$${escapeHtml(r.l.symbol)}</span></button> ${chainBadgeHTML("solana")}</td><td class="num">${fmt(r.amount, 2)}</td><td class="num">${r.price==null ? "—" : r.price.toPrecision(3)+" SOL"}</td><td class="num">${r.value==null ? "—" : fmt(r.value, 4)+" SOL"}</td></tr>`).join("");
+    if(tot) tot.textContent = sol==null && !rows.length ? "—" : fmt(total, 4)+" SOL";
+  }
   async function renderSolPortfolio(){
     const wrap = document.getElementById("solPortfolioWrap");
     if(!wrap) return;
-    if(!solVisible()){ wrap.innerHTML = ""; return; }
+    if(!solVisible()){
+      wrap.innerHTML = (!wallet && solConnectedAddr())
+        ? `<div class="panel" style="margin-bottom:20px;"><div class="eyebrow" style="margin-bottom:6px;">Your Solana launches</div><p style="color:var(--paper-500); font-size:.86rem; margin:0;">Solana launching isn't open to the public yet, so there are no Solana launches to show. Your Solana login and profile still work.</p></div>`
+        : "";
+      return;
+    }
     if(!solLaunchesLoaded){ solLoadLaunches().then(()=> renderSolPortfolio()); }
     const addr = solConnectedAddr();
     if(!addr){
@@ -12476,16 +12523,40 @@
   function renderPortfolio(){
     const wrap = document.getElementById("portfolioWrap");
     if(!wallet){
+      const solAddr = solConnectedAddr();
+      if(solAddr){
+        // Logged in with a Solana wallet only: that IS the account. The Solana side comes first; a Robinhood wallet is an optional extra.
+        wrap.innerHTML = `
+          <div class="panel wallet-card">
+            <div class="wallet-addr"><span class="lbl">Connected Solana wallet · ${escapeHtml(solNetWord())}</span>${escapeHtml(fmtAddr(solAddr))}</div>
+            <div class="readout"><div class="val num" id="solPortTotal">…</div><div class="lbl">Portfolio value</div></div>
+          </div>
+          <div id="solPortfolioWrap"></div>
+          <div class="panel" style="margin-bottom:20px;">
+            <div class="eyebrow" style="margin-bottom:6px;">Holdings</div>
+            <p style="color:var(--paper-500); font-size:.82rem; margin:0 0 10px;">Your wallet's real balance on Solana ${escapeHtml(solNetWord())} — SOL plus any IgnitionX Solana token you hold. Values are in SOL.</p>
+            <div style="overflow-x:auto;">
+            <table class="holdings">
+              <thead><tr><th>Asset</th><th>Amount</th><th>Price</th><th>Value</th></tr></thead>
+              <tbody id="solHoldingsBody"><tr><td colspan="4" style="color:var(--paper-700);">Reading your wallet…</td></tr></tbody>
+            </table>
+            </div>
+          </div>
+          <div class="panel" style="margin-bottom:20px;">
+            <div class="eyebrow" style="margin-bottom:6px;">Robinhood Chain</div>
+            <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 12px;">You're logged in with your Solana wallet. Connect a Robinhood wallet as well only if you want its balance and tokens shown here — your account doesn't need one.</p>
+            <button class="btn btn-ghost btn-sm" type="button" data-connect-evm>Connect Robinhood wallet</button>
+          </div>`;
+        renderSolHoldings();
+        renderSolPortfolio();
+        return;
+      }
       wrap.innerHTML = `
         <div class="panel empty" style="max-width:520px; margin:40px auto;">
           <h3 style="margin-bottom:10px; font-size:1.1rem;">No wallet connected</h3>
-          <p style="color:var(--paper-500); font-size:.9rem; margin-bottom:20px;">Connect your wallet to see its real balance and any tokens you've launched.</p>
-          <button class="btn btn-primary" id="portConnect">Connect Wallet</button>
+          <p style="color:var(--paper-500); font-size:.9rem; margin-bottom:20px;">Connect a Robinhood or a Solana wallet to see your balance and the tokens you've launched.</p>
+          ${connectButtonsHTML()}
         </div>`;
-      document.getElementById("portConnect").addEventListener("click", ()=> walletBtn.click() );
-      // A Solana-only creator has no EVM wallet connected; their Solana launches (and creator fee claims) still show here.
-      wrap.insertAdjacentHTML("beforeend", `<div id="solPortfolioWrap" style="max-width:720px; margin:0 auto;"></div>`);
-      renderSolPortfolio();
       return;
     }
 
@@ -15499,12 +15570,42 @@
       const nm = profileNameOf(a);
       solLoginBtn.textContent = "◎ " + (nm || fmtAddr(a));
       solLoginBtn.classList.add("connected");
-      solLoginBtn.title = "Solana wallet connected — click to disconnect";
+      solLoginBtn.title = "Your account — profile and disconnect";
     }else{
       solLoginBtn.textContent = "Connect Solana";
       solLoginBtn.classList.remove("connected");
       solLoginBtn.title = "Log in with a Solana wallet";
     }
+    // A Solana wallet alone is a full login: the Robinhood button then turns into a quiet optional extra.
+    if(typeof walletBtn !== "undefined" && walletBtn && !wallet){
+      walletBtn.textContent = a ? "+ Robinhood wallet" : "Connect Wallet";
+      walletBtn.classList.toggle("optional", !!a);
+      walletBtn.title = a ? "Optional — also connect a Robinhood wallet" : "";
+    }
+  }
+  // The little account menu under the connected Solana button: open the profile, or disconnect.
+  function closeSolAcctMenu(){ const el = document.getElementById("solAcctMenu"); if(el) el.remove(); }
+  function showSolAcctMenu(anchor){
+    closeSolAcctMenu(); closeSolPicker();
+    const a = solConnectedAddr(); if(!a) return;
+    const nm = profileNameOf(a);
+    const box = document.createElement("div");
+    box.id = "solAcctMenu"; box.className = "sol-picker";
+    box.innerHTML = `<div class="eyebrow">${escapeHtml(nm || fmtAddr(a))} · Solana</div>
+      <button class="btn btn-ghost btn-sm" type="button" data-solacct="profile" style="justify-content:flex-start;">Your profile</button>
+      <button class="btn btn-ghost btn-sm" type="button" data-solacct="portfolio" style="justify-content:flex-start;">Portfolio</button>
+      <button class="btn btn-ghost btn-sm" type="button" data-solacct="disconnect" style="justify-content:flex-start;">Disconnect Solana wallet</button>`;
+    document.body.appendChild(box);
+    const r = anchor.getBoundingClientRect();
+    box.style.top = (r.bottom + 8) + "px";
+    box.style.left = Math.max(8, Math.min(window.innerWidth - box.offsetWidth - 8, r.left)) + "px";
+    box.querySelectorAll("[data-solacct]").forEach(b=> b.addEventListener("click", ()=>{
+      closeSolAcctMenu();
+      const act = b.dataset.solacct;
+      if(act==="disconnect") solLoginDisconnect();
+      else { profileViewAddr = null; const tab = document.querySelector(`.tab[data-view="${act}"]`); if(tab) tab.click(); }
+    }));
+    setTimeout(()=> document.addEventListener("click", function once(ev){ if(!box.contains(ev.target)){ closeSolAcctMenu(); } document.removeEventListener("click", once); }), 0);
   }
   function connectButtonsHTML(){
     return `<div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:center;">${wallet ? "" : `<button class="btn btn-primary" type="button" data-connect-evm>Connect Robinhood wallet</button>`}${solConnectedAddr() ? "" : `<button class="btn ${wallet ? "btn-primary" : "btn-ghost"}" type="button" data-connect-sol>Connect Solana wallet</button>`}</div>`;
@@ -15532,6 +15633,8 @@
     }catch(e){ toast(solErr(e)); }
     finally{ end(); }
     solRefreshWalletUi();
+    // Only a Solana wallet so far: the Launch page should start on Solana, not on a Robinhood launch it can't pay for.
+    if(solConnectedAddr() && !wallet && solVisible()){ try{ solSetLaunchNet("solana"); }catch(e){} }
   }
   async function solLoginConnect(anchor){
     let lib;
@@ -15547,7 +15650,11 @@
     solRefreshWalletUi();
     toast("Solana wallet disconnected from IgnitionX.");
   }
-  if(solLoginBtn) solLoginBtn.addEventListener("click", ()=>{ solConnectedAddr() ? solLoginDisconnect() : solLoginConnect(solLoginBtn); });
+  if(solLoginBtn) solLoginBtn.addEventListener("click", ()=>{
+    if(!solConnectedAddr()) return solLoginConnect(solLoginBtn);
+    if(document.getElementById("solAcctMenu")) return closeSolAcctMenu();   // click again to close
+    showSolAcctMenu(solLoginBtn);
+  });
   document.addEventListener("click", (e)=>{
     const evm = e.target.closest && e.target.closest("[data-connect-evm]");
     if(evm){ e.preventDefault(); if(!wallet) walletBtn.click(); return; }
