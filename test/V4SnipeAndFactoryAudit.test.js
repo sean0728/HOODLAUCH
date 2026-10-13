@@ -128,30 +128,39 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
       expect(await hook.currentSnipeBps(id)).to.equal(0n);
     });
 
-    it("SP-4. an exact-in BUY pays the surcharge on top of the normal tax, to the platform fee wallet", async () => {
+    // The surcharge and the platform tax are both taken in ETH from the ETH leg and booked together in the hook (EthFeeAccrued);
+    // flush() later pays them out to the fee wallet side.
+    const accrued = (rc) => events(rc, hook.interface, "EthFeeAccrued")[0].args;
+
+    it("SP-4. an exact-in BUY pays the surcharge on top of the normal tax, both in ETH, to the platform fee wallet", async () => {
       await factory.setSnipeProtection(5000, 600);
       const { token, key, id } = await plainLaunch();
       const start = (await hook.snipe(id)).start;
       await warpTo(start + 120n);
-      const w0 = await token.balanceOf(feeWallet.address);
       const b0 = await token.balanceOf(sniper.address);
       const rc = await swap(sniper, key, true, -ETH("1"), ETH("1"));
       const sn = events(rc, hook.interface, "SnipeFeeCollected")[0].args;
-      const tax = events(rc, hook.interface, "TaxCollected")[0].args;
+      const acc = accrued(rc);
       const bps = expectedSnipe(5000n, 600n, 120n);
       expect(sn.snipeBps).to.equal(bps);
-      const got = (await token.balanceOf(sniper.address)) - b0;
-      const gross = got + sn.fee + tax.fee;
-      // each part is its own bps of the gross output (within 1 wei of rounding)
-      const snipeBpsSeen = (sn.fee * 10_000n) / gross;
+      expect(sn.fee).to.equal(acc.snipe);
+      const gross = ETH("1"); // fees are bps of the ETH paid in
+      // each part is its own bps of the gross ETH (within 1 wei of rounding)
+      const snipeBpsSeen = (acc.snipe * 10_000n) / gross;
       expect(snipeBpsSeen).to.be.gte(bps - 1n);
       expect(snipeBpsSeen).to.be.lte(bps);
-      expect((tax.fee * 10_000n) / gross).to.be.gte(99n);
-      expect((tax.fee * 10_000n) / gross).to.be.lte(100n);
-      // every token of both fees reached the fee wallet; nothing is stuck in the hook
-      expect((await token.balanceOf(feeWallet.address)) - w0).to.equal(sn.fee + tax.fee);
+      expect((acc.platform * 10_000n) / gross).to.be.gte(99n);
+      expect((acc.platform * 10_000n) / gross).to.be.lte(100n);
+      // the token leg is untouched: the buyer keeps every token the pool paid, and the hook holds no tokens
+      expect((await token.balanceOf(sniper.address)) - b0).to.be.gt(0n);
       expect(await token.balanceOf(await A(hook))).to.equal(0n);
-      console.log(`        120s in: surcharge ${bps} bps; buyer got ${fmt(got)} of ${fmt(gross)} tokens (${fmt(sn.fee)} snipe fee, ${fmt(tax.fee)} normal tax)`);
+      // every wei of both fees sits in the hook and reaches the fee wallet on flush
+      expect(await hook.pendingEth(id)).to.equal(acc.snipe + acc.platform);
+      expect(await ethers.provider.getBalance(await A(hook))).to.equal(acc.snipe + acc.platform);
+      const w0 = await ethers.provider.getBalance(feeWallet.address);
+      await hook.flush(id);
+      expect((await ethers.provider.getBalance(feeWallet.address)) - w0).to.equal(acc.snipe + acc.platform);
+      console.log(`        120s in: surcharge ${bps} bps; ${fmt(acc.snipe)} ETH snipe fee + ${fmt(acc.platform)} ETH normal tax on a 1 ETH buy`);
     });
 
     it("SP-5. a SELL is never charged the surcharge", async () => {
@@ -159,10 +168,13 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
       const { token, key, id } = await plainLaunch();
       await swap(trader, key, true, -ETH("1"), ETH("1"));
       const t = await token.balanceOf(trader.address);
+      const pm0 = await ethers.provider.getBalance(await A(pm));
       const rc = await swap(trader, key, false, -(t / 2n));
       expect(events(rc, hook.interface, "SnipeFeeCollected").length).to.equal(0);
-      const tax = events(rc, hook.interface, "TaxCollected")[0].args;
-      expect(tax.fee).to.equal(((t / 2n) * 100n) / 10_000n); // exactly the 1% tax, nothing more
+      const acc = accrued(rc);
+      expect(acc.snipe).to.equal(0n);
+      const grossEth = pm0 - (await ethers.provider.getBalance(await A(pm)));
+      expect(acc.platform).to.equal((grossEth * 100n) / 10_000n); // exactly the 1% tax on the ETH out, nothing more
     });
 
     it("SP-6. exempt callers pay nothing: the launcher's own creator buy-in and any taxExempt swapper", async () => {
@@ -173,26 +185,29 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
       await factory.setTaxExempt(await A(testRouter), true); // the hook sees the contract that calls the PoolManager
       const rc2 = await swap(sniper, key, true, -ETH("1"), ETH("1"));
       expect(events(rc2, hook.interface, "SnipeFeeCollected").length).to.equal(0);
-      expect(events(rc2, hook.interface, "TaxCollected").length).to.equal(0);
+      expect(events(rc2, hook.interface, "EthFeeAccrued").length).to.equal(0);
       await factory.setTaxExempt(await A(testRouter), false);
       const rc3 = await swap(trader, key, true, -ETH("1"), ETH("1")); // once the exemption is lifted it pays again
       expect(events(rc3, hook.interface, "SnipeFeeCollected").length).to.equal(1);
     });
 
-    it("SP-7. an exact-OUT buy (token specified) pays it too, and the buyer nets exactly what they asked for", async () => {
+    it("SP-7. an exact-OUT buy (ETH unspecified) pays it too, and the buyer nets exactly what they asked for", async () => {
       await factory.setSnipeProtection(7000, 3600);
       const { token, key } = await plainLaunch();
       const want = ETH("1000000");
       const b0 = await token.balanceOf(sniper.address);
+      const e0 = await ethers.provider.getBalance(sniper.address);
       const rc = await swap(sniper, key, true, want, ETH("5"));
       const sn = events(rc, hook.interface, "SnipeFeeCollected")[0].args;
       expect((await token.balanceOf(sniper.address)) - b0).to.equal(want);
       const bps = sn.snipeBps; // ~7000 (a block or two in)
       expect(bps).to.be.gt(6990n);
-      // fee = net * totalBps / (1e4 - totalBps) split by bps
-      const tax = events(rc, hook.interface, "TaxCollected")[0].args;
-      const total = sn.fee + tax.fee;
-      expect(total).to.equal((want * (bps + 100n)) / (10_000n - (bps + 100n)));
+      const acc = accrued(rc);
+      const total = acc.snipe + acc.platform;
+      // fee = poolEth * totalBps / (1e4 - totalBps): the fee is totalBps of what the buyer actually paid
+      const spent = e0 - (await ethers.provider.getBalance(sniper.address));
+      expect(total * 10_000n).to.be.lte(spent * (bps + 100n));
+      expect(total * 10_000n).to.be.gte(spent * (bps + 100n) - 10_000n);
     });
 
     it("SP-8. the worst case still adds up: 70% snipe + 20% platform tax + 5% creator tax on one buy", async () => {
@@ -211,29 +226,30 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
     it("SP-9. a pool whose normal tax is OFF still gets the surcharge, and loses it when the window ends", async () => {
       await factory.setTaxDefaults(feeWallet.address, 0, await A(feed), 50_000n, 3600, 0, 0); // 0% platform tax
       await factory.setSnipeProtection(4000, 300);
-      const { token, key, id } = await plainLaunch();
+      const { key, id } = await plainLaunch();
       expect((await hook.poolTax(id)).taxActive).to.equal(false);
-      const w0 = await token.balanceOf(feeWallet.address);
       const rc = await swap(sniper, key, true, -ETH("1"), ETH("1"));
       const sn = events(rc, hook.interface, "SnipeFeeCollected")[0].args;
       expect(sn.fee).to.be.gt(0n);
-      expect((await token.balanceOf(feeWallet.address)) - w0).to.equal(sn.fee);
+      expect(await hook.pendingEth(id)).to.equal(sn.fee);
+      const w0 = await ethers.provider.getBalance(feeWallet.address);
+      await hook.flush(id);
+      expect((await ethers.provider.getBalance(feeWallet.address)) - w0).to.equal(sn.fee);
       await warpTo((await hook.snipe(id)).start + 301n);
       const rc2 = await swap(sniper, key, true, -ETH("1"), ETH("1"));
       expect(events(rc2, hook.interface, "SnipeFeeCollected").length).to.equal(0);
-      expect((await token.balanceOf(feeWallet.address)) - w0).to.equal(sn.fee); // nothing more collected
+      expect(await hook.pendingEth(id)).to.equal(0n); // nothing more collected
     });
 
     it("SP-10. once the window has passed, fees are exactly the pre-snipe arithmetic", async () => {
       await factory.setSnipeProtection(5000, 60);
-      const { token, key, id } = await plainLaunch();
+      const { key, id } = await plainLaunch();
       await warpTo((await hook.snipe(id)).start + 61n);
-      const b0 = await token.balanceOf(sniper.address);
       const rc = await swap(sniper, key, true, -ETH("1"), ETH("1"));
       expect(events(rc, hook.interface, "SnipeFeeCollected").length).to.equal(0);
-      const tax = events(rc, hook.interface, "TaxCollected")[0].args;
-      const got = (await token.balanceOf(sniper.address)) - b0;
-      expect(tax.fee).to.equal(((got + tax.fee) * 100n) / 10_000n);
+      const acc = accrued(rc);
+      expect(acc.snipe).to.equal(0n);
+      expect(acc.platform).to.equal((ETH("1") * 100n) / 10_000n);
     });
 
     it("SP-11. settings are snapshotted per pool: later changes never touch a pool that already trades", async () => {
@@ -258,12 +274,14 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
       const rc2 = await swap(sniper, key, true, -ETH("1"), ETH("1"));
       const sn = events(rc2, hook.interface, "SnipeFeeCollected")[0].args;
       const cust = events(rc2, hook.interface, "CustomTaxCollected")[0].args;
-      const tax = events(rc2, hook.interface, "TaxCollected")[0].args;
+      const acc = accrued(rc2);
+      // ETH leg: snipe + platform tax (bps of the ETH paid in); token leg: the creator's burn (bps of the tokens out)
+      expect((acc.snipe * 10_000n) / ETH("1")).to.be.gte(sn.snipeBps - 1n);
+      expect((acc.platform * 10_000n) / ETH("1")).to.be.gte(99n);
       const got = (await token.balanceOf(sniper.address)) - b0;
-      const gross = got + sn.fee + tax.fee + cust.burned + cust.reflection + cust.marketing + cust.liquidity;
-      expect((sn.fee * 10_000n) / gross).to.be.gte(sn.snipeBps - 1n);
-      expect((cust.burned * 10_000n) / gross).to.be.gte(199n);
-      expect((cust.burned * 10_000n) / gross).to.be.lte(200n);
+      const grossTokens = got + cust.burned + cust.reflection + cust.liquidity;
+      expect((cust.burned * 10_000n) / grossTokens).to.be.gte(199n);
+      expect((cust.burned * 10_000n) / grossTokens).to.be.lte(200n);
     });
 
     it("SP-13. a pool launched without a fee wallet gets no surcharge (nowhere to send it) instead of reverting swaps", async () => {

@@ -79,9 +79,35 @@ describe("V4CreatorRewardsDistributor security audit", function () {
     for (const w of [trader, attacker]) await token.connect(w).approve(await A(router), ethers.MaxUint256);
     return { token, key };
   }
-  const swap = (signer, key, zeroForOne, amt, value = 0n) =>
+  const rawSwap = (signer, key, zeroForOne, amt, value = 0n) =>
     router.connect(signer).swap(key, { zeroForOne, amountSpecified: amt, sqrtPriceLimitX96: zeroForOne ? MIN_SQRT : MAX_SQRT },
       { takeClaims: false, settleUsingBurn: false }, "0x", { value });
+
+  // The hook now takes the platform fee in ETH. These tests are about the distributors' sell-and-convert path, which still
+  // exists for tokens delivered in kind (e.g. an older pool's fees), so after every exact-in buy by `trader` they get what
+  // the old hook used to send them: the pool's configured share of 1% of the gross token output.
+  async function deliverInKindFee(key, delta) {
+    const token = await ethers.getContractAt("V4LaunchedToken", key.currency1);
+    const p = await hook.poolTax(await token.poolId().catch(async () => factory.poolIdOf(key.currency1)));
+    if (!p.taxActive || p.feeBps === 0n) return;
+    const gross = (delta * 10_000n) / (10_000n - p.feeBps);
+    const fee = gross - delta;
+    const toRewards = p.rewardsDistributor !== ZERO && p.rewardBps > 0n ? (fee * p.rewardBps) / p.feeBps : 0n;
+    const toCreator = p.creatorRewardsDistributor !== ZERO && p.creatorRewardBps > 0n ? (fee * p.creatorRewardBps) / p.feeBps : 0n;
+    const rest = fee - toRewards - toCreator;
+    if (toRewards > 0n) await token.connect(trader).transfer(p.rewardsDistributor, toRewards);
+    if (toCreator > 0n) await token.connect(trader).transfer(p.creatorRewardsDistributor, toCreator);
+    if (rest > 0n) await token.connect(trader).transfer(p.feeWalletDistributor !== ZERO ? p.feeWalletDistributor : p.feeWallet, rest);
+  }
+  async function swap(signer, key, zeroForOne, amt, value = 0n) {
+    const token = await ethers.getContractAt("V4LaunchedToken", key.currency1);
+    const inKind = signer.address === trader.address && zeroForOne && amt < 0n;
+    const before = inKind ? await token.balanceOf(trader.address) : 0n;
+    const tx = await rawSwap(signer, key, zeroForOne, amt, value);
+    await tx.wait();
+    if (inKind) await deliverInKindFee(key, (await token.balanceOf(trader.address)) - before);
+    return tx;
+  }
   async function withRewards() {
     const l = await launch();
     await swap(trader, l.key, true, -ETH("5"), ETH("5"));
@@ -226,6 +252,8 @@ describe("V4CreatorRewardsDistributor security audit", function () {
       const key = { currency0: ZERO, currency1: addr, fee: 3000, tickSpacing: 60, hooks: await A(hook) };
       await token.connect(trader).approve(await A(router), ethers.MaxUint256);
       await swap(trader, key, true, -ETH("1"), ETH("1"));
+      // a curve-graduated token's pool is not in the plain factory's registry, so hand the creator distributor its in-kind cut directly
+      await token.connect(trader).transfer(await A(crd), (await token.balanceOf(trader.address)) / 1000n);
       await crd.triggerCreatorSwap(addr, 1);
       expect(await crd.claimableEth(addr)).to.be.gt(0n);
       return addr;

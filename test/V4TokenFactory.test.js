@@ -242,96 +242,123 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
       await ctx.token.connect(trader).approve(await router.getAddress(), ethers.MaxUint256);
     });
 
-    it("exact-in BUY: pool gets the full ETH, trader nets gross-1%, fee goes to the fee wallet", async () => {
-      const { token, key, added } = ctx;
+    // The platform's 1% is taken in ETH from the ETH leg and booked in the hook until flush() pays it out.
+    const pend = (poolId) => hook.pendingEth(poolId);
+
+    it("exact-in BUY: 1% of the ETH paid is the fee, the pool swaps the other 99%", async () => {
+      const { token, key, added, poolId } = ctx;
       const x = ETH("1");
       const b0 = await snapshotBalances(token, { trader: trader.address, fw: feeWallet.address });
+      const p0 = await pend(poolId);
       await (await swap(trader, key, true, -x, x)).wait();
       const b1 = await snapshotBalances(token, { trader: trader.address, fw: feeWallet.address });
 
       const net = b1.trader.tok - b0.trader.tok;
-      const fee = b1.fw.tok - b0.fw.tok;
+      const fee = (await pend(poolId)) - p0;
       expect(b0.trader.eth - b1.trader.eth).to.equal(x); // spent exactly x
-      expect(fee).to.be.gt(0n);
-      expect(fee).to.equal(((net + fee) * 100n) / 10_000n); // fee = 1% of gross token output
-      // the pool priced the FULL ETH input (tax didn't shrink the swap)
-      const expectedGross = amountOut(x, added.args.ethAmount, added.args.tokenAmount);
-      expect(within(net + fee, expectedGross, { num: 1n, den: 100_000n })).to.equal(true);
-      // hook is left clean
+      expect(fee).to.equal((x * 100n) / 10_000n); // fee = 1% of the ETH in
+      // the pool priced the ETH input net of the fee, and the trader keeps ALL the tokens it produced
+      const expectedOut = amountOut(x - fee, added.args.ethAmount, added.args.tokenAmount);
+      expect(within(net, expectedOut, { num: 1n, den: 100_000n })).to.equal(true);
+      // no token fee at all: the fee wallet got no tokens, the hook holds none, and its ETH is exactly what it booked
+      expect(b1.fw.tok - b0.fw.tok).to.equal(0n);
       expect(await token.balanceOf(await hook.getAddress())).to.equal(0n);
+      expect(await ethers.provider.getBalance(await hook.getAddress())).to.equal(await pend(poolId));
     });
 
-    it("exact-out BUY: trader receives exactly the requested tokens; fee is 1% of the gross", async () => {
-      const { token, key } = ctx;
+    it("exact-out BUY: trader receives exactly the requested tokens; the fee is 1% of the gross ETH paid", async () => {
+      const { token, key, poolId } = ctx;
       const want = ETH("1000000");
-      const b0 = await snapshotBalances(token, { trader: trader.address, fw: feeWallet.address });
+      const b0 = await snapshotBalances(token, { trader: trader.address });
+      const p0 = await pend(poolId);
       await (await swap(trader, key, true, want, ETH("5"))).wait(); // excess ETH is refunded
-      const b1 = await snapshotBalances(token, { trader: trader.address, fw: feeWallet.address });
+      const b1 = await snapshotBalances(token, { trader: trader.address });
 
       expect(b1.trader.tok - b0.trader.tok).to.equal(want);
-      const fee = b1.fw.tok - b0.fw.tok;
-      expect(fee).to.equal((want * 100n) / 9_900n); // fee/(net+fee) = 1%
       const spent = b0.trader.eth - b1.trader.eth;
+      const fee = (await pend(poolId)) - p0;
       expect(spent).to.be.gt(0n);
       expect(spent).to.be.lt(ETH("5"));
+      // fee/(pool ETH + fee) = 1%: fee = poolEth * 100 / 9900, so fee is 1% of what the trader paid (to rounding)
+      expect(fee * 10_000n).to.be.lte(spent * 100n);
+      expect(fee * 10_000n).to.be.gte(spent * 100n - 10_000n);
       expect(await token.balanceOf(await hook.getAddress())).to.equal(0n);
     });
 
-    it("exact-in SELL: trader pays exactly the amount; fee is 1% of it; pool swaps the rest", async () => {
-      const { token, key, added } = ctx;
+    it("exact-in SELL: trader pays exactly the tokens; the fee is 1% of the ETH the pool pays out", async () => {
+      const { token, key, poolId } = ctx;
       await (await swap(trader, key, true, -ETH("2"), ETH("2"))).wait();
       const bal = await token.balanceOf(trader.address);
       const sellAmt = bal / 2n;
       const poolEth0 = await ethers.provider.getBalance(await pm.getAddress());
-      const poolTok0 = await token.balanceOf(await pm.getAddress());
-      const b0 = await snapshotBalances(token, { trader: trader.address, fw: feeWallet.address });
+      const b0 = await snapshotBalances(token, { trader: trader.address });
+      const p0 = await pend(poolId);
       await (await swap(trader, key, false, -sellAmt)).wait();
-      const b1 = await snapshotBalances(token, { trader: trader.address, fw: feeWallet.address });
+      const b1 = await snapshotBalances(token, { trader: trader.address });
 
-      expect(b0.trader.tok - b1.trader.tok).to.equal(sellAmt);
-      const fee = b1.fw.tok - b0.fw.tok;
-      expect(fee).to.equal((sellAmt * 100n) / 10_000n);
+      expect(b0.trader.tok - b1.trader.tok).to.equal(sellAmt); // the whole amount is swapped, no token skimmed
+      const fee = (await pend(poolId)) - p0;
       const ethOut = b1.trader.eth - b0.trader.eth;
-      // The ETH the pool holds includes the 0.30% LP fee earned on the earlier 2 ETH buy; that
-      // fee is accounted to the position, not part of the pricing reserves, so exclude it.
-      const expectedEth = amountOut(sellAmt - fee, poolTok0, poolEth0 - (ETH("2") * 3n) / 1000n);
-      expect(within(ethOut, expectedEth, { num: 1n, den: 100_000n })).to.equal(true);
+      const gross = poolEth0 - (await ethers.provider.getBalance(await pm.getAddress()));
+      expect(ethOut + fee).to.equal(gross); // what left the pool = trader + fee
+      expect(fee).to.equal((gross * 100n) / 10_000n);
       expect(await token.balanceOf(await hook.getAddress())).to.equal(0n);
     });
 
-    it("exact-out SELL: trader receives exactly the requested ETH; fee is 1% of the tokens paid", async () => {
-      const { token, key } = ctx;
+    it("exact-out SELL: trader receives exactly the requested ETH; the fee is 1% of the gross ETH", async () => {
+      const { token, key, poolId } = ctx;
       await (await swap(trader, key, true, -ETH("3"), ETH("3"))).wait();
       const wantEth = ETH("0.5");
-      const b0 = await snapshotBalances(token, { trader: trader.address, fw: feeWallet.address });
+      const poolEth0 = await ethers.provider.getBalance(await pm.getAddress());
+      const b0 = await snapshotBalances(token, { trader: trader.address });
+      const p0 = await pend(poolId);
       await (await swap(trader, key, false, wantEth)).wait();
-      const b1 = await snapshotBalances(token, { trader: trader.address, fw: feeWallet.address });
+      const b1 = await snapshotBalances(token, { trader: trader.address });
 
       expect(b1.trader.eth - b0.trader.eth).to.equal(wantEth);
-      const paid = b0.trader.tok - b1.trader.tok;
-      const fee = b1.fw.tok - b0.fw.tok;
-      expect(fee).to.equal(((paid - fee) * 100n) / 9_900n);
-      expect(fee * 10_000n).to.be.lte(paid * 100n); // never more than 1% of what the trader paid
-      expect(fee * 10_000n).to.be.gte(paid * 99n);
+      const fee = (await pend(poolId)) - p0;
+      expect(fee).to.equal((wantEth * 100n) / 9_900n); // 1% of the gross (requested + fee)
+      const gross = poolEth0 - (await ethers.provider.getBalance(await pm.getAddress()));
+      expect(gross).to.equal(wantEth + fee);
+      expect(b0.trader.tok - b1.trader.tok).to.be.gt(0n);
       expect(await token.balanceOf(await hook.getAddress())).to.equal(0n);
     });
 
-    it("emits TaxCollected and splits creator rewards / remainder like V2", async () => {
-      const { token, key } = ctx;
-      // creator rewards distributor + fee wallet distributor, set BEFORE a fresh launch
-      await factory.setCreatorRewardsDistributor(other.address);
-      await factory.setFeeWalletDistributor(other2.address);
+    it("flush() pays the platform's ETH split out: creator share to the creator distributor, the rest to the fee-wallet distributor", async () => {
+      const Sink = await ethers.getContractFactory("V4MockFeeSink");
+      const creatorSink = await Sink.deploy();
+      const feeSink = await Sink.deploy();
+      await factory.setCreatorRewardsDistributor(await creatorSink.getAddress());
+      await factory.setFeeWalletDistributor(await feeSink.getAddress());
       const c2 = await launch({ liqEth: ETH("10") });
       await (await swap(trader, c2.key, true, -ETH("1"), ETH("1"))).wait();
-      const fee = (await c2.token.balanceOf(other.address)) + (await c2.token.balanceOf(other2.address));
-      expect(fee).to.be.gt(0n);
-      // creatorRewardBps 10 of feeBps 100 -> 10% of the fee to the creator distributor, rest to fee-wallet distributor
-      expect(await c2.token.balanceOf(other.address)).to.equal((fee * 10n) / 100n);
-      expect(await c2.token.balanceOf(feeWallet.address)).to.equal(0n); // fee wallet itself gets nothing: distributor set
+      const fee = await hook.pendingEth(c2.poolId);
+      expect(fee).to.equal(ETH("0.01"));
+      // nothing is paid until someone flushes (swaps never call out)
+      expect(await ethers.provider.getBalance(await creatorSink.getAddress())).to.equal(0n);
+      const w0 = await ethers.provider.getBalance(feeWallet.address);
+      await expect(hook.connect(other).flush(c2.poolId)).to.emit(hook, "TaxCollected").withArgs(c2.poolId, fee, 0n, (fee * 10n) / 100n, fee - (fee * 10n) / 100n);
+      // creatorRewardBps 10 of feeBps 100 -> 10% of the fee to the creator distributor (credited to THIS token), the rest to the fee wallet side
+      expect(await creatorSink.creatorByToken(await c2.token.getAddress())).to.equal((fee * 10n) / 100n);
+      expect(await feeSink.feeDeposits()).to.equal(fee - (fee * 10n) / 100n);
+      expect(await ethers.provider.getBalance(feeWallet.address)).to.equal(w0); // the fee wallet itself gets nothing: distributor set
+      expect(await hook.pendingEth(c2.poolId)).to.equal(0n);
+      expect(await ethers.provider.getBalance(await hook.getAddress())).to.equal(0n);
+      // flushing again is a harmless no-op
+      await hook.flush(c2.poolId);
     });
 
-    it("pool-manager token accounting stays solvent after many mixed swaps", async () => {
-      const { token, key } = ctx;
+    it("with no distributors set, flush() sends the whole platform fee straight to the fee wallet", async () => {
+      const { key, poolId } = ctx;
+      await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
+      const fee = await hook.pendingEth(poolId);
+      const w0 = await ethers.provider.getBalance(feeWallet.address);
+      await hook.flush(poolId);
+      expect((await ethers.provider.getBalance(feeWallet.address)) - w0).to.equal(fee);
+    });
+
+    it("pool-manager accounting stays solvent after many mixed swaps, and everything flushes out", async () => {
+      const { token, key, poolId } = ctx;
       for (let i = 0; i < 5; i++) {
         await (await swap(trader, key, true, -ETH("0.3"), ETH("0.3"))).wait();
         await (await swap(trader, key, false, -((await token.balanceOf(trader.address)) / 4n))).wait();
@@ -339,8 +366,13 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
         await (await swap(trader, key, false, ETH("0.1"))).wait();
       }
       expect(await token.balanceOf(await hook.getAddress())).to.equal(0n);
-      expect(await ethers.provider.getBalance(await hook.getAddress())).to.equal(0n);
+      expect(await ethers.provider.getBalance(await hook.getAddress())).to.equal(await hook.pendingEth(poolId));
       expect(await token.balanceOf(await router.getAddress())).to.equal(0n);
+      const w0 = await ethers.provider.getBalance(feeWallet.address);
+      const owed = await hook.pendingEth(poolId);
+      await hook.flush(poolId);
+      expect((await ethers.provider.getBalance(feeWallet.address)) - w0).to.equal(owed);
+      expect(await ethers.provider.getBalance(await hook.getAddress())).to.equal(0n);
     });
 
     it("tiny swaps with a zero-wei fee don't revert", async () => {
@@ -367,12 +399,12 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
     });
 
     it("an unhooked (ETH, token) pool made by a third party is simply untaxed and doesn't affect the launch pool", async () => {
-      const { token, key } = await launch();
+      const { key, poolId } = await launch();
       const rogueKey = { ...key, hooks: ZERO, fee: 500, tickSpacing: 10 };
       await (await pm.connect(other).initialize(rogueKey, 2n ** 96n)).wait();
       // the real pool is unaffected and still taxed
       await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
-      expect(await token.balanceOf(feeWallet.address)).to.be.gt(0n);
+      expect(await hook.pendingEth(poolId)).to.be.gt(0n);
     });
 
     it("hook / locker / token privileged functions reject outsiders", async () => {
@@ -402,13 +434,14 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
     it("buys through the taxed pool; creator gets net tokens; fee wallet gets the tax", async () => {
       const liqEth = ETH("10");
       const buyEth = ETH("0.5");
-      const { token, ev } = await launch({ liqEth, buyEth });
+      const { token, ev, poolId } = await launch({ liqEth, buyEth });
       const bought = ev("CreatorBought")[0];
       expect(bought.args.ethIn).to.equal(buyEth);
       expect(await token.balanceOf(creator.address)).to.equal(bought.args.tokensOut);
-      const fee = await token.balanceOf(feeWallet.address);
+      const fee = await hook.pendingEth(poolId);
       expect(fee).to.be.gt(0n);
-      expect(fee).to.equal(((bought.args.tokensOut + fee) * 100n) / 10_000n);
+      expect(fee).to.equal((buyEth * 100n) / 10_000n); // 1% of the ETH the creator spent, taken in ETH
+      expect(await token.balanceOf(feeWallet.address)).to.equal(0n);
       // under the 5% cap
       expect(bought.args.tokensOut).to.be.lte((SUPPLY * 500n) / 10_000n);
       expect(await ethers.provider.getBalance(await factory.getAddress())).to.equal(0n);
@@ -441,10 +474,9 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
       await token.connect(trader).approve(await router.getAddress(), ethers.MaxUint256);
       const lockId = added.args.lockId;
 
-      // trader buys 1 ETH of tokens: the whole ETH input (LP fee included) stays in the position
-      const b0 = await snapshotBalances(token, { fw: feeWallet.address });
+      // trader buys 1 ETH of tokens: 1% of the ETH goes to the platform fee, the rest (LP fee included) stays in the position
       await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
-      const gross = (await token.balanceOf(trader.address)) + ((await token.balanceOf(feeWallet.address)) - b0.fw.tok);
+      const gross = await token.balanceOf(trader.address); // no token is skimmed: the trader holds everything the pool paid
 
       await expect(locker.connect(creator).withdraw(lockId)).to.be.revertedWith("V4LiquidityLocker: still locked");
       await network.provider.send("evm_increaseTime", [LOCK_DURATION + 10]);
@@ -458,7 +490,7 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
       const tokBack = (await token.balanceOf(creator.address)) - t0;
 
       // position is the only LP: it gets all ETH in the pool and all tokens left
-      expect(within(ethBack, added.args.ethAmount + ETH("1"), { num: 1n, den: 1_000_000n })).to.equal(true);
+      expect(within(ethBack, added.args.ethAmount + ETH("0.99"), { num: 1n, den: 1_000_000n })).to.equal(true);
       expect(within(tokBack + gross, added.args.tokenAmount, { num: 1n, den: 1_000_000n })).to.equal(true);
       expect(await ethers.provider.getBalance(await pm.getAddress())).to.be.lt(ETH("0.000001"));
 
@@ -503,16 +535,16 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
       p = await hook.poolTax(poolId);
       expect(p.taxActive).to.equal(false);
 
-      // now untaxed: fee wallet balance doesn't move
-      const fw0 = await token.balanceOf(feeWallet.address);
+      // now untaxed: no platform ETH is booked any more (the fee wallet side is shut off at the target)
+      const fw0 = await hook.pendingEth(poolId);
       await (await swap(trader, key, true, -ETH("0.5"), ETH("0.5"))).wait();
-      expect(await token.balanceOf(feeWallet.address)).to.equal(fw0);
+      expect(await hook.pendingEth(poolId)).to.equal(fw0);
       await token.connect(trader).approve(await router.getAddress(), ethers.MaxUint256);
       const half = (await token.balanceOf(trader.address)) / 2n;
       const tr0 = await token.balanceOf(trader.address);
       await (await swap(trader, key, false, -half)).wait();
       expect(tr0 - (await token.balanceOf(trader.address))).to.equal(half);
-      expect(await token.balanceOf(feeWallet.address)).to.equal(fw0);
+      expect(await hook.pendingEth(poolId)).to.equal(fw0);
     });
 
     it("unwinding below the target resets the candidacy", async () => {
@@ -530,7 +562,7 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
       await feed.setReverts(true);
       await (await swap(trader, key, true, -ETH("7"), ETH("7"))).wait();
       expect((await hook.poolTax(poolId)).taxActive).to.equal(true);
-      expect(await token.balanceOf(feeWallet.address)).to.be.gt(0n); // still taxed
+      expect(await hook.pendingEth(poolId)).to.be.gt(0n); // still taxed
       await feed.setReverts(false);
       await feed.setUpdatedAt((await ethers.provider.getBlock("latest")).timestamp - 7200); // 2h stale
       await (await swap(trader, key, true, -ETH("0.1"), ETH("0.1"))).wait();
@@ -590,7 +622,7 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
       expect(await factory.creatorOf(await token.getAddress())).to.equal(creator.address);
       expect(await token.poolId()).to.equal(await factory.poolIdOf(await token.getAddress()));
       expect(await token.balanceOf(creator.address)).to.be.gt(0n); // bought in
-      expect(await token.balanceOf(feeWallet.address)).to.be.gt(0n); // taxed
+      expect(await hook.pendingEth(await token.poolId())).to.be.gt(0n); // taxed (in ETH)
       const lock = await locker.locks(0);
       expect(lock.owner).to.equal(creator.address);
       // gasPrice is 0 in this test network, so the whole fee reaches the treasury
@@ -680,9 +712,8 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
       expect((await hook.poolTax(b.poolId)).feeBps).to.equal(300n);
       // 3% tax on the new pool, exact-in buy
       await (await swap(trader, b.key, true, -ETH("1"), ETH("1"))).wait();
-      const fee = await b.token.balanceOf(feeWallet.address);
-      const net = await b.token.balanceOf(trader.address);
-      expect(fee).to.equal(((net + fee) * 300n) / 10_000n);
+      expect(await hook.pendingEth(b.poolId)).to.equal((ETH("1") * 300n) / 10_000n);
+      expect(await hook.pendingEth(a.poolId)).to.equal(0n);
     });
 
     it("zero fee rate disables the tax for new pools", async () => {
@@ -690,7 +721,7 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
       const { token, key, poolId } = await launch();
       expect((await hook.poolTax(poolId)).taxActive).to.equal(false);
       await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
-      expect(await token.balanceOf(feeWallet.address)).to.equal(0n);
+      expect(await hook.pendingEth(poolId)).to.equal(0n);
     });
 
     it("token burn / burnFrom reduce supply", async () => {

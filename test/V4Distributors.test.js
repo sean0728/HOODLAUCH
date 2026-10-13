@@ -77,6 +77,20 @@ describe("V4 distributors", function () {
     router.connect(signer).swap(key, { zeroForOne, amountSpecified: amt, sqrtPriceLimitX96: zeroForOne ? MIN_SQRT : MAX_SQRT }, { takeClaims: false, settleUsingBurn: false }, "0x", { value });
   const A = (c) => c.getAddress();
 
+  // The hook now takes the platform fee in ETH. The distributors keep their sell-and-convert path for tokens delivered
+  // in kind (e.g. fees of a pool launched under an older hook), so these tests hand them tokens directly, in the shape the
+  // old hook produced: a buy of `eth`, then 1% of the pool's gross output split 10% to the creator distributor and 90% to
+  // the fee-wallet distributor.
+  async function deliverInKind(token, key, eth) {
+    await swap(trader, key, true, -eth, eth);
+    const net = await token.balanceOf(trader.address);
+    const fee = net / 99n; // 1% of gross
+    const toCreator = (fee * 10n) / 100n;
+    await token.connect(trader).transfer(await A(crd), toCreator);
+    await token.connect(trader).transfer(await A(fwd), fee - toCreator);
+    return fee;
+  }
+
   describe("hook tax-exempt list", () => {
     it("only the factory can call the hook; only the factory's owner can call the factory", async () => {
       await expect(hook.connect(owner).setTaxExempt(other.address, true)).to.be.revertedWithCustomError(hook, "NotFactory");
@@ -92,7 +106,7 @@ describe("V4 distributors", function () {
     it("receives the tax in kind, then sells it untaxed (exempt) and the fee wallet claims the ETH", async () => {
       await wire();
       const { token, key } = await launch();
-      await swap(trader, key, true, -ETH("2"), ETH("2")); // buy: 1% of output as tax -> fwd
+      await deliverInKind(token, key, ETH("2")); // the fee arrives in kind
       const held = await token.balanceOf(await A(fwd));
       expect(held).to.be.gt(0n);
 
@@ -115,24 +129,24 @@ describe("V4 distributors", function () {
     it("without the exemption the sale is taxed again and a slice loops back (why the exemption exists)", async () => {
       await wire({ exempt: false });
       const { token, key } = await launch();
-      await swap(trader, key, true, -ETH("2"), ETH("2"));
-      const held = await token.balanceOf(await A(fwd));
+      await deliverInKind(token, key, ETH("2"));
+      const poolId = await factory.poolIdOf(await A(token));
+      const p0 = await hook.pendingEth(poolId);
       await fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n);
-      // 1% of what was sold was taxed again; 10% of that tax goes to the creator
-      // distributor (default creator-reward share), the rest back to this one
-      const fee = (held * 100n) / 10_000n;
-      expect(await token.balanceOf(await A(fwd))).to.equal(fee - (fee * 10n) / 100n);
+      // the sale was taxed again: 1% of the ETH it produced was skimmed by the hook (in ETH, booked to the pool)
+      expect((await hook.pendingEth(poolId)) - p0).to.be.gt(0n);
+      expect(await token.balanceOf(await A(fwd))).to.equal(0n);
     });
 
     it("exempt sale yields strictly more ETH than the taxed one", async () => {
       await wire({ exempt: false });
       let { token, key } = await launch();
-      await swap(trader, key, true, -ETH("2"), ETH("2"));
+      await deliverInKind(token, key, ETH("2"));
       await fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n);
       const taxedOut = await fwd.claimableEth(await A(token));
       await factory.setTaxExempt(await A(fwd), true);
       ({ token, key } = await launch());
-      await swap(trader, key, true, -ETH("2"), ETH("2"));
+      await deliverInKind(token, key, ETH("2"));
       await fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n);
       const exemptOut = await fwd.claimableEth(await A(token));
       expect(exemptOut).to.be.gt(taxedOut);
@@ -141,7 +155,7 @@ describe("V4 distributors", function () {
     it("threshold, per-call cap and minEthOut are enforced", async () => {
       await wire();
       const { token, key } = await launch();
-      await swap(trader, key, true, -ETH("2"), ETH("2"));
+      await deliverInKind(token, key, ETH("2"));
       const held = await token.balanceOf(await A(fwd));
       await fwd.setSwapThreshold(await A(token), held + 1n);
       await expect(fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n)).to.be.revertedWith("V4FeeWalletDistributor: below threshold");
@@ -181,7 +195,7 @@ describe("V4 distributors", function () {
     it("fee wallet is read at claim time; setters are owner-only", async () => {
       await wire();
       const { token, key } = await launch();
-      await swap(trader, key, true, -ETH("2"), ETH("2"));
+      await deliverInKind(token, key, ETH("2"));
       await fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n);
       await fwd.setFeeWallet(other.address);
       const o0 = await ethers.provider.getBalance(other.address);
@@ -198,7 +212,7 @@ describe("V4 distributors", function () {
       await wire();
       await fwd.setPlatformToken(await A(plat));
       const { token, key } = await launch();
-      await swap(trader, key, true, -ETH("2"), ETH("2"));
+      await deliverInKind(token, key, ETH("2"));
       const supply0 = await plat.totalSupply();
       await fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n);
       const credited = await fwd.claimableEth(await A(token));
@@ -222,7 +236,7 @@ describe("V4 distributors", function () {
     it("tax cut arrives in kind, converts to ETH, and only the token's creator is paid", async () => {
       await wire();
       const { token, key } = await launch();
-      await swap(trader, key, true, -ETH("5"), ETH("5"));
+      await deliverInKind(token, key, ETH("5"));
       expect(await token.balanceOf(await A(crd))).to.be.gt(0n);
       await expect(crd.triggerCreatorSwap(await A(token), 0n)).to.emit(crd, "CreatorSwapTriggered");
       const owed = await crd.claimableEth(await A(token));
@@ -237,8 +251,8 @@ describe("V4 distributors", function () {
     it("per-token ledgers stay separate", async () => {
       await wire();
       const a = await launch(), b = await launch();
-      await swap(trader, a.key, true, -ETH("3"), ETH("3"));
-      await swap(trader, b.key, true, -ETH("1"), ETH("1"));
+      await deliverInKind(a.token, a.key, ETH("3"));
+      await deliverInKind(b.token, b.key, ETH("1"));
       await crd.triggerCreatorSwap(await A(a.token), 0n);
       expect(await crd.claimableEth(await A(a.token))).to.be.gt(0n);
       expect(await crd.claimableEth(await A(b.token))).to.equal(0n);
@@ -247,7 +261,7 @@ describe("V4 distributors", function () {
     it("threshold and minEthOut enforced; non-owner cannot configure", async () => {
       await wire();
       const { token, key } = await launch();
-      await swap(trader, key, true, -ETH("5"), ETH("5"));
+      await deliverInKind(token, key, ETH("5"));
       const held = await token.balanceOf(await A(crd));
       await crd.setSwapThreshold(await A(token), held + 1n);
       await expect(crd.triggerCreatorSwap(await A(token), 0n)).to.be.revertedWith("V4CreatorRewardsDistributor: below threshold");
@@ -283,6 +297,7 @@ describe("V4 distributors", function () {
       await factory.setTaxDefaults(feeWallet.address, 100, await A(feed), 50000, 3600, 50, 10);
       const second = await launch();
       await swap(trader, second.key, true, -ETH("4"), ETH("4"));
+      await second.token.connect(trader).transfer(await A(prd), (await second.token.balanceOf(trader.address)) / 200n); // in-kind reward cut
       const held = await second.token.balanceOf(await A(prd));
       expect(held).to.be.gt(0n);
       const ethBefore = await ethers.provider.getBalance(await A(prd));

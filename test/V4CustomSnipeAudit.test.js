@@ -136,13 +136,16 @@ describe("Custom-tax / curve snipe protection + V4CustomTokenFactory / V4CustomT
       const rc2 = await swap(sniper, key, true, -ETH("1"), ETH("1"));
       const sn = events(rc2, hook.interface, "SnipeFeeCollected")[0].args;
       const cust = events(rc2, hook.interface, "CustomTaxCollected")[0].args;
-      const tax = events(rc2, hook.interface, "TaxCollected")[0].args;
+      const acc = events(rc2, hook.interface, "EthFeeAccrued")[0].args;
       expect(sn.snipeBps).to.equal(4500n); // 5000 * (600-60)/600
+      // ETH leg (the surcharge + the platform tax) are bps of the 1 ETH paid in; token leg (reflection + burn) bps of the tokens out
+      expect((sn.fee * 10_000n) / ETH("1")).to.be.gte(4499n);
+      expect(acc.snipe).to.equal(sn.fee);
+      expect((acc.platform * 10_000n) / ETH("1")).to.be.gte(99n);
       const got = (await token.balanceOf(sniper.address)) - b0;
-      const gross = got + sn.fee + tax.fee + cust.reflection + cust.burned;
-      expect((sn.fee * 10_000n) / gross).to.be.gte(4499n);
-      expect((cust.burned * 10_000n) / gross).to.be.gte(99n);
-      expect((cust.reflection * 10_000n) / gross).to.be.gte(99n);
+      const grossTokens = got + cust.reflection + cust.burned;
+      expect((cust.burned * 10_000n) / grossTokens).to.be.gte(99n);
+      expect((cust.reflection * 10_000n) / grossTokens).to.be.gte(99n);
       // a sell right after pays only the platform and creator sell tax
       const t = await token.balanceOf(sniper.address);
       const rc3 = await swap(sniper, key, false, -(t / 2n));

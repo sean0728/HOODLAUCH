@@ -73,9 +73,9 @@ describe("V4TaxHook security audit", function () {
   describe("A. a bad price feed must never freeze trading", () => {
     it("A1: a feed that is an unrelated contract (no such functions) does not brick swaps", async () => {
       await setFeed(await locker.getAddress());
-      const { token, key } = await launch();
+      const { key, poolId } = await launch();
       await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
-      expect(await token.balanceOf(feeWallet.address)).to.be.gt(0n); // still taxed
+      expect(await hook.pendingEth(poolId)).to.be.gt(0n); // still taxed (in ETH)
     });
 
     it("A2: the escape hatch can repoint such a feed", async () => {
@@ -88,13 +88,13 @@ describe("V4TaxHook security audit", function () {
     for (const [mode, label] of [[1, "empty return data"], [2, "decimals() = 255"], [4, "short return data"], [5, "dirty (256) decimals"]]) {
       it(`A3: feed with ${label} does not brick swaps and never graduates`, async () => {
         await setFeed(await hostile.getAddress());
-        const { token, key, poolId } = await launch();
+        const { key, poolId } = await launch();
         await hostile.setMode(mode);
         await (await swap(trader, key, true, -ETH("7"), ETH("7"))).wait();
         await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
         const p = await hook.poolTax(poolId);
         expect(p.taxActive).to.equal(true);
-        expect(await token.balanceOf(feeWallet.address)).to.be.gt(0n);
+        expect(await hook.pendingEth(poolId)).to.be.gt(0n);
       });
     }
 
@@ -151,8 +151,8 @@ describe("V4TaxHook security audit", function () {
 
   // ---------------------------------------------------------------- C: _affordable
   describe("C. fee collection on a drained pool", () => {
-    it("C1: a huge sell into a nearly bought-out pool is still taxed (up to what the pool holds), not tax-free", async () => {
-      const { token, key } = await launch({ liqEth: ETH("10") });
+    it("C1: a huge sell into a nearly bought-out pool is still taxed in ETH, not tax-free", async () => {
+      const { token, key, poolId } = await launch({ liqEth: ETH("10") });
       await token.connect(trader).approve(await router.getAddress(), ethers.MaxUint256);
       await network.provider.send("hardhat_setBalance", [trader.address, "0x" + (10n ** 27n).toString(16)]);
       // drain the token side of the pool with an enormous buy
@@ -160,9 +160,9 @@ describe("V4TaxHook security audit", function () {
       const reserve = await token.balanceOf(await pm.getAddress());
       const held = await token.balanceOf(trader.address);
       expect(reserve).to.be.lt(held / 1000n); // pool is nearly empty of tokens
-      const fw0 = await token.balanceOf(feeWallet.address);
-      await (await swap(trader, key, false, -held)).wait(); // sell everything back: fee (1% of held) > reserve
-      expect(await token.balanceOf(feeWallet.address)).to.be.gt(fw0);
+      const p0 = await hook.pendingEth(poolId);
+      await (await swap(trader, key, false, -held)).wait(); // sell everything back: the ETH fee is 1% of what comes out
+      expect(await hook.pendingEth(poolId)).to.be.gt(p0);
     });
   });
 
@@ -217,30 +217,52 @@ describe("V4TaxHook security audit", function () {
       await network.provider.request({ method: "hardhat_stopImpersonatingAccount", params: [await factory.getAddress()] });
     });
 
-    it("D4: tax is exactly the configured share across a randomised mix of all four swap shapes", async () => {
-      const { token, key } = await launch({ liqEth: ETH("50") });
+    it("D4: the ETH tax is exactly the configured share across a randomised mix of all four swap shapes", async () => {
+      const { token, key, poolId } = await launch({ liqEth: ETH("50") });
       await token.connect(trader).approve(await router.getAddress(), ethers.MaxUint256);
       let seed = 12345n;
       const rnd = (n) => { seed = (seed * 6364136223846793005n + 1442695040888963407n) % (1n << 64n); return seed % n; };
+      const pmAddr = await pm.getAddress();
       let feeTotal = 0n;
+      let swaps = 0;
       for (let i = 0; i < 40; i++) {
         const shape = Number(rnd(4n));
-        const fw0 = await token.balanceOf(feeWallet.address);
-        const pm0 = await token.balanceOf(await pm.getAddress());
-        const t0 = await token.balanceOf(trader.address);
+        const e0 = await ethers.provider.getBalance(pmAddr);
+        const tk0 = await token.balanceOf(pmAddr);
+        const tr0 = await token.balanceOf(trader.address);
+        const eT0 = await ethers.provider.getBalance(trader.address);
+        const f0 = await hook.pendingEth(poolId);
         const amtEth = ETH("0.05") + rnd(ETH("2"));
-        if (shape === 0) await (await swap(trader, key, true, -amtEth, amtEth)).wait();
-        else if (shape === 1) { const out = rnd(ETH("200000")) + ETH("1000"); await (await swap(trader, key, true, out, ETH("100"))).wait(); }
-        else if (shape === 2) { const bal = await token.balanceOf(trader.address); if (bal === 0n) continue; await (await swap(trader, key, false, -(bal / (2n + rnd(5n))))).wait(); }
-        else { await (await swap(trader, key, false, ETH("0.01") + rnd(ETH("0.3")))).wait().catch(() => {}); }
-        const fee = (await token.balanceOf(feeWallet.address)) - fw0;
+        let tx;
+        if (shape === 0) tx = await swap(trader, key, true, -amtEth, amtEth);
+        else if (shape === 1) { const out = rnd(ETH("200000")) + ETH("1000"); tx = await swap(trader, key, true, out, ETH("100")); }
+        else if (shape === 2) { const bal = await token.balanceOf(trader.address); if (bal === 0n) continue; tx = await swap(trader, key, false, -(bal / (2n + rnd(5n)))); }
+        else { try { tx = await swap(trader, key, false, ETH("0.01") + rnd(ETH("0.3"))); } catch (e) { continue; } }
+        const r = await tx.wait();
+        swaps++;
+        const gas = r.gasUsed * r.gasPrice;
+        const fee = (await hook.pendingEth(poolId)) - f0;
         feeTotal += fee;
-        // value conservation: what left the pool == what the trader gained + fee
-        const pmDelta = pm0 - (await token.balanceOf(await pm.getAddress()));
-        const trDelta = (await token.balanceOf(trader.address)) - t0;
-        expect(pmDelta).to.equal(trDelta + fee);
+        const pmEthDelta = (await ethers.provider.getBalance(pmAddr)) - e0; // raw change of the manager's ETH (the fee already left it)
+        const traderEthDelta = (await ethers.provider.getBalance(trader.address)) - eT0 + gas;
+        // the token leg carries no fee on a plain token: what left the pool is exactly what the trader got
+        expect(tk0 - (await token.balanceOf(pmAddr))).to.equal((await token.balanceOf(trader.address)) - tr0);
+        if (shape <= 1) {
+          // BUY: the trader paid pool-ETH + fee, and the fee is 1% of that gross
+          const gross = pmEthDelta + fee; // the manager kept (paid - fee)
+          expect(-traderEthDelta).to.equal(gross);
+          expect(fee * 10_000n - gross * 100n).to.be.within(-10_000n, 10_000n);
+        } else {
+          // SELL: the trader received pool-ETH - fee, and the fee is 1% of that gross
+          const gross = -pmEthDelta;
+          expect(traderEthDelta).to.equal(gross - fee);
+          expect(fee * 10_000n - gross * 100n).to.be.within(-10_000n, 10_000n);
+        }
       }
+      expect(swaps).to.be.gt(20);
       expect(feeTotal).to.be.gt(0n);
+      // every wei of fee is sitting in the hook, booked to this pool
+      expect(await ethers.provider.getBalance(await hook.getAddress())).to.equal(await hook.pendingEth(poolId));
     });
   });
 });

@@ -135,7 +135,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       const sn = events(rc, hook.interface, "SnipeFeeCollected")[0].args;
       expect(sn.snipeBps).to.equal(5400n); // 6000 * (900-90)/900
       expect(events(rc, hook.interface, "CustomTaxCollected").length).to.equal(1);
-      expect(events(rc, hook.interface, "TaxCollected").length).to.equal(1);
+      expect(events(rc, hook.interface, "EthFeeAccrued").length).to.equal(1);
       expect(await token.balanceOf(sniper.address)).to.be.gt(0n);
     });
 
@@ -524,7 +524,7 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       // the pool's tax is on and untouched by the curve's distributors
       const key = await keyOf(addr);
       const rc = await swap(sniper, key, true, -ETH("0.2"), ETH("0.2"));
-      expect(events(rc, hook.interface, "TaxCollected").length).to.equal(1);
+      expect(events(rc, hook.interface, "EthFeeAccrued").length).to.equal(1); // the pool's 1%, taken in ETH
       expect((await hook.poolTax(id)).taxActive).to.equal(true);
       expect([await crd.claimableEth(addr), await fwd.claimableEth(ZERO), await fwd.pendingBuybackEth(), await curveFactory.strandedFees()]).to.deep.equal(dep0);
 
@@ -543,10 +543,10 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
 
       // shut off: no tax on a buy, none on a sell
       const rc2 = await swap(sniper, key, true, -ETH("0.5"), ETH("0.5"));
-      expect(events(rc2, hook.interface, "TaxCollected").length).to.equal(0);
+      expect(events(rc2, hook.interface, "EthFeeAccrued").length).to.equal(0);
       const token = await ethers.getContractAt("IERC20", addr);
       const rc3 = await swap(sniper, key, false, -((await token.balanceOf(sniper.address)) / 4n));
-      expect(events(rc3, hook.interface, "TaxCollected").length).to.equal(0);
+      expect(events(rc3, hook.interface, "EthFeeAccrued").length).to.equal(0);
     });
 
     it("FR-12. a curve that would graduate at or above the tax target is refused at creation (the fee would outlive the tax)", async () => {
@@ -593,18 +593,20 @@ describe("V4CurveFactory: snipe double-check + security audit", function () {
       expect(cfg.feeBps).to.equal(100n); // the same 1% the curve charged, active from the first block of the pool
       // the first pool buy and the first pool sell are both taxed at 1%
       const key = await keyOf(addr);
-      const b0 = await token.balanceOf(sniper.address);
       const rcB = await swap(sniper, key, true, -ETH("0.3"), ETH("0.3"));
-      const evB = events(rcB, hook.interface, "TaxCollected")[0].args;
-      const gotB = (await token.balanceOf(sniper.address)) - b0;
-      const grossB = gotB + evB.fee;
-      expect((evB.fee * 10_000n) / grossB).to.be.within(99n, 100n);
-      const sellAmt = gotB / 2n;
-      const rcS = await swap(sniper, key, false, -sellAmt);
-      const evS = events(rcS, hook.interface, "TaxCollected")[0].args;
-      expect(evS.fee).to.equal(sellAmt / 100n);
-      // and the pool's fee splits like the curve's: 10% creator rewards, 90% fee-wallet distributor
-      expect(evS.toCreator).to.equal(evS.fee / 10n);
+      const accB = events(rcB, hook.interface, "EthFeeAccrued")[0].args;
+      expect(accB.platform).to.equal((ETH("0.3") * 100n) / 10_000n); // 1% of the ETH paid in
+      const gotB = await token.balanceOf(sniper.address);
+      const poolEth0 = await ethers.provider.getBalance(await A(pm));
+      const rcS = await swap(sniper, key, false, -(gotB / 2n));
+      const grossS = poolEth0 - (await ethers.provider.getBalance(await A(pm)));
+      const accS = events(rcS, hook.interface, "EthFeeAccrued")[0].args;
+      expect(accS.platform).to.equal((grossS * 100n) / 10_000n); // 1% of the ETH paid out
+      // and the pool's fee splits like the curve's when it is paid out: 10% creator rewards, 90% fee-wallet distributor
+      const total = accB.platform + accS.platform;
+      const evF = events(await (await hook.flush(id)).wait(), hook.interface, "TaxCollected")[0].args;
+      expect(evF.fee).to.equal(total);
+      expect(evF.toCreator).to.equal((total * 10n) / 100n);
     });
 
     it("FR-15. the platform RewardsDistributor is paid ONCE per launch, on every launch path, 50/50 with the treasury; trading never pays it again", async () => {

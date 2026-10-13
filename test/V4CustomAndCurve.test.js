@@ -194,7 +194,7 @@ describe("V4 custom tax + bonding curve", function () {
       const ev = parse(receipt, customFactory.interface).find((e) => e.name === "CreatorBought");
       expect(await token.balanceOf(creator.address)).to.equal(ev.args.tokensOut);
       expect(ev.args.tokensOut).to.be.lte((SUPPLY * 500n) / 10_000n);
-      expect(await token.balanceOf(marketing.address)).to.be.gt(0n); // marketing share of the buy-in
+      expect((await hook.accrued(await customFactory.poolIdOf(await token.getAddress()))).marketing).to.be.gt(0n); // marketing share of the buy-in (booked in ETH)
       await expect(customFactory.connect(creator).createCustomToken("C", "C", SUPPLY, NONE, NONE, [0, "0x0000000000000000000000000000000000000000"], ZERO, ETH("10"), ETH("2"), 0, nextSalt(), { value: LAUNCH_FEE + ETH("12") }))
         .to.be.revertedWith("V4CustomTokenFactory: creator buy-in exceeds max allowed share of supply");
     });
@@ -202,54 +202,70 @@ describe("V4 custom tax + bonding curve", function () {
 
   // ================================================================== fee mechanics
   describe("buy and sell fees", () => {
-    it("a buy pays platform 1% + custom 4%: each component lands where it should", async () => {
+    it("a buy pays platform 1% + marketing 1% in ETH and reflection/liquidity/burn 3% in tokens: each component lands where it should", async () => {
       const { token, poolId, key } = await launchCustom();
       const addr = await token.getAddress();
       const supply0 = await token.totalSupply();
       const rc = await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
 
       const got = await token.balanceOf(trader.address);
-      const gross = (got * 10_000n) / 9_500n; // 5% total
-      const unit = gross / 100n; // 1% of gross
+      const gross = (got * 10_000n) / 9_700n; // 3% of the token leg is taken in tokens
+      const unit = gross / 100n; // 1% of gross tokens
       const tol = (a, b) => expect(a >= b - 2n && a <= b + 2n, `${a} vs ${b}`).to.equal(true);
       const ev = parse(rc, hook.interface);
       const custom = ev.find((e) => e.name === "CustomTaxCollected").args;
-      const plat = ev.find((e) => e.name === "TaxCollected").args;
+      const acc = ev.find((e) => e.name === "EthFeeAccrued").args;
+      // token leg
       tol(custom.reflection, unit);
-      tol(custom.marketing, unit);
       tol(custom.liquidity, unit);
       tol(custom.burned, unit);
-      tol(plat.fee, unit);
+      expect(custom.marketing).to.equal(0n); // marketing is paid in ETH now
+      // ETH leg: 1% platform + 1% marketing of the 1 ETH paid in
+      expect(acc.platform).to.equal(ETH("0.01"));
+      expect(acc.marketing).to.equal(ETH("0.01"));
+      expect(acc.snipe).to.equal(0n);
 
-      expect(await token.balanceOf(feeWallet.address)).to.equal(plat.fee);
-      expect(await token.balanceOf(marketing.address)).to.equal(custom.marketing);
+      expect(await token.balanceOf(feeWallet.address)).to.equal(0n);
+      expect(await token.balanceOf(marketing.address)).to.equal(0n);
       expect(await token.balanceOf(await compounder.getAddress())).to.equal(custom.liquidity);
       expect(supply0 - (await token.totalSupply())).to.equal(custom.burned);
       // the token holds the reflection share until holders claim it
       expect(await token.balanceOf(addr)).to.equal(custom.reflection);
       expect(await token.unallocatedReflections()).to.equal(custom.reflection); // trader wasn't a holder yet
-      void poolId;
+
+      // flush pays the marketing wallet its ETH and the fee wallet the platform's
+      const m0 = await ethers.provider.getBalance(marketing.address);
+      const f0 = await ethers.provider.getBalance(feeWallet.address);
+      await expect(hook.flush(poolId)).to.emit(hook, "MarketingPaid").withArgs(poolId, marketing.address, acc.marketing);
+      expect((await ethers.provider.getBalance(marketing.address)) - m0).to.equal(acc.marketing);
+      expect((await ethers.provider.getBalance(feeWallet.address)) - f0).to.equal(acc.platform);
+      expect(await ethers.provider.getBalance(await hook.getAddress())).to.equal(0n);
     });
 
-    it("a sell uses the SELL rates (3% custom + 1% platform), carved off the input", async () => {
-      const { token, key } = await launchCustom();
+    it("a sell uses the SELL rates: 2% in tokens carved off the input, 2% in ETH off the proceeds", async () => {
+      const { token, key, poolId } = await launchCustom();
       await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
       await token.connect(trader).approve(await router.getAddress(), ethers.MaxUint256);
-      const mk0 = await token.balanceOf(marketing.address);
       const burn0 = await token.totalSupply();
-      const fw0 = await token.balanceOf(feeWallet.address);
       const sellAmt = (await token.balanceOf(trader.address)) / 2n;
+      const pmEth0 = await ethers.provider.getBalance(await pm.getAddress());
       const rc = await (await swap(trader, key, false, -sellAmt)).wait();
+      const grossEth = pmEth0 - (await ethers.provider.getBalance(await pm.getAddress()));
       const ev = parse(rc, hook.interface);
       const custom = ev.find((e) => e.name === "CustomTaxCollected").args;
-      const plat = ev.find((e) => e.name === "TaxCollected").args;
-      // total fee = 4% of the amount sold; sell split: refl 0.5, mkt 1, liq 0.5, burn 1, platform 1
-      expect(custom.marketing + custom.burned + custom.reflection + custom.liquidity + plat.fee).to.equal((sellAmt * 400n) / 10_000n);
-      expect(custom.marketing).to.equal((sellAmt * 100n) / 10_000n);
+      const acc = ev.find((e) => e.name === "EthFeeAccrued").args;
+      // token leg: sell split refl 0.5 + liq 0.5 + burn 1 = 2% of the tokens sold
+      expect(custom.burned + custom.reflection + custom.liquidity).to.equal((sellAmt * 200n) / 10_000n);
       expect(custom.burned).to.equal((sellAmt * 100n) / 10_000n);
-      expect((await token.balanceOf(marketing.address)) - mk0).to.equal(custom.marketing);
+      expect(custom.marketing).to.equal(0n);
       expect(burn0 - (await token.totalSupply())).to.be.gte(custom.burned);
-      expect((await token.balanceOf(feeWallet.address)) - fw0).to.equal(plat.fee);
+      // ETH leg: platform 1% + marketing 1% of the ETH the pool paid out
+      const unitEth = (grossEth * 100n) / 10_000n;
+      expect(acc.platform).to.be.within(unitEth, unitEth + 1n); // rounding dust goes to the platform part
+      expect(acc.marketing).to.equal(unitEth);
+      const m0 = await ethers.provider.getBalance(marketing.address);
+      await hook.flush(poolId);
+      expect((await ethers.provider.getBalance(marketing.address)) - m0).to.be.gte(acc.marketing);
     });
 
     it("transfers between wallets are never taxed", async () => {
@@ -264,8 +280,8 @@ describe("V4 custom tax + bonding curve", function () {
       const { token, key, poolId } = await launchCustom({ buy: NONE, sell: NONE });
       const rc = await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
       expect(parse(rc, hook.interface).map((e) => e.name)).to.not.include("CustomTaxCollected");
-      expect(await token.balanceOf(feeWallet.address)).to.be.gt(0n);
-      void poolId;
+      expect(await token.balanceOf(feeWallet.address)).to.equal(0n);
+      expect(await hook.pendingEth(poolId)).to.be.gt(0n); // the platform tax, in ETH
     });
 
     it("custom fees survive the platform tax graduation (platform part stops, creator part stays)", async () => {
@@ -276,22 +292,25 @@ describe("V4 custom tax + bonding curve", function () {
       await feed.set(2000n * 10n ** 8n);
       await (await swap(trader, key, true, -ETH("0.1"), ETH("0.1"))).wait();
       expect((await hook.poolTax(poolId)).taxActive).to.equal(false);
-      const fw0 = await token.balanceOf(feeWallet.address);
-      const mk0 = await token.balanceOf(marketing.address);
+      const a0 = await hook.accrued(poolId);
       const rc = await (await swap(trader, key, true, -ETH("0.5"), ETH("0.5"))).wait();
-      expect(await token.balanceOf(feeWallet.address)).to.equal(fw0);
-      expect((await token.balanceOf(marketing.address)) - mk0).to.be.gt(0n);
-      expect(parse(rc, hook.interface).map((e) => e.name)).to.not.include("TaxCollected");
+      const a1 = await hook.accrued(poolId);
+      expect(a1.platform).to.equal(a0.platform); // the platform part (the fee wallet side) has shut off at the target
+      expect(a1.marketing).to.be.gt(a0.marketing); // the creator's part keeps running
+      const acc = parse(rc, hook.interface).find((e) => e.name === "EthFeeAccrued").args;
+      expect(acc.platform).to.equal(0n);
+      expect(acc.marketing).to.be.gt(0n);
+      expect(parse(rc, hook.interface).map((e) => e.name)).to.include("CustomTaxCollected");
     });
 
     it("exempt swappers (the distributors) skip the custom fees too", async () => {
       const { token, key } = await launchCustom();
       await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
       await factory.setTaxExempt(await router.getAddress(), true);
-      const mk0 = await token.balanceOf(marketing.address);
+      const p0 = await hook.pendingEth(await customFactory.poolIdOf(await token.getAddress()));
       const t0 = await token.balanceOf(trader2.address);
       await (await swap(trader2, key, true, -ETH("1"), ETH("1"))).wait();
-      expect(await token.balanceOf(marketing.address)).to.equal(mk0);
+      expect(await hook.pendingEth(await customFactory.poolIdOf(await token.getAddress()))).to.equal(p0);
       expect(await token.balanceOf(trader2.address)).to.be.gt(t0);
     });
   });
@@ -380,12 +399,16 @@ describe("V4 custom tax + bonding curve", function () {
   // ================================================================== creator role
   describe("creator role", () => {
     it("creator can move the marketing wallet; handoff is two-step; renounce is final", async () => {
-      const { token, key } = await launchCustom();
+      const { token, key, poolId } = await launchCustom();
       await expect(token.connect(other).setMarketingWallet(other.address)).to.be.revertedWithCustomError(token, "NotCreator");
       await token.connect(creator).setMarketingWallet(other.address);
       await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
-      expect(await token.balanceOf(other.address)).to.be.gt(0n);
-      expect(await token.balanceOf(marketing.address)).to.equal(0n);
+      // the marketing ETH goes to the wallet in force when it is paid out
+      const o0 = await ethers.provider.getBalance(other.address);
+      const m0 = await ethers.provider.getBalance(marketing.address);
+      await hook.flush(poolId);
+      expect((await ethers.provider.getBalance(other.address)) - o0).to.equal(ETH("0.01"));
+      expect(await ethers.provider.getBalance(marketing.address)).to.equal(m0);
 
       await token.connect(creator).transferCreator(trader2.address);
       await expect(token.connect(other).acceptCreator()).to.be.revertedWith("V4CustomToken: not pending creator");
@@ -526,9 +549,9 @@ describe("V4 custom tax + bonding curve", function () {
       await expect(curveFactory.connect(trader).buy(addr, 0, { value: 1 })).to.be.revertedWith("V4CurveFactory: already graduated");
       await expect(curveFactory.connect(trader).sell(addr, 1, 0)).to.be.revertedWith("V4CurveFactory: already graduated");
       const key = await keyOf(addr);
-      const fw0 = await token.balanceOf(feeWallet.address);
+      const fw0 = await hook.pendingEth(poolId);
       await (await swap(trader2, key, true, -ETH("0.5"), ETH("0.5"))).wait();
-      expect(await token.balanceOf(feeWallet.address)).to.be.gt(fw0);
+      expect(await hook.pendingEth(poolId)).to.be.gt(fw0); // taxed in ETH
     });
 
     it("graduation uses the tax terms snapshotted at creation, not today's", async () => {
@@ -612,8 +635,10 @@ describe("V4 custom tax + bonding curve", function () {
       const supply0 = await token.totalSupply();
       const rc = await (await swap(trader2, key, true, -ETH("0.5"), ETH("0.5"))).wait();
       const custom = parse(rc, hook.interface).find((e) => e.name === "CustomTaxCollected").args;
-      expect(custom.marketing).to.be.gt(0n);
-      expect(await token.balanceOf(marketing.address)).to.equal(custom.marketing);
+      const acc = parse(rc, hook.interface).find((e) => e.name === "EthFeeAccrued").args;
+      expect(custom.marketing).to.equal(0n); // marketing is booked in ETH, not tokens
+      expect(acc.marketing).to.be.gt(0n);
+      expect((await hook.accrued(poolId)).marketing).to.equal(acc.marketing);
       expect(supply0 - (await token.totalSupply())).to.equal(custom.burned);
       expect(await token.balanceOf(await compounder.getAddress())).to.equal(custom.liquidity);
       expect(await token.balanceOf(await token.getAddress())).to.equal(custom.reflection);
