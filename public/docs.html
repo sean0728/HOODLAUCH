@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="IgnitionX documentation — platform features and a step-by-step guide to deploying a token.">
+<meta name="description" content="IgnitionX documentation — how the platform works today: launch modes, ETH-side fees, graduation, Solana Quick Launch, and a step-by-step guide to deploying a token.">
 <!-- Same defense-in-depth CSP as index.html: single static file, no
      per-request nonce available, so script-src keeps 'unsafe-inline' and
      relies on this page never writing untrusted input into the DOM (it
@@ -217,6 +217,48 @@
     .nav-toggle{display:inline-flex;}
     .hud-inner{padding:14px 20px;}
   }
+
+  /* ---------------- additions for the current-platform docs ---------------- */
+  .update-list{display:grid; grid-template-columns:repeat(2,1fr); gap:16px;}
+  @media (max-width: 900px){ .update-list{grid-template-columns:1fr;} }
+  .update-card{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:20px 22px; border-left:3px solid var(--signal-500);}
+  .update-card .tag{font-family:var(--font-mono); font-size:.64rem; letter-spacing:.08em; text-transform:uppercase; color:var(--signal-300); display:block; margin-bottom:8px;}
+  .update-card h3{font-size:1.02rem; margin-bottom:6px;}
+  .update-card p{font-size:.86rem; margin:0; color:var(--paper-500);}
+  .update-card p + p{margin-top:8px;}
+
+  .flow{display:grid; grid-template-columns:1fr; gap:10px; margin:20px 0 6px;}
+  .flow-row{display:grid; gap:10px; align-items:stretch;}
+  .flow-row.cols-3{grid-template-columns:repeat(3,1fr);}
+  .flow-row.cols-2{grid-template-columns:repeat(2,1fr);}
+  @media (max-width: 760px){ .flow-row.cols-3, .flow-row.cols-2{grid-template-columns:1fr;} }
+  .flow-node{background:var(--ink-900); border:1px solid var(--line-strong); border-radius:var(--radius-md); padding:14px 16px; font-size:.84rem; color:var(--paper-300);}
+  .flow-node b{display:block; font-family:var(--font-display); color:var(--paper-100); font-size:.95rem; margin-bottom:3px;}
+  .flow-node .pct{font-family:var(--font-mono); font-size:.72rem; color:var(--cyan-400); display:block; margin-bottom:4px; letter-spacing:.04em;}
+  .flow-node.hot{border-color:rgba(255,74,28,.45); background:linear-gradient(180deg, rgba(255,74,28,.09), var(--ink-900));}
+  .flow-node.end{background:var(--ink-850);}
+  .flow-arrow{text-align:center; font-family:var(--font-mono); color:var(--signal-300); font-size:.78rem; letter-spacing:.06em;}
+  .flow-arrow::before{content:"↓ "; }
+
+  .compare{display:grid; grid-template-columns:repeat(2,1fr); gap:16px; margin-top:16px;}
+  @media (max-width: 760px){ .compare{grid-template-columns:1fr;} }
+  .compare .panel h3{font-size:1rem;}
+  .compare .panel.before{opacity:.78;}
+  .compare .panel.after{border-color:rgba(52,221,156,.35);}
+  .compare ul{margin:0; padding-left:18px; color:var(--paper-300); font-size:.86rem;}
+  .compare li{margin-bottom:6px;}
+  .doc-list{color:var(--paper-300); font-size:.92rem; padding-left:20px; margin:0 0 12px;}
+  .doc-list li{margin-bottom:8px;}
+  .doc-list b{color:var(--paper-100);}
+  .mini-note{font-size:.8rem; color:var(--paper-500);}
+  @media (max-width: 640px){
+    .hud-inner{gap:10px; padding:12px 16px;}
+    .hud-inner .btn-ghost{display:none;}
+    .hud-inner .btn-primary{padding:8px 12px; font-size:.78rem;}
+    .nav-toggle{padding:7px 9px; font-size:.78rem; white-space:nowrap;}
+    .brand small{display:none;}
+    .docs-nav{inset:56px 0 0 0; top:56px;}
+  }
 </style>
 </head>
 <body>
@@ -227,9 +269,10 @@
     <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="docsNav">☰ Menu</button>
     <div class="hud-spacer"></div>
     <nav class="hud-nav" aria-label="Docs sections">
-      <a href="#features">Features</a>
+      <a href="#whats-new">What's new</a>
       <a href="#launch-modes">Launch modes</a>
-      <a href="#how-to-deploy">Deploy a token</a>
+      <a href="#fees">Fees</a>
+      <a href="#solana">Solana</a>
       <a href="#faq">FAQ</a>
     </nav>
     <a class="btn btn-ghost" href="index.html">← Back to app</a>
@@ -242,23 +285,27 @@
     <div class="docs-nav-group">
       <span class="eyebrow">Start here</span>
       <a href="#overview">Overview</a>
+      <a href="#whats-new">What's new</a>
       <a href="#getting-started">Getting started</a>
     </div>
     <div class="docs-nav-group">
-      <span class="eyebrow">Platform</span>
-      <a href="#features">Features</a>
+      <span class="eyebrow">Launching</span>
       <a href="#launch-modes">Launch modes</a>
-    </div>
-    <div class="docs-nav-group">
-      <span class="eyebrow">Deploying</span>
       <a href="#how-to-deploy">How to deploy a token</a>
       <a href="#gasless">Gasless launches</a>
+      <a href="#custom-tax">Custom tax tokens</a>
+      <a href="#solana">Solana Quick Launch</a>
       <a href="#after-launch">After you launch</a>
     </div>
     <div class="docs-nav-group">
-      <span class="eyebrow">Trading</span>
+      <span class="eyebrow">Trading &amp; fees</span>
       <a href="#trading">Buying &amp; selling</a>
-      <a href="#graduation">Tax &amp; graduation</a>
+      <a href="#fees">How fees work</a>
+      <a href="#graduation">Graduation &amp; anti-snipe</a>
+    </div>
+    <div class="docs-nav-group">
+      <span class="eyebrow">Community</span>
+      <a href="#community">Profiles &amp; social</a>
     </div>
     <div class="docs-nav-group">
       <span class="eyebrow">Reference</span>
@@ -272,16 +319,67 @@
     <section id="overview">
       <div class="doc-hero">
         <span class="eyebrow">Documentation</span>
-        <h1>Everything IgnitionX does, and how to launch a token on it.</h1>
-        <p>IgnitionX is a token-launchpad for Robinhood Chain. This page covers what's on the platform — the live launch feed, the six ways to deploy a token, trading, and the anti-rug protections built into every launch — and walks through deploying a token from start to finish.</p>
+        <h1>How IgnitionX works today, and how to launch on it.</h1>
+        <p>IgnitionX is a token launchpad for Robinhood Chain, with pump.fun-style quick launches on Solana alongside. Every Robinhood Chain token trades on Uniswap V4. This page covers the platform as it runs now: the launch modes, how the 1% fee is taken, what happens at graduation, and a step-by-step guide to your first launch.</p>
         <div class="doc-hero-cta">
-          <a class="btn btn-primary" href="#how-to-deploy">Jump to: How to deploy a token</a>
-          <a class="btn btn-ghost" href="#features">See all features</a>
+          <a class="btn btn-primary" href="#how-to-deploy">Jump to: Deploy a token</a>
+          <a class="btn btn-ghost" href="#whats-new">See what's new</a>
         </div>
+      </div>
+      <div class="callout">
+        <span class="callout-icon">◆</span>
+        <p><b>The platform is currently running on testnet.</b> Robinhood Chain testnet and Solana devnet use test funds with no real value. The network pill next to your wallet always shows which network is active, and the same setting applies to everyone using the site.</p>
       </div>
       <div class="callout warn">
         <span class="callout-icon">◆</span>
         <p><b>IgnitionX is an independent, unofficial interface built for Robinhood Chain.</b> It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
+      </div>
+    </section>
+
+    <section id="whats-new">
+      <h2><span class="eyebrow">Recent updates</span>What's new</h2>
+      <p class="section-intro">The changes that matter most if you used the platform earlier, or have only read older descriptions of it.</p>
+      <div class="update-list" style="margin-top:20px;">
+        <div class="update-card">
+          <span class="tag">Fees</span>
+          <h3>The 1% fee is taken in ETH at the trade, not by selling tokens</h3>
+          <p>The fee now comes straight off the ETH side of every buy and sell. Nothing is sold to collect it, so rewards claims no longer print a sell on the chart. See <a href="#fees">How fees work</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Custom tax</span>
+          <h3>Marketing is paid in ETH</h3>
+          <p>A custom token's marketing share is also taken in ETH and sent to the marketing wallet, instead of the wallet receiving tokens it then has to sell.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Custom tax</span>
+          <h3>Reflections can pay in ETH or another token</h3>
+          <p>When you launch a custom-tax token you choose how reflections reach holders: the same token, ETH, or another token launched on the platform. Payouts are sent to holders automatically in batches. See <a href="#custom-tax">Custom tax tokens</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Platform</span>
+          <h3>Uniswap V4 only</h3>
+          <p>Every Robinhood Chain launch now runs on Uniswap V4 and carries a V4 tag. Older V2-era tokens are hidden from the grid rather than deleted.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Trading</span>
+          <h3>Early-buy surcharge on new pools</h3>
+          <p>A brand-new pool charges a surcharge on buys that starts high and falls to zero within minutes, so bots that snipe the first blocks pay for it. See <a href="#graduation">Graduation &amp; anti-snipe</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Solana</span>
+          <h3>Solana Quick Launch is open to anyone</h3>
+          <p>Launch from a Solana wallet with the same four-step wizard. Solana tokens appear in the main grid and live feed next to Robinhood Chain tokens, and show market cap in dollars. See <a href="#solana">Solana Quick Launch</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Grid</span>
+          <h3>Curve tokens are labelled as curve tokens</h3>
+          <p>A Quick Launch token shows <b>Bonding curve</b> until it graduates to a real pool. Only after that does it show as live on a DEX.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Accounts</span>
+          <h3>One account, several wallets</h3>
+          <p>Link a Robinhood wallet and a Solana wallet to one account so your name, picture, follows, comments and launches follow you across both. See <a href="#community">Profiles &amp; social</a>.</p>
+        </div>
       </div>
     </section>
 
@@ -290,300 +388,415 @@
       <p class="section-intro">Three things to know before you do anything else on the platform.</p>
       <div class="table-wrap" style="margin-top:16px;">
         <table class="kv-table">
-          <tr><th>Connect a wallet</th><td>Click <b>Connect Wallet</b> in the top right. IgnitionX talks to whatever wallet your browser has injected (e.g. MetaMask) — no account or sign-up beyond that.</td></tr>
-          <tr><th>Pick a network</th><td>The network pill next to your wallet shows whether you're on <b>Testnet</b> or <b>Mainnet</b>. This is a platform-wide setting, not a personal preference — everyone browsing sees the same one at the same time.</td></tr>
-          <tr><th>Know which one is real</th><td>Testnet uses Robinhood Chain's test network — nothing has real value. Mainnet is the real chain: real ETH, real tokens, real trades. Always check the network pill before sending anything.</td></tr>
+          <tr><th>Connect a wallet</th><td>For Robinhood Chain, click <b>Connect Wallet</b> and approve in whichever wallet your browser has injected (such as MetaMask). For Solana, click <b>Connect Solana</b> and pick a Solana wallet. There is no sign-up beyond that. You can connect either one, or both.</td></tr>
+          <tr><th>Check the network</th><td>The network pill next to your wallet shows whether the platform is on <b>Testnet</b> or <b>Mainnet</b>. It is a platform-wide setting, not a personal one. Solana devnet counts as testnet and Solana mainnet as mainnet.</td></tr>
+          <tr><th>Know which one is real</th><td>Testnet funds have no value. Mainnet is the real chain: real ETH or SOL, real tokens, real and irreversible trades. Always check the pill before sending anything.</td></tr>
         </table>
       </div>
     </section>
 
-    <section id="features">
-      <h2><span class="eyebrow">02</span>Features</h2>
-      <p class="section-intro">What's actually on the platform, beyond the launch wizard itself.</p>
-      <div class="feature-grid" style="margin-top:20px;">
-        <div class="feature-card">
-          <div class="feature-icon">◔</div>
-          <h3>Live launch grid</h3>
-          <p>Every token launched on the current network, with search, status filters (Recently Launched / Launched / Deployed / Graduated), live price sparklines, and a market-cap badge on each card.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">↯</div>
-          <h3>Real-time trade feed</h3>
-          <p>A live ticker of real buys and sells as they happen on-chain — including bonding-curve trades, tagged so you can tell a Quick Launch trade apart from an ordinary pool trade at a glance.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">🚀</div>
-          <h3>Launch announcements</h3>
-          <p>The instant a new token goes live, it gets a large announcement banner in the same feed — you don't have to refresh the grid to catch a brand-new launch.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">◈</div>
-          <h3>Portfolio</h3>
-          <p>Connect your wallet to see every token you've launched, your real on-chain holdings, any creator rewards you can claim, and LP unlock status/countdowns.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">⛓</div>
-          <h3>Six launch modes</h3>
-          <p>From a plain no-frills deploy to a fully configurable tax token to a pump.fun-style bonding curve — pick the mode that matches what you're actually building. See <a href="#launch-modes">Launch modes</a>.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">✎</div>
-          <h3>Editable token profile</h3>
-          <p>Add a logo, banner, description, and social links to your token after launch — off-chain, display-only metadata that syncs to every visitor, verified by a signature from your own wallet.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">⚡</div>
-          <h3>Gasless launches</h3>
-          <p>Two of the six modes let you sign a message instead of paying your own gas — a relayer submits the transaction for you. See <a href="#gasless">Gasless launches</a>.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">🔒</div>
-          <h3>Locked liquidity</h3>
-          <p>Every mode that adds a real pool locks the resulting LP tokens for a fixed period — never immediately withdrawable by the creator. A bonding curve's graduation liquidity is permanently burned instead of locked to anyone.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">◧</div>
-          <h3>Self-disabling tax</h3>
-          <p>Every taxed pool's transfer tax permanently switches itself off, forever, once the pool's live market cap crosses a fixed target — see <a href="#graduation">Tax &amp; graduation</a>.</p>
-        </div>
-      </div>
-    </section>
-
     <section id="launch-modes">
-      <h2><span class="eyebrow">03</span>Launch modes</h2>
-      <p class="section-intro">Every launch starts the same way — name, symbol, supply — then splits into one of six paths depending on how much upfront ETH you want to put in and how much control you want over the tax.</p>
+      <h2><span class="eyebrow">02</span>Launch modes</h2>
+      <p class="section-intro">Every launch starts the same way (name, symbol, supply), then goes one of four ways on Robinhood Chain, or the single quick-launch path on Solana.</p>
 
       <div class="mode-grid" style="margin-top:20px;">
         <div class="mode-card">
-          <div class="mode-card-head"><h3>Deploy Token</h3><span class="mode-badge free">No ETH needed</span></div>
-          <p>100% of the supply mints straight to your wallet. No pool, no tax, nothing else happens on-chain. Creating a market for it — anywhere, any time — is entirely up to you afterward.</p>
-          <ul class="mode-specs">
-            <li><span class="k">Cost</span>A flat, small deploy fee</li>
-            <li><span class="k">Tax</span>None</li>
-            <li><span class="k">Best for</span>Tokens you'll pair into liquidity yourself later, or that don't need a public market at all</li>
-          </ul>
-        </div>
-        <div class="mode-card">
           <div class="mode-card-head"><h3>Deploy + Add Liquidity</h3><span class="mode-badge eth">Needs ETH</span></div>
-          <p>Creates the token and pairs your ETH into a real pool in the same transaction. A 1.00% transfer tax funds the climb to a fixed $50,000 market cap, then switches off for good. Your LP is locked to you, not withdrawable early.</p>
+          <p>Creates the token and pairs your ETH into a real Uniswap V4 pool in the same transaction. A 1.00% fee on trades funds the climb to a $50,000 market cap, then switches off for good. Your liquidity is locked to you.</p>
           <ul class="mode-specs">
-            <li><span class="k">Cost</span>A flat launch fee, plus the ETH you're pairing</li>
-            <li><span class="k">Tax</span>1.00%, until $50,000 market cap</li>
-            <li><span class="k">Optional</span>An initial buy-in, guaranteed to be the pool's first trade</li>
-          </ul>
-        </div>
-        <div class="mode-card">
-          <div class="mode-card-head"><h3>Deploy Custom Tax Token</h3><span class="mode-badge free">No ETH needed</span></div>
-          <p>Same idea as Deploy Token, but for the configurable token type — deploy and verify only, with whatever tax settings you chose staying completely inert until a pool actually exists.</p>
-          <ul class="mode-specs">
-            <li><span class="k">Cost</span>A flat, small deploy fee</li>
-            <li><span class="k">Tax</span>Configured, but inactive</li>
-            <li><span class="k">Best for</span>Reserving your configurable token now, launching liquidity later</li>
+            <li><span class="k">Cost</span>A flat launch fee, plus the ETH you pair in</li>
+            <li><span class="k">Fee</span>1.00% of the ETH in each trade, until $50,000 market cap</li>
+            <li><span class="k">Optional</span>An initial buy, guaranteed to be the pool's first trade and exempt from the early-buy surcharge</li>
           </ul>
         </div>
         <div class="mode-card">
           <div class="mode-card-head"><h3>Deploy + Add Liquidity (Custom Tax)</h3><span class="mode-badge eth">Needs ETH</span></div>
-          <p>The fully configurable path: pick a buy tax and sell tax (each independently capped), and mix in up to four mechanics — reflections paid to every holder, a marketing wallet, automatic liquidity, and automatic burn. Rates lock at launch and can never be raised afterward.</p>
+          <p>The fully configurable path. Set a buy tax and a sell tax independently, and split each across reflections, marketing, automatic liquidity and automatic burn. Rates lock at launch and can never be raised. The platform's 1% fee sits on top and switches off at the same market-cap target.</p>
           <ul class="mode-specs">
-            <li><span class="k">Cost</span>A flat launch fee, plus the ETH you're pairing</li>
-            <li><span class="k">Tax</span>Your own rate, plus a small platform tax on top (same self-disabling behavior)</li>
-            <li><span class="k">Best for</span>Reflections, auto-liquidity, or a fully custom tokenomics design</li>
+            <li><span class="k">Cost</span>A flat launch fee, plus the ETH you pair in</li>
+            <li><span class="k">Tax</span>Your own rates (capped per side), plus the platform fee</li>
+            <li><span class="k">Best for</span>Reflections, auto-liquidity or fully custom tokenomics</li>
           </ul>
         </div>
         <div class="mode-card">
-          <div class="mode-card-head"><h3>Quick Launch</h3><span class="mode-badge quick">⚡ Zero tax, no ETH needed</span></div>
-          <p>No upfront ETH at all. Your token trades immediately against its own bonding curve — price rises automatically as people buy. Once the curve raises enough real ETH, it graduates: it automatically seeds a real pool and the platform's usual post-launch tax begins.</p>
+          <div class="mode-card-head"><h3>Quick Launch</h3><span class="mode-badge quick">⚡ No ETH needed</span></div>
+          <p>No upfront liquidity. Your token trades immediately against its own bonding curve, and price rises as people buy. When the curve has raised its target, it graduates: a real Uniswap V4 pool is created automatically and trading continues there.</p>
           <ul class="mode-specs">
-            <li><span class="k">Cost</span>A flat, small launch fee</li>
-            <li><span class="k">Tax</span>None pre-graduation; the standard platform tax after</li>
-            <li><span class="k">Best for</span>A pump.fun-style launch with instant trading and no liquidity to raise yourself</li>
+            <li><span class="k">Cost</span>A flat launch fee (plus an optional first buy)</li>
+            <li><span class="k">On the curve</span>A 1.00% fee on the ETH of every buy and sell</li>
+            <li><span class="k">After graduation</span>The pool's 1.00% fee until $50,000 market cap</li>
           </ul>
         </div>
         <div class="mode-card">
-          <div class="mode-card-head"><h3>Quick Launch (Custom Tax)</h3><span class="mode-badge quick">⚡ Zero tax, no ETH needed</span></div>
-          <p>Identical bonding-curve mechanics to Quick Launch, but graduates into the configurable token type — so your reflections/marketing/auto-liquidity/burn settings apply from the moment real trading begins.</p>
+          <div class="mode-card-head"><h3>Quick Launch (Custom Tax)</h3><span class="mode-badge quick">⚡ No ETH needed</span></div>
+          <p>The same bonding-curve mechanics, but the token graduates into the configurable token type, so your reflections, marketing, auto-liquidity and burn settings apply from the first pool trade.</p>
           <ul class="mode-specs">
-            <li><span class="k">Cost</span>A flat, small launch fee</li>
-            <li><span class="k">Tax</span>None pre-graduation; your configured tax after</li>
-            <li><span class="k">Best for</span>A bonding-curve launch that still ends in your own custom tokenomics</li>
+            <li><span class="k">Cost</span>A flat launch fee (plus an optional first buy)</li>
+            <li><span class="k">Tax</span>The platform fee on the curve; your configured tax once in the pool</li>
+            <li><span class="k">Best for</span>A curve launch that ends in your own tokenomics</li>
           </ul>
+        </div>
+        <div class="mode-card" style="grid-column:1 / -1;">
+          <div class="mode-card-head"><h3>Solana Quick Launch</h3><span class="mode-badge quick">⚡ Solana wallet</span></div>
+          <p>A pump.fun-style launch on Meteora's Dynamic Bonding Curve, signed only by your Solana wallet. The token graduates to a Meteora DAMM v2 pool when the curve fills. See <a href="#solana">Solana Quick Launch</a> for the details.</p>
         </div>
       </div>
 
       <div class="callout" style="margin-top:20px;">
         <span class="callout-icon">◆</span>
-        <p>In every mode that ends with a real pool, the liquidity that goes in is <b>locked</b> to the original creator for a fixed period — it's never something you (or anyone) can pull back out early. A Quick Launch's graduation liquidity comes from many different buyers rather than one creator, so it's <b>permanently burned</b> instead of locked to anyone.</p>
+        <p>Every Robinhood Chain mode that creates a pool <b>locks</b> the liquidity to the original creator for a fixed period. Nobody can pull it out early, and a Quick Launch's position is locked for the creator who launched it, never for whoever happens to trigger graduation. There is no deploy-only mode any more: a Quick Launch covers the case of launching without upfront liquidity.</p>
       </div>
     </section>
 
     <section id="how-to-deploy">
-      <h2><span class="eyebrow">04</span>How to deploy a token</h2>
-      <p class="section-intro">The launch wizard is the same four steps regardless of which mode you pick — only what you fill in in step 2 and 3 changes.</p>
+      <h2><span class="eyebrow">03</span>How to deploy a token</h2>
+      <p class="section-intro">The launch wizard is the same four steps for every mode. Only what you fill in on steps 2 and 3 changes.</p>
 
       <div class="steps-list" style="margin-top:24px;">
         <div class="doc-step">
           <div class="doc-step-num" aria-hidden="true"></div>
           <div>
             <h3>Connect your wallet and check the network</h3>
-            <p>Click <b>Connect Wallet</b> top-right, then confirm the network pill shows the network you actually intend to launch on. Click <b>Launch a token</b> (or the <b>Launch</b> tab) to open the wizard.</p>
+            <p>Connect the wallet for the chain you want (Robinhood Chain or Solana), confirm the network pill, then open <b>Launch a token</b>. On the Create page, the <b>Robinhood / Solana</b> picker switches the wizard to the other chain.</p>
           </div>
         </div>
         <div class="doc-step">
           <div class="doc-step-num" aria-hidden="true"></div>
           <div>
             <h3>Step 01 · Identity</h3>
-            <p>Name, ticker symbol, total supply, a short description, and optionally a logo, banner, and social links. This is the same information shown on your token's card and detail page later — you can still edit the description/branding/socials after launch.</p>
+            <p>Name, ticker, total supply (where the platform lets you choose it), a short description, and optionally a logo, banner and social links. This is what appears on your token's card and page. You can still edit the description, branding and socials after launch.</p>
           </div>
         </div>
         <div class="doc-step">
           <div class="doc-step-num" aria-hidden="true"></div>
           <div>
             <h3>Step 02 · Deploy mode</h3>
-            <p>Choose one of the six modes from <a href="#launch-modes">Launch modes</a> above. The live preview panel on the right updates immediately to show what your token's card will look like.</p>
-            <div class="step-note"><b>Not sure which to pick?</b> No ETH to put in yet → Deploy Token or Deploy Custom Tax Token. Want instant trading with zero setup → Quick Launch. Want your own tax/reflections design → one of the Custom Tax modes.</div>
+            <p>Pick one of the modes from <a href="#launch-modes">Launch modes</a>. The live preview on the right shows what your token's card will look like.</p>
+            <div class="step-note"><b>Not sure?</b> No ETH to put in, or you want instant trading → Quick Launch. Want a real pool from the first second → Deploy + Add Liquidity. Want reflections, marketing or auto-liquidity → one of the Custom Tax modes.</div>
           </div>
         </div>
         <div class="doc-step">
           <div class="doc-step-num" aria-hidden="true"></div>
           <div>
             <h3>Step 03 · Terms</h3>
-            <p>For a liquidity mode, set how much ETH to pair in (and, optionally, an initial buy-in — guaranteed to be the pool's very first trade). For a custom-tax mode, set your buy/sell tax split across reflections, marketing, liquidity, and burn. Deploy-only and Quick Launch modes have little or nothing to configure here.</p>
+            <p>For a liquidity mode, set how much ETH to pair in and, optionally, an initial buy. For a custom-tax mode, set the buy and sell split across reflections, marketing, liquidity and burn, the marketing wallet, and (once a reflection share is set) how reflections are paid. Quick Launch has almost nothing to configure here.</p>
           </div>
         </div>
         <div class="doc-step">
           <div class="doc-step-num" aria-hidden="true"></div>
           <div>
             <h3>Step 04 · Review</h3>
-            <p>Double-check everything — there's no editing tokenomics after this. Confirm, then approve the transaction in your wallet (or, for a gasless-eligible mode, sign the free message and send the deposit — see <a href="#gasless">Gasless launches</a>). A progress panel tracks each step of the launch live.</p>
+            <p>Check everything. Tokenomics cannot be edited after this. Confirm, then sign: a free message signature for a gasless launch plus one ETH deposit (see <a href="#gasless">Gasless launches</a>), or an ordinary wallet transaction. A progress panel tracks each step of the launch.</p>
           </div>
         </div>
         <div class="doc-step">
           <div class="doc-step-num" aria-hidden="true"></div>
           <div>
             <h3>You're live</h3>
-            <p>Once the transaction confirms, your token appears on the grid, a launch announcement posts to the live feed, and it shows up under <b>Your launches</b> in your Portfolio tab. See <a href="#after-launch">After you launch</a> for what to do next.</p>
+            <p>Once it confirms, your token appears on the grid, a launch announcement posts to the live feed (and to the Telegram launches channel), and it is listed under <b>Your launches</b> in your Portfolio. See <a href="#after-launch">After you launch</a>.</p>
           </div>
         </div>
       </div>
     </section>
 
     <section id="gasless">
-      <h2><span class="eyebrow">05</span>Gasless launches</h2>
-      <p class="section-intro">Deploy Token and Deploy + Add Liquidity both support launching without paying your own gas.</p>
+      <h2><span class="eyebrow">04</span>Gasless launches</h2>
+      <p class="section-intro">All four Robinhood Chain modes can be launched without paying your own gas.</p>
       <div class="table-wrap">
         <table class="kv-table">
-          <tr><th>1. Sign</th><td>You sign a message describing your launch — free, no gas, no transaction sent yet.</td></tr>
-          <tr><th>2. Deposit</th><td>You send <b>one plain ETH transfer</b> covering the fee/liquidity/buy-in — an ordinary transfer, not a special gas payment.</td></tr>
-          <tr><th>3. Relay</th><td>A relayer wallet submits the actual launch transaction and pays that transaction's own gas for you.</td></tr>
+          <tr><th>1. Sign</th><td>You sign a message describing your launch. It is free, uses no gas and sends no transaction.</td></tr>
+          <tr><th>2. Deposit</th><td>You send <b>one plain ETH transfer</b> covering the launch fee, the liquidity and any first buy. It is an ordinary transfer, not a gas payment.</td></tr>
+          <tr><th>3. Relay</th><td>The platform's relayer submits the launch transaction and pays its gas. That gas is repaid out of the launch fee, up to a cap the platform sets.</td></tr>
         </table>
       </div>
-      <p style="margin-top:14px;">This only ever covers the launch transaction's gas — you're still the one funding the launch fee, liquidity, and any buy-in itself. Nobody but you can ever redirect or forge a launch: every relay re-checks your own signature and deposit before doing anything. Where gasless isn't available (or a relayer isn't configured for the current network), the wizard falls back to an ordinary wallet-paid transaction automatically.</p>
+      <p style="margin-top:14px;">You still fund the launch fee, liquidity and first buy yourself; only the transaction's gas is covered. Nobody but you can redirect or forge a launch, because the contracts re-check your signature and your deposit before doing anything. If you sign and the relayer never completes the launch, you can reclaim your deposit after the voucher's deadline. When the relayer isn't ready, the page says so and falls back to a normal wallet transaction automatically.</p>
+    </section>
+
+    <section id="custom-tax">
+      <h2><span class="eyebrow">05</span>Custom tax tokens</h2>
+      <p class="section-intro">A custom-tax token lets you choose a buy tax and a sell tax independently and split each across four mechanics. Total rates are capped per side, and every rate is locked at launch with no setter afterwards.</p>
+      <div class="table-wrap" style="margin-top:16px;">
+        <table class="kv-table">
+          <tr><th>Reflections</th><td>A share of every trade is distributed to all holders in proportion to their balance. You choose at launch how holders are paid, and the choice is permanent (see below).</td></tr>
+          <tr><th>Marketing</th><td>Taken in <b>ETH</b> from the ETH side of the trade and paid to your marketing wallet. The creator can change the wallet later, but never the rate. A wallet that can't receive ETH just keeps its share waiting until it's changed; trading is never blocked.</td></tr>
+          <tr><th>Liquidity</th><td>Taken in the token and turned into permanent pool liquidity by a keeper. It can never be withdrawn.</td></tr>
+          <tr><th>Burn</th><td>Taken in the token and destroyed, reducing total supply.</td></tr>
+        </table>
+      </div>
+      <h3 style="margin-top:26px;">Choosing how reflections are paid</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Same token</th><td>Holders receive more of the token itself. Holders can claim at any time.</td></tr>
+          <tr><th>ETH</th><td>Reflection tokens are sold for ETH by a keeper and the ETH is shared out. Payouts are sent to holders automatically in batches; anyone can also claim straight from the contract. Holders owed only a dust amount keep accruing until it is worth the gas.</td></tr>
+          <tr><th>Another token</th><td>The ETH buys another token that already trades on the platform, and that token is shared out. The target is checked on-chain when you launch.</td></tr>
+        </table>
+      </div>
+      <div class="callout" style="margin-top:18px;">
+        <span class="callout-icon">◆</span>
+        <p>A custom token pays the <b>platform fee on top of your own rates</b>. The platform fee switches off at the market-cap target (see <a href="#graduation">Graduation</a>); your own rates never switch off.</p>
+      </div>
+    </section>
+
+    <section id="solana">
+      <h2><span class="eyebrow">06</span>Solana Quick Launch</h2>
+      <p class="section-intro">Solana launches use Meteora's Dynamic Bonding Curve, an audited program that already runs on Solana. IgnitionX doesn't deploy a contract for it. Anyone with a Solana wallet can launch, and it currently runs on devnet with free test SOL.</p>
+      <div class="table-wrap" style="margin-top:16px;">
+        <table class="kv-table">
+          <tr><th>Launch</th><td>You sign two free messages and the launch transaction with your Solana wallet. Your Robinhood wallet is never asked to confirm anything. The launch can include your own first buy.</td></tr>
+          <tr><th>Trade</th><td>Anyone buys and sells against the curve. In the grid, the token shows <b>Bonding curve</b> while it trades there, and its market cap is shown in dollars.</td></tr>
+          <tr><th>Graduate</th><td>When the curve has raised its SOL target, Meteora migrates the liquidity to a DAMM v2 pool. Most of the migrated LP is permanently locked to the platform and a share goes to the creator. From then on the token shows as graduated.</td></tr>
+          <tr><th>Fees</th><td>A trading fee applies on the curve; Meteora takes its protocol share first, then the creator receives a share of the remainder and the platform the rest. The numbers (starting and graduation market cap, fee, creator share) are set by the platform and fixed into each token's curve when it launches.</td></tr>
+        </table>
+      </div>
+      <p style="margin-top:14px;">Solana tokens sit in the same <b>Live launches</b> grid, the home page's New launches window and the live feed as Robinhood Chain tokens, and use the same comments, callouts and follows. Solana buys and sells are detected from the pool and appear in the live feed within about a minute. The Robinhood Chain fee model described below (ETH-side fee, creator rewards, platform-token buyback) is specific to Robinhood Chain; Solana follows Meteora's own fee rules.</p>
+      <div class="callout warn">
+        <span class="callout-icon">◆</span>
+        <p><b>Solana is on devnet.</b> Devnet SOL is free test currency with no value. Check the network pill before launching or trading.</p>
+      </div>
     </section>
 
     <section id="after-launch">
-      <h2><span class="eyebrow">06</span>After you launch</h2>
+      <h2><span class="eyebrow">07</span>After you launch</h2>
       <div class="feature-grid" style="grid-template-columns:repeat(2,1fr); margin-top:16px;">
         <div class="feature-card">
           <h3>Edit your token</h3>
-          <p>From your token's detail page (or Portfolio → Your launches), update its description, logo, banner, and social links any time — a quick signature from your wallet syncs it for every visitor.</p>
+          <p>From your token's page (or Portfolio → Your launches), update its description, logo, banner and social links any time. A quick signature from your wallet syncs it for every visitor.</p>
         </div>
         <div class="feature-card">
           <h3>Claim creator rewards</h3>
-          <p>If creator rewards are enabled on the network you launched on, your Portfolio shows a claimable balance as trading activity accrues — trigger the swap and claim it straight to your wallet.</p>
+          <p>On Robinhood Chain, 10% of the platform's 1% fee on your token's trades is credited to you in ETH, per token. Your Portfolio shows the claimable balance and you claim it straight to your wallet.</p>
         </div>
         <div class="feature-card">
           <h3>Unlock your LP</h3>
-          <p>Once your lock period ends, an <b>Unlock LP</b> button appears next to that launch in your Portfolio. Before that, the countdown shows exactly how long is left.</p>
+          <p>When your lock period ends, an <b>Unlock LP</b> button appears next to that launch in your Portfolio. Until then the countdown shows how long is left.</p>
         </div>
         <div class="feature-card">
           <h3>Watch it trade</h3>
-          <p>Every real buy/sell shows up in the live feed in real time, and your token's price/market-cap chart updates from the same on-chain activity.</p>
+          <p>Every real buy and sell appears in the live feed, and your token's price and market-cap chart update from the same on-chain activity.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Manage a custom token</h3>
+          <p>Creators of a custom-tax token can change the marketing wallet and hand the creator role to someone else (a two-step transfer), or renounce it. Rates can't be changed by anyone.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Claim reflections</h3>
+          <p>If you hold a reflection token, its page shows what you're owed in the right units (the token, ETH or the payout token). Automatic batches pay most holders; you can also claim yourself.</p>
         </div>
       </div>
     </section>
 
     <section id="trading">
-      <h2><span class="eyebrow">07</span>Buying &amp; selling</h2>
-      <p class="section-intro">How a trade works depends on which side of graduation a token is on.</p>
+      <h2><span class="eyebrow">08</span>Buying &amp; selling</h2>
+      <p class="section-intro">Trades happen on the token's own page. What it trades against depends on which side of graduation the token is on.</p>
       <div class="table-wrap">
         <table class="kv-table">
-          <tr><th>Pool-based token</th><td>Deploy + Add Liquidity and Custom Tax modes trade against a real DEX pool from the moment they launch. Buy/sell straight from the token's detail page; price follows the pool like any ordinary AMM pair.</td></tr>
-          <tr><th>Quick Launch, pre-graduation</th><td>Trades go straight against the bonding curve itself — no pool yet. Price rises with every buy and falls with every sell, following the curve, not an order book.</td></tr>
-          <tr><th>Quick Launch, post-graduation</th><td>Once graduated, it behaves exactly like a pool-based token from then on — same detail-page trade panel, same live pricing.</td></tr>
+          <tr><th>Pool token</th><td>Deploy + Add Liquidity and Custom Tax tokens trade in a Uniswap V4 pool from the moment they launch. Use the Buy/Sell panel on the token's page: enter an amount, see the estimate, price impact and the fees included, and confirm. Sells need one approval the first time.</td></tr>
+          <tr><th>Quick Launch, on the curve</th><td>Trades go against the bonding curve itself. Price rises with every buy and falls with every sell. There is no pool yet and the token shows <b>Bonding curve</b>.</td></tr>
+          <tr><th>Quick Launch, graduated</th><td>It behaves like a pool token from then on: same trade panel, same live pricing.</td></tr>
         </table>
       </div>
-      <p style="margin-top:14px;">The live feed tags every bonding-curve trade with a small <span class="badge-pill signal">⚡</span> marker so you can tell it apart from an ordinary pool trade at a glance.</p>
+      <ul class="doc-list" style="margin-top:16px;">
+        <li><b>Slippage.</b> The default is 2%. The minimum you'll accept is enforced on-chain, so a trade that would fill worse than your setting reverts instead of filling badly.</li>
+        <li><b>The estimate includes the fees.</b> The 0.30% pool fee, the platform's 1% fee, any early-buy surcharge, and a custom token's own rates are all in the quote.</li>
+        <li><b>Live feed.</b> Curve trades carry a small <span class="badge-pill signal">⚡</span> marker so you can tell them apart from pool trades.</li>
+      </ul>
+    </section>
+
+    <section id="fees">
+      <h2><span class="eyebrow">09</span>How fees work</h2>
+      <p class="section-intro">On Robinhood Chain the platform takes one 1% fee on a token's trades. It is taken in ETH, out of the trade itself, and it stops on its own once the token has grown.</p>
+
+      <div class="compare">
+        <div class="panel before">
+          <h3>Before</h3>
+          <ul>
+            <li>The fee was taken in the launched token.</li>
+            <li>To turn it into ETH, a distributor later sold those tokens in the pool.</li>
+            <li>Every claim created a visible sell on the chart.</li>
+          </ul>
+        </div>
+        <div class="panel after">
+          <h3>Now</h3>
+          <ul>
+            <li>The fee comes straight off the ETH side of each buy and sell.</li>
+            <li>No token is sold to collect it, so nothing extra appears on the chart.</li>
+            <li>The ETH is paid out to its destinations in batches by the relayer.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3 style="margin-top:26px;">What you pay</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Buying</th><td>The fee is added on top of the ETH that reaches the pool. If you spend 1 ETH, the pool receives the amount after the fee.</td></tr>
+          <tr><th>Selling</th><td>The fee is taken from the ETH you'd receive. If the pool pays out 1 ETH, you receive 1 ETH less the fee.</td></tr>
+          <tr><th>Quote</th><td>The trade panel's estimate already includes it, so what you see is what you get within your slippage setting.</td></tr>
+        </table>
+      </div>
+
+      <h3 style="margin-top:26px;">Where the fee goes</h3>
+      <div class="flow" role="img" aria-label="Fee flow: a 1% fee on each trade is booked, then paid out 10% to the token's creator and 90% to the fee-wallet distributor, which gives half to the fee wallet and half to the platform-token buyback.">
+        <div class="flow-row"><div class="flow-node hot"><span class="pct">1% OF THE ETH IN EACH TRADE</span><b>Trade fee</b>Taken from the ETH side of every buy and sell, then booked for that token's pool until the next payout.</div></div>
+        <div class="flow-arrow">paid out in batches by the relayer</div>
+        <div class="flow-row cols-2">
+          <div class="flow-node"><span class="pct">10% OF THE FEE</span><b>Creator rewards</b>Credited to the token's creator in ETH. Claim it from your Portfolio.</div>
+          <div class="flow-node"><span class="pct">90% OF THE FEE</span><b>Fee-wallet distributor</b>Receives the rest as plain ETH.</div>
+        </div>
+        <div class="flow-arrow">the distributor splits what it receives</div>
+        <div class="flow-row cols-2">
+          <div class="flow-node end"><span class="pct">HALF</span><b>Platform fee wallet</b>Claimable by the platform.</div>
+          <div class="flow-node end"><span class="pct">HALF</span><b>Platform-token buyback</b>Buys the platform token, then burns part and airdrops part to its holders.</div>
+        </div>
+      </div>
+      <p class="mini-note">Split shown is the platform's current default setting, copied into each pool when it is created; later changes apply to new launches only, never to existing pools.</p>
+
+      <h3 style="margin-top:26px;">The other charges</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Launch fee</th><td>A flat fee at launch. When the launch is relayed, the relayer's gas is repaid from it first and the rest is split between the platform treasury and the platform rewards.</td></tr>
+          <tr><th>Curve fee</th><td>A Quick Launch charges 1% of the ETH on every curve buy and sell until the curve graduates, split the same way as above.</td></tr>
+          <tr><th>Custom rates</th><td>A custom-tax token's own reflection, marketing, liquidity and burn rates, set by the creator. Marketing is taken in ETH; the others in the token.</td></tr>
+          <tr><th>Early-buy surcharge</th><td>An extra charge on buys in a new pool's first minutes. See <a href="#graduation">below</a>.</td></tr>
+          <tr><th>Pool fee</th><td>The 0.30% Uniswap V4 pool fee, which goes to the pool's liquidity providers.</td></tr>
+        </table>
+      </div>
     </section>
 
     <section id="graduation">
-      <h2><span class="eyebrow">08</span>Tax &amp; graduation</h2>
-      <p class="section-intro">Every taxed token on IgnitionX is built to tax itself out of existence, not to tax forever.</p>
-      <ul style="color:var(--paper-300); font-size:.92rem; padding-left:20px; margin:0 0 12px;">
-        <li style="margin-bottom:8px;">A <b>Deploy + Add Liquidity</b> or <b>Custom Tax</b> pool starts taxed the instant it launches, and that tax <b>permanently disables itself</b>, forever, the moment the pool's live market cap crosses its target — checked automatically on every taxed trade.</li>
-        <li style="margin-bottom:8px;">A <b>Quick Launch</b> token has <b>zero tax</b> while it's trading on the curve. The moment it graduates into a real pool, it opts into that same kind of post-launch tax — which then disables itself the same way, once the (now real) pool's market cap crosses its own target.</li>
+      <h2><span class="eyebrow">10</span>Graduation &amp; anti-snipe</h2>
+      <p class="section-intro">Every token is built to stop being charged the platform fee once it has grown, and new pools protect early buyers from bots.</p>
+
+      <h3>The fee switches itself off</h3>
+      <ul class="doc-list">
+        <li>A pool token starts with the 1% platform fee the moment it launches. The fee <b>permanently switches off</b> once the pool's market cap has stayed at or above the target (<b>$50,000</b> by default) across two checks at least 30 minutes apart. Two checks stop a single price spike from ending it early.</li>
+        <li>A <b>Quick Launch</b> charges its curve fee until the curve graduates, then the pool's 1% fee runs until the same $50,000 target is reached and switches off.</li>
+        <li>The market cap is measured in dollars from the pool price and a live ETH price feed. If the feed is stale or unavailable the fee simply stays on and trading is never blocked.</li>
+        <li>What switches off is the <b>platform</b> fee. A custom-tax token's own rates, including its marketing share, keep working.</li>
       </ul>
+      <p class="mini-note">On the grid, a token shows <b>Graduated</b> once its fee has switched off. A curve token first shows <b>Bonding curve</b>, and shows as live on a DEX only once it has moved into a pool.</p>
+
+      <h3 style="margin-top:22px;">Early-buy surcharge</h3>
+      <p>A new pool charges an extra fee on <b>buys only</b> that starts high at the moment the pool is created and falls in a straight line to zero over a short window. A bot buying in the first blocks hands much of its position to the platform; someone buying a couple of minutes later pays little or nothing. Sells are never charged.</p>
+      <ul class="doc-list">
+        <li>The buy quote shows it as <i>"includes X% early-buy surcharge, falling to 0"</i>, so you know what you're paying before you confirm.</li>
+        <li>It is taken in ETH and goes to the platform fee side.</li>
+        <li>Each pool keeps the surcharge settings it was created with, so nobody can raise it on a pool that is already trading.</li>
+        <li>The creator's own first buy inside the launch is exempt. For a Quick Launch the window starts when the pool is created at graduation, not on the curve.</li>
+      </ul>
+
       <div class="callout">
         <span class="callout-icon">◆</span>
-        <p>Nobody can raise a tax rate after launch. For custom-tax tokens the rate is locked in at launch and has no setter at all afterward — the only thing a creator can still change post-launch is operational (marketing wallet, exemptions), never the rate itself.</p>
+        <p>Nobody can raise a rate after launch. A custom token's rates have no setter at all, and a platform fee only ever moves one way: from on to permanently off.</p>
+      </div>
+    </section>
+
+    <section id="community">
+      <h2><span class="eyebrow">11</span>Profiles &amp; social</h2>
+      <p class="section-intro">An account is identified by its main wallet, which can be a Robinhood wallet or a Solana wallet. A Solana wallet on its own is a complete account.</p>
+      <div class="feature-grid" style="margin-top:16px;">
+        <div class="feature-card">
+          <h3>Profile</h3>
+          <p>Set a display name and picture. They show next to your launches, comments and callouts.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Linked wallets</h3>
+          <p>Link up to 5 wallets, across both chains, under one account. Linking takes a free signature from both wallets, and the links are public. A wallet that already has its own profile or activity can't be linked yet, so link wallets that are new to IgnitionX.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Follows</h3>
+          <p>Follow other members to keep track of what they launch and trade.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Comments</h3>
+          <p>Every token page has a comment thread, for Robinhood Chain and Solana tokens alike. Posting needs a display name.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Callouts</h3>
+          <p>Mark a token as a call at its current price and the page tracks how it has done, as a multiple. One callout per account per token. Solana callouts are priced in SOL, Robinhood ones in dollars.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Telegram posts</h3>
+          <p>New launches, and the two milestones (a curve graduating to a pool, and a token's fee switching off) are announced in the platform's Telegram launches channel, once each.</p>
+        </div>
       </div>
     </section>
 
     <section id="security">
-      <h2><span class="eyebrow">09</span>Security &amp; disclosures</h2>
+      <h2><span class="eyebrow">12</span>Security &amp; disclosures</h2>
       <div class="feature-grid" style="grid-template-columns:repeat(2,1fr); margin-top:16px;">
         <div class="feature-card">
-          <h3>LP locks &amp; burns</h3>
-          <p>Every liquidity-bearing launch locks its LP to the creator, or — for a Quick Launch's graduation liquidity — burns it outright. Neither is ever pulled back out early by anyone, including the platform.</p>
+          <h3>Locked liquidity</h3>
+          <p>Every Robinhood Chain launch locks its liquidity position to the creator for a fixed period. Neither the creator, the platform nor anyone else can pull it out early.</p>
         </div>
         <div class="feature-card">
-          <h3>Immutable custom-token rates</h3>
-          <p>A Custom Tax token's buy/sell rates are fixed forever at launch. There is no admin, creator, or platform action anywhere that can raise them afterward.</p>
+          <h3>Immutable custom rates</h3>
+          <p>A custom-tax token's rates are fixed at launch. No creator, admin or platform action can raise them. Only the marketing wallet can change, and only the creator can change it.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Payouts never block trading</h3>
+          <p>Fees are booked during a trade and paid out separately. A destination that can't receive ETH has its amount held and retried; it can never make a buy or sell fail.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Your keys stay yours</h3>
+          <p>The relayer only holds a wallet used to pay gas. It can't take your funds or forge a launch, because every launch is checked against your own signature and deposit.</p>
         </div>
         <div class="feature-card">
           <h3>Independently-added pools</h3>
-          <p>If liquidity is ever detected for a token outside IgnitionX's own launch flow, its card says so plainly and its price isn't tracked here — the platform doesn't vouch for a market it didn't create.</p>
+          <p>If liquidity appears for a token outside IgnitionX's own launch flow, its card says so and its price isn't tracked here. The platform doesn't vouch for a market it didn't create.</p>
         </div>
         <div class="feature-card">
-          <h3>Testnet vs. Mainnet</h3>
-          <p>The Demo/Live network switch is platform-wide. On Mainnet, every launch, trade, and price shown reflects genuine on-chain transactions and real funds — never a simulation.</p>
+          <h3>Testnet vs. mainnet</h3>
+          <p>The network switch is platform-wide. On mainnet every launch, trade and price reflects real on-chain activity and real funds.</p>
         </div>
       </div>
       <div class="callout warn" style="margin-top:20px;">
         <span class="callout-icon">◆</span>
-        <p>IgnitionX is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Launching or trading a token carries real financial risk. Nothing on this page or on the platform is financial advice; review a token's own contract and terms before committing real funds.</p>
+        <p>IgnitionX is an independent, unofficial interface built for Robinhood Chain. It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Launching or trading a token carries real financial risk. Nothing on this page or on the platform is financial advice; review a token's contract and terms before committing real funds.</p>
       </div>
     </section>
 
     <section id="faq">
-      <h2><span class="eyebrow">10</span>FAQ</h2>
+      <h2><span class="eyebrow">13</span>FAQ</h2>
       <div style="margin-top:8px;">
         <details class="faq-item">
           <summary>Do I need ETH to launch a token?</summary>
-          <p>Only for the modes that add liquidity upfront (Deploy + Add Liquidity, and its Custom Tax equivalent) — you're pairing that ETH into the pool yourself. Deploy Token, Deploy Custom Tax Token, and both Quick Launch modes need no upfront ETH beyond a small flat fee.</p>
+          <p>Only for the modes that add liquidity upfront (Deploy + Add Liquidity and its Custom Tax version), where you pair that ETH into the pool yourself. The Quick Launch modes need no upfront liquidity, only the flat launch fee and an optional first buy.</p>
         </details>
         <details class="faq-item">
-          <summary>What's the difference between Testnet and Mainnet?</summary>
-          <p>Testnet runs on Robinhood Chain's test network, where nothing has real value — it's the place to try the platform out. Mainnet is the real chain: real ETH, real tokens, real, irreversible trades. The network pill next to your wallet always shows which one is currently active for everyone.</p>
+          <summary>Why doesn't claiming rewards show a sell on the chart any more?</summary>
+          <p>The platform's 1% fee is now taken in ETH directly from each trade, so there are no fee tokens to sell. Rewards are paid out in ETH from what was already collected.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Who pays the fee on a trade?</summary>
+          <p>The trader. A buyer pays it on top of the ETH that reaches the pool, and a seller receives that much less ETH. The trade panel's estimate already includes it.</p>
+        </details>
+        <details class="faq-item">
+          <summary>When does the platform fee stop?</summary>
+          <p>When the token's market cap has stayed at or above the target ($50,000 by default) across two checks at least 30 minutes apart. After that the platform fee is off for good. A custom token's own rates continue.</p>
         </details>
         <details class="faq-item">
           <summary>Can a creator raise the tax after launch?</summary>
-          <p>No. A Custom Tax token's rate is locked in permanently at launch, with no setter anywhere in the contract afterward. A plain Deploy + Add Liquidity token's tax only ever moves in one direction: from active to permanently disabled once its pool crosses the market-cap target — never back up.</p>
-        </details>
-        <details class="faq-item">
-          <summary>What happens to my liquidity?</summary>
-          <p>It's locked to you (the creator) for a fixed period the moment it's added — you can't withdraw it early, and neither can anyone else. Once the lock period ends, an Unlock LP button appears for that launch in your Portfolio.</p>
+          <p>No. A custom token's rates are locked at launch with no setter anywhere in the contract. The platform fee only ever goes from on to off.</p>
         </details>
         <details class="faq-item">
           <summary>What does "graduated" mean?</summary>
-          <p>For a taxed pool, it means the tax has permanently switched off — the market cap target was hit and trading is now tax-free for good. For a Quick Launch token specifically, "graduated" also marks the moment it moved off the bonding curve and into a real DEX pool.</p>
+          <p>Two things, depending on the token. For a pool token it means the platform fee has permanently switched off. For a Quick Launch it also marks the moment the token left the bonding curve for a real pool; until then it's labelled <b>Bonding curve</b>. On Solana, graduating means the curve filled and the liquidity moved to a Meteora DAMM v2 pool.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What happens to my liquidity?</summary>
+          <p>It is locked to you, the creator, for a fixed period as soon as it's added. You can't withdraw it early and neither can anyone else. When the lock ends, an Unlock LP button appears in your Portfolio.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I launch from Solana and from Robinhood Chain with one account?</summary>
+          <p>Yes. Either wallet can be your account's main wallet, and you can link the other so your name, picture, follows and launches follow you across both. See <a href="#community">Profiles &amp; social</a>.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What's the difference between Testnet and Mainnet?</summary>
+          <p>Testnet runs on Robinhood Chain's test network and Solana devnet, where nothing has real value. Mainnet is the real chain, with real and irreversible trades. The network pill next to your wallet shows which is active, and it is the same for everyone.</p>
         </details>
         <details class="faq-item">
           <summary>Is IgnitionX affiliated with Robinhood?</summary>
           <p>No. IgnitionX is an independent, unofficial interface built for Robinhood Chain. It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
-        </details>
-        <details class="faq-item">
-          <summary>Is any of this simulated?</summary>
-          <p>Once real contracts are configured for a network, launching, trading, and a taxed/graduated token's own price all reflect genuine on-chain activity — not a simulation. What stays illustrative regardless: holder-count breakdowns, 24h volume shown before any real trades exist, and the price of a pool IgnitionX merely detected rather than created itself.</p>
         </details>
       </div>
     </section>
@@ -593,7 +806,7 @@
 
 <footer>
   <div class="footer-inner">
-    <p class="footer-note">IgnitionX is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Wallet connection is real (via your browser wallet), and the Demo/Live switch targets testnet or mainnet respectively. Once real factory addresses are configured for a network, launching a token, trading it, and its own price and chart (for a "taxed"/"graduated" token) all reflect genuine on-chain transactions and live pool state, not a simulation — real tokens and funds move. What stays illustrative regardless: the holder breakdown, 24h volume, and the price of any pool IgnitionX merely detected rather than created itself.</p>
+    <p class="footer-note">IgnitionX is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Wallet connection is real (via your browser wallet or Solana wallet), and the network switch targets testnet or mainnet respectively. Launching, trading and prices reflect genuine on-chain activity on the active network. What stays illustrative regardless: the holder breakdown, 24h volume shown before any real trades exist, and the price of any pool IgnitionX merely detected rather than created itself.</p>
     <div class="footer-links"><a href="index.html">App</a><a href="docs.html" aria-current="page">Docs</a><span>Status</span><span>Terms</span></div>
   </div>
 </footer>
