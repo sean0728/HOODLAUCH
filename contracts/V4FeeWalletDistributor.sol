@@ -44,6 +44,44 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
     /// platform-token buyback, run by an owner or keeper with a price floor.
     uint256 public pendingBuybackEth;
 
+    // ---------------------------------------------------------------
+    // Accounting: running totals of where every unit of fee went. Nothing
+    // here moves money or gates anything; it only counts, so the books can be
+    // read straight from the chain (accounting()) and checked against events.
+    // ---------------------------------------------------------------
+
+    /// @notice All-time totals. ETH in wei, tokens in PlatformToken units.
+    struct Accounting {
+        uint256 ethReceived;            // ETH deposited through depositFee (the hook's platform-fee payouts and curve fees)
+        uint256 ethFromConversions;     // ETH produced by selling in-kind fee tokens (older pools)
+        uint256 ethCreditedToFeeWallet; // ETH that became owed to the fee wallet (claimable)
+        uint256 ethPaidToFeeWallet;     // ETH actually sent to the fee wallet by claims
+        uint256 ethSpentOnBuyback;      // ETH spent buying PlatformToken
+        uint256 ethBuybackFallback;     // memo, already inside ethCreditedToFeeWallet: ETH meant for the buyback that went to the fee wallet instead (buy failed or buyback off)
+        uint256 platformTokensAcquired; // PlatformToken bought, plus fee tokens that already were PlatformToken
+        uint256 platformTokensBurned;
+        uint256 platformTokensQueuedForAirdrop;
+    }
+    Accounting private _acct;
+
+    /// @notice The all-time totals plus the live balances that are still to be settled.
+    /// `ethClaimable` is owed to the fee wallet now; `ethPendingBuyback` is earmarked for the next buyback run.
+    function accounting()
+        external
+        view
+        returns (Accounting memory totals, uint256 ethClaimable, uint256 ethPendingBuyback, uint256 platformTokensPendingAirdrop)
+    {
+        return (_acct, totalClaimableEth, pendingBuybackEth, pendingAirdropTokens);
+    }
+
+    /// @dev Splits and processes PlatformToken (50% burn / 50% airdrop queue) and books it.
+    function _processPlatformTokens(uint256 amount) private {
+        if (amount == 0) return;
+        (uint256 burned, uint256 toAirdrop) = _splitAndProcess(amount);
+        _acct.platformTokensBurned += burned;
+        _acct.platformTokensQueuedForAirdrop += toAirdrop;
+    }
+
     event FeeWalletUpdated(address indexed oldWallet, address indexed newWallet);
     event SwapThresholdUpdated(address indexed token, uint256 newThreshold);
     event MaxSwapAmountUpdated(address indexed token, uint256 newMax);
@@ -113,11 +151,13 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
             // The fee token IS PlatformToken: half goes straight to burn/airdrop.
             uint256 directAmount = amountIn / 2;
             amountIn -= directAmount;
-            _splitAndProcess(directAmount);
+            _acct.platformTokensAcquired += directAmount;
+            _processPlatformTokens(directAmount);
         }
 
         if (amountIn > 0) {
             (uint256 spent, uint256 ethOut) = _sellForEth(token, amountIn, minEthOut);
+            _acct.ethFromConversions += ethOut;
             uint256 toBuyback = (buyback && !isPlatform) ? ethOut / 2 : 0;
             credited = ethOut - toBuyback;
             if (toBuyback > 0) {
@@ -131,15 +171,19 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
                     (ok, tokensOut) = _tryBuyPlatformToken(toBuyback, 0);
                 }
                 if (ok) {
-                    _splitAndProcess(tokensOut);
+                    _acct.ethSpentOnBuyback += toBuyback;
+                    _acct.platformTokensAcquired += tokensOut;
+                    _processPlatformTokens(tokensOut);
                     emit PlatformTokenBuybackTriggered(token, toBuyback, tokensOut);
                 } else {
                     credited += toBuyback; // keep the ETH for the fee wallet
+                    _acct.ethBuybackFallback += toBuyback;
                     emit PlatformTokenBuybackFailed(token, toBuyback);
                 }
             }
             claimableEth[token] += credited;
             totalClaimableEth += credited;
+            _acct.ethCreditedToFeeWallet += credited;
             emit FeeWalletSwapTriggered(token, spent, credited);
         }
     }
@@ -160,6 +204,8 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
         pendingBuybackEth += toBuyback;
         claimableEth[address(0)] += credited;
         totalClaimableEth += credited;
+        _acct.ethReceived += msg.value;
+        _acct.ethCreditedToFeeWallet += credited;
         emit CurveFeeReceived(msg.sender, msg.value, credited, toBuyback);
     }
 
@@ -186,11 +232,15 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
             (ok, tokensOut) = _tryBuyPlatformToken(amount, 0);
         }
         if (ok) {
-            _splitAndProcess(tokensOut);
+            _acct.ethSpentOnBuyback += amount;
+            _acct.platformTokensAcquired += tokensOut;
+            _processPlatformTokens(tokensOut);
             emit PendingBuybackRun(amount, tokensOut);
         } else {
             claimableEth[address(0)] += amount;
             totalClaimableEth += amount;
+            _acct.ethCreditedToFeeWallet += amount;
+            _acct.ethBuybackFallback += amount;
             emit PendingBuybackFailed(amount);
         }
     }
@@ -204,6 +254,7 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
         require(amount > 0, "V4FeeWalletDistributor: nothing to claim");
         claimableEth[token] = 0;
         totalClaimableEth -= amount;
+        _acct.ethPaidToFeeWallet += amount;
         (bool sent,) = payable(recipient).call{value: amount, gas: CLAIM_CALL_GAS}("");
         require(sent, "V4FeeWalletDistributor: ETH transfer failed");
         emit FeeWalletRewardsClaimed(token, recipient, msg.sender, amount);
