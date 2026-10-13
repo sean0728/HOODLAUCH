@@ -19,6 +19,9 @@
 //                                    compounder keeper below
 //   V4_COMPOUND_MIN_SUPPLY_BPS       compound once pending >= this many bps of
 //                                    the token's supply (default 1 = 0.01%)
+//   V4_FLUSH_MIN_ETH / V4_FLUSH_MAX_AGE_MS / V4_FLUSH_BATCH / V4_FLUSH_POLL_INTERVAL_MS
+//                                    hook ETH-payout keeper (flush booked swap fees; defaults
+//                                    0.002 ETH, 6h, 15 pools per tx, the fee-wallet interval)
 //   V4_COMPOUND_POLL_INTERVAL_MS     compounder keeper tick (default: the
 //                                    fee-wallet keeper interval)
 // Each address comes from the env var, else the Admin panel's saved config
@@ -617,6 +620,12 @@ const V4_HOOK_STATE_ABI = [
   "function poolTax(bytes32 poolId) view returns (bool configured, bool taxActive, address token, address feeWallet, uint16 feeBps, uint16 rewardBps, uint16 creatorRewardBps, address rewardsDistributor, address creatorRewardsDistributor, address feeWalletDistributor, address priceFeed, uint32 maxOracleStaleness, uint64 graduationCandidateAt, uint256 graduationTargetUsd)",
 ];
 const V4_POOLS_MAPPING_SLOT = 6n; // PoolManager.pools
+// The hook books the ETH it takes from each swap (platform tax, anti-snipe surcharge, a custom token's marketing share)
+// per pool; flush is permissionless and pays it to its destinations. The keeper below calls it on a timer.
+const V4_HOOK_FLUSH_ABI = [
+  "function pendingEth(bytes32 poolId) view returns (uint256)",
+  "function flushMany(bytes32[] poolIds)",
+];
 
 // ---- V4 distributor keeper (optional) ----
 // On by default (Admin → Relayer settings toggle) once a V4 factory is configured. The
@@ -5332,6 +5341,61 @@ async function main() {
     }
   }
 
+  // ---- V4 hook ETH payout keeper ----
+  // Swaps never pay anyone: the hook books the ETH fee per pool and `flush` delivers it (platform tax -> rewards /
+  // creator / fee-wallet distributor; a custom token's marketing share -> its marketing wallet). This sweep reads
+  // pendingEth for every tracked V4 token and flushes the pools that are worth the gas: pending >= V4_FLUSH_MIN_ETH
+  // (default 0.002), or anything pending that has waited V4_FLUSH_MAX_AGE_MS (default 6h) so small pools still get paid.
+  // Pools go out in batches of V4_FLUSH_BATCH (default 15) per transaction. Anyone could do this; the relayer just does.
+  const v4FlushFirstSeen = new Map();
+  async function sweepV4HookFlushOnce() {
+    const ctx = await getV4Context();
+    if (!ctx) return;
+    const hookAddress = await ctx.hook.getAddress();
+    const view = await hre.ethers.getContractAt(V4_HOOK_FLUSH_ABI, hookAddress, hre.ethers.provider);
+    const minWei = hre.ethers.parseEther(String(process.env.V4_FLUSH_MIN_ETH || "0.002"));
+    const maxAgeMs = Number(process.env.V4_FLUSH_MAX_AGE_MS) > 0 ? Number(process.env.V4_FLUSH_MAX_AGE_MS) : 6 * 3600 * 1000;
+    const batch = Math.max(1, Number(process.env.V4_FLUSH_BATCH) || 15);
+    const now = Date.now();
+    const due = [];
+    const seen = new Set();
+    for (const entry of await v4KeeperTokens()) {
+      if (seen.has(entry.poolId)) continue;
+      seen.add(entry.poolId);
+      try {
+        const pending = await view.pendingEth(entry.poolId);
+        if (pending === 0n) {
+          v4FlushFirstSeen.delete(entry.poolId);
+          continue;
+        }
+        if (!v4FlushFirstSeen.has(entry.poolId)) v4FlushFirstSeen.set(entry.poolId, now);
+        if (pending >= minWei || now - v4FlushFirstSeen.get(entry.poolId) >= maxAgeMs) due.push({ poolId: entry.poolId, pending });
+      } catch (err) {
+        // BAD_DATA / CALL_EXCEPTION: a pool from an older hook, or no contract at the address: nothing to flush
+      }
+    }
+    if (!due.length) return;
+    const flusher = await hre.ethers.getContractAt(V4_HOOK_FLUSH_ABI, hookAddress, relayerWallet);
+    for (let i = 0; i < due.length; i += batch) {
+      const slice = due.slice(i, i + batch);
+      try {
+        const tx = await sendRelayerTx(() => flusher.flushMany(slice.map((d) => d.poolId)));
+        const receipt = await tx.wait();
+        for (const d of slice) v4FlushFirstSeen.delete(d.poolId);
+        const total = slice.reduce((a, d) => a + d.pending, 0n);
+        console.log(`[v4-flush] paid out ${hre.ethers.formatEther(total)} ETH of booked swap fees across ${slice.length} pool(s) in tx ${receipt.hash}.`);
+      } catch (err) {
+        console.warn(`[v4-flush] batch of ${slice.length} failed: ${err.message}`);
+      }
+    }
+  }
+  const V4_FLUSH_POLL_INTERVAL_MS = () =>
+    Number(process.env.V4_FLUSH_POLL_INTERVAL_MS) > 0 ? Number(process.env.V4_FLUSH_POLL_INTERVAL_MS) : relayerSettings.feeWalletPollIntervalMs;
+  async function v4HookFlushPollLoop() {
+    if (v4KeeperOn()) await sweepV4HookFlushOnce().catch((err) => console.error(`[v4-flush] sweep error: ${err.message}`));
+    setTimeout(v4HookFlushPollLoop, V4_FLUSH_POLL_INTERVAL_MS());
+  }
+
   async function v4FeeWalletPollLoop() {
     if (v4KeeperOn()) await sweepV4FeeWalletOnce().catch((err) => console.error(`[v4-fee-wallet] sweep error: ${err.message}`));
     setTimeout(v4FeeWalletPollLoop, relayerSettings.feeWalletPollIntervalMs);
@@ -5427,6 +5491,12 @@ async function main() {
         `V4 keeper switch is ${v4KeeperOn() ? "ON" : "OFF"} (Admin → Relayer settings). Loops for factory ${v4TokenFactoryAddress || v4CustomTokenFactoryAddress || v4CurveFactoryAddress}: fee-wallet every ${relayerSettings.feeWalletPollIntervalMs}ms, ` +
           `creator rewards every ${relayerSettings.creatorRewardsPollIntervalMs}ms, platform rewards every ${relayerSettings.platformRewardsPollIntervalMs}ms ` +
           "(distributor addresses are read from the factory each tick; a slot that's unset just idles; while the switch is OFF every tick is skipped)."
+      );
+      v4HookFlushPollLoop();
+      console.log(
+        `V4 swap-fee payouts: every ${V4_FLUSH_POLL_INTERVAL_MS()}ms the keeper calls flush on the hook for pools with at least ` +
+          `${process.env.V4_FLUSH_MIN_ETH || "0.002"} ETH booked (or anything waiting longer than ${Number(process.env.V4_FLUSH_MAX_AGE_MS) > 0 ? Number(process.env.V4_FLUSH_MAX_AGE_MS) : 6 * 3600 * 1000}ms). ` +
+          "flush is permissionless; this wallet needs no special role, only gas."
       );
       v4FeeWalletPollLoop();
       v4CreatorRewardsPollLoop();
