@@ -17628,6 +17628,7 @@
       if(action==="launchFee"){
         const v = field("launchFee").value;
         if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid ETH amount.");
+        if(key==="v4" && parseFloat(v)>1) throw new Error("The V4TokenFactory launch fee can be at most 1 ETH.");
         data = encodeUint256Calldata(SET_LAUNCH_FEE_SELECTOR, parseEtherToWei(v));
         successMsg = "Launch fee updated.";
       } else if(action==="feeTreasury"){
@@ -17638,11 +17639,13 @@
       } else if(action==="lpLockDuration"){
         const v = field("lpLockDays").value;
         if(v==="" || isNaN(parseFloat(v)) || parseFloat(v)<0) throw new Error("Enter a valid number of days.");
+        if(key==="v4" && (parseFloat(v)<1 || parseFloat(v)>3650)) throw new Error("The V4TokenFactory lock must be between 1 day and 3650 days (10 years).");
         data = encodeUint256Calldata(SET_LP_LOCK_DURATION_SELECTOR, BigInt(Math.round(parseFloat(v)*86400)));
         successMsg = "LP lock duration updated.";
       } else if(action==="maxCreatorBuyBps"){
         const n = parseInt(field("maxBuyBps").value, 10);
         if(isNaN(n) || n<0 || n>10000) throw new Error("Enter a bps value between 0 and 10000.");
+        if(key==="v4" && n>2000) throw new Error("The V4TokenFactory creator buy-in cap can be at most 2000 bps (20%).");
         data = encodeUint256Calldata(SET_MAX_CREATOR_BUY_BPS_SELECTOR, BigInt(n));
         successMsg = "Max creator buy-in cap updated.";
       } else if(action==="buyInSlippage"){
