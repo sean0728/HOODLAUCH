@@ -16,7 +16,6 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import "./V4TokenSeller.sol";
-import "./interfaces/V4ICreatorAware.sol";
 
 /// @dev The slice of V4CustomToken the converter drives.
 interface IV4ReflectionToken {
@@ -41,7 +40,7 @@ interface IV4ReflectionFlag {
 ///
 /// V4TaxHook still delivers the reflection share in kind, to the token. For an ETH / token
 /// payout the token keeps those tokens in `pendingConversion`. Here, an approved keeper (the
-/// relayer), the owner or the token's creator calls convert():
+/// relayer) or the owner calls convert():
 ///
 ///   1. the token releases (some of) its pending tokens to this contract;
 ///   2. they are sold for ETH into the token's own V4 pool, inside a price limit
@@ -52,9 +51,10 @@ interface IV4ReflectionFlag {
 ///
 /// Anything the price limit stops from filling is not lost: unsold reflection tokens go back to
 /// the token's pending pile, and ETH the target pool could not absorb is carried to the next
-/// conversion. Converting is limited to the owner, approved keepers and the token's creator for
-/// the same reason as V4CreatorRewardsDistributor (the price limit is measured from the current
-/// price, so an open caller could sandwich a zero-minimum conversion).
+/// conversion. Converting is limited to the owner and approved keepers. The price limit is
+/// measured from the current price, so any other caller (the token's creator included: the
+/// creator is a token holder with an interest in the rate, and can trade the pool before and
+/// after) could sandwich a conversion and take value from the holders it is paid to.
 ///
 /// Wiring: set this as V4TokenFactory.reflectionConverter BEFORE launching tokens that use it
 /// (each token fixes its converter at launch), exempt it from the hook's tax with
@@ -126,10 +126,7 @@ contract V4ReflectionConverter is V4TokenSeller {
         IV4ReflectionToken t = IV4ReflectionToken(token);
         uint8 mode = t.payoutMode();
         require(mode != 0 && t.converter() == address(this), "V4ReflectionConverter: not served by this converter");
-        require(
-            _isKeeper(msg.sender) || msg.sender == V4ICreatorAware(token).creator(),
-            "V4ReflectionConverter: not authorized to convert"
-        );
+        require(_isKeeper(msg.sender), "V4ReflectionConverter: not authorized to convert");
 
         uint256 pending = t.pendingConversion();
         uint256 carry = carryEth[token];

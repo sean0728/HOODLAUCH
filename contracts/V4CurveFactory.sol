@@ -83,6 +83,9 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     /// platform distributor's receive(); bounded so a recipient that burns gas
     /// cannot turn every curve trade (sell included) into a gas-limit-sized one.
     uint256 public constant FEE_CALL_GAS = 300_000;
+    /// @notice Same name / symbol bounds as V4TokenFactory and V4CustomTokenFactory.
+    uint256 public constant MAX_NAME_BYTES = 128;
+    uint256 public constant MAX_SYMBOL_BYTES = 32;
     /// @dev Gas for each read of the price feed (same bound the hook uses).
     uint256 private constant FEED_CALL_GAS = 200_000;
     uint256 private constant MAX_FEED_DECIMALS = 36;
@@ -320,6 +323,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
             name_, symbol_, totalSupply_, _creator(), address(this), address(this), marketingWallet, buyFees, sellFees, _infra()
         );
         if (payout.mode != 0) V4CustomToken(token).setReflectionPayout(payout);
+        else require(payout.token == address(0), "V4CurveFactory: payout token set for in-kind payout");
         V4TaxHook.CustomFees memory f = V4TaxHook.CustomFees({
             buyReflectionBps: buyFees.reflectionBps,
             buyMarketingBps: buyFees.marketingBps,
@@ -348,6 +352,8 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     {
         require(bytes(name_).length > 0, "V4CurveFactory: name required");
         require(bytes(symbol_).length > 0, "V4CurveFactory: symbol required");
+        require(bytes(name_).length <= MAX_NAME_BYTES, "V4CurveFactory: name too long");
+        require(bytes(symbol_).length <= MAX_SYMBOL_BYTES, "V4CurveFactory: symbol too long");
         require(totalSupply_ > 0, "V4CurveFactory: supply must be > 0");
         require(msg.value == _feeDue(curveLaunchFee) + creatorBuyEthAmount, "V4CurveFactory: incorrect ETH sent");
         TaxTerms memory t = _currentTerms();

@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/proxy/Clones.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -37,8 +38,16 @@ import {V4LiquidityCompounder} from "./V4LiquidityCompounder.sol";
 ///
 /// Not included (compared with V2): a "deploy token only" option.
 contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
+    using SafeERC20 for IERC20;
+
     address public immutable tokenImplementation;
     V4LiquidityCompounder public immutable compounder;
+
+    /// @notice Hard ceiling on the launch fee (same as V4TokenFactory), so a mistyped or hostile
+    /// setLaunchFee can never make launching unaffordable.
+    uint256 public constant MAX_LAUNCH_FEE = 1 ether;
+    uint256 public constant MAX_NAME_BYTES = 128;
+    uint256 public constant MAX_SYMBOL_BYTES = 32;
 
     uint256 public launchFee;
     uint256 public buyInSlippageBps = 600;
@@ -62,6 +71,8 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
     event CreatorBought(address indexed token, address indexed creator, uint256 ethIn, uint256 tokensOut);
     event LaunchFeeUpdated(uint256 newFee);
     event BuyInSlippageBpsUpdated(uint256 newBps);
+    event EthRescued(address indexed to, uint256 amount);
+    event TokensRescued(address indexed token, address indexed to, uint256 amount);
 
     constructor(address tokenImplementation_, address taxSource_, address compounder_, uint256 launchFee_, uint256 lpLockDuration_)
         V4PoolLauncher(taxSource_, lpLockDuration_)
@@ -69,14 +80,25 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         require(tokenImplementation_ != address(0), "V4CustomTokenFactory: invalid token implementation");
         require(compounder_ != address(0), "V4CustomTokenFactory: invalid compounder");
         tokenImplementation = tokenImplementation_;
+        require(launchFee_ <= MAX_LAUNCH_FEE, "V4CustomTokenFactory: launch fee above ceiling");
         compounder = V4LiquidityCompounder(payable(compounder_));
         launchFee = launchFee_;
     }
 
-    /// @dev Only the locker (refunding unused seed ETH) and the PoolManager
-    /// (never, but harmless) send ETH here.
+    /// @dev Only the locker (refunding unused seed ETH) sends ETH here. (The PoolManager is
+    /// never paid through this function: swaps settle with `settle{value}` and `take` goes
+    /// straight to the recipient.)
     receive() external payable {
         require(msg.sender == address(locker), "V4CustomTokenFactory: unexpected ETH");
+    }
+
+    function _checkNameSymbol(string calldata name_, string calldata symbol_) private pure {
+        uint256 n = bytes(name_).length;
+        uint256 y = bytes(symbol_).length;
+        require(n > 0, "V4CustomTokenFactory: name required");
+        require(y > 0, "V4CustomTokenFactory: symbol required");
+        require(n <= MAX_NAME_BYTES, "V4CustomTokenFactory: name too long");
+        require(y <= MAX_SYMBOL_BYTES, "V4CustomTokenFactory: symbol too long");
     }
 
     function _deriveTokenSalt(address creator_, uint256 salt) private pure returns (bytes32) {
@@ -102,8 +124,9 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         uint256 liquidity;
         uint256 lockId;
         uint256 creatorTokensBought;
-        require(bytes(name_).length > 0, "V4CustomTokenFactory: name required");
-        require(bytes(symbol_).length > 0, "V4CustomTokenFactory: symbol required");
+        _checkNameSymbol(name_, symbol_);
+        // A payout token is only meaningful for mode 2; refuse a stray one rather than ignore it.
+        require(payout.mode != 0 || payout.token == address(0), "V4CustomTokenFactory: payout token set for in-kind payout");
         require(totalSupply_ > 0, "V4CustomTokenFactory: supply must be > 0");
         require(liquidityEthAmount > 0, "V4CustomTokenFactory: no ETH sent for liquidity");
         uint256 fee = _feeDue(launchFee);
@@ -294,6 +317,7 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
     }
 
     function setLaunchFee(uint256 newFee) external onlyOwner {
+        require(newFee <= MAX_LAUNCH_FEE, "V4CustomTokenFactory: launch fee above ceiling");
         launchFee = newFee;
         emit LaunchFeeUpdated(newFee);
     }
@@ -303,5 +327,22 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
         require(newBps <= MAX_SLIPPAGE_BPS, "V4CustomTokenFactory: slippage above 8% ceiling");
         buyInSlippageBps = newBps;
         emit BuyInSlippageBpsUpdated(newBps);
+    }
+
+    /// @notice Recovers ETH that was forced into the factory (selfdestruct, a coinbase reward).
+    /// A launch keeps no ETH here between transactions, so nothing is escrowed against it.
+    function rescueETH(address payable to, uint256 amount) external onlyOwner nonReentrant {
+        require(to != address(0), "V4CustomTokenFactory: invalid recipient");
+        (bool sent,) = to.call{value: amount}("");
+        require(sent, "V4CustomTokenFactory: rescue transfer failed");
+        emit EthRescued(to, amount);
+    }
+
+    /// @notice Recovers tokens sent to the factory by mistake. A launch holds its own token only
+    /// inside the launch transaction (nonReentrant), so this never touches one in progress.
+    function rescueERC20(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        require(to != address(0), "V4CustomTokenFactory: invalid recipient");
+        IERC20(token).safeTransfer(to, amount);
+        emit TokensRescued(token, to, amount);
     }
 }

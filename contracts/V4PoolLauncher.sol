@@ -63,6 +63,8 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
     /// unlock time as a uint64; an unbounded duration could wrap it into the
     /// past and hand the creator an already-expired lock.
     uint256 public constant MAX_LOCK_DURATION = 3650 days;
+    /// @notice Floor on the LP lock, so a launcher can never be configured to lock liquidity for seconds.
+    uint256 public constant MIN_LOCK_DURATION = 1 days;
     /// @dev Gas given to the creator when returning seed-rounding ETH dust. Enough
     /// for a smart wallet's receive hook, not enough to be used to grief.
     uint256 private constant DUST_CALL_GAS = 50_000;
@@ -154,7 +156,7 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
     }
 
     function _checkLockDuration(uint256 d) private pure {
-        require(d > 0, "V4PoolLauncher: lock duration must be > 0");
+        require(d >= MIN_LOCK_DURATION, "V4PoolLauncher: lock duration below the 1 day floor");
         require(d <= MAX_LOCK_DURATION, "V4PoolLauncher: lock duration above 10 year ceiling");
     }
 

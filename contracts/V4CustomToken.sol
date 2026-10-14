@@ -36,8 +36,8 @@ interface IV4PayoutConverter {
 ///                   until the platform's V4ReflectionConverter sells them
 ///                   (and buys the target token), then the proceeds are shared
 ///                   out by the same per-share accounting.
-///   - marketing   : paid in-kind straight to marketingWallet (the creator can
-///                   change it, see setMarketingWallet).
+///   - marketing   : paid in ETH to marketingWallet by the hook's flush (the
+///                   creator can change the wallet, see setMarketingWallet).
 ///   - liquidity   : delivered by the hook to the V4LiquidityCompounder, which
 ///                   adds it to the pool as permanent liquidity.
 ///   - burn        : the hook burns it on the spot (burn() below).
@@ -51,8 +51,9 @@ interface IV4PayoutConverter {
 /// platform distributors, the dead address, this contract) do not earn
 /// reflections: they are "excluded" and their balance is left out of the share
 /// base, so reflections are shared among real holders only. The excluded set is
-/// fixed at initialize(); the factory can only ever ADD to it (one-way), which
-/// it does for the distributors a pool is actually launched with.
+/// fixed at initialize() (the factory passes the whole list there). The factory can
+/// still ADD to it afterwards (one-way, excludeFromReflections), though the
+/// current factory never needs to.
 ///
 /// The creator role is the same two-step handoff / renounce as V2. It only
 /// controls the marketing wallet; it can never change a rate.
@@ -85,6 +86,10 @@ contract V4CustomToken is ERC20 {
     address public hook;
 
     uint256 public constant MAX_TOTAL_SUPPLY = 1_000_000_000_000_000 * 1e18;
+    /// @notice Same bounds the V4TokenFactory applies: keeps the name / symbol that wallets and the
+    /// page render, and every event that carries them, a sane size.
+    uint256 public constant MAX_NAME_BYTES = 128;
+    uint256 public constant MAX_SYMBOL_BYTES = 32;
 
     // ---- reflection payout (chosen at launch, never changes) ----
     /// @notice What reflections are paid in: 0 = this token (in kind), 1 = ETH, 2 = another token.
@@ -195,6 +200,8 @@ contract V4CustomToken is ERC20 {
         address[] memory excluded_
     ) external {
         require(!_initialized, "V4CustomToken: already initialized");
+        require(bytes(name_).length > 0 && bytes(name_).length <= MAX_NAME_BYTES, "V4CustomToken: invalid name");
+        require(bytes(symbol_).length > 0 && bytes(symbol_).length <= MAX_SYMBOL_BYTES, "V4CustomToken: invalid symbol");
         require(totalSupply_ > 0, "V4CustomToken: supply must be > 0");
         require(totalSupply_ <= MAX_TOTAL_SUPPLY, "V4CustomToken: supply too large");
         require(creator_ != address(0), "V4CustomToken: invalid creator");
@@ -400,13 +407,21 @@ contract V4CustomToken is ERC20 {
         uint256 n = _holders.length;
         if (n == 0 || maxHolders == 0) return (0, 0);
         if (minPayout == 0) minPayout = 1;
-        uint256 start = payCursor % n;
+        uint256 idx = payCursor % n;
         processed = maxHolders < n ? maxHolders : n;
         for (uint256 i = 0; i < processed; i++) {
-            address h = _holders[(start + i) % n];
+            // Re-read the list every step: paying a holder runs that holder's code, which can move
+            // tokens and so shrink `_holders` (swap-and-pop) in the middle of this loop. A cached
+            // length would then index past the end and revert, and the same revert would repeat on
+            // every retry (the cursor is only saved at the end).
+            uint256 len = _holders.length;
+            if (len == 0) break;
+            if (idx >= len) idx = 0;
+            address h = _holders[idx];
+            idx++;
             if (pendingReflections(h) >= minPayout) paid += _claim(h, h, false);
         }
-        payCursor = (start + processed) % n;
+        payCursor = idx;
     }
 
     /// @notice How many holders payBatch() walks through (ETH / token payouts).
