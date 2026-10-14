@@ -43,23 +43,30 @@ interface IV4FeeDeposit {
 /// token. So a "buy" is zeroForOne = true (ETH in, token out) and a "sell" is
 /// zeroForOne = false (token in, ETH out).
 ///
-/// THE TAX IS ALWAYS TAKEN IN THE TOKEN. Whichever way a trade runs, the fee
-/// is `feeBps` of the token leg, so it can be paid straight out of the
-/// PoolManager to the destinations with take() and no swapping is needed.
-/// Which hook callback has to carry it depends on whether the token is the
-/// "specified" side of the swap (the side the trader fixed) or the
-/// "unspecified" side (the side the pool computed):
+/// WHERE EACH FEE IS TAKEN. The platform tax, the anti-snipe surcharge and a
+/// custom token's marketing share are taken in ETH, from the ETH leg of the
+/// swap, so collecting them never puts a sell on the chart. A custom token's
+/// reflection / liquidity / burn shares are inherently tokens and are taken from
+/// the token leg. Which hook callback has to carry a leg's fee depends on
+/// whether that leg is the "specified" side of the swap (the side the trader
+/// fixed) or the "unspecified" side (the side the pool computed):
 ///
-///   token specified   -> beforeSwap return delta  (exact-in SELL, exact-out BUY)
-///   token unspecified -> afterSwap  return delta  (exact-in BUY,  exact-out SELL)
+///   specified leg   -> beforeSwap return delta
+///   unspecified leg -> afterSwap  return delta
 ///
-/// In every case the fee is exactly feeBps of the GROSS token amount moved
-/// (so a 1% tax means a buyer receives 99% of what the pool paid out, and a
-/// seller is charged 101.0101..% of what the pool takes -- i.e. the fee is 1%
-/// of the total). The fee is then split exactly like the V2 token did:
-/// rewardBps to rewardsDistributor, creatorRewardBps to
-/// creatorRewardsDistributor, and the remainder to feeWalletDistributor if
-/// set, otherwise straight to feeWallet.
+/// A fee on the specified leg is fixed before the pool has run, so it is
+/// charged on the amount the trader REQUESTED. If a price limit then stops the
+/// swap early, that fee would be far larger than its rate on what was filled;
+/// the hook therefore refuses such a swap (PartialFillNotAllowed) instead of
+/// overcharging it. The platform's own routers and factories always swap with
+/// the widest limits, so they never meet this.
+///
+/// Fees are exactly the configured share of the gross amount moved (so a 1% tax
+/// means a buyer pays 1% of the total). The platform tax is booked per pool and
+/// paid by flush(): rewardBps to rewardsDistributor, creatorRewardBps to
+/// creatorRewardsDistributor, and the remainder to feeWalletDistributor if set,
+/// otherwise straight to feeWallet. Each destination is paid on its own, so one
+/// that cannot take ETH only holds back its own share.
 ///
 /// WHAT THIS HOOK ALSO FIXES versus V2. Only the factory may initialize a pool
 /// that uses this hook (beforeInitialize), so there is no equivalent of the V2
@@ -167,12 +174,14 @@ contract V4TaxHook {
     /// starts at `startBps` the moment the pool is configured and falls in a
     /// straight line to zero over `duration` seconds, so a bot that buys in the
     /// first blocks pays most of its position away while a human buying a
-    /// minute later pays little or nothing. It is taken in kind, in the token,
-    /// exactly like the normal tax, and goes to the platform fee wallet (or the
-    /// fee-wallet distributor) of the pool. Sells are never charged.
+    /// minute later pays little or nothing. It is taken in ETH, from the ETH
+    /// leg, exactly like the platform tax, and goes to the platform fee wallet
+    /// (or the fee-wallet distributor) of the pool. Sells are never charged.
     ///
     /// The launcher's own seeding buy and every swapper marked taxExempt (the
-    /// platform's distributor contracts) are exempt, the same as for the tax.
+    /// platform's distributor contracts) are exempt from the surcharge. (A
+    /// launcher's seeding buy still pays the platform tax; only the exempt
+    /// swappers skip that too.)
     ///
     /// Each launcher (V4TokenFactory, V4CustomTokenFactory, V4CurveFactory) has
     /// its OWN default below, set by that launcher's owner, so plain, custom-tax
@@ -215,6 +224,7 @@ contract V4TaxHook {
     error InvalidHookAddress();
     error PoolInitNotByFactory();
     error InvalidPool();
+    error PartialFillNotAllowed();
 
     modifier onlyPoolManager() {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
@@ -377,10 +387,12 @@ contract V4TaxHook {
     }
 
     /// @notice Escape hatch for a dead price feed -- same rules as V2's
-    /// LaunchedToken.updatePriceFeed: factory-only (which gates it behind its
-    /// own owner) and ONLY allowed while the current feed cannot report a fresh
-    /// price, so it can never be used to nudge a healthy token's graduation.
-    function updatePriceFeed(PoolId id, address newPriceFeed_, uint256 newMaxOracleStaleness_) external onlyLauncher {
+    /// LaunchedToken.updatePriceFeed: only the launcher that configured the pool
+    /// (which gates it behind its own owner) and ONLY while the current feed
+    /// cannot report a fresh price, so it can never be used to nudge a healthy
+    /// token's graduation. It does not need the launcher to still be on the
+    /// allowed list: revoking a launcher leaves its existing pools manageable.
+    function updatePriceFeed(PoolId id, address newPriceFeed_, uint256 newMaxOracleStaleness_) external {
         PoolTax storage p = poolTax[id];
         require(p.configured, "V4TaxHook: pool not configured");
         require(poolLauncher[id] == msg.sender, "V4TaxHook: not this pool's launcher");
@@ -486,6 +498,12 @@ contract V4TaxHook {
             bool exactIn = params.amountSpecified < 0;
             // exact-in buy / exact-out sell leave the token unspecified, the others leave ETH unspecified
             bool tokenUnspecified = (exactIn == params.zeroForOne);
+            // A fee on the SPECIFIED leg was fixed in beforeSwap, on the amount requested. If a price limit stopped the swap
+            // short, that fee is out of proportion to what was filled, so such a swap is refused instead of overcharged.
+            if (_specifiedLegHasFee(id, p, sender, params.zeroForOne, tokenUnspecified)) {
+                (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(id);
+                if (sqrtPriceX96 == params.sqrtPriceLimitX96) revert PartialFillNotAllowed();
+            }
             int128 d = tokenUnspecified ? delta.amount1() : delta.amount0();
             // unspecified amount the pool computed: received by the swapper when positive, paid when negative
             uint256 amt;
@@ -519,13 +537,7 @@ contract V4TaxHook {
         private
         returns (uint256 fee)
     {
-        uint256 platformBps = p.taxActive ? p.feeBps : 0;
-        uint256 snipeBps = _snipeFor(id, sender, isBuy);
-        uint256 marketingBps;
-        if (hasCustomFees[id]) {
-            CustomFees storage f = customFees[id];
-            marketingBps = isBuy ? f.buyMarketingBps : f.sellMarketingBps;
-        }
+        (uint256 platformBps, uint256 snipeBps, uint256 marketingBps) = _ethLegBps(id, p, sender, isBuy);
         uint256 bps = platformBps + snipeBps + marketingBps;
         if (bps == 0) return 0;
         fee = _feeOn(amt, bps, exactIn);
@@ -552,6 +564,43 @@ contract V4TaxHook {
         if (snipeFee > 0) emit SnipeFeeCollected(id, snipeFee, snipeBps);
     }
 
+    /// @dev The three ETH-leg rates that apply to this swap right now.
+    function _ethLegBps(PoolId id, PoolTax storage p, address sender, bool isBuy)
+        private
+        view
+        returns (uint256 platformBps, uint256 snipeBps, uint256 marketingBps)
+    {
+        platformBps = p.taxActive ? p.feeBps : 0;
+        snipeBps = _snipeFor(id, sender, isBuy);
+        if (hasCustomFees[id]) {
+            CustomFees storage f = customFees[id];
+            marketingBps = isBuy ? f.buyMarketingBps : f.sellMarketingBps;
+        }
+    }
+
+    /// @dev The token-leg rate (reflection + liquidity + burn) that applies to this swap.
+    function _tokenLegBps(PoolId id, bool isBuy) private view returns (uint256 bps) {
+        if (!hasCustomFees[id]) return 0;
+        CustomFees storage f = customFees[id];
+        bps = isBuy
+            ? uint256(f.buyReflectionBps) + f.buyLiquidityBps + f.buyBurnBps
+            : uint256(f.sellReflectionBps) + f.sellLiquidityBps + f.sellBurnBps;
+    }
+
+    /// @dev Whether beforeSwap charges anything on the specified leg of this swap: the ETH leg when the token is the
+    /// unspecified one, the token leg otherwise.
+    function _specifiedLegHasFee(PoolId id, PoolTax storage p, address sender, bool isBuy, bool tokenUnspecified)
+        private
+        view
+        returns (bool)
+    {
+        if (tokenUnspecified) {
+            (uint256 a, uint256 b, uint256 c) = _ethLegBps(id, p, sender, isBuy);
+            return a + b + c > 0;
+        }
+        return _tokenLegBps(id, isBuy) > 0;
+    }
+
     function _sat80(uint256 v) private pure returns (uint80) {
         return v > type(uint80).max ? type(uint80).max : uint80(v);
     }
@@ -562,11 +611,7 @@ contract V4TaxHook {
         private
         returns (uint256 fee)
     {
-        if (!hasCustomFees[id]) return 0;
-        CustomFees storage f = customFees[id];
-        uint256 bps = isBuy
-            ? uint256(f.buyReflectionBps) + f.buyLiquidityBps + f.buyBurnBps
-            : uint256(f.sellReflectionBps) + f.sellLiquidityBps + f.sellBurnBps;
+        uint256 bps = _tokenLegBps(id, isBuy);
         if (bps == 0) return 0;
         fee = _feeOn(amt, bps, exactIn);
         // paid from the pool manager's own token balance: cap rather than revert (absurd edge only)
@@ -633,10 +678,22 @@ contract V4TaxHook {
     event MarketingPaid(PoolId indexed poolId, address indexed wallet, uint256 amount);
     event FlushFailed(PoolId indexed poolId, bool platformPart, bool marketingPart);
 
+    /// @notice Parts of earlier payouts that a destination refused, kept per
+    /// destination so each is retried on its own. `rewards` / `creator` are owed to
+    /// the pool's rewards / creator-rewards distributor, `feeSide` to its fee
+    /// wallet side (fee-wallet distributor or fee wallet). Almost always zero.
+    struct Owed {
+        uint80 rewards;
+        uint80 creator;
+        uint80 feeSide;
+    }
+    mapping(PoolId => Owed) public owed;
+
     /// @notice The ETH `flush` would pay out for this pool right now.
     function pendingEth(PoolId id) external view returns (uint256) {
         Accrued storage a = accrued[id];
-        return uint256(a.platform) + a.snipe + a.marketing;
+        Owed storage o = owed[id];
+        return uint256(a.platform) + a.snipe + a.marketing + o.rewards + o.creator + o.feeSide;
     }
 
     /// @notice Pays this pool's accrued ETH to its destinations. Anyone may call
@@ -644,55 +701,76 @@ contract V4TaxHook {
     /// caller chooses), and nothing here touches a price, so there is nothing to
     /// manipulate. The relayer does this on a timer.
     ///
-    /// A part that cannot be delivered (a marketing wallet that refuses ETH, say)
-    /// is put back and retried on the next call; it never reverts the call and
-    /// never affects trading, which does not call this at all.
+    /// Every destination is paid on its own. A part that cannot be delivered (a
+    /// marketing wallet that refuses ETH, a distributor that reverts) is put back
+    /// under its own heading and retried on the next call; it never reverts the
+    /// call, never holds back the other destinations, and never affects trading,
+    /// which does not call this at all.
     function flush(PoolId id) public {
         require(!_flushing, "V4TaxHook: flush in progress");
         _flushing = true;
         Accrued memory a = accrued[id];
-        if (a.platform == 0 && a.snipe == 0 && a.marketing == 0) {
+        Owed memory o = owed[id];
+        if (a.platform == 0 && a.snipe == 0 && a.marketing == 0 && o.rewards == 0 && o.creator == 0 && o.feeSide == 0) {
             _flushing = false;
             return;
         }
         delete accrued[id];
+        delete owed[id];
         PoolTax storage p = poolTax[id];
 
         // Marketing: to the token's CURRENT marketing wallet. If the creator renounced it (zero address) there is nobody
         // to pay, so it goes to the platform side like the snipe surcharge does.
-        uint256 toPlatformExtra = a.snipe;
+        uint256 toFeeSide = uint256(a.snipe) + o.feeSide;
         uint256 marketingOwed = a.marketing;
         bool marketingFailed;
         if (marketingOwed > 0) {
             address wallet = _marketingWalletOf(p.token);
             if (wallet == address(0)) {
-                toPlatformExtra += marketingOwed;
+                toFeeSide += marketingOwed;
                 marketingOwed = 0;
+            } else if (_pay(wallet, marketingOwed, "")) {
+                emit MarketingPaid(id, wallet, marketingOwed);
             } else {
-                (bool ok,) = wallet.call{value: marketingOwed, gas: FLUSH_CALL_GAS}("");
-                if (ok) emit MarketingPaid(id, wallet, marketingOwed);
-                else marketingFailed = true;
+                marketingFailed = true;
             }
         }
 
-        bool platformFailed;
-        if (a.platform > 0 || toPlatformExtra > 0) {
-            try this.payPlatform(id, a.platform, toPlatformExtra) {} catch {
-                platformFailed = true;
+        uint256 failedRewards;
+        uint256 failedCreator;
+        uint256 failedFeeSide;
+        bool platformCallFailed;
+        if (a.platform > 0 || toFeeSide > 0 || o.rewards > 0 || o.creator > 0) {
+            try this.payPlatform(id, a.platform, toFeeSide, o.rewards, o.creator) returns (uint256 fr, uint256 fc, uint256 ff) {
+                failedRewards = fr;
+                failedCreator = fc;
+                failedFeeSide = ff;
+            } catch {
+                platformCallFailed = true;
             }
         }
 
         // re-book anything that could not be delivered
-        if (platformFailed || marketingFailed) {
+        if (platformCallFailed || failedRewards > 0 || failedCreator > 0 || failedFeeSide > 0 || marketingFailed) {
             Accrued storage s = accrued[id];
-            if (platformFailed) {
+            Owed storage so = owed[id];
+            if (platformCallFailed) {
+                // the payout itself aborted (out of gas, say): nothing was delivered, put every bucket back as it was
                 s.platform = _sat80(uint256(s.platform) + a.platform);
-                // the extra is made of the snipe amount and (renounced case) the marketing amount; keep them in their own buckets
                 s.snipe = _sat80(uint256(s.snipe) + a.snipe);
-                if (toPlatformExtra > a.snipe) s.marketing = _sat80(uint256(s.marketing) + (toPlatformExtra - a.snipe));
+                if (toFeeSide > uint256(a.snipe) + o.feeSide) {
+                    s.marketing = _sat80(uint256(s.marketing) + (toFeeSide - a.snipe - o.feeSide)); // renounced marketing amount
+                }
+                so.rewards = _sat80(uint256(so.rewards) + o.rewards);
+                so.creator = _sat80(uint256(so.creator) + o.creator);
+                so.feeSide = _sat80(uint256(so.feeSide) + o.feeSide);
+            } else {
+                so.rewards = _sat80(uint256(so.rewards) + failedRewards);
+                so.creator = _sat80(uint256(so.creator) + failedCreator);
+                so.feeSide = _sat80(uint256(so.feeSide) + failedFeeSide);
             }
             if (marketingFailed) s.marketing = _sat80(uint256(s.marketing) + marketingOwed);
-            emit FlushFailed(id, platformFailed, marketingFailed);
+            emit FlushFailed(id, platformCallFailed || failedRewards > 0 || failedCreator > 0 || failedFeeSide > 0, marketingFailed);
         }
         _flushing = false;
     }
@@ -701,11 +779,16 @@ contract V4TaxHook {
         for (uint256 i = 0; i < ids.length; i++) flush(ids[i]);
     }
 
-    /// @dev The platform's part of a payout, all-or-nothing (flush catches a revert
-    /// and re-books the amounts). External only so it can be try/catch'd; callable
-    /// only by this contract. `platformFee` is split with the pool's snapshotted
-    /// reward / creator ratios, `extra` (snipe etc.) all goes to the fee wallet side.
-    function payPlatform(PoolId id, uint256 platformFee, uint256 extra) external {
+    /// @dev The platform's part of a payout. External only so flush can try/catch it; callable only by this contract.
+    /// `platformFee` is split with the pool's snapshotted reward / creator ratios; `extra` (snipe surcharge, a renounced
+    /// marketing share, and anything the fee side refused before) all goes to the fee wallet side; `retryRewards` /
+    /// `retryCreator` are what those two destinations refused before. Each destination is paid separately and a refusal
+    /// is reported in the return values (amounts NOT delivered) instead of reverting, so one broken destination never
+    /// holds back the others.
+    function payPlatform(PoolId id, uint256 platformFee, uint256 extra, uint256 retryRewards, uint256 retryCreator)
+        external
+        returns (uint256 failedRewards, uint256 failedCreator, uint256 failedFeeSide)
+    {
         require(msg.sender == address(this), "V4TaxHook: internal only");
         PoolTax storage p = poolTax[id];
         uint256 rewardCut;
@@ -717,28 +800,58 @@ contract V4TaxHook {
             }
         }
         uint256 rest = platformFee - rewardCut - creatorCut + extra;
+        rewardCut += retryRewards;
+        creatorCut += retryCreator;
 
+        uint256 paidRewards;
+        uint256 paidCreator;
+        uint256 paidRest;
         if (rewardCut > 0) {
-            (bool ok,) = p.rewardsDistributor.call{value: rewardCut, gas: FLUSH_CALL_GAS}("");
-            require(ok, "V4TaxHook: rewards payout failed");
+            if (_pay(p.rewardsDistributor, rewardCut, "")) paidRewards = rewardCut;
+            else failedRewards = rewardCut;
         }
         if (creatorCut > 0) {
-            IV4CreatorDeposit(p.creatorRewardsDistributor).depositFor{value: creatorCut, gas: FLUSH_CALL_GAS}(p.token);
-        }
-        if (rest > 0) {
-            if (p.feeWalletDistributor != address(0)) {
-                IV4FeeDeposit(p.feeWalletDistributor).depositFee{value: rest, gas: FLUSH_CALL_GAS}();
+            if (_pay(p.creatorRewardsDistributor, creatorCut, abi.encodeCall(IV4CreatorDeposit.depositFor, (p.token)))) {
+                paidCreator = creatorCut;
             } else {
-                (bool ok,) = p.feeWallet.call{value: rest, gas: FLUSH_CALL_GAS}("");
-                require(ok, "V4TaxHook: fee wallet payout failed");
+                failedCreator = creatorCut;
             }
         }
-        emit TaxCollected(id, platformFee + extra, rewardCut, creatorCut, rest);
+        if (rest > 0) {
+            bool ok = p.feeWalletDistributor != address(0)
+                ? _pay(p.feeWalletDistributor, rest, abi.encodeCall(IV4FeeDeposit.depositFee, ()))
+                : _pay(p.feeWallet, rest, "");
+            if (ok) paidRest = rest;
+            else failedFeeSide = rest;
+        }
+        if (paidRewards + paidCreator + paidRest > 0) emit TaxCollected(id, paidRewards + paidCreator + paidRest, paidRewards, paidCreator, paidRest);
     }
 
+    /// @dev Sends ETH (and optionally calldata) to `to` with at most FLUSH_CALL_GAS and reports success. The reply is never
+    /// copied, so a destination answering with megabytes costs nothing extra; a zero address (which would just burn the
+    /// ETH) or, when calldata is given, an address with no code counts as a failure.
+    function _pay(address to, uint256 value, bytes memory data) private returns (bool ok) {
+        if (to == address(0)) return false;
+        if (data.length > 0 && to.code.length == 0) return false;
+        uint256 callGas = FLUSH_CALL_GAS;
+        assembly ("memory-safe") {
+            ok := call(callGas, to, value, add(data, 32), mload(data), 0, 0)
+        }
+    }
+
+    /// @dev The token's current marketing wallet, read with a gas-capped staticcall that copies only the first word.
     function _marketingWalletOf(address token) private view returns (address w) {
-        (bool ok, bytes memory ret) = token.staticcall{gas: 50_000}(abi.encodeWithSelector(IV4CustomTokenHooked.marketingWallet.selector));
-        if (ok && ret.length >= 32) w = abi.decode(ret, (address));
+        bytes4 sel = IV4CustomTokenHooked.marketingWallet.selector;
+        bool ok;
+        uint256 raw;
+        assembly ("memory-safe") {
+            let m := mload(0x40)
+            mstore(m, sel)
+            ok := staticcall(50000, token, m, 4, m, 32)
+            if lt(returndatasize(), 32) { ok := 0 }
+            if ok { raw := mload(m) }
+        }
+        if (ok && raw <= type(uint160).max) w = address(uint160(raw));
     }
 
     /// @dev ETH only ever arrives here from the pool manager (taking a swap fee).
