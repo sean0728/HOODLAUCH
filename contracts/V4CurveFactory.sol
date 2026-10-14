@@ -35,7 +35,8 @@ interface IV4CreatorDeposit {
 ///
 /// What changes is graduation. Instead of adding V2 liquidity, graduation now
 /// seeds a V4 pool: this contract initializes the (ETH, token) pool on the
-/// shared V4TaxHook at exactly the curve's final tokens : ETH ratio, snapshots
+/// shared V4TaxHook at exactly the curve's final tokens : ETH ratio (a buy never takes the real
+/// reserve past the target: the buy that reaches it is clipped and the rest refunded), snapshots
 /// the platform tax terms (as they were when the curve was CREATED) into the
 /// hook, attaches the creator's custom fee split when the token is a custom
 /// one, and hands the whole remaining token balance plus every wei of real ETH
@@ -83,9 +84,17 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     /// platform distributor's receive(); bounded so a recipient that burns gas
     /// cannot turn every curve trade (sell included) into a gas-limit-sized one.
     uint256 public constant FEE_CALL_GAS = 300_000;
-    /// @notice Same name / symbol bounds as V4TokenFactory and V4CustomTokenFactory.
-    uint256 public constant MAX_NAME_BYTES = 128;
-    uint256 public constant MAX_SYMBOL_BYTES = 32;
+    /// @dev Same name / symbol bounds as V4TokenFactory and V4CustomTokenFactory.
+    uint256 private constant MAX_NAME_BYTES = 128;
+    uint256 private constant MAX_SYMBOL_BYTES = 32;
+    /// @notice Ceiling on the flat curve launch fee (same as V4TokenFactory and V4CustomTokenFactory).
+    uint256 public constant MAX_LAUNCH_FEE = 1 ether;
+    /// @dev Gas a buy must still have when it crosses the graduation target. Graduation (pool
+    /// creation, hook set-up, locking) runs inside a try/catch; without this floor a caller could give
+    /// the buy just enough gas for the try to run out of gas and be swallowed, leaving the curve
+    /// at its target and ungraduated. Measured need: about 0.82M gas for the heaviest case (custom token, every
+    /// fee leg), so the floor leaves a margin of about 60%.
+    uint256 private constant GRADUATION_GAS_RESERVE = 1_300_000;
     /// @dev Gas for each read of the price feed (same bound the hook uses).
     uint256 private constant FEED_CALL_GAS = 200_000;
     uint256 private constant MAX_FEED_DECIMALS = 36;
@@ -138,6 +147,22 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     event CustomCurveConfigured(
         address indexed token, address marketingWallet, V4CustomToken.FeeSet buyFees, V4CustomToken.FeeSet sellFees
     );
+    // Rarely-hit guards use custom errors: this contract is within a few hundred bytes of the
+    // 24,576-byte limit. Messages the UI, relayer or integrators match on stay as strings.
+    error InvalidImplementation();
+    error InvalidCompounder();
+    error BalanceInvariant();
+    error CurveSupplyZero();
+    error ExceedsRealReserve();
+    error PayoutFailed();
+    error NothingToGraduate();
+    error FeeAboveCeiling();
+    error BpsOutOfRange();
+    error VirtualEthZero();
+    error TargetZero();
+    error RescueFailed();
+    error CompounderNotSet();
+
     event CreatorBought(address indexed token, address indexed creator, uint256 ethIn, uint256 tokensOut);
     event CurveBought(address indexed token, address indexed buyer, uint256 ethIn, uint256 feeAmount, uint256 tokensOut, uint256 realEthReserveAfter);
     event CurveSold(address indexed token, address indexed seller, uint256 tokensIn, uint256 feeAmount, uint256 ethOut, uint256 realEthReserveAfter);
@@ -169,8 +194,9 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         uint256 curveLaunchFee_,
         uint256 lpLockDuration_
     ) V4PoolLauncher(taxSource_, lpLockDuration_) {
-        require(plainImpl_ != address(0) && customImpl_ != address(0), "V4CurveFactory: invalid token implementation");
-        require(compounder_ != address(0), "V4CurveFactory: invalid compounder");
+        if (plainImpl_ == address(0) || customImpl_ == address(0)) revert InvalidImplementation();
+        if (compounder_ == address(0)) revert InvalidCompounder();
+        _checkLaunchFee(curveLaunchFee_);
         plainTokenImplementation = plainImpl_;
         customTokenImplementation = customImpl_;
         compounder = V4LiquidityCompounder(payable(compounder_));
@@ -180,6 +206,23 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     /// @dev The locker refunds seed rounding ETH here during graduation.
     receive() external payable {
         require(msg.sender == address(locker), "V4CurveFactory: unexpected ETH");
+    }
+
+    /// @dev The curve of a token this factory launched, or a revert.
+    function _live(address token) private view returns (Curve storage curve) {
+        curve = curves[token];
+        require(curve.totalSupply > 0, "V4CurveFactory: unknown curve");
+    }
+
+    /// @dev The factory must always hold every token the curve has not sold plus the reserve.
+    function _checkCover(address token, Curve storage curve) private view {
+        if (IERC20(token).balanceOf(address(this)) < curve.tokensRemaining + (curve.totalSupply - curve.curveSupply)) {
+            revert BalanceInvariant();
+        }
+    }
+
+    function _checkLaunchFee(uint256 fee) private pure {
+        require(fee <= MAX_LAUNCH_FEE, "V4CurveFactory: launch fee above ceiling");
     }
 
     function _deriveTokenSalt(address creator_, uint256 salt) private pure returns (bytes32) {
@@ -258,12 +301,26 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         }
     }
 
+    /// @dev A buy is clipped at the graduation target: it takes only the ETH (fee included) that brings the
+    /// curve's real reserve to its target, and the caller gets the rest back. A buy that could overshoot
+    /// would open the pool at a price the curve never quoted (see the audit report, CF-1); 0 means the
+    /// curve is already at its target and waiting to graduate.
+    function _clipToTarget(Curve storage curve, uint256 ethIn) private view returns (uint256) {
+        uint256 target = curve.poolSeedTargetWei;
+        if (curve.realEthReserve >= target) return 0;
+        uint256 keep = 10_000 - curve.curveFeeBps; // curveFeeBps <= 20%, so never zero
+        uint256 maxGross = ((target - curve.realEthReserve) * 10_000 + keep - 1) / keep; // net of the fee reaches the room
+        return ethIn > maxGross ? maxGross : ethIn;
+    }
+
     function _executeBuy(address token, Curve storage curve, address recipient, uint256 ethIn, uint256 minTokensOut)
         private
-        returns (uint256 tokensOut, uint256 feeAmount)
+        returns (uint256 tokensOut, uint256 feeAmount, uint256 ethUsed)
     {
+        ethUsed = _clipToTarget(curve, ethIn);
+        require(ethUsed > 0, "V4CurveFactory: target reached, graduate the curve");
         uint256 netEthIn;
-        (tokensOut, feeAmount, netEthIn) = _quoteBuy(curve, ethIn);
+        (tokensOut, feeAmount, netEthIn) = _quoteBuy(curve, ethUsed);
         require(tokensOut > 0, "V4CurveFactory: zero tokens out");
         require(tokensOut <= curve.tokensRemaining, "V4CurveFactory: exceeds curve supply");
         require(tokensOut >= minTokensOut, "V4CurveFactory: slippage");
@@ -275,10 +332,15 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         _distributeTradeFee(token, feeAmount);
         IERC20(token).safeTransfer(recipient, tokensOut);
 
-        require(
-            IERC20(token).balanceOf(address(this)) >= curve.tokensRemaining + (curve.totalSupply - curve.curveSupply),
-            "V4CurveFactory: token balance invariant violated"
-        );
+        _checkCover(token, curve);
+    }
+
+    /// @dev Graduation is attempted inside a try/catch so a failing graduation never blocks the buy that
+    /// reached the target (graduate() is the fallback). The gas floor makes sure the attempt is given
+    /// enough gas to finish: a buy that cannot afford it reverts instead of silently skipping it.
+    function _tryGraduate(address token) private {
+        require(gasleft() >= GRADUATION_GAS_RESERVE, "V4CurveFactory: not enough gas to graduate");
+        try this._attemptGraduate(token) returns (bytes32) {} catch {}
     }
 
     // ---------------------------------------------------------------
@@ -337,10 +399,9 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         // The hook only enforces the 5% cap and the compounder when the pool
         // is configured, at graduation -- by then it would be too late to
         // reject the launch, so check both now.
-        require(
-            buyFees.liquidityBps == 0 && sellFees.liquidityBps == 0 || hook.liquidityCompounder() != address(0),
-            "V4CurveFactory: liquidity compounder not set"
-        );
+        if ((buyFees.liquidityBps != 0 || sellFees.liquidityBps != 0) && hook.liquidityCompounder() == address(0)) {
+            revert CompounderNotSet();
+        }
         _registerCurve(token, name_, symbol_, totalSupply_, true, f);
         emit CustomCurveConfigured(token, marketingWallet, buyFees, sellFees);
         creatorTokensBought = _creatorBuy(token, totalSupply_, creatorBuyEthAmount, minCreatorTokensOut);
@@ -350,10 +411,12 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         private
         view
     {
-        require(bytes(name_).length > 0, "V4CurveFactory: name required");
-        require(bytes(symbol_).length > 0, "V4CurveFactory: symbol required");
-        require(bytes(name_).length <= MAX_NAME_BYTES, "V4CurveFactory: name too long");
-        require(bytes(symbol_).length <= MAX_SYMBOL_BYTES, "V4CurveFactory: symbol too long");
+        uint256 n = bytes(name_).length;
+        uint256 y = bytes(symbol_).length;
+        require(n > 0, "V4CurveFactory: name required");
+        require(y > 0, "V4CurveFactory: symbol required");
+        require(n <= MAX_NAME_BYTES, "V4CurveFactory: name too long");
+        require(y <= MAX_SYMBOL_BYTES, "V4CurveFactory: symbol too long");
         require(totalSupply_ > 0, "V4CurveFactory: supply must be > 0");
         require(msg.value == _feeDue(curveLaunchFee) + creatorBuyEthAmount, "V4CurveFactory: incorrect ETH sent");
         TaxTerms memory t = _currentTerms();
@@ -471,7 +534,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
 
     function _initCurveStorage(address token, uint256 totalSupply_, bool isCustom) private {
         uint256 curveSupply = (totalSupply_ * curveSupplyBps) / 10_000;
-        require(curveSupply > 0, "V4CurveFactory: curve supply rounds to zero");
+        if (curveSupply == 0) revert CurveSupplyZero();
         Curve storage curve = curves[token];
         curve.creator = _creator();
         curve.totalSupply = totalSupply_;
@@ -486,27 +549,11 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     }
 
     function _storeTerms(address token) private {
-        TaxTerms memory t = _currentTerms();
-        TaxTerms storage dst = curves[token].terms;
-        dst.feeWallet = t.feeWallet;
-        dst.feeBps = t.feeBps;
-        dst.priceFeed = t.priceFeed;
-        dst.graduationTargetUsd = t.graduationTargetUsd;
-        dst.maxOracleStaleness = t.maxOracleStaleness;
-        dst.rewardBps = t.rewardBps;
-        dst.creatorRewardBps = t.creatorRewardBps;
+        curves[token].terms = _currentTerms();
     }
 
     function _storeFees(address token, V4TaxHook.CustomFees memory f) private {
-        V4TaxHook.CustomFees storage dst = curves[token].fees;
-        dst.buyReflectionBps = f.buyReflectionBps;
-        dst.buyMarketingBps = f.buyMarketingBps;
-        dst.buyLiquidityBps = f.buyLiquidityBps;
-        dst.buyBurnBps = f.buyBurnBps;
-        dst.sellReflectionBps = f.sellReflectionBps;
-        dst.sellMarketingBps = f.sellMarketingBps;
-        dst.sellLiquidityBps = f.sellLiquidityBps;
-        dst.sellBurnBps = f.sellBurnBps;
+        curves[token].fees = f;
     }
 
     function _emitCreated(address token, string calldata name_, string calldata symbol_) private {
@@ -525,15 +572,14 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     {
         Curve storage curve = curves[token];
         if (ethAmount > 0) {
-            (tokensBought,) = _executeBuy(token, curve, _creator(), ethAmount, minTokensOut);
+            uint256 ethUsed;
+            (tokensBought,, ethUsed) = _executeBuy(token, curve, _creator(), ethAmount, minTokensOut);
             require(
                 tokensBought <= (totalSupply_ * maxCreatorBuyBps) / 10_000,
                 "V4CurveFactory: creator buy-in exceeds max allowed share of supply"
             );
-            emit CreatorBought(token, _creator(), ethAmount, tokensBought);
-            if (curve.realEthReserve >= curve.poolSeedTargetWei) {
-                try this._attemptGraduate(token) returns (bytes32) {} catch {}
-            }
+            emit CreatorBought(token, _creator(), ethUsed, tokensBought);
+            _finishBuy(token, curve, _creator(), ethAmount, ethUsed);
         }
         _distributeEthFee(_feeDue(curveLaunchFee));
     }
@@ -543,33 +589,37 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     // ---------------------------------------------------------------
 
     function buy(address token, uint256 minTokensOut) external payable nonReentrant whenNotPaused returns (uint256 tokensOut) {
-        Curve storage curve = curves[token];
-        require(curve.totalSupply > 0, "V4CurveFactory: unknown curve");
+        Curve storage curve = _live(token);
         require(!curve.graduated, "V4CurveFactory: already graduated");
         require(msg.value > 0, "V4CurveFactory: no ETH sent");
 
         uint256 feeAmount;
-        (tokensOut, feeAmount) = _executeBuy(token, curve, msg.sender, msg.value, minTokensOut);
-        _emitBought(token, feeAmount, tokensOut);
+        uint256 ethUsed;
+        (tokensOut, feeAmount, ethUsed) = _executeBuy(token, curve, msg.sender, msg.value, minTokensOut);
+        _emitBought(token, ethUsed, feeAmount, tokensOut);
 
-        if (curve.realEthReserve >= curve.poolSeedTargetWei) {
-            try this._attemptGraduate(token) returns (bytes32) {} catch {}
-        }
+        _finishBuy(token, curve, msg.sender, msg.value, ethUsed);
     }
 
-    function _emitBought(address token, uint256 feeAmount, uint256 tokensOut) private {
-        emit CurveBought(token, msg.sender, msg.value, feeAmount, tokensOut, curves[token].realEthReserve);
+    /// @dev After a buy: graduate if the target is reached, then return the part of the offer that
+    /// was past it (see _clipToTarget).
+    function _finishBuy(address token, Curve storage curve, address to, uint256 ethIn, uint256 ethUsed) private {
+        if (curve.realEthReserve >= curve.poolSeedTargetWei) _tryGraduate(token);
+        if (ethIn > ethUsed) _sendEth(to, ethIn - ethUsed);
+    }
+
+    function _emitBought(address token, uint256 ethUsed, uint256 feeAmount, uint256 tokensOut) private {
+        emit CurveBought(token, msg.sender, ethUsed, feeAmount, tokensOut, curves[token].realEthReserve);
     }
 
     /// @notice Never pausable: holders can always leave a live curve.
     function sell(address token, uint256 tokenAmountIn, uint256 minEthOut) external nonReentrant returns (uint256 ethOut) {
-        Curve storage curve = curves[token];
-        require(curve.totalSupply > 0, "V4CurveFactory: unknown curve");
+        Curve storage curve = _live(token);
         require(!curve.graduated, "V4CurveFactory: already graduated");
         require(tokenAmountIn > 0, "V4CurveFactory: zero amount");
 
         SellQuote memory quote = _quoteSell(curve, tokenAmountIn);
-        require(quote.ethOutGross <= curve.realEthReserve, "V4CurveFactory: exceeds real ETH reserve");
+        if (quote.ethOutGross > curve.realEthReserve) revert ExceedsRealReserve();
         require(quote.netEthOut >= minEthOut, "V4CurveFactory: slippage");
 
         curve.tokensRemaining += tokenAmountIn;
@@ -584,14 +634,11 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         returns (uint256 ethOut)
     {
         IERC20(token).safeTransferFrom(msg.sender, address(this), tokenAmountIn);
-        require(
-            IERC20(token).balanceOf(address(this)) >= curve.tokensRemaining + (curve.totalSupply - curve.curveSupply),
-            "V4CurveFactory: token balance invariant violated"
-        );
+        _checkCover(token, curve);
         _distributeTradeFee(token, quote.feeAmount);
         ethOut = quote.netEthOut;
         (bool sentEth,) = payable(msg.sender).call{value: ethOut}("");
-        require(sentEth, "V4CurveFactory: ETH payout failed");
+        if (!sentEth) revert PayoutFailed();
         _emitSold(token, tokenAmountIn, quote.feeAmount, ethOut);
     }
 
@@ -606,8 +653,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     /// @notice Permissionless once a curve's real ETH has crossed its target:
     /// the guaranteed fallback to buy()'s own best-effort attempt.
     function graduate(address token) external nonReentrant returns (bytes32 poolId) {
-        Curve storage curve = curves[token];
-        require(curve.totalSupply > 0, "V4CurveFactory: unknown curve");
+        Curve storage curve = _live(token);
         require(!curve.graduated, "V4CurveFactory: already graduated");
         require(curve.realEthReserve >= curve.poolSeedTargetWei, "V4CurveFactory: graduation target not met");
         return _doGraduate(token, curve);
@@ -623,7 +669,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
 
     /// @dev Flips `graduated` before any external call. Seeds the pool with the
     /// factory's ENTIRE remaining token balance (unsold curve tokens plus the
-    /// untouched reserve; nothing is burned) and every wei of real ETH, locks
+    /// untouched reserve; only rounding dust the locker hands back is burned) and every wei of real ETH, locks
     /// the position to the ORIGINAL creator, and opts the pool into the
     /// platform tax terms snapshotted when the curve was created.
     function _doGraduate(address token, Curve storage curve) private returns (bytes32 poolId) {
@@ -640,7 +686,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         ethForPool = curve.realEthReserve;
         curve.realEthReserve = 0;
         totalCurveReserveEth -= ethForPool;
-        require(tokensForPool > 0 && ethForPool > 0, "V4CurveFactory: nothing to graduate");
+        if (tokensForPool == 0 || ethForPool == 0) revert NothingToGraduate();
     }
 
     function _launchPool(address token, uint256 tokensForPool, uint256 ethForPool) private returns (bytes32 poolId) {
@@ -673,8 +719,9 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     }
 
     /// @dev The distributor slots may have changed since the token was
-    /// created; make sure whatever the pool will pay in-kind tax to does not
-    /// earn reflections.
+    /// created, so make sure the current ones are on the token's no-reflections
+    /// list (the platform tax itself is paid in ETH; this only keeps a distributor that ever
+    /// holds the token from sharing in reflections).
     function _excludeDistributors(address token) private {
         address a = taxSource.rewardsDistributor();
         address b = taxSource.creatorRewardsDistributor();
@@ -689,14 +736,12 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     // ---------------------------------------------------------------
 
     function quoteBuy(address token, uint256 ethIn) external view returns (uint256 tokensOut, uint256 feeAmount) {
-        Curve storage curve = curves[token];
-        require(curve.totalSupply > 0, "V4CurveFactory: unknown curve");
-        (tokensOut, feeAmount,) = _quoteBuy(curve, ethIn);
+        Curve storage curve = _live(token);
+        (tokensOut, feeAmount,) = _quoteBuy(curve, _clipToTarget(curve, ethIn)); // what a buy of ethIn would actually take
     }
 
     function quoteSell(address token, uint256 tokenAmountIn) external view returns (uint256 ethOut, uint256 feeAmount) {
-        Curve storage curve = curves[token];
-        require(curve.totalSupply > 0, "V4CurveFactory: unknown curve");
+        Curve storage curve = _live(token);
         SellQuote memory quote = _quoteSell(curve, tokenAmountIn);
         ethOut = quote.netEthOut;
         feeAmount = quote.feeAmount;
@@ -719,8 +764,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
             uint256 createdAt
         )
     {
-        Curve storage curve = curves[token];
-        require(curve.totalSupply > 0, "V4CurveFactory: unknown curve");
+        Curve storage curve = _live(token);
         return (
             curve.creator,
             curve.totalSupply,
@@ -738,13 +782,13 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
 
     /// @notice True for a custom-tax curve (V4CustomToken), false for a plain one.
     function isCustomCurve(address token) external view returns (bool) {
-        require(curves[token].totalSupply > 0, "V4CurveFactory: unknown curve");
+        _live(token);
         return curves[token].isCustom;
     }
 
     /// @notice The platform tax terms this curve will graduate under.
     function curveTaxConfig(address token) external view returns (TaxTerms memory) {
-        require(curves[token].totalSupply > 0, "V4CurveFactory: unknown curve");
+        _live(token);
         return curves[token].terms;
     }
 
@@ -767,36 +811,37 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
     // ---------------------------------------------------------------
 
     function setCurveFeeBps(uint256 newBps) external onlyOwner {
-        require(newBps <= MAX_CURVE_FEE_BPS, "V4CurveFactory: fee exceeds ceiling");
+        if (newBps > MAX_CURVE_FEE_BPS) revert FeeAboveCeiling();
         curveFeeBps = newBps;
         emit CurveFeeBpsUpdated(newBps);
     }
 
     function setCurveSupplyBps(uint256 newBps) external onlyOwner {
-        require(newBps > 0 && newBps <= 10_000, "V4CurveFactory: bps out of range");
+        if (newBps == 0 || newBps > 10_000) revert BpsOutOfRange();
         curveSupplyBps = newBps;
         emit CurveSupplyBpsUpdated(newBps);
     }
 
     function setVirtualEthReserveDefault(uint256 newDefault) external onlyOwner {
-        require(newDefault > 0, "V4CurveFactory: virtual ETH must be > 0");
+        if (newDefault == 0) revert VirtualEthZero();
         virtualEthReserveDefault = newDefault;
         emit VirtualEthReserveDefaultUpdated(newDefault);
     }
 
     function setVirtualTokenReserveBps(uint256 newBps) external onlyOwner {
-        require(newBps > 0 && newBps <= 10_000, "V4CurveFactory: bps out of range");
+        if (newBps == 0 || newBps > 10_000) revert BpsOutOfRange();
         virtualTokenReserveBps = newBps;
         emit VirtualTokenReserveBpsUpdated(newBps);
     }
 
     function setPoolSeedTargetWei(uint256 newTarget) external onlyOwner {
-        require(newTarget > 0, "V4CurveFactory: target must be > 0");
+        if (newTarget == 0) revert TargetZero();
         poolSeedTargetWei = newTarget;
         emit PoolSeedTargetUpdated(newTarget);
     }
 
     function setCurveLaunchFee(uint256 newFee) external onlyOwner {
+        _checkLaunchFee(newFee);
         curveLaunchFee = newFee;
         emit CurveLaunchFeeUpdated(newFee);
     }
@@ -806,7 +851,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         require(amount <= strandedFees, "V4CurveFactory: exceeds stranded fees");
         strandedFees -= amount;
         (bool sent,) = payable(to).call{value: amount}("");
-        require(sent, "V4CurveFactory: rescue transfer failed");
+        if (!sent) revert RescueFailed();
         emit StrandedFeesRescued(to, amount);
     }
 
@@ -818,7 +863,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         require(address(this).balance > accountedFor, "V4CurveFactory: no stray ETH to rescue");
         amount = address(this).balance - accountedFor;
         (bool sent,) = payable(to).call{value: amount}("");
-        require(sent, "V4CurveFactory: stray ETH rescue failed");
+        if (!sent) revert RescueFailed();
         emit StrayEthRescued(to, amount);
     }
 
