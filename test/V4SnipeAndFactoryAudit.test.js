@@ -382,7 +382,7 @@ describe("Snipe protection + V4TokenFactory / V4LaunchedToken security audit", f
         const F = await ethers.getContractFactory("V4TokenFactory");
         const a = [await A(plainImpl), await A(pm), await A(locker), await A(hook), LAUNCH_FEE, treasury.address];
         const z = [feeWallet.address, await A(feed)];
-        await expect(F.deploy(...a, 0, ...z)).to.be.revertedWith("V4TokenFactory: lock duration must be > 0");
+        await expect(F.deploy(...a, 0, ...z)).to.be.revertedWith("V4TokenFactory: lock duration below the 1 day floor");
         await expect(F.deploy(...a, 3651 * 24 * 3600, ...z)).to.be.revertedWith("V4TokenFactory: lock duration above 10 year ceiling");
       });
     });
