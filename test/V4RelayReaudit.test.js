@@ -344,8 +344,8 @@ describe("Re-audit: V4LaunchRelay (regression tests)", function () {
         await f.setLaunchRelay(ZERO);
         // deposit was made while the relay was registered; unregistering is an owner change but the launch must still not run
         await expect(go()).to.be.revertedWith("V4LaunchRelay: factory does not recognise this relay");
-        // pointing the factory at some other address is refused the same way
-        await f.setLaunchRelay(stranger.address);
+        // pointing the factory at some other contract is refused the same way (an EOA is refused outright by setLaunchRelay, PL-8)
+        await f.setLaunchRelay(await A(locker)); // some other contract
         await expect(go()).to.be.revertedWith("V4LaunchRelay: factory does not recognise this relay");
         const d = await relay.deposits(creator.address, hash);
         expect(d.settled).to.equal(false);
