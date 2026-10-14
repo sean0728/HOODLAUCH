@@ -163,6 +163,16 @@ describe("V4PoolLauncher security audit", function () {
       await (await customFactory.setLpLockDuration(3650 * 24 * 3600)).wait(); // the ceiling itself is allowed
     });
 
+    it("PL-3d: the setter enforces the 1 day floor too (exactly 1 day is allowed)", async () => {
+      for (const f of [customFactory, curveFactory]) {
+        await expect(f.setLpLockDuration(0)).to.be.revertedWith("V4PoolLauncher: lock duration below the 1 day floor");
+        await expect(f.setLpLockDuration(1)).to.be.revertedWith("V4PoolLauncher: lock duration below the 1 day floor");
+        await expect(f.setLpLockDuration(24 * 3600 - 1)).to.be.revertedWith("V4PoolLauncher: lock duration below the 1 day floor");
+        await (await f.setLpLockDuration(24 * 3600)).wait();
+      }
+      await (await customFactory.setLpLockDuration(3650 * 24 * 3600)).wait();
+    });
+
     it("PL-3b: a locked position's unlock time is always in the future", async () => {
       await (await customFactory.setLpLockDuration(3650 * 24 * 3600)).wait();
       const token = await launchCustom();
@@ -172,10 +182,12 @@ describe("V4PoolLauncher security audit", function () {
       expect(token).to.not.equal(ZERO);
     });
 
-    it("PL-3c: constructor refuses a zero lock duration", async () => {
+    it("PL-3c: constructor refuses a lock below the 1 day floor (or above the ceiling)", async () => {
       const F = await ethers.getContractFactory("V4CustomTokenFactory");
       await expect(F.deploy(await customImpl.getAddress(), await factory.getAddress(), await compounder.getAddress(), LAUNCH_FEE, 0))
-        .to.be.revertedWith("V4PoolLauncher: lock duration must be > 0");
+        .to.be.revertedWith("V4PoolLauncher: lock duration below the 1 day floor");
+      await expect(F.deploy(await customImpl.getAddress(), await factory.getAddress(), await compounder.getAddress(), LAUNCH_FEE, 24 * 3600 - 1))
+        .to.be.revertedWith("V4PoolLauncher: lock duration below the 1 day floor");
       await expect(F.deploy(await customImpl.getAddress(), await factory.getAddress(), await compounder.getAddress(), LAUNCH_FEE, 2n ** 64n))
         .to.be.revertedWith("V4PoolLauncher: lock duration above 10 year ceiling");
     });

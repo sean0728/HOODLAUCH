@@ -317,13 +317,13 @@ describe("V4 reflection payout (in kind / ETH / another token)", function () {
       expect(await token.holderAt(0)).to.not.equal(await A(token));
     });
 
-    it("only the owner, a keeper or the creator may convert, and the minimum is enforced", async () => {
+    it("only the owner or a keeper may convert (not the creator, not anyone else), and the minimum is enforced", async () => {
       const { token, key } = await launch({ payout: payoutOf(1) });
       await trade(token, key);
       await expect(converter.connect(other).convert(await A(token), 1n, 0)).to.be.revertedWith("V4ReflectionConverter: not authorized to convert");
       await expect(converter.connect(keeper).convert(await A(token), ETH("1000"), 0)).to.be.revertedWith("V4ReflectionConverter: output below minimum");
       expect(await token.pendingConversion()).to.be.gt(0n); // nothing was lost
-      await converter.connect(creator).convert(await A(token), 1n, 0); // the creator may
+      await expect(converter.connect(creator).convert(await A(token), 1n, 0)).to.be.revertedWith("V4ReflectionConverter: not authorized to convert"); // the creator may not (CT-1)
     });
 
     it("converting something that is not served by this converter, or an in-kind token, is refused", async () => {
