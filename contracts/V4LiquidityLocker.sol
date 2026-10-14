@@ -18,6 +18,12 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 
+/// @dev The one thing the locker asks of a launcher: the locker it was built for. V4TokenFactory, V4CustomTokenFactory
+/// and V4CurveFactory all expose it.
+interface IV4LockerBound {
+    function locker() external view returns (address);
+}
+
 /// @title V4LiquidityLocker
 /// @notice The V4 counterpart of LiquidityLocker. In V2 the LP position was an
 /// ERC20 (the pair's LP token) and the locker simply held it. A V4 position is
@@ -43,6 +49,10 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
 
     IPoolManager public immutable poolManager;
+
+    /// @notice Shortest lock the locker will create, whatever a launcher asks for. Every launcher already floors
+    /// its own setting at the same value; the locker is the contract that keeps the promise, so it checks too.
+    uint256 public constant MIN_LOCK_DURATION = 1 days;
 
     /// @notice The only address allowed to create locks. Set once, after
     /// deployment, because the factory's constructor needs this address first.
@@ -95,26 +105,47 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         poolManager = poolManager_;
     }
 
+    /// @notice The primary launcher, set once. It must be a contract built for THIS locker (it reports this
+    /// address from locker()): the slot cannot be changed or revoked afterwards, so a wallet or an unrelated
+    /// contract typed in by mistake would otherwise burn it for ever.
     function setFactory(address factory_) external onlyOwner {
         require(factory == address(0), "V4LiquidityLocker: factory already set");
         require(factory_ != address(0), "V4LiquidityLocker: invalid factory");
+        require(_isBoundToThis(factory_), "V4LiquidityLocker: factory is not wired to this locker");
         factory = factory_;
         emit FactorySet(factory_);
     }
 
     /// @notice Authorize (or revoke) an additional launcher. Revoking one
-    /// never affects locks it already created.
+    /// never affects locks it already created, and needs no checks; authorizing
+    /// one needs a contract built for this locker (see setFactory).
     function setExtraFactory(address factory_, bool allowed) external onlyOwner {
         require(factory_ != address(0), "V4LiquidityLocker: invalid factory");
+        if (allowed) require(_isBoundToThis(factory_), "V4LiquidityLocker: factory is not wired to this locker");
         extraFactories[factory_] = allowed;
         emit ExtraFactorySet(factory_, allowed);
     }
 
-    /// @notice Same safety rail as V2: ownership can't be renounced before a
-    /// factory is wired, which would strand this instance forever.
-    function renounceOwnership() public virtual override onlyOwner {
-        require(factory != address(0), "V4LiquidityLocker: cannot renounce before a factory is wired");
-        super.renounceOwnership();
+    /// @notice Ownership can never be renounced: the owner is the only one who can authorize a launcher (every
+    /// redeployed factory needs it) and who can recover tokens or ETH sent here by mistake. Hand it over with the
+    /// (two-step) transferOwnership instead. Locks themselves never depend on the owner.
+    function renounceOwnership() public view override onlyOwner {
+        revert("V4LiquidityLocker: ownership cannot be renounced");
+    }
+
+    /// @dev True when `f` is a contract whose locker() is this locker. A gas-capped staticcall that copies one
+    /// word, so whatever the address answers cannot cost more.
+    function _isBoundToThis(address f) private view returns (bool ok) {
+        bytes4 sel = IV4LockerBound.locker.selector;
+        uint256 bound;
+        assembly ("memory-safe") {
+            let m := mload(0x40)
+            mstore(m, sel)
+            ok := staticcall(50000, f, m, 4, m, 32)
+            if lt(returndatasize(), 32) { ok := 0 }
+            if ok { bound := mload(m) }
+        }
+        return ok && bound == uint256(uint160(address(this)));
     }
 
     // ---------------------------------------------------------------
@@ -141,6 +172,7 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         // The time is stored as a uint64. Without this check a huge value would
         // silently wrap into the past and create an already-expired lock.
         require(unlockTime <= type(uint64).max, "V4LiquidityLocker: unlock time out of range");
+        require(unlockTime >= block.timestamp + MIN_LOCK_DURATION, "V4LiquidityLocker: lock shorter than the 1 day floor");
         require(msg.value > 0 && tokenAmount > 0, "V4LiquidityLocker: nothing to seed");
         require(Currency.unwrap(key.currency0) == address(0), "V4LiquidityLocker: currency0 must be native ETH");
         require(
@@ -326,8 +358,8 @@ contract V4LiquidityLocker is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         emit TokenRescued(token, to, amount);
     }
 
-    /// @notice Same, for stray ETH. This contract never holds ETH between
-    /// transactions, so any balance here is a mistake.
+    /// @notice Same, for stray ETH. A seed or a withdrawal leaves no ETH here, so any
+    /// balance is a mistake or ETH forced in (a selfdestruct, a coinbase reward).
     function rescueETH(address payable to, uint256 amount) external onlyOwner {
         require(to != address(0), "V4LiquidityLocker: invalid recipient");
         (bool ok,) = to.call{value: amount}("");
