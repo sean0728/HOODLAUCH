@@ -20,9 +20,9 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 ///  - there is no auto-activation / pair-detection logic, no oracle, and no
 ///    graduation state here -- all of it lives in the hook, per pool.
 ///
-/// "Deploy Token" (no liquidity) V4 launches are therefore ordinary untaxed
-/// ERC20s for their entire life, exactly like a V2 "Just Launch" token whose
-/// creator never routes anything through the platform.
+/// There is no deploy-only ("no pool") mode on V4: every launch seeds a pool, so
+/// every token has a pool and a hook registered by the factory in the same
+/// transaction that initializes it.
 ///
 /// The only V4-specific state is `poolId` / `hook`, recorded once by the
 /// factory when it seeds the token's pool, so front ends and indexers can go
@@ -37,7 +37,7 @@ contract V4LaunchedToken is ERC20 {
     string private _tokenSymbol;
 
     /// @notice The Uniswap V4 PoolId (bytes32) of this token's launch pool and
-    /// the hook that taxes it. Both stay zero for a "Deploy Token" launch.
+    /// the hook that taxes it. Set once by the factory when it seeds the pool.
     bytes32 public poolId;
     address public hook;
 

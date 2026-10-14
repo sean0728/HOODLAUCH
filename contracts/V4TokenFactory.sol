@@ -27,9 +27,10 @@ import {V4TaxHook} from "./V4TaxHook.sol";
 
 /// @title V4TokenFactory
 /// @notice The Uniswap V4 counterpart of TokenFactory (V2 is untouched and keeps
-/// running side by side). Same two launch modes, same fees, same relayed
-/// (gasless) flow, same EIP-712 voucher, same 50/50 fee split. What changes is
-/// everything underneath the "add liquidity" step:
+/// running side by side). One launch mode (every launch seeds a pool), the same
+/// fees, the same relayed (gasless) flow, the same EIP-712 voucher and the same
+/// 50/50 fee split. What changes is everything underneath the "add liquidity"
+/// step:
 ///
 ///  - the pool is a V4 pool in the singleton PoolManager, (native ETH, token),
 ///    created by THIS contract at exactly the launch price, with V4TaxHook
@@ -37,10 +38,13 @@ import {V4TaxHook} from "./V4TaxHook.sol";
 ///    third party can no longer pre-create the pair to interfere with a launch;
 ///  - the position is a full-range V4 position owned by V4LiquidityLocker, which
 ///    also enforces the creator's lock (see that contract);
-///  - the trading tax is collected by the hook at the pool, in the token, on
-///    every swap (see V4TaxHook) instead of inside the token's _update();
+///  - the trading tax is collected by the hook at the pool, on every swap (see
+///    V4TaxHook): the platform tax, snipe surcharge and marketing share come out
+///    of the ETH leg, the custom reflection / liquidity / burn shares out of the
+///    token leg -- instead of inside the token's _update();
 ///  - the creator's optional same-transaction buy-in is a real swap through the
-///    PoolManager, so it pays the tax like any other buyer's.
+///    PoolManager, so it pays the platform tax like any other buyer's (but not
+///    the snipe surcharge: the factory is a launcher, which the hook exempts).
 ///
 /// There is no deploy-only ("no pool") mode any more: every launch seeds a pool.
 /// The addLiquidityAtLaunch flag is kept in createToken and in the voucher only so
@@ -70,9 +74,27 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     uint256 public constant MAX_FEE_BPS = 2_000; // 20.00%
 
     /// @notice Ceiling on the LP lock: 10 years, the same bound V4PoolLauncher
-    /// uses. Zero is refused as well -- the locker rejects an unlock time that
-    /// is not in the future, so either extreme would make every launch revert.
+    /// uses. (A duration of zero, or one near 2^64, would make every launch
+    /// revert in the locker; the floor below also covers zero.)
     uint256 public constant MAX_LOCK_DURATION = 3650 days;
+
+    /// @notice Floor on the LP lock. The lock is the main trust signal a buyer
+    /// sees on a launch, so the owner cannot set it so short that the creator
+    /// could withdraw the pool moments after launching.
+    uint256 public constant MIN_LOCK_DURATION = 1 days;
+
+    /// @notice Ceiling on the launch fee (also the relayed-launch fee floor).
+    uint256 public constant MAX_LAUNCH_FEE = 1 ether;
+
+    /// @notice Name / symbol limits, in BYTES (so multi-byte characters count in
+    /// full). The site allows 28 and 6 characters, which is at most 112 and 24
+    /// bytes. Without a bound a creator could make a launch cost millions of gas
+    /// and hand every integration an arbitrarily long string.
+    uint256 public constant MAX_NAME_BYTES = 128;
+    uint256 public constant MAX_SYMBOL_BYTES = 32;
+
+    /// @notice Ceiling on the owner's creator-buy-in cap: 20% of supply.
+    uint256 public constant MAX_CREATOR_BUY_BPS = 2_000;
 
     address public platformFeeWallet;
     uint256 public feeBps = 100; // 1.00%
@@ -91,7 +113,8 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
 
     /// @notice Anti-rug cap on the creator's same-transaction buy-in, in bps of
     /// totalSupply, checked against the tokens the creator actually receives
-    /// AFTER the hook's tax.
+    /// (the hook's tax is already taken from the ETH paid in, so the pool
+    /// prices the net amount).
     uint256 public maxCreatorBuyBps = 500; // 5.00%
 
     /// @notice Slippage floor on the creator's buy-in (5%-8% band, as in V2).
@@ -118,9 +141,19 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         uint256 deadline;
         bool settled;
         bool reclaimed;
+        /// @dev Hash of the launch terms in force when the deposit was made
+        /// (lock duration, platform tax, graduation target, reward shares). A
+        /// relayed launch only runs if they are unchanged; if the owner has
+        /// changed them the creator may reclaim at once instead of waiting for
+        /// the deadline. See _currentTermsHash.
+        bytes32 termsHash;
     }
 
     mapping(address => mapping(bytes32 => Deposit)) public deposits;
+
+    /// @notice ETH currently held in relayed-launch escrow. Anything above it
+    /// in the contract's balance was forced in and is recoverable by rescueETH.
+    uint256 public totalEscrowed;
 
     struct LaunchVoucher {
         address creator;
@@ -142,6 +175,13 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 private immutable _domainSeparator;
+    uint256 private immutable _domainChainId;
+
+    /// @notice The rewards distributor could not receive its share of a launch
+    /// fee; the share went to the treasury instead so the launch still succeeds.
+    event RewardsPayoutFailed(address indexed distributor, uint256 amount);
+    event EthRescued(address indexed to, uint256 amount);
+    event TokensRescued(address indexed token, address indexed to, uint256 amount);
 
     event RelayerUpdated(address newRelayer);
     event MaxRelayerGasReimbursementUpdated(uint256 newCapWei);
@@ -208,6 +248,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         require(locker_ != address(0), "V4TokenFactory: invalid locker");
         require(hook_ != address(0), "V4TokenFactory: invalid hook");
         require(feeTreasury_ != address(0), "V4TokenFactory: invalid treasury");
+        require(launchFee_ <= MAX_LAUNCH_FEE, "V4TokenFactory: launch fee above ceiling");
         _checkLockDuration(lpLockDuration_);
 
         tokenImplementation = tokenImplementation_;
@@ -220,7 +261,12 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         platformFeeWallet = platformFeeWallet_;
         priceFeed = priceFeed_;
 
-        _domainSeparator = keccak256(
+        _domainChainId = block.chainid;
+        _domainSeparator = _buildDomainSeparator();
+    }
+
+    function _buildDomainSeparator() private view returns (bytes32) {
+        return keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
                 keccak256(bytes("HoodLaunchV4TokenFactory")),
@@ -237,7 +283,35 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     }
 
     function _hashTypedDataV4(bytes32 structHash) private view returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator, structHash));
+        // Rebuilt if the chain id ever differs from the one at deployment (a chain fork), so a
+        // voucher signed for one chain cannot be replayed on the other.
+        bytes32 sep = block.chainid == _domainChainId ? _domainSeparator : _buildDomainSeparator();
+        return keccak256(abi.encodePacked("\x19\x01", sep, structHash));
+    }
+
+    function _checkNameSymbol(string calldata name_, string calldata symbol_) private pure {
+        uint256 n = bytes(name_).length;
+        uint256 y = bytes(symbol_).length;
+        require(n > 0, "V4TokenFactory: name required");
+        require(y > 0, "V4TokenFactory: symbol required");
+        require(n <= MAX_NAME_BYTES, "V4TokenFactory: name too long");
+        require(y <= MAX_SYMBOL_BYTES, "V4TokenFactory: symbol too long");
+    }
+
+    /// @dev The launch terms a relayed-launch creator implicitly accepts when
+    /// depositing: what the hook will be configured with, plus the lock. Uses the
+    /// EFFECTIVE reward shares (zero when no distributor is set), exactly as
+    /// _configureHook does.
+    function _currentTermsHash() private view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                lpLockDuration,
+                feeBps,
+                graduationTargetUsd,
+                rewardsDistributor != address(0) ? rewardBps : 0,
+                creatorRewardsDistributor != address(0) ? creatorRewardBps : 0
+            )
+        );
     }
 
     function _deriveTokenSalt(address creator_, uint256 salt) private pure returns (bytes32) {
@@ -267,8 +341,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         nonReentrant
         returns (address token, uint256 liquidity, uint256 lockId, uint256 creatorTokensBought)
     {
-        require(bytes(name_).length > 0, "V4TokenFactory: name required");
-        require(bytes(symbol_).length > 0, "V4TokenFactory: symbol required");
+        _checkNameSymbol(name_, symbol_);
         require(totalSupply_ > 0, "V4TokenFactory: supply must be > 0");
         require(addLiquidityAtLaunch, "V4TokenFactory: deploy-only launches are not supported");
 
@@ -317,7 +390,12 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
             uint256 toTreasury = feeCollected - toRewards;
             if (toRewards > 0) {
                 (bool sentRewards,) = rewardsDistributor.call{value: toRewards}("");
-                require(sentRewards, "V4TokenFactory: rewards transfer failed");
+                if (!sentRewards) {
+                    // A distributor that cannot receive ETH must not block every launch:
+                    // its share goes to the treasury and the failure is logged.
+                    toTreasury += toRewards;
+                    emit RewardsPayoutFailed(rewardsDistributor, toRewards);
+                }
             }
             (bool sent,) = feeTreasury.call{value: toTreasury}("");
             require(sent, "V4TokenFactory: fee transfer failed");
@@ -358,6 +436,8 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         require(d.amount == 0, "V4TokenFactory: voucher already funded");
         d.amount = msg.value;
         d.deadline = deadline;
+        d.termsHash = _currentTermsHash();
+        totalEscrowed += msg.value;
         emit LaunchDeposited(voucherHash, msg.sender, msg.value, deadline);
     }
 
@@ -366,9 +446,15 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         require(d.amount > 0, "V4TokenFactory: no such deposit");
         require(!d.settled, "V4TokenFactory: voucher already relayed");
         require(!d.reclaimed, "V4TokenFactory: already reclaimed");
-        require(block.timestamp > d.deadline, "V4TokenFactory: deadline has not passed yet");
+        // Reclaimable once the deadline has passed, or at once if the owner has changed the launch terms
+        // (lock duration, platform tax, graduation target, reward shares) since the deposit was made.
+        require(
+            block.timestamp > d.deadline || d.termsHash != _currentTermsHash(),
+            "V4TokenFactory: deadline has not passed yet"
+        );
         d.reclaimed = true;
         uint256 amount = d.amount;
+        totalEscrowed -= amount;
         (bool sent,) = payable(msg.sender).call{value: amount}("");
         require(sent, "V4TokenFactory: refund transfer failed");
         emit DepositReclaimed(voucherHash, msg.sender, amount);
@@ -394,8 +480,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         returns (bytes32 voucherHash)
     {
         require(block.timestamp <= voucher.deadline, "V4TokenFactory: voucher expired");
-        require(bytes(voucher.name).length > 0, "V4TokenFactory: name required");
-        require(bytes(voucher.symbol).length > 0, "V4TokenFactory: symbol required");
+        _checkNameSymbol(voucher.name, voucher.symbol);
         require(voucher.totalSupply > 0, "V4TokenFactory: supply must be > 0");
         // The direct entry points make the sender pay the platform's fee; the
         // relayed path takes it from the escrowed deposit, so the fee the creator
@@ -419,8 +504,13 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
             d.amount == voucher.fee + voucher.liquidityEthAmount + voucher.creatorBuyEthAmount,
             "V4TokenFactory: deposit does not match voucher amount"
         );
+        require(
+            d.termsHash == _currentTermsHash(),
+            "V4TokenFactory: launch terms changed since the deposit, reclaim it"
+        );
 
         d.settled = true;
+        totalEscrowed -= d.amount;
     }
 
     function _relayedLaunch(LaunchVoucher calldata voucher)
@@ -482,7 +572,11 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
                 toTreasury = netFee - toRewards;
                 if (toRewards > 0) {
                     (bool sentRewards,) = rewardsDistributor.call{value: toRewards}("");
-                    require(sentRewards, "V4TokenFactory: rewards transfer failed");
+                    if (!sentRewards) {
+                        toTreasury += toRewards;
+                        emit RewardsPayoutFailed(rewardsDistributor, toRewards);
+                        toRewards = 0;
+                    }
                 }
                 (bool sent,) = feeTreasury.call{value: toTreasury}("");
                 require(sent, "V4TokenFactory: fee transfer failed");
@@ -705,12 +799,13 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     // ---------------------------------------------------------------
 
     function setLaunchFee(uint256 newFee) external onlyOwner {
+        require(newFee <= MAX_LAUNCH_FEE, "V4TokenFactory: launch fee above ceiling");
         launchFee = newFee;
         emit LaunchFeeUpdated(newFee);
     }
 
     function _checkLockDuration(uint256 d) private pure {
-        require(d > 0, "V4TokenFactory: lock duration must be > 0");
+        require(d >= MIN_LOCK_DURATION, "V4TokenFactory: lock duration below the 1 day floor");
         require(d <= MAX_LOCK_DURATION, "V4TokenFactory: lock duration above 10 year ceiling");
     }
 
@@ -727,7 +822,7 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     }
 
     function setMaxCreatorBuyBps(uint256 newBps) external onlyOwner {
-        require(newBps <= 10_000, "V4TokenFactory: bps cannot exceed 100%");
+        require(newBps <= MAX_CREATOR_BUY_BPS, "V4TokenFactory: creator buy-in cap above the 20% ceiling");
         maxCreatorBuyBps = newBps;
         emit MaxCreatorBuyBpsUpdated(newBps);
     }
@@ -817,6 +912,32 @@ contract V4TokenFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         rewardBps = rewardBps_;
         creatorRewardBps = creatorRewardBps_;
         emit TaxDefaultsUpdated();
+    }
+
+    /// @notice Disabled. Renouncing would strand every admin function, including the
+    /// hook's admin surface that is only reachable through this contract. Use the
+    /// two-step transferOwnership to hand control over.
+    function renounceOwnership() public view override onlyOwner {
+        revert("V4TokenFactory: renouncing ownership is disabled");
+    }
+
+    /// @notice Recovers ETH that was forced into the contract (selfdestruct, a coinbase
+    /// reward) -- never the escrow that backs relayed-launch deposits.
+    function rescueETH(address payable to, uint256 amount) external onlyOwner nonReentrant {
+        require(to != address(0), "V4TokenFactory: invalid recipient");
+        require(address(this).balance >= totalEscrowed + amount, "V4TokenFactory: amount exceeds unescrowed balance");
+        (bool sent,) = to.call{value: amount}("");
+        require(sent, "V4TokenFactory: rescue transfer failed");
+        emit EthRescued(to, amount);
+    }
+
+    /// @notice Recovers tokens sent to the factory by mistake. A launch holds its own
+    /// token only inside the launch transaction (nonReentrant), so this can never
+    /// touch a launch in progress.
+    function rescueERC20(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        require(to != address(0), "V4TokenFactory: invalid recipient");
+        IERC20(token).safeTransfer(to, amount);
+        emit TokensRescued(token, to, amount);
     }
 
     /// @notice Dead-oracle escape hatch; see V4TaxHook.updatePriceFeed.

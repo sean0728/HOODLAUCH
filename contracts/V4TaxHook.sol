@@ -816,10 +816,10 @@ contract V4TaxHook {
         // price (token per wei of ETH) in Q128 = sqrtP^2 / 2^64
         uint256 priceX128 = FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), 1 << 64);
         if (priceX128 == 0) return (0, false);
-        // wei of ETH per whole (1e18) token
-        uint256 pricePerTokenWei = FullMath.mulDiv(1e18, 1 << 128, priceX128);
-        uint256 usdPerToken = (pricePerTokenWei * ethUsd) / 1e18;
-        marketCap = (usdPerToken * IERC20(poolTax[id].token).totalSupply()) / 1e18;
+        // ETH value of the WHOLE supply in wei = supply / (tokens per wei) = supply * 2^128 / priceX128, computed in one
+        // step so nothing is rounded to zero before the supply is multiplied in; then converted to USD in one more step.
+        uint256 valueWei = FullMath.mulDiv(IERC20(poolTax[id].token).totalSupply(), 1 << 128, priceX128);
+        marketCap = FullMath.mulDiv(valueWei, ethUsd, 1e18);
         ok = true;
     }
 
