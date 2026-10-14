@@ -15,6 +15,10 @@ import {V4CurveFactory} from "./V4CurveFactory.sol";
 interface IV4RelayTaxSource {
     function rewardsDistributor() external view returns (address);
     function feeTreasury() external view returns (address);
+    function feeBps() external view returns (uint256);
+    function graduationTargetUsd() external view returns (uint256);
+    function rewardBps() external view returns (uint256);
+    function creatorRewardBps() external view returns (uint256);
 }
 
 /// @title V4LaunchRelay
@@ -38,6 +42,12 @@ interface IV4RelayTaxSource {
 ///      platform rewards distributor (if one is set) and the treasury, the same
 ///      rule as V4TokenFactory._settleRelayedFee.
 ///
+/// The launch terms in force when a deposit is made (lock duration, platform
+/// tax, graduation target, reward shares, launch fee and, for curves, the curve
+/// settings) are recorded with it. A relayed launch only runs if they are
+/// unchanged; if the owner has changed them the creator may reclaim at once
+/// instead of waiting for the deadline (same rule as V4TokenFactory).
+///
 /// The creator receives everything a direct launch gives them: the token, the
 /// locked LP, the buy-in tokens and any ETH dust. The relay never holds a token.
 /// A launch fee below the factory's current fee is refused, so a stale or
@@ -59,9 +69,20 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         uint256 deadline;
         bool settled;
         bool reclaimed;
+        /// @dev Hashes of the custom-factory and curve-factory launch terms in force when the
+        /// deposit was made (see _customTerms, _curveTerms). The relay does not know which
+        /// kind of voucher will claim the deposit, so it records both.
+        bytes32 customTerms;
+        bytes32 curveTerms;
     }
 
     mapping(address => mapping(bytes32 => Deposit)) public deposits;
+
+    /// @notice ETH currently held in escrow for unsettled, unreclaimed deposits. Anything above
+    /// it (and strandedFees) in the contract's balance was forced in and is recoverable by rescueStrayEth.
+    uint256 public totalEscrowed;
+    /// @notice ETH a fee recipient rejected; recoverable by the owner.
+    uint256 public strandedFees;
 
     // ---- vouchers ----
 
@@ -130,6 +151,9 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
     event MaxRelayerGasReimbursementUpdated(uint256 newCapWei);
     event LaunchDeposited(bytes32 indexed voucherHash, address indexed creator, uint256 amount, uint256 deadline);
     event DepositReclaimed(bytes32 indexed voucherHash, address indexed creator, uint256 amount);
+    event FeeTransferFailed(address indexed recipient, uint256 amount);
+    event StrandedFeesRescued(address indexed to, uint256 amount);
+    event StrayEthRescued(address indexed to, uint256 amount);
     event RelayedFeeSettled(
         bytes32 indexed voucherHash,
         address indexed token,
@@ -263,6 +287,38 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------
+    // Launch terms (what a deposit is bound to)
+    // ---------------------------------------------------------------
+
+    /// @dev The platform tax terms every launch snapshots, as the factories will read them.
+    function _platformTerms() private view returns (bytes memory) {
+        return abi.encode(taxSource.feeBps(), taxSource.graduationTargetUsd(), taxSource.rewardBps(), taxSource.creatorRewardBps());
+    }
+
+    /// @dev Everything the owner can change that a custom-tax launch's creator was shown: LP lock,
+    /// launch fee and the platform tax terms. (The buy-in slippage and cap only tighten or loosen the
+    /// guard around the creator's own buy-in, which the voucher's minCreatorTokensOut bounds.)
+    function _customTerms() private view returns (bytes32) {
+        return keccak256(abi.encode(customFactory.lpLockDuration(), customFactory.launchFee(), _platformTerms()));
+    }
+
+    /// @dev The same for a curve launch, plus the curve's own settings.
+    function _curveTerms() private view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                curveFactory.lpLockDuration(),
+                curveFactory.curveLaunchFee(),
+                curveFactory.curveFeeBps(),
+                curveFactory.curveSupplyBps(),
+                curveFactory.virtualEthReserveDefault(),
+                curveFactory.virtualTokenReserveBps(),
+                curveFactory.poolSeedTargetWei(),
+                _platformTerms()
+            )
+        );
+    }
+
+    // ---------------------------------------------------------------
     // Deposits
     // ---------------------------------------------------------------
 
@@ -273,6 +329,9 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         require(d.amount == 0, "V4LaunchRelay: voucher already funded");
         d.amount = msg.value;
         d.deadline = deadline;
+        d.customTerms = _customTerms();
+        d.curveTerms = _curveTerms();
+        totalEscrowed += msg.value;
         emit LaunchDeposited(voucherHash, msg.sender, msg.value, deadline);
     }
 
@@ -281,9 +340,15 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         require(d.amount > 0, "V4LaunchRelay: no such deposit");
         require(!d.settled, "V4LaunchRelay: voucher already relayed");
         require(!d.reclaimed, "V4LaunchRelay: already reclaimed");
-        require(block.timestamp > d.deadline, "V4LaunchRelay: deadline has not passed yet");
+        // Reclaimable once the deadline has passed, or at once if the owner has changed the launch
+        // terms (either kind) since the deposit was made.
+        require(
+            block.timestamp > d.deadline || d.customTerms != _customTerms() || d.curveTerms != _curveTerms(),
+            "V4LaunchRelay: deadline has not passed yet"
+        );
         d.reclaimed = true;
         uint256 amount = d.amount;
+        totalEscrowed -= amount;
         (bool sent,) = payable(msg.sender).call{value: amount}("");
         require(sent, "V4LaunchRelay: refund transfer failed");
         emit DepositReclaimed(voucherHash, msg.sender, amount);
@@ -298,9 +363,16 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         uint256 voucherDeadline,
         uint256 fee,
         uint256 currentFee,
-        uint256 forwarded
+        uint256 forwarded,
+        bool isCurve
     ) private {
         require(block.timestamp <= voucherDeadline, "V4LaunchRelay: voucher expired");
+        // The factory only treats this call as made for the creator if it has this relay registered; an
+        // unregistered relay would launch with the relay itself as creator (and LP owner) when the fee is 0.
+        require(
+            (isCurve ? curveFactory.launchRelay() : customFactory.launchRelay()) == address(this),
+            "V4LaunchRelay: factory does not recognise this relay"
+        );
         // The direct entry points make the sender pay the platform's fee; here it
         // comes from the deposit, so the fee the creator signed must not be below it.
         require(fee >= currentFee, "V4LaunchRelay: voucher fee below the current launch fee");
@@ -313,7 +385,12 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         require(!d.reclaimed, "V4LaunchRelay: deposit already reclaimed");
         require(block.timestamp <= d.deadline, "V4LaunchRelay: deposit expired, creator must reclaim");
         require(d.amount == fee + forwarded, "V4LaunchRelay: deposit does not match voucher amount");
+        require(
+            (isCurve ? d.curveTerms == _curveTerms() : d.customTerms == _customTerms()),
+            "V4LaunchRelay: launch terms changed since the deposit, reclaim it"
+        );
         d.settled = true;
+        totalEscrowed -= d.amount;
     }
 
     // ---------------------------------------------------------------
@@ -329,7 +406,7 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         uint256 gasStart = gasleft();
         bytes32 voucherHash = hashCustomVoucher(v);
         uint256 forwarded = v.liquidityEthAmount + v.creatorBuyEthAmount;
-        _consume(v.creator, voucherHash, signature, v.deadline, v.fee, customFactory.launchFee(), forwarded);
+        _consume(v.creator, voucherHash, signature, v.deadline, v.fee, customFactory.launchFee(), forwarded, false);
 
         _forward(
             address(customFactory),
@@ -364,7 +441,7 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
     {
         uint256 gasStart = gasleft();
         bytes32 voucherHash = hashCurveVoucher(v);
-        _consume(v.creator, voucherHash, signature, v.deadline, v.fee, curveFactory.curveLaunchFee(), v.creatorBuyEthAmount);
+        _consume(v.creator, voucherHash, signature, v.deadline, v.fee, curveFactory.curveLaunchFee(), v.creatorBuyEthAmount, true);
 
         bytes memory ret = _forward(
             address(curveFactory),
@@ -387,7 +464,7 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
     {
         uint256 gasStart = gasleft();
         bytes32 voucherHash = hashCustomCurveVoucher(v);
-        _consume(v.creator, voucherHash, signature, v.deadline, v.fee, curveFactory.curveLaunchFee(), v.creatorBuyEthAmount);
+        _consume(v.creator, voucherHash, signature, v.deadline, v.fee, curveFactory.curveLaunchFee(), v.creatorBuyEthAmount, true);
 
         bytes memory ret = _forward(
             address(curveFactory),
@@ -443,31 +520,63 @@ contract V4LaunchRelay is Ownable2Step, ReentrancyGuard {
         }
         if (gasReimbursement > feeCollected) gasReimbursement = feeCollected;
 
-        if (gasReimbursement > 0) {
-            (bool sentGas,) = payable(relayer).call{value: gasReimbursement, gas: PAY_GAS}("");
-            require(sentGas, "V4LaunchRelay: relayer gas reimbursement failed");
-        }
+        _payOrStrand(relayer, gasReimbursement);
 
         uint256 netFee = feeCollected - gasReimbursement;
         uint256 toRewards;
         uint256 toTreasury;
         if (netFee > 0) {
             address rd = taxSource.rewardsDistributor();
-            address treasury = taxSource.feeTreasury();
             if (rd != address(0)) {
                 toRewards = netFee / 2;
                 toTreasury = netFee - toRewards;
-                if (toRewards > 0) {
-                    (bool sentRewards,) = rd.call{value: toRewards}("");
-                    require(sentRewards, "V4LaunchRelay: rewards transfer failed");
+                // A rewards distributor that cannot take its half must not block launches: it goes to the treasury.
+                if (toRewards > 0 && !_tryPay(rd, toRewards)) {
+                    toTreasury += toRewards;
+                    toRewards = 0;
                 }
             } else {
                 toTreasury = netFee;
             }
-            (bool sent,) = treasury.call{value: toTreasury}("");
-            require(sent, "V4LaunchRelay: fee transfer failed");
+            _payOrStrand(taxSource.feeTreasury(), toTreasury);
         }
 
         emit RelayedFeeSettled(voucherHash, token, feeCollected, gasReimbursement, toTreasury, toRewards);
+    }
+
+    /// @dev Every fee payment is gas-capped (a recipient that burns gas cannot make launches cost the
+    /// relayer more) and never reverts the launch: what a recipient refuses is parked in strandedFees.
+    function _tryPay(address to, uint256 amount) private returns (bool ok) {
+        (ok,) = payable(to).call{value: amount, gas: PAY_GAS}("");
+        if (!ok) emit FeeTransferFailed(to, amount);
+    }
+
+    function _payOrStrand(address to, uint256 amount) private {
+        if (amount > 0 && !_tryPay(to, amount)) strandedFees += amount;
+    }
+
+    // ---------------------------------------------------------------
+    // Recovery (never touches escrowed deposits)
+    // ---------------------------------------------------------------
+
+    function rescueStrandedFees(address to, uint256 amount) external onlyOwner nonReentrant {
+        require(to != address(0), "V4LaunchRelay: invalid recipient");
+        require(amount <= strandedFees, "V4LaunchRelay: exceeds stranded fees");
+        strandedFees -= amount;
+        (bool sent,) = payable(to).call{value: amount}("");
+        require(sent, "V4LaunchRelay: rescue transfer failed");
+        emit StrandedFeesRescued(to, amount);
+    }
+
+    /// @notice Sweeps ETH that is neither escrow for a deposit nor a stranded fee (forced in by
+    /// selfdestruct or a coinbase payment).
+    function rescueStrayEth(address to) external onlyOwner nonReentrant returns (uint256 amount) {
+        require(to != address(0), "V4LaunchRelay: invalid recipient");
+        uint256 accountedFor = totalEscrowed + strandedFees;
+        require(address(this).balance > accountedFor, "V4LaunchRelay: no stray ETH to rescue");
+        amount = address(this).balance - accountedFor;
+        (bool sent,) = payable(to).call{value: amount}("");
+        require(sent, "V4LaunchRelay: rescue transfer failed");
+        emit StrayEthRescued(to, amount);
     }
 }
