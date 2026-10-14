@@ -331,16 +331,13 @@ describe("V4LaunchRelay (gasless custom-tax and curve launches)", function () {
         .to.be.revertedWith("V4LaunchRelay: voucher fee below the current launch fee");
     });
 
-    it("a voucher signed before the owner raises the fee is refused; the deposit is reclaimable after its deadline", async () => {
+    it("a voucher signed before the owner raises the fee is refused; the deposit is reclaimable at once (the launch terms changed)", async () => {
       const v = await voucher("custom", { deadline: (await now()) + 3600n }); await deposit("custom", v);
       await customFactory.setLaunchFee(LAUNCH_FEE * 2n);
       await expect(relay.connect(relayerW).relayedCreateCustomToken(orderFor("custom", v), await sign("custom", v)))
         .to.be.revertedWith("V4LaunchRelay: voucher fee below the current launch fee");
       const hash = await relay.hashCustomVoucher(orderFor("custom", v));
-      await expect(relay.connect(creator).reclaimDeposit(hash)).to.be.revertedWith("V4LaunchRelay: deadline has not passed yet");
-      await network.provider.send("evm_increaseTime", [3700]);
-      await network.provider.send("evm_mine");
-      const b0 = await ethers.provider.getBalance(creator.address);
+      const b0 = await ethers.provider.getBalance(creator.address); // the fee change is a change of launch terms: no waiting for the deadline
       const tx = await relay.connect(creator).reclaimDeposit(hash);
       const r = await tx.wait();
       expect((await ethers.provider.getBalance(creator.address)) - b0 + r.gasUsed * r.gasPrice).to.equal(total("custom", v));
@@ -406,12 +403,11 @@ describe("V4LaunchRelay (gasless custom-tax and curve launches)", function () {
         .to.be.revertedWith("V4CurveFactory: incorrect ETH sent");
     });
 
-    it("with the relay switched off (setLaunchRelay(0)) the relay's calls act as plain direct calls and cannot name a creator", async () => {
+    it("with the relay switched off (setLaunchRelay(0)) the relay refuses to launch: the factory would treat its calls as plain direct calls", async () => {
       await customFactory.setLaunchRelay(ZERO);
       const v = await voucher("custom"); await deposit("custom", v);
-      // relay now looks like any other caller: the fee is demanded of it, and it only forwards liq + buy
       await expect(relay.connect(relayerW).relayedCreateCustomToken(orderFor("custom", v), await sign("custom", v)))
-        .to.be.revertedWith("V4CustomTokenFactory: msg.value doesn't match liquidity + buy-in");
+        .to.be.revertedWith("V4LaunchRelay: factory does not recognise this relay");
     });
 
     it("only the owner can set the relay", async () => {
