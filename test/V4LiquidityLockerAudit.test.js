@@ -169,7 +169,7 @@ describe("V4LiquidityLocker security audit", function () {
     afterEach(async () => {
       await network.provider.request({ method: "hardhat_stopImpersonatingAccount", params: [await factory.getAddress()] });
     });
-    const fut = async () => (await now()) + 1000n;
+    const fut = async () => (await now()) + BigInt(2 * 24 * 3600);
 
     it("rejects zero owner, zero refund target, past unlock, nothing to seed", async () => {
       const L = locker.connect(fsig);
@@ -225,9 +225,9 @@ describe("V4LiquidityLocker security audit", function () {
       expect((await ethers.provider.getBalance(other.address)) - e0).to.be.gt(ETH("4.9"));
     });
 
-    it("ownership: two-step, cannot be renounced before a factory is wired (and is allowed after), rescue is owner-only", async () => {
+    it("ownership: two-step, can never be renounced (see LK-6 in the re-audit tests), rescue is owner-only", async () => {
       const fresh = await (await ethers.getContractFactory("V4LiquidityLocker")).deploy(await pm.getAddress());
-      await expect(fresh.renounceOwnership()).to.be.revertedWith("V4LiquidityLocker: cannot renounce before a factory is wired");
+      await expect(fresh.renounceOwnership()).to.be.revertedWith("V4LiquidityLocker: ownership cannot be renounced");
       await expect(fresh.connect(other).setFactory(other.address)).to.be.reverted;
       await expect(fresh.connect(other).setExtraFactory(other.address, true)).to.be.reverted;
       await (await fresh.transferOwnership(other.address)).wait();
