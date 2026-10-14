@@ -222,7 +222,7 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
 
         uint256 ethUsed;
         uint256 tokenUsed;
-        (lockId, liquidity, ethUsed, tokenUsed) = _seed(key, _creator(), totalSupply_, liquidityEthAmount);
+        (lockId, liquidity, ethUsed, tokenUsed) = _seed(key, _creator(), totalSupply_, liquidityEthAmount, lpLockDuration);
 
         if (creatorBuyEthAmount > 0) {
             creatorTokensBought =
@@ -231,8 +231,7 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
     }
 
     function _payLaunchFee(uint256 fee) private {
-        (bool ok,,) = _splitFee(fee);
-        require(ok, "V4CustomTokenFactory: fee transfer failed");
+        require(_splitFee(fee), "V4CustomTokenFactory: fee transfer failed");
     }
 
     // ---------------------------------------------------------------
@@ -330,7 +329,8 @@ contract V4CustomTokenFactory is V4PoolLauncher, IUnlockCallback {
     }
 
     /// @notice Recovers ETH that was forced into the factory (selfdestruct, a coinbase reward).
-    /// A launch keeps no ETH here between transactions, so nothing is escrowed against it.
+    /// A launch keeps no ETH here between transactions, so nothing is escrowed against it. The one
+    /// exception is seed-rounding dust that neither the creator nor the treasury would take (DustKept).
     function rescueETH(address payable to, uint256 amount) external onlyOwner nonReentrant {
         require(to != address(0), "V4CustomTokenFactory: invalid recipient");
         (bool sent,) = to.call{value: amount}("");

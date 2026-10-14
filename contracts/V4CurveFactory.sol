@@ -41,7 +41,8 @@ interface IV4CreatorDeposit {
 /// hook, attaches the creator's custom fee split when the token is a custom
 /// one, and hands the whole remaining token balance plus every wei of real ETH
 /// to the V4LiquidityLocker, which locks the full-range position to the
-/// ORIGINAL creator for lpLockDuration. After that the token trades on the V4
+/// ORIGINAL creator for the lpLockDuration in force when the curve was created (snapshotted with the tax
+/// terms, so a later change of the setting never touches a curve that is already trading). After that the token trades on the V4
 /// pool through V4SwapRouter like any other V4 launch.
 ///
 /// Because the tax lives in the pool's hook, curve trades are never taxed and
@@ -111,6 +112,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         uint256 curveFeeBps;
         bool graduated;
         bool isCustom;
+        uint64 lockDuration; // LP lock seconds, snapshotted at creation (see _storeTerms)
         uint256 createdAt;
         TaxTerms terms; // platform tax terms, snapshotted at creation
         V4TaxHook.CustomFees fees; // creator split, custom curves only
@@ -550,6 +552,7 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
 
     function _storeTerms(address token) private {
         curves[token].terms = _currentTerms();
+        curves[token].lockDuration = uint64(lpLockDuration); // bounded by MAX_LOCK_DURATION
     }
 
     function _storeFees(address token, V4TaxHook.CustomFees memory f) private {
@@ -714,8 +717,14 @@ contract V4CurveFactory is V4PoolLauncher, Pausable {
         uint256 ethForPool
     ) private {
         (uint256 lockId, uint256 liquidity, uint256 ethUsed, uint256 tokenUsed) =
-            _seed(key, creator_, tokensForPool, ethForPool);
-        emit CurveGraduated(token, poolId, ethUsed, tokenUsed, liquidity, block.timestamp + lpLockDuration, lockId);
+            _seed(key, creator_, tokensForPool, ethForPool, _lockDurationOf(token));
+        emit CurveGraduated(token, poolId, ethUsed, tokenUsed, liquidity, block.timestamp + _lockDurationOf(token), lockId);
+    }
+
+    /// @dev The LP lock this curve was created under. The owner can change lpLockDuration at any time,
+    /// but a curve's buyers were promised the lock that was in force when it was created.
+    function _lockDurationOf(address token) private view returns (uint256) {
+        return curves[token].lockDuration;
     }
 
     /// @dev The distributor slots may have changed since the token was

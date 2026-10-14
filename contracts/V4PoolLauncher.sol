@@ -68,6 +68,11 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
     /// @dev Gas given to the creator when returning seed-rounding ETH dust. Enough
     /// for a smart wallet's receive hook, not enough to be used to grief.
     uint256 private constant DUST_CALL_GAS = 50_000;
+    /// @dev Gas given to every other ETH payment this contract makes to an address someone else
+    /// controls (the platform treasury, the rewards distributor). Same cap as V4LaunchRelay and
+    /// V4CurveFactory use: ample for a multisig or a distributor's receive hook, and a recipient that
+    /// burns gas can no longer make a launch or a graduation cost millions more.
+    uint256 private constant PAY_GAS = 300_000;
 
     IPoolManager public immutable poolManager;
     V4LiquidityLocker public immutable locker;
@@ -84,6 +89,12 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
     /// launch calls are made on someone else's behalf. Zero = gasless launches off.
     address public launchRelay;
     event LaunchRelayUpdated(address newRelay);
+    /// @notice The rewards distributor could not receive its share of a launch fee; the share went to
+    /// the treasury instead so the launch still succeeds (same rule as V4TokenFactory).
+    event RewardsPayoutFailed(address indexed distributor, uint256 amount);
+    /// @notice Seed-rounding ETH that neither the creator nor the treasury would take. It stays on the
+    /// factory as stray ETH, which the owner can sweep, rather than blocking the launch or graduation.
+    event DustKept(address indexed creator, uint256 amount);
 
     /// @dev Platform tax terms for one pool, snapshotted from the tax source.
     struct TaxTerms {
@@ -149,8 +160,11 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
         return _isRelayed() ? 0 : fee;
     }
 
-    /// @notice Sets (or, with address(0), turns off) the gasless launch relay.
+    /// @notice Sets (or, with address(0), turns off) the gasless launch relay. The relay is a contract
+    /// (V4LaunchRelay): whoever sits in this slot launches for any creator it names and pays no launch
+    /// fee, so an address with no code (a mistyped address, a plain wallet) is refused.
     function setLaunchRelay(address newRelay) external onlyOwner {
+        require(newRelay == address(0) || newRelay.code.length > 0, "V4PoolLauncher: relay is not a contract");
         launchRelay = newRelay;
         emit LaunchRelayUpdated(newRelay);
     }
@@ -198,26 +212,33 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
         require(t.rewardBps + t.creatorRewardBps <= t.feeBps, "V4PoolLauncher: reward bps exceed fee bps");
     }
 
-    /// @dev launch / deploy fee: 50/50 between treasury and the platform
-    /// rewards distributor when one is set, all to the treasury otherwise.
-    /// Same rule as V4TokenFactory._finalizeLaunch.
-    function _splitFee(uint256 amount) internal returns (bool okAll, address failedTo, uint256 failedAmt) {
-        okAll = true;
-        if (amount == 0) return (true, address(0), 0);
+    /// @dev launch / deploy fee: 50/50 between treasury and the platform rewards
+    /// distributor when one is set, all to the treasury otherwise (the same rule as
+    /// V4TokenFactory._finalizeLaunch). A rewards distributor that cannot take its half (it reverts, or
+    /// needs more than PAY_GAS) must not block every launch: its half goes to the treasury and the
+    /// failure is logged. The treasury is the fee's final home, so a treasury that cannot take it makes
+    /// this return false and the caller reverts, leaving the creator's ETH with the creator.
+    function _splitFee(uint256 amount) internal returns (bool) {
+        if (amount == 0) return true;
         address rd = taxSource.rewardsDistributor();
-        address treasury = taxSource.feeTreasury();
+        uint256 toTreasury = amount;
         if (rd != address(0)) {
             uint256 toRewards = amount / 2;
-            uint256 toTreasury = amount - toRewards;
             if (toRewards > 0) {
-                (bool s1,) = rd.call{value: toRewards}("");
-                if (!s1) return (false, rd, toRewards);
+                if (_pay(rd, toRewards, PAY_GAS)) toTreasury -= toRewards;
+                else emit RewardsPayoutFailed(rd, toRewards);
             }
-            (bool s2,) = treasury.call{value: toTreasury}("");
-            if (!s2) return (false, treasury, toTreasury);
-        } else {
-            (bool s3,) = treasury.call{value: amount}("");
-            if (!s3) return (false, treasury, amount);
+        }
+        return _pay(taxSource.feeTreasury(), toTreasury, PAY_GAS);
+    }
+
+    /// @dev Plain ETH transfer with a gas cap. The reply is never copied (a recipient answering with
+    /// megabytes costs nothing extra) and a zero address, which would just burn the ETH, counts as a
+    /// failure.
+    function _pay(address to, uint256 value, uint256 gasCap) private returns (bool ok) {
+        if (to == address(0)) return false;
+        assembly ("memory-safe") {
+            ok := call(gasCap, to, value, 0, 0, 0, 0)
         }
     }
 
@@ -277,9 +298,10 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
     }
 
     /// @dev Hands tokenAmount of the token + ethAmount of ETH to the locker for
-    /// a full-range position locked to `creator_`. Dust comes back here: ETH to
-    /// the creator, leftover tokens burned.
-    function _seed(PoolKey memory key, address creator_, uint256 tokenAmount, uint256 ethAmount)
+    /// a full-range position locked to `creator_` for `lockDuration` (the caller
+    /// picks it: a custom launch uses the current setting, a curve the one it was created under).
+    /// Dust comes back here: ETH to the creator, leftover tokens burned.
+    function _seed(PoolKey memory key, address creator_, uint256 tokenAmount, uint256 ethAmount, uint256 lockDuration)
         internal
         returns (uint256 lockId, uint256 liquidity, uint256 ethUsed, uint256 tokenUsed)
     {
@@ -287,27 +309,31 @@ abstract contract V4PoolLauncher is Ownable2Step, ReentrancyGuard {
         IERC20(token).safeTransfer(address(locker), tokenAmount);
         uint128 liq;
         (lockId, liq, ethUsed, tokenUsed) = locker.seedAndLock{value: ethAmount}(
-            key, creator_, block.timestamp + lpLockDuration, tokenAmount, address(this)
+            key, creator_, block.timestamp + lockDuration, tokenAmount, address(this)
         );
         liquidity = liq;
+        _returnDust(token, creator_, ethAmount - ethUsed);
+        emit LiquidityAdded(token, creator_, ethUsed, tokenUsed, liquidity, block.timestamp + lockDuration, lockId);
+    }
+
+    /// @dev Leftover tokens are burned (the launcher's whole balance, so nothing is stranded), the ETH
+    /// rounding dust goes back to the creator.
+    function _returnDust(address token, address creator_, uint256 ethDust) private {
         uint256 tokenDust = IERC20(token).balanceOf(address(this));
         if (tokenDust > 0) IV4LaunchToken(token).burn(tokenDust);
-        uint256 ethDust = ethAmount - ethUsed;
         if (ethDust > 0) _sendDust(creator_, ethDust);
-        emit LiquidityAdded(token, creator_, ethUsed, tokenUsed, liquidity, block.timestamp + lpLockDuration, lockId);
     }
 
     /// @dev Returns seed-rounding ETH to the creator without ever letting the
-    /// creator block the launch or graduation: the call is gas-capped, and if
-    /// the creator rejects it the (tiny) dust goes to the platform treasury
-    /// instead. Graduation is permissionless and must not depend on a token
-    /// creator's receive hook.
+    /// creator, or the treasury, block the launch or graduation: both calls are
+    /// gas-capped, the creator is tried first, then the platform treasury, and
+    /// dust that neither takes stays on this contract as stray ETH (the owner
+    /// can sweep it; it is never a curve's reserve). Graduation is permissionless
+    /// and must not depend on anybody's receive hook.
     function _sendDust(address creator_, uint256 amount) internal {
-        (bool ok,) = payable(creator_).call{value: amount, gas: DUST_CALL_GAS}("");
-        if (!ok) {
-            (ok,) = payable(taxSource.feeTreasury()).call{value: amount}("");
-            require(ok, "V4PoolLauncher: dust transfer failed");
-        }
+        if (_pay(creator_, amount, DUST_CALL_GAS)) return;
+        if (_pay(taxSource.feeTreasury(), amount, PAY_GAS)) return;
+        emit DustKept(creator_, amount);
     }
 
     function _sendEth(address to, uint256 amount) internal {
