@@ -181,7 +181,7 @@ describe("V4TaxHook security audit", function () {
       const feedAddr = await feed.getAddress();
       await expect(hook.connect(other).configurePool(key, other.address, 100, feedAddr, 1, 3600, ZERO, 0, ZERO, 0, ZERO))
         .to.be.revertedWithCustomError(hook, "NotFactory");
-      await expect(hook.connect(other).updatePriceFeed(poolId, feedAddr, 3600)).to.be.revertedWithCustomError(hook, "NotFactory");
+      await expect(hook.connect(other).updatePriceFeed(poolId, feedAddr, 3600)).to.be.revertedWith("V4TaxHook: not this pool's launcher");
       await expect(hook.connect(other).setTaxExempt(other.address, true)).to.be.revertedWithCustomError(hook, "NotFactory");
       await expect(hook.connect(other).setLauncher(other.address, true)).to.be.revertedWith("V4TaxHook: not deployer");
       await expect(hook.connect(other).setLiquidityCompounder(other.address)).to.be.revertedWith("V4TaxHook: not deployer");

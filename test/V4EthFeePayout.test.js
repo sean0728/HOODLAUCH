@@ -173,7 +173,7 @@ describe("V4TaxHook ETH fees: accrual and flush", function () {
       expect((await paidAll())).to.equal(total);
     });
 
-    it("a payout that fails is all-or-nothing, stays booked, and is paid on a later flush", async () => {
+    it("a destination that refuses ETH keeps only its own share booked; the others are paid, and it is retried later", async () => {
       const { key, poolId } = await launchPlain();
       await (await swap(trader, key, true, -ETH("2"), ETH("2"))).wait();
       const pending = await hook.pendingEth(poolId);
@@ -183,22 +183,27 @@ describe("V4TaxHook ETH fees: accrual and flush", function () {
       expect(failed.length).to.equal(1);
       expect(failed[0].args.platformPart).to.equal(true);
       expect(failed[0].args.marketingPart).to.equal(false);
-      expect(await hook.pendingEth(poolId)).to.equal(pending);
-      expect(await paidRW()).to.equal(0n); // not half-paid
-      expect(await paidCR()).to.equal(0n);
+      // 30 / 10 / 60: rewards and creator are delivered, only the fee-wallet share (60%) is still owed
+      expect(await paidRW()).to.equal((pending * 30n) / 100n);
+      expect(await paidCR()).to.equal((pending * 10n) / 100n);
+      expect(await paidFW()).to.equal(0n);
+      const left1 = await hook.pendingEth(poolId);
+      expect(left1).to.equal(pending - (await paidRW()) - (await paidCR()));
+      expect((await hook.owed(poolId)).feeSide).to.equal(left1);
       // trading is unaffected by a stuck payout
       await (await swap(trader, key, true, -ETH("1"), ETH("1"))).wait();
       const pending2 = await hook.pendingEth(poolId);
-      expect(pending2).to.be.gt(pending);
+      expect(pending2).to.be.gt(left1);
       await feeSink.setRejecting(false);
       await (await hook.flush(poolId)).wait();
       expect(await hook.pendingEth(poolId)).to.equal(0n);
-      expect((await paidAll())).to.equal(pending2);
+      expect(await bal(await hookAddr())).to.equal(0n);
+      expect(await paidAll()).to.equal(pending + (pending2 - left1)); // every wei booked was delivered exactly once
     });
 
     it("payPlatform can only be called by the hook itself; ETH can only be sent to the hook by the pool manager", async () => {
       const { poolId } = await launchPlain();
-      await expect(hook.connect(other).payPlatform(poolId, 1, 0)).to.be.revertedWith("V4TaxHook: internal only");
+      await expect(hook.connect(other).payPlatform(poolId, 1, 0, 0, 0)).to.be.revertedWith("V4TaxHook: internal only");
       await expect(other.sendTransaction({ to: await hookAddr(), value: 1n })).to.be.revertedWith("V4TaxHook: ETH only from the pool manager");
     });
 

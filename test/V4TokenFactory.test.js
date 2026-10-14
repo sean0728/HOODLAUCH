@@ -412,7 +412,7 @@ describe("V4 pilot (V4TokenFactory + V4TaxHook + V4LiquidityLocker)", function (
       await expect(hook.connect(other).configurePool(key, other.address, 100, other.address, 1, 1, ZERO, 0, ZERO, 0, ZERO))
         .to.be.revertedWithCustomError(hook, "NotFactory");
       await expect(hook.connect(other).updatePriceFeed(await token.poolId(), other.address, 100))
-        .to.be.revertedWithCustomError(hook, "NotFactory");
+        .to.be.revertedWith("V4TaxHook: not this pool's launcher");
       await expect(hook.connect(other).beforeSwap(other.address, key, { zeroForOne: true, amountSpecified: -1, sqrtPriceLimitX96: MIN_SQRT }, "0x"))
         .to.be.revertedWithCustomError(hook, "NotPoolManager");
       await expect(locker.connect(other).seedAndLock(key, other.address, 2n ** 60n, 1, other.address, { value: 1 }))
