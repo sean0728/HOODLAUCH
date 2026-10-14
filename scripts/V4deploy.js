@@ -58,7 +58,7 @@
 //                              skipped with a warning if DEX_ROUTER_ADDRESS is not set).
 //   LAUNCH_FEE_WEI / CURVE_LAUNCH_FEE_WEI   Fees in wei (default: $100 / $25 at a live ETH price, or $3000
 //                              if no price can be fetched). There is no deploy-only fee any more.
-//   LP_LOCK_DURATION_SECONDS   LP lock (default 15 days; 1 second to 10 years).
+//   LP_LOCK_DURATION_SECONDS   LP lock (default 15 days; 1 day to 10 years).
 //   SNIPE_START_BPS            anti-snipe surcharge on buys at launch (default 2500 = 25%, max 7000; 0 = off).
 //   SNIPE_DURATION_SECONDS     how long it takes to fall to zero (default 180, max 3600; 0 = off).
 //                              Applied to V4TokenFactory, V4CustomTokenFactory and V4CurveFactory alike; each has
