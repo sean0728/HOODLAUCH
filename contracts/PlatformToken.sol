@@ -6,152 +6,166 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /// @title PlatformToken
-/// @notice Hood Launch's own token — the one the platform itself launches
-/// "in conjunction with the launch of the platform" (the owner's own
-/// words). A plain, fixed-supply, ordinary ERC20 in every way a holder or
-/// a DEX ever sees it — no tax, no transfer restrictions, nothing that
-/// makes it behave differently from any other token someone could launch
-/// through this same platform.
+/// @notice Hood Launch's own token: a plain, fixed-supply ERC20 in every way a holder or a DEX ever
+/// sees it (no tax, no transfer restrictions, no mint, no pause, no blacklist) with two additions that
+/// exist only so the platform's airdrop rounds (V4PlatformTokenRewards, V4PlatformTaxDistributor) can
+/// pay holders fairly:
 ///
-/// The one thing it adds on top of a stock ERC20Burnable is a live,
-/// enumerable holder registry, maintained automatically in _update below,
-/// because V4PlatformTokenRewards needs to be able to walk "every
-/// current holder" on-chain, in a deterministic order, to push out batched
-/// airdrops — see V4PlatformTokenRewards.processAirdropBatch. Nothing
-/// about the registry affects transfers, balances, or supply; it's pure
-/// bookkeeping alongside the ERC20 state OpenZeppelin already tracks.
+///  1. An enumerable, APPEND-ONLY holder registry. An address is added the first time it holds a
+///     nonzero balance and is never removed (a holder who sells everything simply holds zero and is
+///     paid zero). Indices therefore never move, so a round that walks the registry over several
+///     transactions cannot skip a holder or run off the end of the list. holderGeneration is the
+///     address's position (1-based) and holderGenerationCounter the number of addresses registered.
 ///
-/// The registry is a small hand-rolled swap-and-pop set (an address array
-/// plus a 1-based index mapping) rather than OpenZeppelin's own
-/// EnumerableSet.AddressSet — deliberately: the version of EnumerableSet
-/// this project's pinned OpenZeppelin release resolves to pulls in
-/// Arrays.sol helpers that use the `mcopy` opcode, which isn't available
-/// under this project's target EVM version (hardhat.config.js's
-/// solidity.settings leaves evmVersion at its pre-Cancun default, matching
-/// Robinhood Chain's own EVM support). Avoiding the import sidesteps that
-/// entirely; the logic below (append on add, swap-last-into-slot on
-/// remove) is the exact same approach EnumerableSet itself uses
-/// internally.
+///  2. Balance snapshots (the same idea as OpenZeppelin's ERC20Snapshot, written out here because
+///     this project's pinned OpenZeppelin does not ship one and its Arrays helper needs `mcopy`).
+///     An authorised snapshotter (a distributor, authorised by the owner) calls snapshot() when a
+///     round starts and then reads balanceOfAt / totalSupplyAt, so every holder is paid for the
+///     balance it held at that moment, whatever it does with its tokens while the round is paid out
+///     over several transactions. Without this, a holder paid early could send its tokens to another
+///     registered wallet that had not been paid yet and be paid twice.
 ///
-/// burn()/burnFrom() (via ERC20Burnable) are what V4PlatformTokenRewards
-/// calls on its own balance after every buyback, to actually destroy the
-/// "burn" half of each round — see V4PlatformTokenRewards._splitAndProcess.
+/// Powers of the owner: it can authorise or remove snapshotters and nothing else. It cannot move,
+/// freeze, mint or burn anyone's tokens. An unauthorised address cannot snapshot (otherwise anyone
+/// could force a checkpoint write into every transfer); a rogue snapshotter could only make later
+/// transfers cost more gas. Ownership can be renounced once the distributors are authorised.
 ///
-/// Alongside the registry itself, holderGeneration/holderGenerationCounter
-/// stamp each holder with WHEN it most recently entered the registry. This
-/// exists purely so V4PlatformTokenRewards's airdrop rounds can tell a
-/// genuine round-start holder apart from one that entered (or re-entered)
-/// after a round had already started, even when that address happens to
-/// land at a registry index the round would otherwise have treated as
-/// "safe" — see holderGenerationCounter's own comment and
-/// V4PlatformTokenRewards.processAirdropBatch for the full mechanics.
+/// Cost to a holder: a transfer writes an account's checkpoint only the first time its balance changes
+/// after a snapshot (about 45,000 gas each for the sender and the receiver, once per snapshot), and a
+/// transfer to an address that has never held the token also registers it (about 90,000 gas, once ever).
+///
+/// burn()/burnFrom() (ERC20Burnable) are what the distributors call after every buyback.
 contract PlatformToken is ERC20, ERC20Burnable, Ownable2Step {
-    address[] private _holderList;
-    mapping(address => uint256) private _holderIndex; // 1-based index into _holderList; 0 means "not currently a holder"
+    // ---------------------------------------------------------------- holder registry
 
-    /// @notice Monotonically increasing counter, bumped once every time an
-    /// address transitions from a zero balance to a nonzero one (i.e. every
-    /// time _addHolder actually registers someone new, whether for the
-    /// first time ever or re-entering after a previous exit) — see
-    /// holderGeneration below and _addHolder. Added specifically so
-    /// V4PlatformTokenRewards's airdrop rounds can tell a genuine
-    /// round-start holder apart from an address that only entered (or
-    /// re-entered) the registry after a round had already started, even
-    /// when that address happens to land at a registry INDEX that existed
-    /// at round start (which can happen because _removeHolder's swap-and-pop
-    /// can hand a freshly-vacated low index to a brand-new holder — see
-    /// V4PlatformTokenRewards.processAirdropBatch's own comment on
-    /// roundGenerationAtStart for the full reasoning). Starts at 0 (no
-    /// holder has ever been registered); the first holder ever added gets
-    /// generation 1, matching this file's own existing 1-based
-    /// _holderIndex convention.
+    address[] private _holderList;
+    mapping(address => uint256) private _holderIndex; // 1-based; 0 = never held
+
+    /// @notice Number of addresses ever registered (equal to holderCount()). Kept for the
+    /// distributors' existing interface.
     uint256 public holderGenerationCounter;
 
-    /// @notice The generation stamped on `account` the most recent time it
-    /// was added to the holder registry (see holderGenerationCounter
-    /// above). 0 means the address has never been a holder. An address that
-    /// drains to zero and is later re-added gets a NEW, higher generation —
-    /// deliberately: whatever balance it holds after re-entering has no
-    /// relationship to any round's supply snapshot computed before that
-    /// re-entry, so it must be treated as a brand-new entrant, not as
-    /// continuously eligible since its original, long-ago first entry.
+    /// @notice The address's 1-based position in the registry; 0 = never held a balance. Set once.
     mapping(address => uint256) public holderGeneration;
+
+    // ---------------------------------------------------------------- snapshots
+
+    /// @dev One storage slot per checkpoint (id and value packed): a snapshot costs an account one slot
+    /// write plus the array length the first time its balance changes afterwards. The constructor caps
+    /// the supply at 2^128 - 1, so a balance always fits.
+    struct Checkpoint {
+        uint128 id;
+        uint128 value;
+    }
+
+    mapping(address => Checkpoint[]) private _balanceCheckpoints;
+    Checkpoint[] private _supplyCheckpoints;
+
+    /// @notice Id of the latest snapshot; 0 = none taken yet.
+    uint256 public currentSnapshotId;
+
+    /// @notice Addresses allowed to call snapshot(). Set by the owner.
+    mapping(address => bool) public isSnapshotter;
+
+    event Snapshot(uint256 id, address indexed by);
+    event SnapshotterSet(address indexed account, bool allowed);
 
     /// @param name_ Token name.
     /// @param symbol_ Token symbol.
-    /// @param totalSupply_ The entire, fixed supply — minted once, here,
-    /// and never again. There is no mint() function anywhere in this
-    /// contract.
-    /// @param initialHolder_ Where the full supply lands at construction —
-    /// expected to be the deployer/admin wallet, who from there seeds
-    /// liquidity (via this same platform's own launch flow or directly
-    /// against the DEX router) exactly like any other token's creator
-    /// would, entirely as a separate, later step from this deployment.
-    constructor(
-        string memory name_,
-        string memory symbol_,
-        uint256 totalSupply_,
-        address initialHolder_
-    ) ERC20(name_, symbol_) Ownable(msg.sender) {
+    /// @param totalSupply_ The entire, fixed supply, minted once, here. There is no mint() anywhere.
+    /// @param initialHolder_ Where the full supply lands at construction (the deployer or admin wallet,
+    /// who then seeds liquidity as a separate, later step).
+    constructor(string memory name_, string memory symbol_, uint256 totalSupply_, address initialHolder_)
+        ERC20(name_, symbol_)
+        Ownable(msg.sender)
+    {
         require(totalSupply_ > 0, "PlatformToken: supply must be > 0");
+        require(totalSupply_ <= type(uint128).max, "PlatformToken: supply too large");
         require(initialHolder_ != address(0), "PlatformToken: invalid initial holder");
         _mint(initialHolder_, totalSupply_);
     }
 
-    /// @notice How many distinct addresses currently hold a nonzero
-    /// balance. Grows/shrinks automatically as balances cross zero — see
-    /// _update below.
+    // ---------------------------------------------------------------- registry views
+
+    /// @notice How many addresses have ever held a nonzero balance. Never decreases.
     function holderCount() external view returns (uint256) {
         return _holderList.length;
     }
 
-    /// @notice The holder address at a given registry index. Indices are
-    /// NOT stable across calls that change the registry (removal is
-    /// swap-and-pop, same as OpenZeppelin's EnumerableSet) — callers that
-    /// need to walk the whole set across multiple transactions, like
-    /// V4PlatformTokenRewards's batched airdrop, must tolerate that a
-    /// holder's index can shift if someone else's balance hits zero in
-    /// between. See V4PlatformTokenRewards.processAirdropBatch for how
-    /// that tradeoff is handled.
+    /// @notice The address at registry index `index`. Indices are stable: an entry never moves.
     function holderAt(uint256 index) external view returns (address) {
         return _holderList[index];
     }
 
-    /// @dev Maintains the holder registry alongside every mint, burn, and
-    /// transfer. Runs after the balance change itself (super._update), so
-    /// balanceOf(from)/balanceOf(to) below already reflect the new
-    /// balances. Adding an address that's already present, or removing one
-    /// that's already absent, is a harmless no-op.
+    // ---------------------------------------------------------------- snapshots
+
+    /// @notice Owner only: allow or stop an address (a distributor) from taking snapshots.
+    function setSnapshotter(address account, bool allowed) external onlyOwner {
+        require(account != address(0), "PlatformToken: invalid snapshotter");
+        isSnapshotter[account] = allowed;
+        emit SnapshotterSet(account, allowed);
+    }
+
+    /// @notice Starts a new snapshot and returns its id. Authorised snapshotters only.
+    function snapshot() external returns (uint256 id) {
+        require(isSnapshotter[msg.sender], "PlatformToken: not a snapshotter");
+        id = ++currentSnapshotId;
+        emit Snapshot(id, msg.sender);
+    }
+
+    /// @notice `account`'s balance at the moment snapshot `id` was taken.
+    function balanceOfAt(address account, uint256 id) public view returns (uint256) {
+        (bool found, uint256 value) = _valueAt(id, _balanceCheckpoints[account]);
+        return found ? value : balanceOf(account);
+    }
+
+    /// @notice Total supply at the moment snapshot `id` was taken.
+    function totalSupplyAt(uint256 id) public view returns (uint256) {
+        (bool found, uint256 value) = _valueAt(id, _supplyCheckpoints);
+        return found ? value : totalSupply();
+    }
+
+    /// @dev The value recorded for the first checkpoint at or after `id`: it is what the account held
+    /// when snapshot `id` was taken, because a checkpoint is written (with the old value) just before
+    /// the first change after each snapshot. None at or after `id` means nothing changed since, so the
+    /// live value is the snapshot value.
+    function _valueAt(uint256 id, Checkpoint[] storage c) private view returns (bool, uint256) {
+        require(id > 0 && id <= currentSnapshotId, "PlatformToken: invalid snapshot id");
+        uint256 low = 0;
+        uint256 high = c.length;
+        while (low < high) {
+            uint256 mid = (low + high) / 2;
+            if (c[mid].id >= id) high = mid;
+            else low = mid + 1;
+        }
+        if (low == c.length) return (false, 0);
+        return (true, c[low].value);
+    }
+
+    function _checkpoint(Checkpoint[] storage c, uint256 valueBefore) private {
+        uint256 id = currentSnapshotId;
+        if (id == 0) return;
+        uint256 n = c.length;
+        if (n == 0 || c[n - 1].id < id) c.push(Checkpoint(uint128(id), uint128(valueBefore)));
+    }
+
+    // ---------------------------------------------------------------- transfers
+
+    /// @dev Runs on every mint, burn and transfer. Before the balances change it records the old values
+    /// for the current snapshot (once per account per snapshot); after, it registers a receiver that has
+    /// never held the token. Nothing here can revert a transfer except the arithmetic of the ERC20 itself.
     function _update(address from, address to, uint256 value) internal override(ERC20) {
+        if (from != address(0)) _checkpoint(_balanceCheckpoints[from], balanceOf(from));
+        if (to != address(0)) _checkpoint(_balanceCheckpoints[to], balanceOf(to));
+        if (from == address(0) || to == address(0)) _checkpoint(_supplyCheckpoints, totalSupply());
+
         super._update(from, to, value);
 
-        if (from != address(0) && balanceOf(from) == 0) {
-            _removeHolder(from);
+        if (to != address(0) && _holderIndex[to] == 0 && balanceOf(to) > 0) {
+            _holderList.push(to);
+            _holderIndex[to] = _holderList.length;
+            holderGenerationCounter = _holderList.length;
+            holderGeneration[to] = _holderList.length;
         }
-        if (to != address(0) && balanceOf(to) > 0) {
-            _addHolder(to);
-        }
-    }
-
-    function _addHolder(address account) private {
-        if (_holderIndex[account] != 0) return; // already registered
-        _holderList.push(account);
-        _holderIndex[account] = _holderList.length; // 1-based
-        holderGenerationCounter += 1;
-        holderGeneration[account] = holderGenerationCounter;
-    }
-
-    function _removeHolder(address account) private {
-        uint256 idx = _holderIndex[account]; // 1-based
-        if (idx == 0) return; // not registered
-
-        uint256 lastIndex = _holderList.length; // also 1-based, since length == count
-        if (idx != lastIndex) {
-            address lastAccount = _holderList[lastIndex - 1];
-            _holderList[idx - 1] = lastAccount;
-            _holderIndex[lastAccount] = idx;
-        }
-        _holderList.pop();
-        delete _holderIndex[account];
     }
 }
