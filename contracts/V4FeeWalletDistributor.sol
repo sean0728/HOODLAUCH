@@ -9,16 +9,23 @@ import "./V4PlatformTokenRewards.sol";
 
 /// @title V4FeeWalletDistributor
 /// @notice V4 counterpart of FeeWalletDistributor: receives the platform's own
-/// remainder of the trading tax in kind (V4TaxHook pushes it here), converts
-/// it to ETH in each token's own V4 pool and pays it to the fee wallet.
+/// remainder of the trading tax and pays it to the fee wallet. Today that
+/// remainder is ETH: V4TaxHook's flush() (and V4CurveFactory's per-trade fee)
+/// call depositFee(). With a buyback configured, half of it is earmarked for
+/// buying PlatformToken and half is owed to the fee wallet; with none, all of it
+/// is owed to the fee wallet. The older in-kind path is kept for fee tokens that
+/// still arrive (an older pool's fees, or tokens sent by hand): they are
+/// converted to ETH in each token's own V4 pool and booked the same way.
 ///
 /// Once platformToken is set (and a V2 buyback router was provided), half of
-/// each conversion's ETH is used to buy PlatformToken instead, split 50/50
-/// burn / holder airdrop, exactly the net effect of the V2 contract: of every
-/// unit of tax reaching here, 50% is ETH for the fee wallet, 25% worth is
-/// burned and 25% worth is airdropped. Differences from V2: one V4 sale per
-/// call instead of two swaps, and the PlatformToken leg buys with ETH on the
-/// platform token's own (V2) pool.
+/// the ETH is used to buy PlatformToken instead, split 50/50 burn / holder
+/// airdrop, exactly the net effect of the V2 contract: of every unit of tax
+/// reaching here, 50% is ETH for the fee wallet, 25% worth is burned and 25%
+/// worth is airdropped. Differences from V2: one V4 sale per call instead of
+/// two swaps, and the PlatformToken leg buys with ETH on the platform token's
+/// own (V2) pool. The ETH arriving through depositFee is NOT bought back inside
+/// the deposit (that would put a V2 swap with no price floor in every trade);
+/// an owner or keeper runs triggerPendingBuyback with a floor.
 ///
 /// Audit changes: only the owner and approved keepers (the relayer) may start a
 /// conversion, so an outsider cannot bundle a price-manipulation sandwich around
@@ -26,8 +33,25 @@ import "./V4PlatformTokenRewards.sol";
 /// fee wallet is tracked so stray ETH can be recovered; and a failed platform-
 /// token buy no longer blocks the sale (that ETH is kept for the fee wallet).
 ///
-/// Wiring: set as the factory's feeWalletDistributor, then exempt it from the
-/// hook tax with V4TokenFactory.setTaxExempt(this, true).
+/// Changes from the second audit pass (ETH fee flow):
+///  FW-7 (Low, fixed): the permissionless claim copied whatever the fee wallet
+///   answered with. The 100,000-gas cap limits what the wallet can burn, not the
+///   cost of copying a large reply, so a wallet contract that answered with one
+///   made each claim cost about three times the normal gas (191k against 63k
+///   measured). The payout now ignores the reply, so the most a wallet can cost
+///   its caller is the 100,000-gas allowance itself. (The wallet is chosen by the
+///   owner, so this is a robustness fix, the same one made in
+///   V4CreatorRewardsDistributor.)
+///
+/// Gas budget of depositFee, which V4TaxHook calls with at most 150,000 gas
+/// (V4CurveFactory: 300,000): the costliest call is the first one, when every
+/// counter is still zero and the buyback is on, about 116,000 gas inside the
+/// call; later deposits cost about 50,000. A failed deposit is re-booked by the
+/// hook and retried, so anything that pushes this near the cap must be re-measured.
+///
+/// Wiring: set as the factory's feeWalletDistributor. The exemption from the hook
+/// tax (V4TokenFactory.setTaxExempt(this, true)) is only needed for the in-kind
+/// conversion, which refuses to run without it.
 contract V4FeeWalletDistributor is V4PlatformTokenRewards {
     address public feeWallet;
 
@@ -255,7 +279,13 @@ contract V4FeeWalletDistributor is V4PlatformTokenRewards {
         claimableEth[token] = 0;
         totalClaimableEth -= amount;
         _acct.ethPaidToFeeWallet += amount;
-        (bool sent,) = payable(recipient).call{value: amount, gas: CLAIM_CALL_GAS}("");
+        // FW-7: a bare call that never copies the reply (a wallet contract could otherwise make the caller pay to
+        // copy a large one, which the gas cap does not bound).
+        uint256 callGas = CLAIM_CALL_GAS;
+        bool sent;
+        assembly {
+            sent := call(callGas, recipient, amount, 0, 0, 0, 0)
+        }
         require(sent, "V4FeeWalletDistributor: ETH transfer failed");
         emit FeeWalletRewardsClaimed(token, recipient, msg.sender, amount);
     }
