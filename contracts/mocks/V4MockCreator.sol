@@ -19,7 +19,7 @@ interface IV4LockerLike {
 }
 
 /// @notice Test-only: a smart-contract token creator whose ETH receive hook can
-/// be switched to accept (0), reject (1) or burn all gas (2). Used by the
+/// be switched to accept (0), reject (1), burn all gas (2) or answer with a huge reply (3). Used by the
 /// V4PoolLauncher audit tests.
 contract V4MockCreator {
     uint256 public mode;
@@ -66,6 +66,12 @@ contract V4MockCreator {
         if (mode == 1) revert("no ETH");
         if (mode == 2) {
             for (;;) {}
+        }
+        // mode 3: accept the ETH but answer with a huge reply (a "return bomb") that costs the caller to copy
+        if (mode == 3) {
+            assembly {
+                return(0, 150000)
+            }
         }
     }
 }
