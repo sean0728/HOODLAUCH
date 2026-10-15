@@ -21,8 +21,8 @@ import "./interfaces/V4IUniswapV2Router.sol";
 /// whichever pool the trade went through, so the same deployed distributor
 /// can serve both. This file exists so the V4 set has no hidden dependency on
 /// V2-prefixed interfaces and so the holder-payout machinery matches the
-/// hardened one in V4PlatformTokenRewards (PR-5 generation guard, own balance
-/// excluded from the snapshot). Like the V4 distributors, the platform token's
+/// hardened one in V4PlatformTokenRewards (balance snapshots, own balance
+/// excluded from the eligible supply). Like the V4 distributors, the platform token's
 /// own pool is Uniswap V2, so the buyback goes through a V2 router passed at
 /// construction.
 ///
@@ -37,13 +37,10 @@ import "./interfaces/V4IUniswapV2Router.sol";
 /// of its own tokens, paying part of the round to itself. The snapshot is now
 /// totalSupply() less this contract's own balance and this contract is
 /// skipped, as in V4PlatformTokenRewards.
-/// V4TD-2 (Low, fixed): no holder-generation guard. The holder registry
-/// swap-and-pops, so a holder who exits and re-enters mid-round (or a tail
-/// holder moved into an already-paid slot) could be paid twice or skipped.
-/// Rounds now record holderCount and holderGenerationCounter at start and only
-/// pay holders that were already in place; late arrivals are skipped (their
-/// share is not lost: it simply stays in the contract and is rescuable above
-/// the committed amount).
+/// V4TD-2 (Low, fixed, superseded by TR-1..TR-3): no holder-generation guard.
+/// The first fix recorded holderCount and holderGenerationCounter at round start
+/// and skipped late arrivals; the second audit replaced it with snapshot
+/// balances over the append-only registry of the redesigned PlatformToken.
 /// V4TD-3 (Medium, disclosed, mitigated): the "protocol floor" the V2 file
 /// computes from getAmountsOut() is read from the SAME pool in the SAME
 /// transaction, so it reflects whatever price an attacker has just pushed it
@@ -64,8 +61,8 @@ import "./interfaces/V4IUniswapV2Router.sol";
 /// an immutable, and may be address(0) at construction.
 ///
 /// --- Changes from the standalone security audit of this file ---
-/// TA-1 (Medium, fixed): a round pays from holders' balances AT THE MOMENT IT
-/// RUNS against a supply snapshot taken at its start, so anyone who borrowed
+/// TA-1 (Medium, fixed; the live-balance cause is removed by TR-1): a round paid from holders' balances AT THE
+/// MOMENT IT RUNS against a supply taken at its start, so anyone who borrowed
 /// tokens (a flash loan, a V2 pair's liquidity) could start or process a round
 /// while holding them and take other holders' share, and a holder hopping
 /// tokens to a wallet later in the list was paid twice out of the NEXT round's
@@ -94,6 +91,31 @@ import "./interfaces/V4IUniswapV2Router.sol";
 /// what was paid, the committed amount used by rescueToken ignored what a
 /// running round had already paid, and renounceOwnership could orphan the
 /// contract. Now accurate, and renounce is disabled.
+///
+/// --- Changes from the second audit of this file (the round now pays from a balance snapshot) ---
+/// TR-1 (Medium, fixed): a round still read each holder's LIVE balance when that holder was paid, so a holder paid
+/// early could move its tokens to a wallet that was registered earlier but sits later in the list and be paid
+/// again; the holders paid last bore the loss (the pot cap only keeps the round inside its pot). A round now takes
+/// a PlatformToken snapshot when it starts and pays each holder roundAmount * balanceOfAt(holder, id) / eligible
+/// supply, so whatever holders do with their tokens while the round is paid out over several transactions changes
+/// nobody's payout. Needs the redesigned PlatformToken (snapshots) and its owner's one-time setSnapshotter.
+/// TR-2 (Medium, fixed): whatever a round did not pay (tokens moved to a newcomer, a share that rounds to nothing)
+/// fell out of the commitments and could be rescued by the owner. With snapshot shares the pot is paid in full;
+/// only rounding dust (under one wei per holder) is left, and it is never queued.
+/// TR-3 (Medium, fixed by the new token): over the previous swap-and-pop registry a payout that took this contract's
+/// own balance to zero removed it from the holder list mid-loop and the batch reverted with an out-of-bounds panic,
+/// and a holder who sold out after being paid moved the last holder behind the cursor. The new token's registry is
+/// append-only, setPlatformToken refuses a token without it, and the loop only reads indices below the count taken
+/// at round start (a generation guard is no longer needed and is removed).
+/// TR-4 (Low, fixed): setPlatformToken accepted any contract. It now needs the holder registry, the snapshots and the
+/// token's own authorisation of this contract (isSnapshotter), with a clear reason for each.
+/// TR-5 (design, tested): a round starts inside the distribution that bought its tokens. If the token cannot snapshot
+/// (not authorised, or the authorisation was withdrawn) that start is deferred (DisburseRoundDeferred): the fee
+/// wallet is still paid, the buyback still happens and the tokens wait in pendingDisburseTokens, so a snapshot
+/// problem can never stop the tax from being converted. startDisburseRound / runDisburseRound then revert with the
+/// token's reason until it is fixed.
+/// Gas: about 67,700 per registered holder per round with the real token (measured), so keep batches at 200 holders or
+/// fewer; autoProcessBatchSize (the heartbeat, default off) runs inside a trader's tax transfer, so keep it small.
 contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -125,8 +147,10 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     uint256 public maxBuybackPerDistribution;
 
     /// @notice How many holders receive() pays out of an active round per
-    /// incoming transfer (the "heartbeat"); 0 (default) disables it. See TA-1:
-    /// payouts are balance-based, so leave this off unless that is acceptable.
+    /// incoming transfer (the "heartbeat"); 0 (default) disables it. Payouts come
+    /// from the round's snapshot (TR-1), so the heartbeat cannot be gamed, but the
+    /// batch runs inside the trader's own tax transfer (about 67,700 gas per
+    /// holder), so keep it small.
     uint256 public autoProcessBatchSize = 0;
 
     /// @notice Gas forwarded to feeWallet when paying it (TA-5).
@@ -148,10 +172,11 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     uint256 public pendingDisburseTokens;
     bool public roundActive;
     uint256 public roundAmount;
-    uint256 public roundSupplyAtStart; // eligible supply: totalSupply less this contract's own balance
+    uint256 public roundSupplyAtStart; // eligible supply at the snapshot: totalSupply less this contract's and the excluded balances
     uint256 public roundCursor;
     uint256 public roundHolderCountAtStart;
-    uint256 public roundGenerationAtStart;
+    /// @notice Id of the PlatformToken snapshot the active round pays from (TR-1).
+    uint256 public roundSnapshotId;
     /// @notice Part of roundAmount already paid out or re-queued this round.
     uint256 public roundUsed;
     /// @notice Part of roundAmount actually transferred to holders this round.
@@ -171,7 +196,8 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
     event DisburseRoundProgress(uint256 nextCursor, uint256 paidThisBatch);
     event DisburseRoundFinished(uint256 totalAmount);
     event DisbursePayoutSkipped(address indexed holder, uint256 amount);
-    event DisburseHolderIneligibleThisRound(address indexed holder, uint256 holderGeneration, uint256 roundGeneration);
+    /// @notice A round could not start because the token would not snapshot (TR-5); the tokens wait in pendingDisburseTokens.
+    event DisburseRoundDeferred(uint256 pendingTokens);
     event EthRescued(address indexed to, uint256 amount);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
     event KeeperSet(address indexed keeper, bool enabled);
@@ -234,8 +260,23 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
         );
         require(!roundActive, "V4PlatformTaxDistributor: a disburse round is active");
         require(pendingDisburseTokens == 0, "V4PlatformTaxDistributor: tokens pending under the current platform token");
+        if (newPlatformToken != address(0)) _requireSnapshotToken(newPlatformToken);
         platformToken = V4IPlatformToken(newPlatformToken);
         emit PlatformTokenUpdated(newPlatformToken);
+    }
+
+    /// @dev TR-4: the token must have the holder registry and the snapshots, and must have authorised this contract
+    /// to snapshot. Fail here, where the owner can see why, not in the middle of a distribution.
+    function _requireSnapshotToken(address token) private view {
+        try V4IPlatformToken(token).holderCount() returns (uint256) {}
+        catch { revert("V4PlatformTaxDistributor: platform token has no holder registry"); }
+        bool authorised;
+        try V4IPlatformToken(token).isSnapshotter(address(this)) returns (bool ok) {
+            authorised = ok;
+        } catch {
+            revert("V4PlatformTaxDistributor: platform token has no snapshots");
+        }
+        require(authorised, "V4PlatformTaxDistributor: token owner must authorise this contract as a snapshotter first");
     }
 
     function setFeeWallet(address newFeeWallet) external onlyOwner {
@@ -399,21 +440,41 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
 
         emit DistributionTriggered(balance, toFeeWallet, toBuyback, bought);
 
-        _startRoundIfNeeded();
+        // Never lets a round problem undo the distribution that just bought the tokens (TR-5).
+        _startRound(false);
     }
 
-    /// @dev Starts a round over whatever is pending when none is active.
-    /// Silent no-op if there are no eligible holders (never reverts the
-    /// distribution that just bought the tokens).
-    function _startRoundIfNeeded() private {
+    /// @dev Starts a round over whatever is pending when none is active. `strict` = false (the automatic start inside
+    /// a distribution): a no-op when there are no eligible holders, and a deferral (DisburseRoundDeferred) when the
+    /// token will not snapshot, so the fee wallet is still paid and the tokens are still bought. `strict` = true (a
+    /// keeper starting a round by hand): both reverts, with the token's own reason for the snapshot.
+    function _startRound(bool strict) private {
         if (roundActive || pendingDisburseTokens == 0) return;
 
+        // Eligible supply = everything except this contract's own balance (it holds the pot) and the excluded
+        // balances. Read live here: the snapshot below is taken in this same transaction, before anything can
+        // move, so these are the snapshot values.
         uint256 ineligible = platformToken.balanceOf(address(this));
         uint256 n = _airdropExcludedList.length;
         for (uint256 i = 0; i < n; i++) ineligible += platformToken.balanceOf(_airdropExcludedList[i]);
         uint256 supply = platformToken.totalSupply();
         uint256 eligibleSupply = supply > ineligible ? supply - ineligible : 0;
-        if (eligibleSupply == 0) return;
+        if (eligibleSupply == 0) {
+            require(!strict, "V4PlatformTaxDistributor: no eligible holders");
+            return;
+        }
+
+        uint256 id;
+        if (strict) {
+            id = platformToken.snapshot();
+        } else {
+            try platformToken.snapshot() returns (uint256 newId) {
+                id = newId;
+            } catch {
+                emit DisburseRoundDeferred(pendingDisburseTokens);
+                return;
+            }
+        }
 
         roundActive = true;
         roundAmount = pendingDisburseTokens;
@@ -422,15 +483,16 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
         roundUsed = 0;
         roundDistributed = 0;
         pendingDisburseTokens = 0;
+        roundSnapshotId = id;
+        // The registry only grows and never reorders, so the first `count` entries are exactly the addresses
+        // that could hold anything at the snapshot.
         roundHolderCountAtStart = platformToken.holderCount();
-        roundGenerationAtStart = platformToken.holderGenerationCounter();
         emit DisburseRoundStarted(roundAmount, eligibleSupply, roundHolderCountAtStart);
     }
 
-    /// @notice Owner / keeper only: a round is paid from balances at the moment
-    /// it runs, so an outsider could borrow tokens to inflate theirs (TA-1).
-    /// Manual fallback: start a round over pending tokens (e.g. after skipped
-    /// shares were re-queued, or tokens sent in directly).
+    /// @notice Owner / keeper only. Manual fallback: start a round over pending tokens (a round that was
+    /// deferred because the token could not snapshot, shares that were re-queued, or tokens sent in directly).
+    /// The round pays every holder for its balance at this moment, whatever it does afterwards (TR-1).
     function startDisburseRound() external nonReentrant onlyRoundRunner {
         _startDisburseRound();
     }
@@ -439,22 +501,20 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
         require(!roundActive, "V4PlatformTaxDistributor: a disburse round is already active");
         require(pendingDisburseTokens > 0, "V4PlatformTaxDistributor: nothing pending to disburse");
         require(address(platformToken) != address(0), "V4PlatformTaxDistributor: platformToken not set");
-        _startRoundIfNeeded();
-        require(roundActive, "V4PlatformTaxDistributor: no eligible holders");
+        _startRound(true);
     }
 
     /// @notice Pays up to `batchSize` more holders of the active round. Owner /
     /// keeper only (receive() calls it on itself when the heartbeat is on).
-    /// A zero balance, zero share, holder that joined after the round started,
-    /// or a transfer that reverts is skipped, never reverting the batch.
+    /// A zero balance at the snapshot, a zero share, or a transfer that reverts
+    /// is skipped, never reverting the batch.
     /// A transfer that fails is re-queued into pendingDisburseTokens.
     function processDisburseRound(uint256 batchSize) external nonReentrant onlyRoundRunner {
         _processDisburseRound(batchSize);
     }
 
     /// @notice Starts a round if none is running and pays the first
-    /// `batchSize` holders, all in one transaction (no gap between snapshot and
-    /// payment).
+    /// `batchSize` holders, all in one transaction.
     function runDisburseRound(uint256 batchSize) external nonReentrant onlyRoundRunner {
         if (!roundActive) _startDisburseRound();
         _processDisburseRound(batchSize);
@@ -464,8 +524,8 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
         require(roundActive, "V4PlatformTaxDistributor: no disburse round is active");
         require(batchSize > 0, "V4PlatformTaxDistributor: batchSize must be > 0");
 
-        uint256 liveCount = platformToken.holderCount();
-        uint256 total = liveCount < roundHolderCountAtStart ? liveCount : roundHolderCountAtStart;
+        uint256 total = roundHolderCountAtStart;
+        uint256 id = roundSnapshotId;
         uint256 from = roundCursor;
         uint256 to = from + batchSize;
         if (to > total) to = total;
@@ -475,15 +535,10 @@ contract V4PlatformTaxDistributor is Ownable2Step, ReentrancyGuard {
         for (uint256 i = from; i < to; i++) {
             address holder = platformToken.holderAt(i);
             if (holder == address(this) || airdropExcluded[holder]) continue;
-            uint256 holderGen = platformToken.holderGeneration(holder);
-            if (holderGen > roundGenerationAtStart) {
-                emit DisburseHolderIneligibleThisRound(holder, holderGen, roundGenerationAtStart);
-                continue;
-            }
-            uint256 bal = platformToken.balanceOf(holder);
+            uint256 bal = platformToken.balanceOfAt(holder, id);
             if (bal == 0) continue;
             uint256 share = (roundAmount * bal) / roundSupplyAtStart;
-            // Never beyond the round's own pot, whatever balances did mid-round.
+            // Backstop only: with snapshot balances the shares add up to the pot at most.
             if (share > remaining) share = remaining;
             if (share == 0) continue;
             remaining -= share;
