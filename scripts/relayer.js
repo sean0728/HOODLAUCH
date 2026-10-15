@@ -5055,7 +5055,8 @@ async function main() {
       // an older distributor without keepers(): buybacks are open to everyone
     }
 
-    // 1. The factory's 50% launch-fee share arrives as plain ETH.
+    // 1. ETH: the 50% launch-fee share from every launch path, plus the hook's reward cut when a pool's rewardBps
+    //    is above zero (default 0), all arrive as plain transfers and are spent here.
     try {
       const balance = await hre.ethers.provider.getBalance(d.address);
       if (balance > 0n && balance >= (await d.contract.ethBuybackThreshold())) {
@@ -5074,7 +5075,8 @@ async function main() {
       console.warn(`[v4-platform-rewards] ETH buyback skip: ${err.message}`);
     }
 
-    // 2. Each token's in-kind rewardBps cut.
+    // 2. Tokens that still arrive in kind (older pools, or sent by hand). The hook pays its reward cut in ETH now, so
+    //    for current pools this finds nothing.
     for (const entry of await v4KeeperTokens()) {
       const tokenAddress = entry.tokenAddress;
       try {
