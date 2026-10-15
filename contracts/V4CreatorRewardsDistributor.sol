@@ -11,17 +11,22 @@ import "./interfaces/V4ICreatorAware.sol";
 
 /// @title V4CreatorRewardsDistributor
 /// @notice V4 counterpart of CreatorRewardsDistributor. Where the creator-reward
-/// slice of the trading tax lands: V4TaxHook pushes it here in kind (the
-/// launched token itself). Per token, anyone can convert the accumulated
-/// balance to ETH (sold into that token's own V4 pool, see V4TokenSeller) and
-/// anyone can pay the proceeds out to that token's creator.
+/// slice of the trading tax lands. Today that slice is ETH: V4TaxHook pays it
+/// in ETH from flush() (and V4CurveFactory pays the curve phase's share the same
+/// way) by calling depositFor(token), and it is credited to that token's creator
+/// and paid out by claimCreatorRewards. Nothing in the hook sends tokens here any
+/// more. The older in-kind path is kept for tokens that still arrive (a pool's
+/// pre-ETH fees, or tokens sent by hand): per token, the owner, an approved keeper
+/// or the token's own creator can convert the accumulated balance to ETH (sold
+/// into that token's own V4 pool, see V4TokenSeller) and it is credited the same
+/// way. Anyone can pay the proceeds out to that token's creator.
 ///
 /// Unchanged from V2: per-token (not per-creator) claimable balances, the
 /// swapThreshold / maxSwapAmount knobs, the 5-8% slippage band, creator read
 /// live from the token at swap and claim time, and the orphaned-balance rescue
 /// once a creator has renounced.
 ///
-/// Changed from V2 (see the audit report): the SALE is no longer open to
+/// Changed from V2 (see the audit reports): the SALE is no longer open to
 /// everyone. The pool's price limit is measured from the pool's current price,
 /// so a caller who first pushes the price down in the same transaction, then
 /// triggers the sale with minEthOut = 0, then buys back, makes the distributor
@@ -30,8 +35,24 @@ import "./interfaces/V4ICreatorAware.sol";
 /// token's own creator, who always pass a real minEthOut. CLAIMING stays
 /// permissionless and always pays only the token's creator.
 ///
+/// Changes from the second audit pass (ETH fee flow):
+///  CR-6 (Low, fixed): depositFor credited ANY address, so ETH sent for something
+///   that is not a token with a creator() (a mistyped address, a wallet) was booked
+///   under a key nobody can claim: claimCreatorRewards reverts for it, the owner
+///   rescue needs creator() == 0, and the amount counted in totalClaimableEth, so
+///   rescueStrayEth could not return it either. depositFor now requires the key to
+///   answer creator(). A real token whose creator renounced is still accepted (the
+///   owner can rescue it, as before).
+///  CR-7 (Low, fixed): the permissionless claim copied whatever a creator contract
+///   answered with. The 100,000-gas cap limits what the creator can burn, but not
+///   the cost of copying a large reply, so a hostile creator made every caller pay
+///   about four times the normal gas (175k against 47k measured), more than the cap
+///   was meant to allow. The payout now ignores the reply, so the most a creator can
+///   cost its caller is the 100,000-gas allowance itself (104k measured).
+///
 /// Wiring: set this as the factory's creatorRewardsDistributor, and exempt it
-/// from the hook's tax with V4TokenFactory.setTaxExempt(this, true).
+/// from the hook's tax with V4TokenFactory.setTaxExempt(this, true) (only the
+/// in-kind sale needs it; the seller refuses to sell while it is not exempt).
 contract V4CreatorRewardsDistributor is V4TokenSeller {
     using SafeERC20 for IERC20;
 
@@ -96,13 +117,17 @@ contract V4CreatorRewardsDistributor is V4TokenSeller {
         emit CreatorSwapTriggered(token, creator, spent, ethOut);
     }
 
-    /// @notice Intake for the creator's share of fees that arrive as ETH: the
-    /// bonding curve's per-trade fee. Credited to `token`'s creator exactly like
-    /// ETH converted from in-kind rewards, and claimed the same way. Anyone may
-    /// send ETH here; it can only ever be claimed by the token's creator.
+    /// @notice Intake for the creator's share of fees that arrive as ETH: V4TaxHook's
+    /// flush() and the bonding curve's per-trade fee. Credited to `token`'s creator
+    /// exactly like ETH converted from in-kind rewards, and claimed the same way.
+    /// Anyone may send ETH here; it can only ever be claimed by the token's creator.
+    /// `token` must answer creator() (CR-6), so ETH can never be booked under a key
+    /// that has no creator to claim it; a token whose creator has renounced answers
+    /// with the zero address and is accepted (that balance is the owner's to rescue).
     function depositFor(address token) external payable {
         require(token != address(0), "V4CreatorRewardsDistributor: invalid token");
         require(msg.value > 0, "V4CreatorRewardsDistributor: no ETH");
+        require(_answersCreator(token), "V4CreatorRewardsDistributor: not a creator-aware token");
         claimableEth[token] += msg.value;
         totalClaimableEth += msg.value;
         emit CreatorFeeDeposited(token, msg.sender, msg.value);
@@ -116,9 +141,25 @@ contract V4CreatorRewardsDistributor is V4TokenSeller {
         address creator = V4ICreatorAware(token).creator();
         require(creator != address(0), "V4CreatorRewardsDistributor: token has no creator");
         amount = _takeClaimable(token);
-        (bool sent,) = payable(creator).call{value: amount, gas: CLAIM_CALL_GAS}("");
+        // CR-7: pay with a bare call that never copies the reply (a hostile creator could otherwise make the
+        // caller pay to copy a large one).
+        uint256 callGas = CLAIM_CALL_GAS;
+        bool sent;
+        assembly {
+            sent := call(callGas, creator, amount, 0, 0, 0, 0)
+        }
         require(sent, "V4CreatorRewardsDistributor: ETH transfer failed");
         emit CreatorRewardsClaimed(token, creator, msg.sender, amount);
+    }
+
+    /// @dev True when `token` is a contract that answers creator() with at least one word. The reply is never
+    /// copied beyond that word and the call is gas-capped, so a hostile "token" costs only the depositor.
+    function _answersCreator(address token) private view returns (bool ok) {
+        assembly {
+            mstore(0x00, 0x02d05d3f00000000000000000000000000000000000000000000000000000000) // creator()
+            let success := staticcall(50000, token, 0x00, 0x04, 0x00, 0x20) // (a separate statement: assembly evaluates arguments right to left)
+            ok := and(success, iszero(lt(returndatasize(), 0x20)))
+        }
     }
 
     /// @notice Creator-only: pays claimableEth[token] to `to` instead of the
