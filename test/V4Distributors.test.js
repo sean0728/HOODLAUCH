@@ -126,30 +126,29 @@ describe("V4 distributors", function () {
       await expect(fwd.claimFeeWalletRewards(await A(token))).to.be.revertedWith("V4FeeWalletDistributor: nothing to claim");
     });
 
-    it("without the exemption the sale is taxed again and a slice loops back (why the exemption exists)", async () => {
+    it("without the exemption the sale is refused (it used to be taxed again, RC-1) and nothing is sold", async () => {
       await wire({ exempt: false });
       const { token, key } = await launch();
       await deliverInKind(token, key, ETH("2"));
       const poolId = await factory.poolIdOf(await A(token));
       const p0 = await hook.pendingEth(poolId);
-      await fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n);
-      // the sale was taxed again: 1% of the ETH it produced was skimmed by the hook (in ETH, booked to the pool)
-      expect((await hook.pendingEth(poolId)) - p0).to.be.gt(0n);
-      expect(await token.balanceOf(await A(fwd))).to.equal(0n);
+      const held = await token.balanceOf(await A(fwd));
+      await expect(fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n)).to.be.revertedWith("V4TokenSeller: seller is not tax exempt");
+      expect(await hook.pendingEth(poolId)).to.equal(p0);
+      expect(await token.balanceOf(await A(fwd))).to.equal(held);
     });
 
-    it("exempt sale yields strictly more ETH than the taxed one", async () => {
+    it("once exempted, the refused sale goes through and the hook skims nothing", async () => {
       await wire({ exempt: false });
-      let { token, key } = await launch();
+      const { token, key } = await launch();
       await deliverInKind(token, key, ETH("2"));
-      await fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n);
-      const taxedOut = await fwd.claimableEth(await A(token));
+      await expect(fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n)).to.be.revertedWith("V4TokenSeller: seller is not tax exempt");
       await factory.setTaxExempt(await A(fwd), true);
-      ({ token, key } = await launch());
-      await deliverInKind(token, key, ETH("2"));
+      const poolId = await factory.poolIdOf(await A(token));
+      const p0 = await hook.pendingEth(poolId);
       await fwd["triggerFeeWalletSwap(address,uint256)"](await A(token), 0n);
-      const exemptOut = await fwd.claimableEth(await A(token));
-      expect(exemptOut).to.be.gt(taxedOut);
+      expect(await hook.pendingEth(poolId)).to.equal(p0);
+      expect(await fwd.claimableEth(await A(token))).to.be.gt(0n);
     });
 
     it("threshold, per-call cap and minEthOut are enforced", async () => {
