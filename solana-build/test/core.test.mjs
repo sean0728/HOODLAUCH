@@ -2,10 +2,11 @@
 // Wallet Standard wallet signs with a throwaway keypair. Checks that the transactions we build are
 // well-formed, correctly signed and aimed at the right program/accounts.
 import assert from "node:assert/strict";
-import { Connection, Keypair, PublicKey, Transaction, ComputeBudgetProgram } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction, ComputeBudgetProgram, SystemProgram, SystemInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
 import BN from "bn.js";
 import * as DBC from "@meteora-ag/dynamic-bonding-curve-sdk";
+import { CpAmm, CP_AMM_PROGRAM_ID } from "@meteora-ag/cp-amm-sdk";
 import * as core from "../core.js";
 
 let pass = 0, fail = 0;
@@ -119,7 +120,7 @@ const conn = new FakeConn();
 const st = makeState(conn);
 core._setClientForTests(conn, st.client);
 core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "devnet", configAddress: CONFIG.toBase58() });
-core._setClientForTests(conn, st.client); // init() creates its own; put ours back
+core._setClientForTests(conn, st.client, new CpAmm(conn)); // init() creates its own; put ours back
 
 await t("init() accepts devnet and mainnet-beta, rejects anything else", () => {
   assert.throws(() => core.init({ rpcUrl: "http://x", cluster: "testnet" }), /Unknown Solana cluster/);
@@ -278,8 +279,14 @@ await t("quote(): selling returns SOL, less than the buy cost", async () => {
 await t("quote() rejects zero/invalid amounts and graduated pools", async () => {
   await assert.rejects(core.quote({ pool: st.poolAddr, side: "buy", amount: "0" }), /greater than zero/);
   await assert.rejects(core.quote({ pool: st.poolAddr, side: "buy", amount: "x" }), /valid amount/);
+  // A graduated pool no longer errors out: it is quoted on its DAMM v2 pool. With no DAMM v2 pool findable
+  // yet, the trader gets a clear message instead of a crash.
   st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
-  await assert.rejects(core.quote({ pool: st.poolAddr, side: "buy", amount: "1" }), /graduated/);
+  const cpNone = new CpAmm(conn);
+  cpNone.fetchPoolState = async () => { throw new Error("Account does not exist"); };
+  cpNone.fetchPoolStatesByTokenMint = async () => [];
+  core._setClientForTests(conn, st.client, cpNone);
+  await assert.rejects(core.quote({ pool: st.poolAddr, side: "buy", amount: "1" }), /DAMM v2 pool wasn't found/);
   st.setPool({ poolState: st.mkPoolState() });
 });
 await t("trade(buy): signed swap tx aimed at the pool, min-out enforced", async () => {
@@ -334,6 +341,187 @@ await t("wallets that only offer signAndSendTransaction still work", async () =>
   assert.equal(sent.length, 1);
   core._setWalletForTests(fakeWallet(user), { address: user.publicKey.toBase58(), publicKey: user.publicKey.toBytes() });
 });
+
+
+// ======================= platform swap fee (0.30%) and DAMM v2 swapping =======================
+const feeTransfers = (tx) => tx.instructions
+  .filter((i) => i.programId.equals(SystemProgram.programId) && SystemInstruction.decodeInstructionType(i) === "Transfer")
+  .map((i) => SystemInstruction.decodeTransfer(i));
+const u64At = (buf, off) => Number(buf.readBigUInt64LE(off));
+const reset = () => { core._setClientForTests(conn, st.client, new CpAmm(conn)); core._setFeeForTests({ feeBps: 30, feeWallet: null }); st.setPool({ poolState: st.mkPoolState() }); conn.sent.length = 0; };
+
+await t("fee math: 30 bps of the SOL side, rounded down, never negative", () => {
+  assert.equal(core.platformFeeLamports(new BN(1_000_000_000)).toString(), "3000000");   // 1 SOL -> 0.003
+  assert.equal(core.platformFeeLamports(new BN(333)).toString(), "0");                    // too small: rounds to 0
+  assert.equal(core.platformFeeLamports(new BN(10_000)).toString(), "30");
+  assert.equal(core.platformFeeLamports(new BN(10_000), 0).toString(), "0");
+  assert.equal(core.getSwapFeeBps(), 30);
+});
+await t("init() sets the fee and refuses nonsense or anything above 1%", () => {
+  assert.throws(() => core.init({ rpcUrl: "http://x", cluster: "devnet", swapFeeBps: 101 }), /0 to 100/);
+  assert.throws(() => core.init({ rpcUrl: "http://x", cluster: "devnet", swapFeeBps: -1 }), /0 to 100/);
+  assert.throws(() => core.init({ rpcUrl: "http://x", cluster: "devnet", swapFeeBps: 0.5 }), /whole number/);
+  assert.equal(core.init({ rpcUrl: "http://x", cluster: "devnet" }).swapFeeBps, 30);
+  assert.equal(core.init({ rpcUrl: "http://x", cluster: "devnet", swapFeeBps: 0 }).swapFeeBps, 0);
+  core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "devnet", configAddress: CONFIG.toBase58() });
+  reset();
+});
+await t("curve buy: 0.3% of the SOL typed goes to the platform wallet in the same tx; the rest is swapped", async () => {
+  reset();
+  const q = await core.quote({ pool: st.poolAddr, side: "buy", amount: "1" });
+  assert.equal(q.venue, "curve");
+  assert.equal(q.platformFeeSol, 0.003);
+  assert.equal(q.platformFeeBps, 30);
+  assert.equal(q.amountIn.toString(), "997000000");       // 1 SOL typed -> 0.997 swapped + 0.003 fee = exactly what was typed
+  const r = await core.trade({ pool: st.poolAddr, side: "buy", amount: "1", slippageBps: 300 });
+  assert.equal(r.platformFeeSol, 0.003);
+  const tx = Transaction.from(conn.sent[0]); assert.ok(tx.verifySignatures());
+  const swap = tx.instructions.find((i) => i.programId.equals(DBC.DYNAMIC_BONDING_CURVE_PROGRAM_ID));
+  assert.equal(u64At(swap.data, 8), 997_000_000, "swap input is the typed amount minus the fee");
+  const tr = feeTransfers(tx).filter((x) => x.toPubkey.equals(feeClaimer));
+  assert.equal(tr.length, 1, "exactly one fee transfer to the platform wallet (the config's fee claimer)");
+  assert.equal(Number(tr[0].lamports), 3_000_000);
+  assert.ok(tr[0].fromPubkey.equals(user.publicKey));
+  const iSwap = tx.instructions.indexOf(swap), iFee = tx.instructions.findIndex((i) => i.programId.equals(SystemProgram.programId) && SystemInstruction.decodeInstructionType(i) === "Transfer" && SystemInstruction.decodeTransfer(i).toPubkey.equals(feeClaimer));
+  assert.ok(iFee > iSwap, "the fee comes after the swap");
+});
+await t("curve sell: 0.3% of the SOL the swap pays is sent to the platform wallet; the quote shows the net", async () => {
+  reset(); st.setPool(st.afterBuy());
+  const q = await core.quote({ pool: st.poolAddr, side: "sell", amount: "100000" });
+  const gross = Number(core.formatUnits(q.amountOut, 9, 9));
+  assert.ok(Math.abs(q.platformFeeSol - gross * 0.003) < 1e-8, `fee ${q.platformFeeSol} vs ${gross * 0.003}`);
+  assert.ok(Math.abs(q.out - (gross - q.platformFeeSol)) < 1e-8, "out is net of the fee");
+  assert.ok(q.minOut < q.out);
+  await core.trade({ pool: st.poolAddr, side: "sell", amount: "100000", slippageBps: 300 });
+  const tx = Transaction.from(conn.sent[0]); assert.ok(tx.verifySignatures());
+  const swap = tx.instructions.find((i) => i.programId.equals(DBC.DYNAMIC_BONDING_CURVE_PROGRAM_ID));
+  assert.equal(u64At(swap.data, 8), 100_000_000_000, "the whole token amount typed is swapped");
+  const tr = feeTransfers(tx).filter((x) => x.toPubkey.equals(feeClaimer));
+  assert.equal(tr.length, 1);
+  assert.equal(Number(tr[0].lamports), Number(core.platformFeeLamports(q.amountOut)));
+});
+await t("fee off (0 bps): no transfer is added and nothing is held back", async () => {
+  reset(); core._setFeeForTests({ feeBps: 0 });
+  const q = await core.quote({ pool: st.poolAddr, side: "buy", amount: "1" });
+  assert.equal(q.amountIn.toString(), "1000000000"); assert.equal(q.platformFeeSol, 0);
+  await core.trade({ pool: st.poolAddr, side: "buy", amount: "1" });
+  assert.equal(feeTransfers(Transaction.from(conn.sent[0])).filter((x) => x.toPubkey.equals(feeClaimer)).length, 0);
+  reset();
+});
+await t("an explicit fee wallet overrides the config's fee claimer", async () => {
+  reset(); const other = Keypair.generate().publicKey; core._setFeeForTests({ feeWallet: other.toBase58() });
+  await core.trade({ pool: st.poolAddr, side: "buy", amount: "1" });
+  const tr = feeTransfers(Transaction.from(conn.sent[0]));
+  assert.ok(tr.some((x) => x.toPubkey.equals(other)) && !tr.some((x) => x.toPubkey.equals(feeClaimer)));
+  reset();
+});
+await t("trade refuses (and sends nothing) if the platform wallet can't be determined", async () => {
+  reset(); core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "devnet" }); core._setClientForTests(conn, st.client, new CpAmm(conn)); // no config address
+  await assert.rejects(core.trade({ pool: st.poolAddr, side: "buy", amount: "1" }), /swap fee can't be sent anywhere/);
+  assert.equal(conn.sent.length, 0);
+  core.init({ rpcUrl: "http://127.0.0.1:1", cluster: "devnet", configAddress: CONFIG.toBase58() }); reset();
+});
+await t("dust amounts (fee rounds to zero lamports) trade with no fee transfer rather than failing", async () => {
+  reset();
+  const q = await core.quote({ pool: st.poolAddr, side: "buy", amount: "0.000000333" }); // 333 lamports -> fee 0
+  assert.equal(q.platformFeeSol, 0); assert.equal(q.amountIn.toString(), "333");
+  await core.trade({ pool: st.poolAddr, side: "buy", amount: "0.000000333" });
+  assert.equal(feeTransfers(Transaction.from(conn.sent[0])).filter((x) => x.toPubkey.equals(feeClaimer)).length, 0);
+  reset();
+});
+
+// ---- DAMM v2: a graduated token trades on its Meteora pool ----
+function makeDamm() {
+  const cp = new CpAmm(conn);
+  const [tA, tB] = Buffer.compare(st.mint.toBuffer(), WSOL.toBuffer()) < 0 ? [st.mint, WSOL] : [WSOL, st.mint];
+  const poolState = {
+    tokenAMint: tA, tokenBMint: tB, tokenAVault: Keypair.generate().publicKey, tokenBVault: Keypair.generate().publicKey,
+    tokenAFlag: 0, tokenBFlag: 0, activationType: 1, activationPoint: new BN(0), liquidity: new BN("1000000000000"),
+    sqrtPrice: new BN(2).pow(new BN(64)).muln(1), // price 1 (before decimals)
+    poolFees: { baseFee: { baseFeeInfo: { data: new Array(32).fill(0) } } },
+  };
+  const calls = { quote: [], states: 0 };
+  cp.fetchPoolState = async (addr) => { calls.states++; calls.lastAddr = addr; return poolState; };
+  cp.fetchPoolStatesByTokenMint = async () => [];
+  cp.getQuote2 = (p) => {
+    calls.quote.push(p);
+    const out = p.amountIn.muln(2); // fake constant price
+    return { includedFeeInputAmount: p.amountIn, excludedFeeInputAmount: p.amountIn.muln(99).divn(100), amountLeft: new BN(0),
+      outputAmount: out, nextSqrtPrice: new BN(1), claimingFee: new BN(0), protocolFee: new BN(0), compoundingFee: new BN(0), referralFee: new BN(0),
+      priceImpact: { toString: () => "0.42" }, minimumAmountOut: out.muln(10000 - p.slippage).divn(10000) };
+  };
+  return { cp, poolState, calls };
+}
+conn.getBlockTime = async () => 1_790_000_000;
+
+await t("graduated token: quote() uses the DAMM v2 pool, with the fee taken off the SOL typed", async () => {
+  reset(); const d = makeDamm(); core._setClientForTests(conn, st.client, d.cp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const q = await core.quote({ pool: st.poolAddr, side: "buy", amount: "1", slippageBps: 100 });
+  assert.equal(q.venue, "damm");
+  assert.equal(d.calls.quote.length, 1);
+  assert.equal(d.calls.quote[0].amountIn.toString(), "997000000", "DAMM swap input is net of the 0.3% fee");
+  assert.equal(d.calls.quote[0].slippage, 100, "slippage passed in basis points");
+  assert.equal(d.calls.quote[0].inputTokenMint.toBase58(), WSOL.toBase58());
+  assert.equal(q.platformFeeSol, 0.003);
+  assert.ok(Math.abs(q.impactPct - 0.42) < 1e-9);
+  assert.ok(q.feeSol > 0.009 && q.feeSol < 0.011, "pool fee shown " + q.feeSol);
+});
+await t("graduated token: a sell quotes the token in, shows SOL out net of the 0.3% fee", async () => {
+  reset(); const d = makeDamm(); core._setClientForTests(conn, st.client, d.cp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const q = await core.quote({ pool: st.poolAddr, side: "sell", amount: "1000" });
+  assert.equal(d.calls.quote[0].inputTokenMint.toBase58(), st.mint.toBase58());
+  assert.equal(d.calls.quote[0].amountIn.toString(), "1000000000", "1000 tokens at 6 decimals");
+  const gross = Number(core.formatUnits(q.amountOut, 9, 9));
+  assert.ok(Math.abs(q.out - gross * 0.997) < 1e-9);
+});
+await t("graduated token: trade() sends a DAMM v2 swap plus the fee transfer, in one signed tx", async () => {
+  reset(); const d = makeDamm(); core._setClientForTests(conn, st.client, d.cp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const r = await core.trade({ pool: st.poolAddr, side: "buy", amount: "1", slippageBps: 100 });
+  assert.equal(r.venue, "damm");
+  const tx = Transaction.from(conn.sent[0]); assert.ok(tx.verifySignatures());
+  const swap = tx.instructions.find((i) => i.programId.equals(CP_AMM_PROGRAM_ID));
+  assert.ok(swap, "DAMM v2 swap instruction present");
+  assert.ok(swap.keys.some((k) => k.pubkey.equals(d.poolState.tokenAVault)) && swap.keys.some((k) => k.pubkey.equals(d.poolState.tokenBVault)), "pool vaults referenced");
+  assert.ok(!tx.instructions.some((i) => i.programId.equals(DBC.DYNAMIC_BONDING_CURVE_PROGRAM_ID)), "no curve instruction after graduation");
+  const tr = feeTransfers(tx).filter((x) => x.toPubkey.equals(feeClaimer));
+  assert.equal(tr.length, 1); assert.equal(Number(tr[0].lamports), 3_000_000);
+  assert.ok(tx.instructions.indexOf(swap) < tx.instructions.findIndex((i) => i.programId.equals(SystemProgram.programId) && SystemInstruction.decodeInstructionType(i) === "Transfer" && SystemInstruction.decodeTransfer(i).toPubkey.equals(feeClaimer)), "fee after swap");
+});
+await t("graduated token: the pool is found once, then remembered", async () => {
+  reset(); const d = makeDamm(); core._setClientForTests(conn, st.client, d.cp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  await core.quote({ pool: st.poolAddr, side: "buy", amount: "1" });
+  const first = d.calls.states;
+  await core.quote({ pool: st.poolAddr, side: "buy", amount: "2" });
+  assert.ok(d.calls.states - first <= 1, "second quote re-reads the pool state but not the pool address search");
+});
+await t("graduated token: a pool at an unexpected address is found by searching the token's pools", async () => {
+  reset(); const d = makeDamm(); core._setClientForTests(conn, st.client, d.cp);
+  const odd = Keypair.generate().publicKey;
+  d.cp.fetchPoolState = async (a) => { if (!a.equals(odd)) throw new Error("Account does not exist"); return d.poolState; };
+  d.cp.fetchPoolStatesByTokenMint = async () => [
+    { publicKey: Keypair.generate().publicKey, account: { ...d.poolState, tokenBMint: Keypair.generate().publicKey, tokenAMint: Keypair.generate().publicKey, liquidity: new BN(5) } }, // not a SOL pool: ignored
+    { publicKey: odd, account: d.poolState },
+  ];
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const q = await core.quote({ pool: st.poolAddr, side: "buy", amount: "1" });
+  assert.equal(q.dammPool, odd.toBase58());
+});
+await t("getPoolInfo for a graduated token reports the live DAMM v2 price, and falls back to the curve price if it can't", async () => {
+  reset(); const d = makeDamm(); core._setClientForTests(conn, st.client, d.cp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const info = await core.getPoolInfo(st.poolAddr);
+  assert.equal(info.migrated, true); assert.equal(info.venue, "damm");
+  assert.ok(info.priceSol > 0 && isFinite(info.priceSol));
+  d.cp.fetchPoolState = async () => { throw new Error("rpc down"); };
+  reset(); core._setClientForTests(conn, st.client, d.cp); st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const fb = await core.getPoolInfo(st.poolAddr);
+  assert.ok(fb.priceSol > 0 && fb.migrated === true, "still returns the (frozen) curve price");
+});
+reset();
 
 console.log(`\n${pass}/${pass + fail} passed`);
 if (fail) { for (const e of results) console.log(e && e.stack); process.exit(1); }
