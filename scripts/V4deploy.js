@@ -35,6 +35,13 @@
 // switches to the 50/50 buyback once the owner calls setRouter + setPlatformToken.
 // Save its address as platformTaxDistributor in Admin.
 //
+// Airdrop authorisation: the fee-wallet, platform-rewards and platform-tax distributors run holder rounds
+// from a PlatformToken snapshot, which only works once the TOKEN's owner has authorised each of them
+// (setSnapshotter). When the platform token already exists (PLATFORM_TOKEN_ADDRESS or
+// deployments/<network>/platform-token.json) and the deploying wallet owns it, this script does that; otherwise
+// deployPlatformToken.js does it when the token is deployed. AUTHORIZE_SNAPSHOTTERS=false skips it, and
+// scripts/authorizePlatformTokenSnapshotters.js does it by hand.
+//
 // Updating an existing set: if deployments/<network>/v4-deploy.json holds a V4CustomTokenFactory or
 // V4CurveFactory from before gasless launches existed (it has no launchRelay()), this script retires
 // it from the saved state and deploys the new one next to the rest of the set (hook, locker, token
@@ -488,6 +495,33 @@ async function main() {
         await send("platformTaxDistributor.setKeeper(relayer, true)", () => taxDist.setKeeper(taxKeeper, true));
     } else {
       console.log("  NOTE: set RELAYER_ADDRESS to authorise the relayer on the platformTaxDistributor, or call setKeeper(relayerWallet, true) on it as the owner. Also set V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS for the relayer.");
+    }
+  }
+
+  // ---- airdrop authorisation -------------------------------------------
+  // Holder rounds pay from a PlatformToken balance snapshot, so the TOKEN's owner has to authorise each
+  // distributor that runs rounds (fee wallet, platform rewards, platform tax) with setSnapshotter. If the
+  // platform token already exists on this network (PLATFORM_TOKEN_ADDRESS, or platform-token.json from
+  // deployPlatformToken.js) and this wallet owns it, do it now; deployPlatformToken.js does it when the token
+  // is deployed after this set. AUTHORIZE_SNAPSHOTTERS=false skips it.
+  if (String(process.env.AUTHORIZE_SNAPSHOTTERS || "true").toLowerCase() !== "false") {
+    const snap = require("../lib/platformTokenSnapshotters");
+    const tokenAddr = snap.platformTokenAddress(netName);
+    const fresh = [];
+    if (withDistributors) fresh.push(["V4FeeWalletDistributor", await A(feeWalletDist)]);
+    if (withPlatformRewards) fresh.push(["V4PlatformRewardsDistributor", await A(rewardsDist)]);
+    if (withTaxDistributor) fresh.push(["V4PlatformTaxDistributor", await A(taxDist)]);
+    if (fresh.length === 0) {
+      // nothing deployed in this run that runs rounds
+    } else if (!tokenAddr) {
+      console.log("\n  NOTE: no platform token yet. deployPlatformToken.js authorises these distributors as snapshotters when it runs (it reads this set from v4-deploy.json).");
+    } else {
+      console.log(`\nAuthorising the reward distributors as snapshotters on the platform token ${tokenAddr}:`);
+      const r = await snap.authoriseSnapshotters({ ethers, signer: deployer, tokenAddress: tokenAddr, targets: fresh });
+      if (r.reason) {
+        console.log(`  NOTE: not done (${r.reason}). The token's owner runs: npx hardhat run scripts/authorizePlatformTokenSnapshotters.js --network ${netName}`);
+      }
+      for (const [n, a, why] of r.skipped) console.log(`  NOTE: ${n} ${a} skipped: ${why}.`);
     }
   }
 

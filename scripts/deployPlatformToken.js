@@ -11,8 +11,10 @@
 //   npx hardhat run scripts/deployPlatformToken.js --network robinhoodMainnet
 //
 // The token keeps an append-only holder registry and balance snapshots (see contracts/PlatformToken.sol). Its
-// owner (the deployer) must authorise each distributor as a snapshotter before setPlatformToken works on it:
-// run scripts/authorizePlatformTokenSnapshotters.js with the owner's wallet.
+// owner (the deployer) must authorise each distributor as a snapshotter before setPlatformToken works on it.
+// This script does that for every distributor already listed in deployments/<network>/v4-deploy.json (the V4
+// deploy script does it for the token it finds in platform-token.json); AUTHORIZE_SNAPSHOTTERS=false skips it,
+// and scripts/authorizePlatformTokenSnapshotters.js does it by hand.
 //
 // Settings (all optional, set in .env or the shell):
 //   PLATFORM_TOKEN_NAME            default "Hood Launch"
@@ -61,12 +63,35 @@ async function main() {
     console.log(`Explorer verification skipped (${err.message}).`);
   }
 
+  // Airdrop rounds need each reward distributor authorised as a snapshotter by this token's owner (this wallet).
+  // If the V4 set is already deployed on this network, do it now; V4deploy.js does it when it runs later.
+  // AUTHORIZE_SNAPSHOTTERS=false skips it.
+  let authorisedNow = false;
+  let noDistributorsYet = false;
+  if (String(process.env.AUTHORIZE_SNAPSHOTTERS || "true").toLowerCase() !== "false") {
+    const { distributorTargets, authoriseSnapshotters } = require("../lib/platformTokenSnapshotters");
+    const targets = distributorTargets(hre.network.name);
+    if (targets.length > 0) {
+      console.log("Authorising the reward distributors as snapshotters (airdrop rounds):");
+      const r = await authoriseSnapshotters({ ethers: hre.ethers, signer: deployer, tokenAddress: address, targets });
+      if (r.reason) console.log(`  Not done: ${r.reason}.`);
+      else authorisedNow = true;
+    } else {
+      noDistributorsYet = true;
+      console.log("No V4 distributors found for this network yet; V4deploy.js will authorise them when it runs (it finds this token in platform-token.json).");
+    }
+  }
+
   console.log(
     "\nNext steps:\n" +
       "  1. Seed its Uniswap V2 pool:  PLATFORM_TOKEN_ADDRESS=" + address + " PLATFORM_ROUTER_ADDRESS=<v2 router> TOKEN_AMOUNT=... ETH_AMOUNT=... \\\n" +
       "       npx hardhat run scripts/addPlatformTokenLiquidity.js --network " + hre.network.name + "\n" +
-      "  2. Token owner (this wallet): npx hardhat run scripts/authorizePlatformTokenSnapshotters.js --network " + hre.network.name + "\n" +
-      "     (authorises the distributors as snapshotters; setPlatformToken refuses until then).\n" +
+      (authorisedNow
+        ? "  2. The reward distributors are already authorised as snapshotters (done above).\n"
+        : noDistributorsYet
+          ? "  2. Deploy the V4 set (scripts/V4deploy.js): it authorises the reward distributors as snapshotters itself, because it finds this token in platform-token.json and this wallet owns it.\n"
+          : "  2. Token owner (this wallet): npx hardhat run scripts/authorizePlatformTokenSnapshotters.js --network " + hre.network.name + "\n" +
+            "     (authorises the distributors as snapshotters; setPlatformToken refuses until then).\n") +
       "     V4PlatformRewardsDistributor (owner wallet): setPlatformToken(" + address + ").\n" +
       "     V4PlatformTaxDistributor (owner wallet): setRouter(<v2 router>) then setPlatformToken(" + address + ").\n" +
       "  3. Exclude the V2 pair (and any other non-holder address such as the router) from airdrops: setAirdropExcluded(<pair>, true) on the distributor(s) from step 2."
