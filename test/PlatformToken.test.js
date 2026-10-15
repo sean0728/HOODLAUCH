@@ -28,36 +28,37 @@ describe("PlatformToken", function () {
     await expect(Token.deploy("X", "X", 1n, ethers.ZeroAddress)).to.be.revertedWith("PlatformToken: invalid initial holder");
   });
 
-  it("keeps the holder registry in step with balances crossing zero", async () => {
+  it("registers an address the first time it holds a balance, and never removes it", async () => {
     const { token, owner, a, b } = await deploy();
     await token.transfer(a.address, 100n);
     await token.transfer(b.address, 50n);
     expect(await token.holderCount()).to.equal(3n);
-    await token.connect(a).transfer(b.address, 100n); // a drops to zero
-    expect(await token.holderCount()).to.equal(2n);
-    const held = [await token.holderAt(0), await token.holderAt(1)];
-    expect(held).to.include(owner.address);
-    expect(held).to.include(b.address);
-    expect(held).to.not.include(a.address);
+    await token.connect(a).transfer(b.address, 100n); // a drops to zero but stays registered, at the same index
+    expect(await token.holderCount()).to.equal(3n);
+    expect(await token.holderAt(0)).to.equal(owner.address);
+    expect(await token.holderAt(1)).to.equal(a.address);
+    expect(await token.holderAt(2)).to.equal(b.address);
+    expect(await token.balanceOf(a.address)).to.equal(0n);
   });
 
-  it("stamps a new generation each time an address (re-)enters the registry", async () => {
-    const { token, a } = await deploy();
+  it("stamps each address with its position, once", async () => {
+    const { token, owner, a } = await deploy();
     expect(await token.holderGeneration(a.address)).to.equal(0n);
+    expect(await token.holderGeneration(owner.address)).to.equal(1n);
     await token.transfer(a.address, 10n);
-    const first = await token.holderGeneration(a.address);
-    expect(first).to.be.gt(0n);
-    await token.connect(a).transfer(await (await ethers.getSigners())[0].getAddress(), 10n);
-    await token.transfer(a.address, 10n);
-    expect(await token.holderGeneration(a.address)).to.be.gt(first);
-    expect(await token.holderGenerationCounter()).to.be.gte(await token.holderGeneration(a.address));
+    expect(await token.holderGeneration(a.address)).to.equal(2n);
+    await token.connect(a).transfer(owner.address, 10n);
+    await token.transfer(a.address, 10n); // re-entering does not change the stamp
+    expect(await token.holderGeneration(a.address)).to.equal(2n);
+    expect(await token.holderGenerationCounter()).to.equal(2n);
   });
 
-  it("burn() lowers supply and drops a holder who burns everything", async () => {
+  it("burn() lowers supply; a holder who burns everything stays registered with a zero balance", async () => {
     const { token, a, supply } = await deploy();
     await token.transfer(a.address, 1000n);
     await token.connect(a).burn(1000n);
     expect(await token.totalSupply()).to.equal(supply - 1000n);
-    expect(await token.holderCount()).to.equal(1n);
+    expect(await token.holderCount()).to.equal(2n);
+    expect(await token.balanceOf(a.address)).to.equal(0n);
   });
 });
