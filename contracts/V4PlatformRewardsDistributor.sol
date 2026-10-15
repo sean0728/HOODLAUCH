@@ -29,7 +29,7 @@ import "./V4PlatformTokenRewards.sol";
 ///
 /// Audit changes: only the owner and approved keepers (the relayer) may start a
 /// buyback, so an outsider cannot bundle a price-manipulation sandwich around
-/// it (airdrop rounds stay permissionless); and a failed PlatformToken buy no
+/// it (airdrop rounds are owner/keeper-only too, see V4PlatformTokenRewards); and a failed PlatformToken buy no
 /// longer blocks the conversion of a launched token (the ETH waits here for the
 /// next triggerEthBuyback) unless the caller asked for a minimum.
 ///

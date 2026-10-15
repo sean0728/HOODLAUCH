@@ -39,6 +39,27 @@ import "./interfaces/V4IUniswapV2Router.sol";
 ///  - AirdropRoundCompleted reports what was really paid (roundDistributed),
 ///    and the platform token must be a contract.
 ///
+/// Second audit of this base (test/V4PlatformTokenRewardsReaudit.test.js):
+///  - AR-1 (Medium, fixed): paying out the pot's last wei empties this contract, which then leaves the
+///    PlatformToken holder registry (swap-and-pop) in the middle of the payout loop and shortens the list
+///    under it; the batch reverted with an out-of-bounds panic. It happened whenever the pot divided
+///    exactly (one eligible holder, round numbers) and whenever the pot cap bound because a holder had
+///    moved tokens mid-round. The loop now re-reads the list length on every step and the round closes on
+///    a fresh count.
+///  - AR-2 (Medium, fixed): what a round did not pay (tokens moved to a newcomer, a holder reordered behind
+///    the cursor, a share that rounds to nothing) used to fall out of the commitments: the owner could
+///    rescue it and a PlatformToken trigger recycled it with half burned. It is now carried to the next
+///    round (AirdropRemainderCarried); rounding dust under one wei per holder is left.
+///  - AR-3 (Low, mitigated by AR-2): a holder who empties out mid-round pulls the last holder in the
+///    registry behind the cursor. That holder is skipped this round and paid by the next.
+///  - AR-4 (Medium, residual): a round pays from live balances, so between two transactions of one round a
+///    holder can move tokens to a later wallet and be paid twice (the pot cap makes the last holders pay for
+///    it). Not fixable in this contract: it needs a balance snapshot in PlatformToken. Until then, pay a round
+///    in one transaction (runAirdropRound with the whole list; about 24,000 gas per holder, and the relayer
+///    does so up to AIRDROP_SINGLE_TX_MAX_HOLDERS).
+///  - AR-5 (Info, fixed): the cursor could move backwards when the list shrank below it.
+///  - AR-6 (Info, fixed): setPlatformToken checks that the token has a holder registry.
+///
 /// What changes on V4: launched tokens are converted to ETH in their own V4
 /// pool (V4TokenSeller). PlatformToken itself still trades wherever it trades,
 /// so ETH -> PlatformToken goes through a Uniswap V2 router that is passed in
@@ -78,6 +99,7 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
     event AirdropPayoutSkipped(address indexed holder, uint256 amount);
     event AirdropHolderIneligibleThisRound(address indexed holder, uint256 holderGeneration, uint256 roundGeneration);
     event AirdropRoundCompleted(uint256 totalDistributed);
+    event AirdropRemainderCarried(uint256 amount);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
     event AirdropExclusionSet(address indexed account, bool excluded);
 
@@ -97,8 +119,18 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         require(pendingAirdropTokens == 0, "V4PlatformTokenRewards: pending airdrop must clear first");
         require(newToken == address(0) || address(buybackRouter) != address(0), "V4PlatformTokenRewards: no buyback router");
         require(newToken == address(0) || newToken.code.length > 0, "V4PlatformTokenRewards: platform token is not a contract");
+        if (newToken != address(0)) _requireHolderRegistry(newToken);
         platformToken = V4IPlatformToken(newToken);
         emit PlatformTokenSet(newToken);
+    }
+
+    /// @dev AR-6: an ordinary ERC20 has no holder registry, so rounds on it would revert with no
+    /// reason. Fail here, where the owner can see why.
+    function _requireHolderRegistry(address token) private view {
+        try V4IPlatformToken(token).holderCount() returns (uint256) {}
+        catch { revert("V4PlatformTokenRewards: platform token has no holder registry"); }
+        try V4IPlatformToken(token).holderGenerationCounter() returns (uint256) {}
+        catch { revert("V4PlatformTokenRewards: platform token has no holder registry"); }
     }
 
     /// @notice Leave `account` out of airdrops (or put it back). Owner only, at most
@@ -203,7 +235,7 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
     }
 
     // ---------------------------------------------------------------
-    // Airdrop rounds (permissionless, batch-driven)
+    // Airdrop rounds (owner/keeper-only, batch-driven)
     // ---------------------------------------------------------------
 
     modifier onlyRoundRunner() {
@@ -267,15 +299,24 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         require(roundActive, "V4PlatformTokenRewards: no active round");
         require(maxHolders > 0, "V4PlatformTokenRewards: maxHolders must be > 0");
 
+        uint256 start = roundHolderCountAtStart;
         uint256 liveHolderCount = platformToken.holderCount();
-        uint256 total = liveHolderCount < roundHolderCountAtStart ? liveHolderCount : roundHolderCountAtStart;
+        uint256 total = liveHolderCount < start ? liveHolderCount : start;
         uint256 from = roundCursor;
         uint256 to = from + maxHolders;
         if (to > total) to = total;
+        if (to < from) to = from; // AR-5: the list shrank below the cursor; never move the cursor back
 
         uint256 distributed;
         uint256 remaining = roundAmount - roundUsed;
         for (uint256 i = from; i < to; i++) {
+            // AR-1: paying out the pot's last wei empties this contract, which drops it from the registry
+            // (swap-and-pop) in the middle of this loop and shortens the list under it. Re-check each step
+            // instead of trusting the length read above.
+            if (i >= platformToken.holderCount()) {
+                to = i;
+                break;
+            }
             address holder = platformToken.holderAt(i);
             if (holder == address(this) || airdropExcluded[holder]) continue;
             uint256 holderGen = platformToken.holderGeneration(holder);
@@ -301,8 +342,19 @@ abstract contract V4PlatformTokenRewards is V4TokenSeller {
         roundDistributed += distributed;
         emit AirdropBatchProcessed(from, to, distributed);
 
+        // Holders (and this contract) may have left during the batch: count again.
+        liveHolderCount = platformToken.holderCount();
+        total = liveHolderCount < start ? liveHolderCount : start;
         if (roundCursor >= total) {
             roundActive = false;
+            // AR-2: what the round did not pay (a holder who moved tokens to a newcomer, one the registry
+            // reordered behind the cursor, one whose share rounds to nothing) stays earmarked for holders and
+            // goes to the next round. Rounding dust (under one wei per holder) is left: not worth a round.
+            uint256 leftover = roundAmount - roundUsed;
+            if (leftover > start) {
+                pendingAirdropTokens += leftover;
+                emit AirdropRemainderCarried(leftover);
+            }
             emit AirdropRoundCompleted(roundDistributed);
         }
     }
