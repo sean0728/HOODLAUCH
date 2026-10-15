@@ -793,7 +793,12 @@ const V4_COMPOUND_MIN_SUPPLY_BPS = (() => {
 // to have the relayer convert its tax and run its holder payouts. The audited
 // contract only lets its owner and approved keepers do either, so the relayer
 // wallet must be authorised with setKeeper(relayerWallet, true) (RELAYER_ADDRESS in
-// V4deploy.js does that when the deployer owns it).
+// V4deploy.js does that when the deployer owns it). Its holder rounds pay from a PlatformToken
+// balance snapshot, so the token's owner must also have authorised it with setSnapshotter
+// (scripts/authorizePlatformTokenSnapshotters.js); until then a distribution still pays the fee
+// wallet and buys the token, but the round waits in pendingDisburseTokens (DisburseRoundDeferred)
+// and runDisburseRound reverts with "PlatformToken: not a snapshotter". Batches of about 200
+// holders fit one transaction (about 67,000 gas per holder).
 const V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS = (process.env.V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS || "").trim() || null;
 const V4_PLATFORM_TAX_DISTRIBUTOR_ABI = [
   "function owner() view returns (address)",

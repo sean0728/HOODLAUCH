@@ -6,8 +6,8 @@
 //   npx hardhat run scripts/authorizePlatformTokenSnapshotters.js --network robinhoodTestnet
 //
 // Addresses come from deployments/<network>/platform-token.json and v4-deploy.json, or from
-// PLATFORM_TOKEN_ADDRESS, V4_FEE_WALLET_DISTRIBUTOR_ADDRESS and V4_PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS.
-// Add V4PlatformTaxDistributor here once it pays from snapshots. Safe to re-run.
+// PLATFORM_TOKEN_ADDRESS, V4_FEE_WALLET_DISTRIBUTOR_ADDRESS, V4_PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS and
+// V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS. Safe to re-run.
 const hre = require("hardhat");
 const fs = require("fs");
 const path = require("path");
@@ -25,6 +25,7 @@ async function main() {
   const targets = [
     ["V4FeeWalletDistributor", process.env.V4_FEE_WALLET_DISTRIBUTOR_ADDRESS || v4.feeWalletDistributor],
     ["V4PlatformRewardsDistributor", process.env.V4_PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS || v4.platformRewardsDistributor],
+    ["V4PlatformTaxDistributor", process.env.V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS || v4.platformTaxDistributor],
   ].filter(([, a]) => a && hre.ethers.isAddress(a));
   if (targets.length === 0) throw new Error("No distributor addresses found (deployments/<network>/v4-deploy.json or the V4_*_DISTRIBUTOR_ADDRESS settings).");
 
@@ -40,7 +41,7 @@ async function main() {
     await tx.wait();
     console.log(`+ ${name} ${address} authorised as a snapshotter (tx ${tx.hash}).`);
   }
-  console.log("Next: on each distributor (owner wallet) call setPlatformToken(" + tokenAddress + ").");
+  console.log("Next: on each distributor (owner wallet) call setPlatformToken(" + tokenAddress + ") (on the tax distributor, setRouter first).");
 }
 
 main().catch((err) => { console.error(err); process.exitCode = 1; });
