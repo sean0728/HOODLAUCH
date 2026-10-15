@@ -10930,7 +10930,7 @@
     let lib;
     try{ lib = await solLoadLib(); }
     catch(e){ return (solFeeCache[pool] = { f:null, err:solErr(e), at:Date.now() }); }
-    try{ return (solFeeCache[pool] = { f: await lib.getFeeBreakdown(pool), at:Date.now() }); }
+    try{ return (solFeeCache[pool] = { f: await lib.getFeeBreakdown(pool, { force: !!force }), at:Date.now() }); }
     catch(e){ return (solFeeCache[pool] = { f:null, err:solErr(e), at:Date.now() }); }
   }
   // Runs fn over items a few at a time so a long list doesn't fire every RPC read at once.
@@ -10951,10 +10951,11 @@
     if(solBusy) return;
     const lib = window.IgnitionSol;
     if(!lib || !lib.currentWallet()){ solNeedWallet(); return; }
-    solBusy = true; btn.disabled = true; msgEl.textContent = "Approve the transaction in your Solana wallet…";
+    solBusy = true; btn.disabled = true; msgEl.textContent = "Approve the transaction in your Solana wallet… (a graduated token can need two: curve fees, then Meteora pool fees)";
     try{
       const r = await solGuarded(()=> lib.claimFees({ pool, who }));
-      msgEl.innerHTML = `Claimed · <a href="${solExplorer("tx", r.signature)}" target="_blank" rel="noopener noreferrer">view transaction</a>`;
+      const sigs = (r.signatures && r.signatures.length) ? r.signatures : [r.signature];
+      msgEl.innerHTML = `Claimed · ` + sigs.map((sg, i)=> `<a href="${solExplorer("tx", sg)}" target="_blank" rel="noopener noreferrer">${sigs.length > 1 ? "transaction " + (i+1) : "view transaction"}</a>`).join(" · ");
       await solReadFees(pool, true);
     }catch(e){
       msgEl.textContent = solErr(e) + (who === "partner" ? " (Only the platform fee-claimer wallet can claim this share.)" : " (Only the wallet that launched the token can claim this share.)");
@@ -11055,8 +11056,9 @@
       const btn = row.querySelector("[data-solp-claim]");
       if(!c.f){ lab.textContent = c.err ? "fee figures unavailable right now" : "Checking creator fees…"; btn.disabled = true; return; }
       const un = c.f.creatorUnclaimedSol;
-      lab.innerHTML = `<b>${solFeeAmt(un)} SOL</b> unclaimed · ${solFeeAmt(c.f.creatorTotalSol)} SOL earned in total`;
-      btn.disabled = !(un > 0);
+      const tokFee = c.f.creatorUnclaimedToken > 0 ? c.f.creatorUnclaimedToken : 0;
+      lab.innerHTML = `<b>${solFeeAmt(un)} SOL</b>${tokFee ? ` + ${tokFee.toLocaleString("en-US", { maximumFractionDigits: 2 })} $${escapeHtml(l.symbol)}` : ""} unclaimed · ${solFeeAmt(c.f.creatorTotalSol)} SOL earned in total${c.f.venue === "damm" ? " (incl. Meteora pool)" : ""}`;
+      btn.disabled = !(un > 0 || tokFee > 0);
     };
     wrap.querySelectorAll("[data-solp-claim]").forEach(btn=> btn.addEventListener("click", ()=>{
       const l = mine.find(x=> x.pool === btn.dataset.solpClaim); if(!l) return;
@@ -11105,9 +11107,12 @@
       const c = solFeeCache[l.pool] || {};
       const un = row.querySelector("[data-saf-un]"), tot = row.querySelector("[data-saf-tot]"), btn = row.querySelector("[data-saf-claim]");
       if(!c.f){ un.textContent = c.err ? "n/a" : "…"; tot.textContent = c.err ? "fee figures unavailable" : "unclaimed"; btn.disabled = true; if(c.err) un.title = c.err; return; }
-      un.innerHTML = `${solFeeAmt(c.f.partnerUnclaimedSol)} SOL`;
-      tot.textContent = "unclaimed · " + solFeeAmt(c.f.partnerTotalSol) + " earned";
-      btn.disabled = !(c.f.partnerUnclaimedSol > 0);
+      const tokFee = c.f.partnerUnclaimedToken > 0 ? c.f.partnerUnclaimedToken : 0;
+      un.innerHTML = `${solFeeAmt(c.f.partnerUnclaimedSol)} SOL` + (tokFee ? `<div class="mtr-meta" style="margin:0;">+ ${tokFee.toLocaleString("en-US", { maximumFractionDigits: 2 })} $${escapeHtml(l.symbol)}</div>` : "");
+      tot.textContent = "unclaimed · " + solFeeAmt(c.f.partnerTotalSol) + " earned" + (c.f.venue === "damm" ? " · incl. Meteora pool" : "");
+      const msgEl = row.querySelector("[data-saf-msg]");
+      if(msgEl && c.f.dammError && !solBusy) msgEl.textContent = "Meteora pool fees couldn't be read right now (" + c.f.dammError + "); curve fees are shown.";
+      btn.disabled = !(c.f.partnerUnclaimedSol > 0 || tokFee > 0);
     };
     const paintTotal = ()=>{
       const el = document.getElementById("safTotal"); if(!el) return;
