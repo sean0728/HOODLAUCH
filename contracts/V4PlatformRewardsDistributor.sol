@@ -10,16 +10,22 @@ import "./V4PlatformTokenRewards.sol";
 /// @title V4PlatformRewardsDistributor
 /// @notice V4 counterpart of PlatformRewardsDistributor. Everything it
 /// receives ends up as PlatformToken that is 50% burned and 50% airdropped to
-/// PlatformToken holders:
-///  - ETH (the V4 factory's 50% launch-fee share, plain transfers) is spent on
-///    PlatformToken by triggerEthBuyback;
-///  - launched tokens (its reward-diversion cut of the trading tax, pushed in
-///    kind by V4TaxHook) are sold into their own V4 pool by
-///    triggerTokenBuyback and the ETH is spent on PlatformToken in the same
-///    call.
+/// PlatformToken holders. It receives ETH, as plain transfers into receive():
+///  - the 50% share of every launch fee, from each launch path (V4TokenFactory,
+///    V4CustomTokenFactory, V4CurveFactory, V4PoolLauncher, and the relayed
+///    launches' settlement). This is its steady income;
+///  - the pool's reward-diversion cut of the trading tax, paid by V4TaxHook.flush()
+///    when a pool's rewardBps is above zero (the factory default is 0, so by
+///    default trading pays it nothing);
+///  - anything anyone chooses to send.
+/// All of that ETH is spent on PlatformToken by triggerEthBuyback. The older in-kind
+/// path is kept for tokens that still arrive (an older pool's rewards, or tokens
+/// sent by hand): triggerTokenBuyback sells them into their own V4 pool and spends
+/// the ETH on PlatformToken in the same call. The hook no longer delivers tokens.
 /// ETH -> PlatformToken uses the Uniswap V2 router passed at construction (the
-/// pool PlatformToken trades on). With no router (address(0)) nothing is
-/// bought back and funds simply accumulate.
+/// pool PlatformToken trades on). With no router (address(0)), or no platform
+/// token set yet, nothing is bought back and the ETH simply waits here (the owner
+/// can sweep it with rescueEth).
 ///
 /// Audit changes: only the owner and approved keepers (the relayer) may start a
 /// buyback, so an outsider cannot bundle a price-manipulation sandwich around
@@ -27,8 +33,18 @@ import "./V4PlatformTokenRewards.sol";
 /// longer blocks the conversion of a launched token (the ETH waits here for the
 /// next triggerEthBuyback) unless the caller asked for a minimum.
 ///
-/// Wiring: set as the factory's rewardsDistributor, then exempt it from the hook
-/// tax with V4TokenFactory.setTaxExempt(this, true).
+/// Second audit pass (ETH intake): every path above was run against the real
+/// contracts, and each lands (see test/V4PlatformRewardsReaudit.test.js). receive()
+/// stores nothing, so a plain 21,000-gas transfer succeeds and no sender's gas cap
+/// (the hook's 150,000, the relay's and launcher's 300,000) can make it fail. That
+/// matters because the factories divert this share to the treasury, and log it,
+/// whenever a payment to this contract fails. No code change was needed; the
+/// comments above were the only stale part.
+///
+/// Wiring: set as the factory's rewardsDistributor. The exemption from the hook tax
+/// (V4TokenFactory.setTaxExempt(this, true)) is only needed for the in-kind
+/// triggerTokenBuyback, which refuses to sell without it; the ETH buyback never
+/// needs it.
 contract V4PlatformRewardsDistributor is V4PlatformTokenRewards {
     uint256 public ethBuybackThreshold;
     mapping(address => uint256) public tokenBuybackThreshold;
