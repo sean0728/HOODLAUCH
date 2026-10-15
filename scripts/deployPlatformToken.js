@@ -10,6 +10,10 @@
 //   npx hardhat run scripts/deployPlatformToken.js --network robinhoodTestnet
 //   npx hardhat run scripts/deployPlatformToken.js --network robinhoodMainnet
 //
+// The token keeps an append-only holder registry and balance snapshots (see contracts/PlatformToken.sol). Its
+// owner (the deployer) must authorise each distributor as a snapshotter before setPlatformToken works on it:
+// run scripts/authorizePlatformTokenSnapshotters.js with the owner's wallet.
+//
 // Settings (all optional, set in .env or the shell):
 //   PLATFORM_TOKEN_NAME            default "Hood Launch"
 //   PLATFORM_TOKEN_SYMBOL          default "HOOD"
@@ -61,7 +65,9 @@ async function main() {
     "\nNext steps:\n" +
       "  1. Seed its Uniswap V2 pool:  PLATFORM_TOKEN_ADDRESS=" + address + " PLATFORM_ROUTER_ADDRESS=<v2 router> TOKEN_AMOUNT=... ETH_AMOUNT=... \\\n" +
       "       npx hardhat run scripts/addPlatformTokenLiquidity.js --network " + hre.network.name + "\n" +
-      "  2. V4PlatformRewardsDistributor (owner wallet): setPlatformToken(" + address + ").\n" +
+      "  2. Token owner (this wallet): npx hardhat run scripts/authorizePlatformTokenSnapshotters.js --network " + hre.network.name + "\n" +
+      "     (authorises the distributors as snapshotters; setPlatformToken refuses until then).\n" +
+      "     V4PlatformRewardsDistributor (owner wallet): setPlatformToken(" + address + ").\n" +
       "     V4PlatformTaxDistributor (owner wallet): setRouter(<v2 router>) then setPlatformToken(" + address + ").\n" +
       "  3. Exclude the V2 pair (and any other non-holder address such as the router) from airdrops: setAirdropExcluded(<pair>, true) on the distributor(s) from step 2."
   );

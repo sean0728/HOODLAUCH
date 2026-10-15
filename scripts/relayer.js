@@ -4823,23 +4823,12 @@ async function main() {
     if (!roundActive) {
       const pending = await distributor.pendingAirdropTokens();
       if (pending === 0n) return;
-      // Start and pay the first batch in ONE transaction where the contract supports
-      // it, so no balance can change between the snapshot and the payment.
+      // Start and pay the first batch in ONE transaction where the contract supports it. The round pays from a
+      // PlatformToken snapshot taken when it starts, so batches may be spread over many transactions; the
+      // distributor must first be authorised on the token (PlatformToken.setSnapshotter).
       let startedAtomically = false;
-      // A round pays from balances as they are when each batch runs, so a holder can move tokens to another
-      // wallet between two batches (V4PlatformTokenRewards audit, AR-4). Where the whole holder list fits in
-      // one transaction (about 24,000 gas per holder, measured), pay the round in that one transaction.
-      let firstBatch = batchSize;
       try {
-        const reg = await hre.ethers.getContractAt(["function holderCount() view returns (uint256)"], platformTokenAddress, hre.ethers.provider);
-        const holders = Number(await reg.holderCount());
-        const singleTxMax = Number(process.env.AIRDROP_SINGLE_TX_MAX_HOLDERS || 600);
-        if (holders > firstBatch && holders <= singleTxMax) firstBatch = holders;
-      } catch (err) {
-        // no registry readable: keep the configured batch size
-      }
-      try {
-        const tx = await sendRelayerTx(() => distributor.runAirdropRound(firstBatch));
+        const tx = await sendRelayerTx(() => distributor.runAirdropRound(batchSize));
         const receipt = await tx.wait();
         await recordAirdropGas(label, receipt);
         console.log(`[${label}] airdrop round started and first batch paid (${pending} platformToken pending) in tx ${receipt.hash}.`);
