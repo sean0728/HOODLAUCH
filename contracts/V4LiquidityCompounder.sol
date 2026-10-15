@@ -17,6 +17,11 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 
+/// @dev The one hook function the compounder needs to read.
+interface IV4TaxExemptView {
+    function taxExempt(address swapper) external view returns (bool);
+}
+
 /// @title V4LiquidityCompounder
 /// @notice Turns the "liquidity" share of a custom fee into pool liquidity.
 ///
@@ -49,6 +54,16 @@ import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmo
 ///   rounding) was silently spent on whichever token compounded next. Each
 ///   token's leftover ETH is now tracked (ethCarry) and only that token's own
 ///   ETH is used for it.
+///
+///  LC-3 (Low, fixed): the exemption below was a deployment step nothing checked.
+///   With the compounder NOT exempt, its own sale was taxed (about 5% of the ETH
+///   in the loaded-fee test, plus burned tokens and fees paid to the platform),
+///   and whenever the price cap stopped the sale short the hook refused it
+///   (PartialFillNotAllowed), so compound() reverted with an unrelated error.
+///   compound() now reads the flag from the hook first and refuses with a clear
+///   message, so a missing or revoked exemption can neither leak value nor hide
+///   behind another error. isTaxExempt() lets a deploy script or the admin page
+///   check it.
 ///
 /// The sale must not be taxed or it would pay itself: the platform owner
 /// marks this contract tax-exempt on the factory (setTaxExempt), exactly like
@@ -84,6 +99,12 @@ contract V4LiquidityCompounder is ReentrancyGuard, IUnlockCallback {
         require(msg.sender == address(poolManager), "V4LiquidityCompounder: unexpected ETH");
     }
 
+    /// @notice Whether the hook currently treats this contract as tax-exempt.
+    /// compound() refuses to run when this is false.
+    function isTaxExempt() public view returns (bool) {
+        return IV4TaxExemptView(hook).taxExempt(address(this));
+    }
+
     /// @notice Tokens waiting to be compounded for `token`.
     function pending(address token) external view returns (uint256) {
         return IERC20(token).balanceOf(address(this));
@@ -101,6 +122,7 @@ contract V4LiquidityCompounder is ReentrancyGuard, IUnlockCallback {
 
     /// @notice Adds everything waiting for `token` to its pool, permanently.
     function compound(address token) external nonReentrant returns (uint128 liquidity) {
+        require(isTaxExempt(), "V4LiquidityCompounder: compounder is not tax exempt");
         uint256 bal = IERC20(token).balanceOf(address(this));
         require(bal >= 2, "V4LiquidityCompounder: nothing to compound");
         PoolKey memory key = _key(token);

@@ -27,6 +27,12 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 /// swapper, so `minOut` is compared against what the trader actually receives
 /// (net of the tax). Anyone can use it; it only ever swaps the caller's own
 /// ETH / tokens and pays the output to the caller.
+///
+/// Change from the security audit: SR-1 (Low, fixed) -- sell() now rejects an
+/// amountIn above int256.max. Before, such a value changed sign when it was
+/// cast to the pool's signed amount, so sell(2^256-5) quietly became an
+/// exact-OUT swap for 5 wei of ETH. Only the caller's own tokens were ever
+/// involved, but "sells exactly amountIn" now always holds.
 contract V4SwapRouter is ReentrancyGuard, IUnlockCallback {
     using SafeERC20 for IERC20;
     using StateLibrary for IPoolManager;
@@ -90,6 +96,9 @@ contract V4SwapRouter is ReentrancyGuard, IUnlockCallback {
     {
         require(block.timestamp <= deadline, "V4SwapRouter: expired");
         require(amountIn > 0, "V4SwapRouter: nothing to sell");
+        // SR-1: amountIn is negated into an int256 below; a value above int256.max would flip sign and
+        // turn this exact-in sell into an exact-out one.
+        require(amountIn <= uint256(type(int256).max), "V4SwapRouter: amount too large");
         // The tokens go from the seller straight to the PoolManager inside the
         // callback; the router never holds them. (If it did, a token that
         // shares reflections among holders would count the router as a holder
