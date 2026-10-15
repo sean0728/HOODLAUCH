@@ -523,5 +523,111 @@ await t("getPoolInfo for a graduated token reports the live DAMM v2 price, and f
 });
 reset();
 
+
+// ---- after graduation: fees sitting in the DAMM v2 liquidity positions ----
+const le32 = (n) => { const b = Buffer.alloc(32); let x = BigInt(n); for (let i = 0; i < 32; i++) { b[i] = Number(x & 0xffn); x >>= 8n; } return [...b]; };
+function makeDammFees({ platformSol = 500_000_000, platformTok = 1_000_000_000, creatorSol = 50_000_000, creatorTok = 0, claimedSol = 0 } = {}) {
+  const d = makeDamm();
+  const solIsA = d.poolState.tokenAMint.equals(WSOL);
+  d.poolState.feeAPerLiquidity = le32(0); d.poolState.feeBPerLiquidity = le32(0);
+  const pos = (owner, sol, tok, claimed = 0) => {
+    const nft = Keypair.generate().publicKey, position = Keypair.generate().publicKey;
+    return { owner, position, positionNftAccount: nft, positionState: {
+      pool: null, unlockedLiquidity: new BN(0), vestedLiquidity: new BN(0), permanentLockedLiquidity: new BN("1000000000"),
+      feeAPerTokenCheckpoint: le32(0), feeBPerTokenCheckpoint: le32(0), rewardInfos: [],
+      feeAPending: new BN(solIsA ? sol : tok), feeBPending: new BN(solIsA ? tok : sol),
+      metrics: { totalClaimedAFee: new BN(solIsA ? claimed : 0), totalClaimedBFee: new BN(solIsA ? 0 : claimed) },
+    } };
+  };
+  const platformPos = pos(feeClaimer, platformSol, platformTok, claimedSol);
+  const creatorPos = pos(user.publicKey, creatorSol, creatorTok);
+  d.positionsFor = (o) => (o.equals(st.config.feeClaimer) ? [platformPos] : o.equals(user.publicKey) ? [creatorPos] : []);
+  d.cp.getPositionsByUser = async (o) => d.positionsFor(o).map((x) => ({ positionNftAccount: x.positionNftAccount, position: x.position, positionState: x.positionState }));
+  // positions belong to whichever pool the SDK resolved to
+  const origFetch = d.cp.fetchPoolState;
+  d.cp.fetchPoolState = async (addr) => { for (const x of [platformPos, creatorPos]) x.positionState.pool = addr; return origFetch(addr); };
+  d.platformPos = platformPos; d.creatorPos = creatorPos;
+  return d;
+}
+const asPlatformWallet = (kp) => { // connect the wallet that is the platform config's fee claimer
+  st.config.feeClaimer = kp.publicKey;
+  core._setWalletForTests(fakeWallet(kp), { address: kp.publicKey.toBase58(), publicKey: kp.publicKey.toBytes() });
+};
+const restoreWallet = () => { st.config.feeClaimer = feeClaimer; core._setWalletForTests(fakeWallet(user), { address: user.publicKey.toBase58(), publicKey: user.publicKey.toBytes() }); };
+
+await t("fees after graduation: balance = curve fees + DAMM v2 position fees, for platform and creator", async () => {
+  reset(); const d = makeDammFees({ claimedSol: 100_000_000 }); core._setClientForTests(conn, st.client, d.cp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const fb = await core.getFeeBreakdown(st.poolAddr);
+  assert.equal(fb.venue, "damm");
+  assert.ok(Math.abs(fb.partnerUnclaimedSol - (0.045 + 0.5)) < 1e-9, "platform SOL " + fb.partnerUnclaimedSol);
+  assert.equal(fb.partnerUnclaimedToken, 1000);
+  assert.ok(Math.abs(fb.partnerTotalSol - (0.045 + 0.5 + 0.1)) < 1e-9, "earned incl. already-claimed " + fb.partnerTotalSol);
+  assert.ok(Math.abs(fb.creatorUnclaimedSol - (0.005 + 0.05)) < 1e-9, "creator SOL " + fb.creatorUnclaimedSol);
+  assert.equal(fb.creatorUnclaimedToken, 0);
+  assert.ok(fb.dammPool && !fb.dammError);
+});
+await t("fees on the curve are unchanged (no DAMM v2 reads before graduation)", async () => {
+  reset(); const d = makeDammFees(); core._setClientForTests(conn, st.client, d.cp);
+  let reads = 0; d.cp.getPositionsByUser = async () => { reads++; return []; };
+  const fb = await core.getFeeBreakdown(st.poolAddr);
+  assert.equal(fb.venue, "curve"); assert.equal(reads, 0);
+  assert.equal(fb.partnerUnclaimedSol, 0.045); assert.equal(fb.creatorUnclaimedSol, 0.005); assert.equal(fb.partnerUnclaimedToken, 0);
+});
+await t("fees after graduation: if the DAMM v2 pool can't be read the curve figures still come back, with the reason", async () => {
+  reset(); const d = makeDammFees(); core._setClientForTests(conn, st.client, d.cp);
+  d.cp.getPositionsByUser = async () => { throw new Error("rpc down"); };
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const fb = await core.getFeeBreakdown(st.poolAddr);
+  assert.equal(fb.partnerUnclaimedSol, 0.045); assert.match(fb.dammError, /rpc down/);
+});
+await t("fees: a wallet that is both platform and creator is counted once, on the platform line", async () => {
+  reset(); const d = makeDammFees(); core._setClientForTests(conn, st.client, d.cp);
+  st.config.feeClaimer = user.publicKey; // same wallet as the pool's creator
+  d.positionsFor = (o) => (o.equals(user.publicKey) ? [d.platformPos, d.creatorPos] : []);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const fb = await core.getFeeBreakdown(st.poolAddr);
+  st.config.feeClaimer = feeClaimer;
+  assert.ok(Math.abs(fb.partnerUnclaimedSol - (0.045 + 0.55)) < 1e-9, "platform line has both " + fb.partnerUnclaimedSol);
+  assert.equal(fb.creatorUnclaimedSol, 0.005, "creator line shows only the curve share, not counted twice");
+});
+await t("claim after graduation (platform): curve claim then one DAMM v2 claim per position, each signed", async () => {
+  reset(); const d = makeDammFees(); core._setClientForTests(conn, st.client, d.cp);
+  const platformKp = Keypair.generate(); asPlatformWallet(platformKp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const r = await core.claimFees({ pool: st.poolAddr, who: "partner" });
+  assert.equal(r.signatures.length, 2, "one curve claim + one DAMM v2 claim");
+  const txs = conn.sent.map((b) => Transaction.from(b));
+  txs.forEach((tx) => assert.ok(tx.verifySignatures()));
+  assert.ok(txs[0].instructions.some((i) => i.programId.equals(DBC.DYNAMIC_BONDING_CURVE_PROGRAM_ID)), "first: curve fees");
+  const damm = txs[1].instructions.find((i) => i.programId.equals(CP_AMM_PROGRAM_ID));
+  assert.ok(damm, "second: DAMM v2 claim");
+  assert.ok(damm.keys.some((k) => k.pubkey.equals(d.platformPos.positionNftAccount)), "the position NFT account is referenced");
+  assert.ok(damm.keys.some((k) => k.pubkey.equals(d.platformPos.position)), "the position is referenced");
+  restoreWallet();
+});
+await t("claim after graduation: positions with nothing to claim are skipped", async () => {
+  reset(); const d = makeDammFees({ creatorSol: 0, creatorTok: 0 }); core._setClientForTests(conn, st.client, d.cp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const r = await core.claimFees({ pool: st.poolAddr, who: "creator" }); // wallet = creator; only the curve share remains
+  assert.equal(r.signatures.length, 1);
+  assert.ok(Transaction.from(conn.sent[0]).instructions.some((i) => i.programId.equals(DBC.DYNAMIC_BONDING_CURVE_PROGRAM_ID)));
+});
+await t("claim after graduation: the wrong wallet is refused up front with a clear message, nothing is sent", async () => {
+  reset(); const d = makeDammFees(); core._setClientForTests(conn, st.client, d.cp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  await assert.rejects(core.claimFees({ pool: st.poolAddr, who: "partner" }), /Only the platform fee-claimer wallet/);
+  assert.equal(conn.sent.length, 0);
+});
+await t("claim: a creator share on a graduated token claims the creator's DAMM v2 position too", async () => {
+  reset(); const d = makeDammFees(); core._setClientForTests(conn, st.client, d.cp);
+  st.setPool({ poolState: st.mkPoolState({ isMigrated: 1 }) });
+  const r = await core.claimFees({ pool: st.poolAddr, who: "creator" });
+  assert.equal(r.signatures.length, 2);
+  const damm = Transaction.from(conn.sent[1]).instructions.find((i) => i.programId.equals(CP_AMM_PROGRAM_ID));
+  assert.ok(damm.keys.some((k) => k.pubkey.equals(d.creatorPos.positionNftAccount)));
+});
+reset();
+
 console.log(`\n${pass}/${pass + fail} passed`);
 if (fail) { for (const e of results) console.log(e && e.stack); process.exit(1); }
