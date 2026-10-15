@@ -10815,7 +10815,7 @@
     if(st){ st.textContent = info.migrated ? "Graduated" : "Curve"; st.className = "tc-status "+(info.migrated?"graduated":"curve-trading"); }
     if(info.migrated){
       set("solDGaugeLabel", "Graduated");
-      set("solDGaugeHint", "This token reached its target and moved to a Meteora DAMM v2 pool — it no longer trades on the bonding curve.");
+      set("solDGaugeHint", "This token reached its target and moved to a Meteora DAMM v2 pool — it no longer trades on the bonding curve. You can still buy and sell it here; trades go to the DAMM v2 pool.");
     }
     solRenderTradePanel();
   }
@@ -10832,13 +10832,10 @@
     if(panel.contains(document.activeElement) && document.activeElement.id==="solTradeAmount") return;
     const mint = solDetailMint;
     const info = solInfo[mint];
-    if(info && info.migrated){
-      panel.innerHTML = `<div class="eyebrow">Trade</div><p style="margin:10px 0 0; color:var(--paper-500)">This token has graduated. It trades on Meteora (DAMM v2) now, not on the IgnitionX curve.</p>`;
-      return;
-    }
     const buy = solTradeSide === "buy";
+    const onDamm = !!(info && info.migrated);
     panel.innerHTML = `
-      <div class="eyebrow" style="margin-bottom:12px;">Trade on the curve</div>
+      <div class="eyebrow" style="margin-bottom:12px;">${onDamm ? "Trade on Meteora (DAMM v2)" : "Trade on the curve"}</div>
       <div class="trade-tabs">
         <button class="trade-tab" data-sol-side="buy" aria-selected="${buy}">Buy</button>
         <button class="trade-tab" data-sol-side="sell" aria-selected="${!buy}">Sell</button>
@@ -10877,9 +10874,13 @@
       const q = await lib.quote({ pool: info.pool, side: solTradeSide, amount: amt, slippageBps: 100 });
       if(seq !== solQuoteSeq) return;
       const buy = solTradeSide === "buy";
+      // q.out / q.minOut are what you receive AFTER the platform fee. The platform fee is a separate SOL transfer in
+      // the same transaction (on a buy it is part of the SOL you typed; on a sell it comes out of the SOL you get).
+      const feePct = (q.platformFeeBps/100).toFixed(2).replace(/\.?0+$/, "");
       out.innerHTML = `You receive ≈ <b>${buy ? q.out.toLocaleString("en-US", {maximumFractionDigits:2})+" tokens" : q.out.toFixed(4)+" SOL"}</b>`
         + ` · min ${buy ? q.minOut.toLocaleString("en-US", {maximumFractionDigits:2}) : q.minOut.toFixed(4)} at 1% slippage`
-        + ` · price impact ${q.impactPct.toFixed(2)}%${q.feeSol!=null ? ` · fee ${q.feeSol.toFixed(4)} SOL` : ""}`;
+        + ` · price impact ${q.impactPct.toFixed(2)}%${q.feeSol!=null ? ` · pool fee ${q.feeSol.toFixed(4)} SOL` : ""}`
+        + (q.platformFeeBps > 0 ? ` · platform fee ${feePct}% (${q.platformFeeSol < 0.0001 ? q.platformFeeSol.toFixed(7) : q.platformFeeSol.toFixed(4)} SOL)` : "");
     }catch(e){
       if(seq !== solQuoteSeq) return;
       out.textContent = solErr(e);
