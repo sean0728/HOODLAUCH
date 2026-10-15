@@ -54,9 +54,11 @@ import "./interfaces/V4IUniswapV2Router.sol";
 ///    registry behind the cursor. That holder is skipped this round and paid by the next.
 ///  - AR-4 (Medium, residual): a round pays from live balances, so between two transactions of one round a
 ///    holder can move tokens to a later wallet and be paid twice (the pot cap makes the last holders pay for
-///    it). Not fixable in this contract: it needs a balance snapshot in PlatformToken. Until then, pay a round
-///    in one transaction (runAirdropRound with the whole list; about 24,000 gas per holder, and the relayer
-///    does so up to AIRDROP_SINGLE_TX_MAX_HOLDERS).
+///    it). Not fixable here: it needs the balances as they were at round start, and the deployed
+///    PlatformToken keeps no snapshots and cannot be changed. So it stays, and the defence is operational:
+///    pay a round in one transaction (runAirdropRound with the whole list; about 24,000 gas per holder, and
+///    the relayer does so up to AIRDROP_SINGLE_TX_MAX_HOLDERS). Registering many dust holders raises the
+///    holder count and can push a round past that size.
 ///  - AR-5 (Info, fixed): the cursor could move backwards when the list shrank below it.
 ///  - AR-6 (Info, fixed): setPlatformToken checks that the token has a holder registry.
 ///
