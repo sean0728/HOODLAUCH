@@ -16436,7 +16436,7 @@
       const walletOrContract = (has, addr, slot) => {
         if(has===null) return [v4Pill("warn","Couldn't check")];
         if(!has) return [v4Pill("", "Wallet (no contract)"), ...(slot && slot.exempt===false ? [] : [])];
-        if(slot && slot.isV4) return [v4Pill("ok","V4 distributor"), slot.exempt ? v4Pill("ok","Tax-exempt") : v4Pill("warn","Not tax-exempt — its sales are taxed again")];
+        if(slot && slot.isV4) return [v4Pill("ok","V4 distributor"), slot.exempt ? v4Pill("ok","Tax-exempt") : v4Pill("warn","Not tax-exempt — its sales are refused until it is")];
         return [v4Pill("warn","Contract, not a V4 distributor")];
       };
       row("Price feed", isZeroAddr(fState.priceFeed) ? null : fState.priceFeed, isZeroAddr(fState.priceFeed) ? [v4Pill("warn","Unset — graduation check inactive")] : [v4CodePill(code.priceFeed, fState.priceFeed)], "ETH/USD feed used by the graduation check");
