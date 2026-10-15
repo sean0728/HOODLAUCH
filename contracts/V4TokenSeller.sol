@@ -19,18 +19,29 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
+/// @dev The one hook function the sellers need to read.
+interface IV4SellerExemptView {
+    function taxExempt(address swapper) external view returns (bool);
+}
+
 /// @title V4TokenSeller
-/// @notice Shared base of the V4 distributors. On V4 the trading tax arrives
-/// in kind (the launched token itself, pushed here by V4TaxHook), and these
-/// contracts turn it into ETH by selling it into that token's own
-/// (native ETH, token) V4 pool, the V4 counterpart of what the V2
-/// distributors did through the V2 router.
+/// @notice Shared base of the V4 distributors and the reflection converter.
+/// Some fee shares reach these contracts in kind (the launched token itself,
+/// pushed here by V4TaxHook: a custom token's reflection share, and tokens
+/// sent to a distributor), and they turn them into ETH by selling them into
+/// that token's own (native ETH, token) V4 pool, the V4 counterpart of what the
+/// V2 distributors did through the V2 router.
 ///
 /// Two things differ from V2 and are deliberate:
 ///  - The sale is a swap on a taxed pool, so the hook must exempt this
 ///    contract (V4TokenFactory.setTaxExempt) or each conversion would pay the
-///    tax again. Without the exemption a sale still works, it just loses
-///    feeBps to a second round of tax.
+///    tax again. RC-1 (Low, fixed): this used to be only a deployment step.
+///    With the exemption missing, a sale paid the platform fee and the token's
+///    own fees (reflection tax paid to itself, burns), and whenever the price
+///    limit stopped a sale of a custom token short the hook refused it
+///    (PartialFillNotAllowed), so the call reverted without naming the cause.
+///    Every sale now checks the flag first (isTaxExempt) and refuses with
+///    "seller is not tax exempt".
 ///  - V2 derived a slippage floor from pair reserves. Here the guard is a
 ///    PRICE LIMIT handed to the pool: the swap may move the pool's price by at
 ///    most swapSlippageBps (5.00%-8.00%, same band as everywhere else), and
@@ -67,10 +78,21 @@ abstract contract V4TokenSeller is Ownable2Step, ReentrancyGuard, IUnlockCallbac
         hook = hook_;
     }
 
-    /// @notice ETH only ever arrives from the PoolManager (sale proceeds), the
-    /// V4 factory (its 50% fee share, for the rewards distributor) or, in
-    /// the platform distributor's case, a plain transfer.
+    /// @notice ETH arrives from the PoolManager (sale proceeds) and from the
+    /// factories and relay (fee shares); anyone else can send some too. Each
+    /// contract that inherits this keeps its own books and treats ETH it did not
+    /// book as stray (the converter's rescueStrayEth).
     receive() external payable {}
+
+    /// @notice Whether the hook currently treats this contract as tax-exempt.
+    /// Selling is refused when this is false.
+    function isTaxExempt() public view returns (bool) {
+        return IV4SellerExemptView(hook).taxExempt(address(this));
+    }
+
+    function _requireTaxExempt() internal view {
+        require(isTaxExempt(), "V4TokenSeller: seller is not tax exempt");
+    }
 
     function setKeeper(address keeper, bool allowed) external onlyOwner {
         require(keeper != address(0), "V4TokenSeller: invalid keeper");
@@ -131,6 +153,7 @@ abstract contract V4TokenSeller is Ownable2Step, ReentrancyGuard, IUnlockCallbac
         returns (uint256 tokenSpent, uint256 ethOut)
     {
         require(amountIn > 0, "V4TokenSeller: nothing to sell");
+        _requireTaxExempt();
         PoolKey memory key = _poolKey(token);
         uint160 limit = _sellPriceLimit(key);
         bytes memory result = poolManager.unlock(abi.encode(key, amountIn, limit));

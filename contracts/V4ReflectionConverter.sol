@@ -56,6 +56,10 @@ interface IV4ReflectionFlag {
 /// creator is a token holder with an interest in the rate, and can trade the pool before and
 /// after) could sandwich a conversion and take value from the holders it is paid to.
 ///
+/// RC-1 (Low, fixed): the tax exemption below is checked on every conversion
+/// (isTaxExempt); a missing exemption now refuses the call instead of leaking
+/// value or being refused by the hook for an unrelated reason.
+///
 /// Wiring: set this as V4TokenFactory.reflectionConverter BEFORE launching tokens that use it
 /// (each token fixes its converter at launch), exempt it from the hook's tax with
 /// V4TokenFactory.setTaxExempt(this, true), and make the relayer wallet a keeper.
@@ -186,6 +190,7 @@ contract V4ReflectionConverter is V4TokenSeller {
         returns (uint256 spent, uint256 out)
     {
         require(amountIn > 0, "V4ReflectionConverter: nothing to swap");
+        _requireTaxExempt(); // RC-1: an un-exempt converter would pay tax on its own sale and purchase
         PoolKey memory key = _poolKey(token);
         uint160 limit = op == 0 ? _sellPriceLimit(key) : _buyPriceLimit(key);
         bytes memory result = poolManager.unlock(abi.encode(op, key, amountIn, limit));
