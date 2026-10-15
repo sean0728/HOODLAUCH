@@ -22,7 +22,8 @@
 // exact Admin keys and relayer env vars to set.
 //
 // No platform token is deployed or set. The fee-wallet distributor is deployed with no
-// buyback router (it just converts its tax to ETH for the fee wallet).
+// buyback router (the platform's ETH remainder is simply owed to the fee wallet; the router is
+// immutable, so redeploy it with one to turn the platform-token buyback on later).
 // The platform rewards distributor IS deployed and set as the factory's rewards slot (it
 // needs DEX_ROUTER_ADDRESS because its buyback router cannot be changed later). Heads up:
 // once that slot is set, 50% of every launch fee is sent to it in ETH, and it can only
