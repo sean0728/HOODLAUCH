@@ -14,7 +14,7 @@ import BN from "bn.js";
 import bs58 from "bs58";
 import { getWallets } from "@wallet-standard/app";
 import * as DBC from "@meteora-ag/dynamic-bonding-curve-sdk";
-import { CpAmm, SwapMode as CpSwapMode, getCurrentPoint as cpCurrentPoint, getTokenProgram as cpTokenProgram } from "@meteora-ag/cp-amm-sdk";
+import { CpAmm, SwapMode as CpSwapMode, getCurrentPoint as cpCurrentPoint, getTokenProgram as cpTokenProgram, getUnClaimLpFee } from "@meteora-ag/cp-amm-sdk";
 
 export const WSOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 const LAMPORTS_PER_SOL = 1_000_000_000;
@@ -33,12 +33,13 @@ const S = {
   feeBps: 30,       // platform swap fee, in basis points of the SOL side of every swap (0.30%)
   feeWallet: null,  // PublicKey the fee is sent to; resolved from the platform config's fee claimer
   dammPools: new Map(), // DBC pool address -> DAMM v2 pool address (a graduated token's pool never changes)
+  positions: new Map(), // owner address -> { at, p } a wallet's DAMM v2 positions, cached briefly (one scan serves every token)
   wallet: null,   // Wallet Standard wallet object
   account: null,  // Wallet Standard account
   listeners: new Set(),
   offEvents: null,
 };
-export function _setClientForTests(conn, client, cp = null) { S.conn = conn; S.client = client; S.cp = cp; S.dammPools = new Map(); }
+export function _setClientForTests(conn, client, cp = null) { S.conn = conn; S.client = client; S.cp = cp; S.dammPools = new Map(); S.positions = new Map(); }
 export function _setFeeForTests({ feeBps, feeWallet } = {}) {
   if (feeBps !== undefined) S.feeBps = feeBps;
   if (feeWallet !== undefined) S.feeWallet = feeWallet ? new PublicKey(feeWallet) : null;
@@ -67,6 +68,7 @@ export function init({ rpcUrl, cluster = "devnet", configAddress = null, swapFee
   S.feeBps = bps;
   S.feeWallet = feeWallet ? new PublicKey(feeWallet) : null;
   S.dammPools = new Map();
+  S.positions = new Map();
   return { cluster, configAddress, swapFeeBps: bps };
 }
 function need() {
@@ -537,25 +539,119 @@ export async function trade({ pool: poolAddress, side, amount, slippageBps = 100
 }
 
 // ---- fees -------------------------------------------------------------------------------------------
-export async function getFeeBreakdown(poolAddress) {
-  const { client } = need();
-  const f = await client.state.getPoolFeeBreakdown(poolAddress);
-  const sol = (b) => toNum(b, 9);
+// While a token is on the curve, trading fees accrue inside the curve pool and are claimed there (creator and
+// platform ("partner") shares). After graduation the pool is a Meteora DAMM v2 pool whose trading fees accrue to
+// LIQUIDITY POSITIONS: the platform's position is owned by the platform config's fee claimer and the creator's by the
+// token's creator wallet. Fees earned on the curve stay claimable on the curve pool afterwards. getFeeBreakdown() and
+// claimFees() cover both, so one balance and one button work before and after graduation.
+const POSITIONS_TTL_MS = 20_000;
+function positionsOf(ownerPk, force = false) {
+  const key = ownerPk.toBase58();
+  const hit = S.positions.get(key);
+  if (!force && hit && Date.now() - hit.at < POSITIONS_TTL_MS) return hit.p;
+  const p = needCp().getPositionsByUser(ownerPk);
+  S.positions.set(key, { at: Date.now(), p });
+  p.catch(() => S.positions.delete(key));
+  return p;
+}
+// What `ownerPk` has earned in this graduated token's DAMM v2 pool: unclaimed (claimable now) and already claimed.
+async function dammFeesFor(poolAddress, ctx, ownerPk, force = false) {
+  const addr = await resolveDammPool(poolAddress, ctx);
+  const poolState = await needCp().fetchPoolState(addr);
+  const mine = (await positionsOf(ownerPk, force)).filter((x) => x.positionState.pool.equals(addr));
+  const solIsA = poolState.tokenAMint.equals(WSOL_MINT);
+  const zero = () => new BN(0);
+  const t = { unSol: zero(), unTok: zero(), clSol: zero(), clTok: zero() };
+  const claimable = [];
+  for (const x of mine) {
+    const f = getUnClaimLpFee(poolState, x.positionState);
+    const m = x.positionState.metrics || {};
+    const fA = f.feeTokenA, fB = f.feeTokenB;
+    const cA = m.totalClaimedAFee || zero(), cB = m.totalClaimedBFee || zero();
+    t.unSol = t.unSol.add(solIsA ? fA : fB); t.unTok = t.unTok.add(solIsA ? fB : fA);
+    t.clSol = t.clSol.add(solIsA ? cA : cB); t.clTok = t.clTok.add(solIsA ? cB : cA);
+    if (fA.gtn(0) || fB.gtn(0)) claimable.push(x);
+  }
+  const dec = ctx.config.tokenDecimal;
   return {
-    creatorUnclaimedSol: sol(f.creator.unclaimedQuoteFee), creatorTotalSol: sol(f.creator.totalQuoteFee),
-    partnerUnclaimedSol: sol(f.partner.unclaimedQuoteFee), partnerTotalSol: sol(f.partner.totalQuoteFee),
+    addr, poolState, positions: mine, claimable,
+    unclaimedSol: toNum(t.unSol, 9), unclaimedToken: toNum(t.unTok, dec),
+    claimedSol: toNum(t.clSol, 9), claimedToken: toNum(t.clTok, dec),
+  };
+}
+export async function getFeeBreakdown(poolAddress, { force = false } = {}) {
+  const { client } = need();
+  const ctx = await loadPool(poolAddress);
+  const sol = (b) => toNum(b, 9);
+  let f = null;
+  try { f = await client.state.getPoolFeeBreakdown(poolAddress); }
+  catch (e) { if (!ctx.migrated) throw e; /* a graduated curve may no longer report; the DAMM v2 side below still can */ }
+  const out = {
+    creatorUnclaimedSol: f ? sol(f.creator.unclaimedQuoteFee) : 0, creatorTotalSol: f ? sol(f.creator.totalQuoteFee) : 0,
+    partnerUnclaimedSol: f ? sol(f.partner.unclaimedQuoteFee) : 0, partnerTotalSol: f ? sol(f.partner.totalQuoteFee) : 0,
+    creatorUnclaimedToken: 0, partnerUnclaimedToken: 0,
+    venue: ctx.migrated ? "damm" : "curve",
     _raw: f,
   };
+  if (ctx.migrated && S.cp) {
+    try {
+      const platform = ctx.config.feeClaimer, creator = ctx.pool.creator;
+      const pf = await dammFeesFor(poolAddress, ctx, platform, force);
+      out.dammPool = pf.addr.toBase58();
+      out.partnerUnclaimedSol += pf.unclaimedSol; out.partnerTotalSol += pf.unclaimedSol + pf.claimedSol;
+      out.partnerUnclaimedToken += pf.unclaimedToken;
+      // If the platform wallet is also the token's creator, one wallet owns both positions and they can't be told
+      // apart, so everything is shown on the platform line only (never counted twice).
+      if (!creator.equals(platform)) {
+        const cf = await dammFeesFor(poolAddress, ctx, creator, force);
+        out.creatorUnclaimedSol += cf.unclaimedSol; out.creatorTotalSol += cf.unclaimedSol + cf.claimedSol;
+        out.creatorUnclaimedToken += cf.unclaimedToken;
+      }
+    } catch (e) {
+      out.dammError = (e && e.message) || String(e); // curve figures are still returned
+    }
+  }
+  return out;
 }
 export async function claimFees({ pool: poolAddress, who }) {
   const { client } = need();
   const me = owner();
-  const f = await client.state.getPoolFeeBreakdown(poolAddress);
+  const ctx = await loadPool(poolAddress);
   const part = who === "partner";
-  const src = part ? f.partner : f.creator;
-  const params = { payer: me, pool: pk(poolAddress), maxBaseAmount: src.unclaimedBaseFee, maxQuoteAmount: src.unclaimedQuoteFee };
-  const tx = part
-    ? await client.partner.claimPartnerTradingFee({ ...params, feeClaimer: me })
-    : await client.creator.claimCreatorTradingFee({ ...params, creator: me });
-  return { signature: await signSendConfirm(tx) };
+  const signatures = [];
+  // Only the wallet that owns this share can claim it; say so before anything is built or signed.
+  const expected = part ? ctx.config.feeClaimer : ctx.pool.creator;
+  if (ctx.migrated && !me.equals(expected)) {
+    throw new Error(`Only the ${part ? "platform fee-claimer" : "token creator"} wallet (${expected.toBase58().slice(0, 4)}…${expected.toBase58().slice(-4)}) can claim this share.`);
+  }
+  // 1) Fees earned on the curve (always attempted before graduation, as before; after it only if some remain).
+  let f = null;
+  try { f = await client.state.getPoolFeeBreakdown(poolAddress); } catch (e) { if (!ctx.migrated) throw e; }
+  if (f) {
+    const src = part ? f.partner : f.creator;
+    if (!ctx.migrated || src.unclaimedBaseFee.gtn(0) || src.unclaimedQuoteFee.gtn(0)) {
+      const params = { payer: me, pool: pk(poolAddress), maxBaseAmount: src.unclaimedBaseFee, maxQuoteAmount: src.unclaimedQuoteFee };
+      const tx = part
+        ? await client.partner.claimPartnerTradingFee({ ...params, feeClaimer: me })
+        : await client.creator.claimCreatorTradingFee({ ...params, creator: me });
+      signatures.push(await signSendConfirm(tx));
+    }
+  }
+  // 2) After graduation: the fees sitting in this wallet's DAMM v2 position(s). One transaction per position (each
+  //    sets up its own token accounts, so they can't be merged safely).
+  if (ctx.migrated) {
+    const d = await dammFeesFor(poolAddress, ctx, me, true);
+    const st = d.poolState;
+    for (const x of d.claimable) {
+      const tx = await needCp().claimPositionFee2({
+        owner: me, receiver: me, pool: d.addr, position: x.position, positionNftAccount: x.positionNftAccount,
+        tokenAMint: st.tokenAMint, tokenBMint: st.tokenBMint, tokenAVault: st.tokenAVault, tokenBVault: st.tokenBVault,
+        tokenAProgram: cpTokenProgram(st.tokenAFlag), tokenBProgram: cpTokenProgram(st.tokenBFlag),
+      });
+      signatures.push(await signSendConfirm(tx));
+    }
+    S.positions.delete(me.toBase58());
+  }
+  if (!signatures.length) throw new Error("There are no unclaimed fees for this token.");
+  return { signature: signatures[signatures.length - 1], signatures };
 }
