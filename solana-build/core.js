@@ -4,13 +4,17 @@
 // What lives here:
 //   - Solana wallet discovery/connect through the Wallet Standard (Phantom, Solflare, Backpack, ... all speak it)
 //   - launch (create pool + optional first buy in ONE transaction), buy/sell, quotes, pool info, fee claims
+//   - trading: on the bonding curve while a token is on it, and on its Meteora DAMM v2 pool once it has graduated
+//     (quote() and trade() pick the right one). Every swap made through the site also pays the platform's swap
+//     fee: a SOL transfer to the platform wallet inside the same transaction (see "platform swap fee" below).
 //   - createPlatformConfig: the one-time admin transaction that creates the platform's DBC config
 //     (curve shape, 1% fee, creator share, migration settings). Every launch then points at that config.
-import { Connection, PublicKey, Keypair, ComputeBudgetProgram } from "@solana/web3.js";
+import { Connection, PublicKey, Keypair, ComputeBudgetProgram, SystemProgram } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
 import { getWallets } from "@wallet-standard/app";
 import * as DBC from "@meteora-ag/dynamic-bonding-curve-sdk";
+import { CpAmm, SwapMode as CpSwapMode, getCurrentPoint as cpCurrentPoint, getTokenProgram as cpTokenProgram } from "@meteora-ag/cp-amm-sdk";
 
 export const WSOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 const LAMPORTS_PER_SOL = 1_000_000_000;
@@ -25,12 +29,20 @@ const S = {
   configAddress: null,
   conn: null,
   client: null,
+  cp: null,         // Meteora DAMM v2 (cp-amm) client, for graduated tokens
+  feeBps: 30,       // platform swap fee, in basis points of the SOL side of every swap (0.30%)
+  feeWallet: null,  // PublicKey the fee is sent to; resolved from the platform config's fee claimer
+  dammPools: new Map(), // DBC pool address -> DAMM v2 pool address (a graduated token's pool never changes)
   wallet: null,   // Wallet Standard wallet object
   account: null,  // Wallet Standard account
   listeners: new Set(),
   offEvents: null,
 };
-export function _setClientForTests(conn, client) { S.conn = conn; S.client = client; }
+export function _setClientForTests(conn, client, cp = null) { S.conn = conn; S.client = client; S.cp = cp; S.dammPools = new Map(); }
+export function _setFeeForTests({ feeBps, feeWallet } = {}) {
+  if (feeBps !== undefined) S.feeBps = feeBps;
+  if (feeWallet !== undefined) S.feeWallet = feeWallet ? new PublicKey(feeWallet) : null;
+}
 export function _setWalletForTests(wallet, account) { S.wallet = wallet; S.account = account; }
 
 // Wallet Standard names the networks "solana:devnet" / "solana:mainnet" (NOT "mainnet-beta").
@@ -38,7 +50,10 @@ export const CLUSTERS = Object.freeze({ "devnet": "solana:devnet", "mainnet-beta
 const walletChain = () => CLUSTERS[S.cluster];
 const clusterLabel = () => (S.cluster === "mainnet-beta" ? "mainnet" : "devnet");
 
-export function init({ rpcUrl, cluster = "devnet", configAddress = null } = {}) {
+export const DEFAULT_SWAP_FEE_BPS = 30;
+export const MAX_SWAP_FEE_BPS = 100; // hard ceiling so a bad value can never charge more than 1%
+
+export function init({ rpcUrl, cluster = "devnet", configAddress = null, swapFeeBps = DEFAULT_SWAP_FEE_BPS, feeWallet = null } = {}) {
   if (!CLUSTERS[cluster]) throw new Error(`Unknown Solana cluster "${cluster}" (expected devnet or mainnet-beta).`);
   if (!rpcUrl) throw new Error("Solana RPC URL missing (Admin → Solana).");
   S.cluster = cluster;
@@ -46,7 +61,13 @@ export function init({ rpcUrl, cluster = "devnet", configAddress = null } = {}) 
   S.configAddress = configAddress ? new PublicKey(configAddress) : null;
   S.conn = new Connection(rpcUrl, "confirmed");
   S.client = DBC.DynamicBondingCurveClient.create(S.conn, "confirmed");
-  return { cluster, configAddress };
+  S.cp = new CpAmm(S.conn);
+  const bps = Number(swapFeeBps);
+  if (!Number.isInteger(bps) || bps < 0 || bps > MAX_SWAP_FEE_BPS) throw new Error(`The swap fee must be a whole number of basis points from 0 to ${MAX_SWAP_FEE_BPS}.`);
+  S.feeBps = bps;
+  S.feeWallet = feeWallet ? new PublicKey(feeWallet) : null;
+  S.dammPools = new Map();
+  return { cluster, configAddress, swapFeeBps: bps };
 }
 function need() {
   if (!S.client) throw new Error("Solana isn't initialised yet.");
@@ -292,13 +313,28 @@ export async function getPoolInfo(poolAddress) {
   if (migrated) progressPct = 100;
   const supplyRaw = config.preMigrationTokenSupply || config.postMigrationTokenSupply;
   const supplyWhole = supplyRaw ? Number(formatUnits(new BN(supplyRaw.toString()), dec, 0)) : null;
+  // After graduation the curve's price is frozen; the live price is the DAMM v2 pool's. If that pool can't be read
+  // (not found yet, RPC hiccup) fall back to the last curve price rather than failing the whole token.
+  let livePrice = price;
+  let venue = migrated ? "damm" : "curve";
+  if (migrated && S.cp) {
+    try {
+      const ctx = { pool, config };
+      const addr = await resolveDammPool(poolAddress, ctx);
+      const st = await S.cp.fetchPoolState(addr);
+      const tokenIsA = st.tokenAMint.equals(pool.baseMint);
+      const p = dammPriceSol({ poolState: st, tokenIsA, decA: tokenIsA ? dec : 9, decB: tokenIsA ? 9 : dec });
+      if (p > 0 && isFinite(p)) livePrice = p;
+    } catch (e) { /* keep the curve price */ }
+  }
   return {
     pool: pk(poolAddress).toBase58(),
     mint: pool.baseMint.toBase58(),
     creator: pool.creator.toBase58(),
     config: pool.config.toBase58(),
-    priceSol: price,
-    marketCapSol: supplyWhole ? price * supplyWhole : null,
+    venue,
+    priceSol: livePrice,
+    marketCapSol: supplyWhole ? livePrice * supplyWhole : null,
     raisedSol: toNum(raised, 9),
     thresholdSol: toNum(threshold, 9),
     progressPct,
@@ -318,54 +354,186 @@ export async function getBalances(mint) {
   return { sol: lamports / LAMPORTS_PER_SOL, token };
 }
 
+// ---- platform swap fee --------------------------------------------------------------------------------
+// Every swap made through the site (curve or DAMM v2) pays the platform S.feeBps (30 = 0.30%) of the SOL side of the
+// trade: a plain SOL transfer to the platform wallet, added to the SAME transaction, so it either happens with the
+// swap or not at all. On a buy it is taken from the SOL the trader enters (the rest goes into the swap, so the trader
+// never spends more than they typed); on a sell it is taken from the SOL the swap pays out (quoted amount).
+// It is a front-end fee: trades made elsewhere (Meteora, Jupiter, another app) don't pay it. The platform wallet is
+// the platform config's fee claimer, so curve fees and swap fees land in the same place.
+export function getSwapFeeBps() { return S.feeBps; }
+export function platformFeeLamports(lamports, bps = S.feeBps) {
+  const l = BN.isBN(lamports) ? lamports : new BN(String(lamports));
+  return l.muln(bps).divn(10_000); // rounds down
+}
+async function platformFeeWallet() {
+  if (S.feeWallet) return S.feeWallet;
+  if (S.feeBps === 0) return null;
+  const { client, configAddress } = need();
+  if (!configAddress) throw new Error("The platform's Solana config isn't set (Admin → Solana), so the swap fee can't be sent anywhere.");
+  const cfg = await client.state.getPoolConfig(configAddress);
+  if (!cfg || !cfg.feeClaimer) throw new Error("Couldn't read the platform wallet from the platform config.");
+  S.feeWallet = cfg.feeClaimer;
+  return S.feeWallet;
+}
+function addFeeTransfer(tx, from, to, lamports) {
+  if (!to || !lamports || lamports.lten(0) || to.equals(from)) return;
+  tx.add(SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports: BigInt(lamports.toString()) }));
+}
+
 // ---- trade ------------------------------------------------------------------------------------------
-async function swapContext(poolAddress) {
-  const { client, conn } = need();
+async function loadPool(poolAddress) {
+  const { client } = need();
   const rawPool = await client.state.getPool(poolAddress);
   if (!rawPool) throw new Error("Pool not found.");
   const pool = unwrapPool(rawPool);
-  if (Number(pool.isMigrated) !== 0) throw new Error("This token has graduated — it now trades on Meteora (DAMM v2), not on the bonding curve.");
   const config = await client.state.getPoolConfig(pool.config);
-  const currentPoint = await DBC.getCurrentPoint(conn, config.activationType);
-  // `virtualPool` (rawPool) is what the SDK's quote/swap functions want; `pool` is the unwrapped poolState.
-  return { pool, virtualPool: rawPool, config, currentPoint };
+  return { rawPool, pool, config, migrated: Number(pool.isMigrated) !== 0 };
 }
-// side: "buy" (amount in SOL) | "sell" (amount in whole tokens)
+async function curveContext(ctx) {
+  const { conn } = need();
+  const currentPoint = await DBC.getCurrentPoint(conn, ctx.config.activationType);
+  // `virtualPool` (rawPool) is what the SDK's quote/swap functions want; `pool` is the unwrapped poolState.
+  return { pool: ctx.pool, virtualPool: ctx.rawPool, config: ctx.config, currentPoint };
+}
+
+// A graduated token trades in a Meteora DAMM v2 pool. Its address is derived from the migration settings the
+// platform config was created with; a pool made some other way is found by searching for the token's pools.
+function needCp() {
+  if (!S.cp) throw new Error("Solana isn't initialised yet.");
+  return S.cp;
+}
+async function resolveDammPool(poolAddress, ctx) {
+  const key = pk(poolAddress).toBase58();
+  if (S.dammPools.has(key)) return S.dammPools.get(key);
+  const cp = needCp();
+  const baseMint = ctx.pool.baseMint, quoteMint = ctx.config.quoteMint;
+  let found = null;
+  const dammConfig = DBC.DAMM_V2_MIGRATION_FEE_ADDRESS[Number(ctx.config.migrationFeeOption)];
+  if (Number(ctx.config.migrationOption) === DBC.MigrationOption.MET_DAMM_V2 && dammConfig) {
+    const addr = DBC.deriveDammV2PoolAddress(dammConfig, baseMint, quoteMint);
+    try { await cp.fetchPoolState(addr); found = addr; } catch (e) { /* not at the derived address: search below */ }
+  }
+  if (!found) {
+    let all = [];
+    try { all = await cp.fetchPoolStatesByTokenMint(baseMint); } catch (e) { all = []; }
+    all = all.filter((x) => x.account.tokenAMint.equals(quoteMint) || x.account.tokenBMint.equals(quoteMint));
+    all.sort((x, y) => (y.account.liquidity.gt(x.account.liquidity) ? 1 : -1)); // deepest pool first
+    if (all.length) found = all[0].publicKey;
+  }
+  if (!found) throw new Error("This token has graduated, but its Meteora DAMM v2 pool wasn't found yet. Try again in a minute.");
+  S.dammPools.set(key, found);
+  return found;
+}
+async function dammContext(poolAddress, ctx) {
+  const cp = needCp();
+  const { conn } = need();
+  const addr = await resolveDammPool(poolAddress, ctx);
+  const poolState = await cp.fetchPoolState(addr);
+  const currentPoint = await cpCurrentPoint(conn, poolState.activationType);
+  const tokenIsA = poolState.tokenAMint.equals(ctx.pool.baseMint);
+  const tokenDec = ctx.config.tokenDecimal;
+  return { addr, poolState, currentPoint, tokenIsA, decA: tokenIsA ? tokenDec : 9, decB: tokenIsA ? 9 : tokenDec };
+}
+// SOL per whole token in a DAMM v2 pool (price of token A in token B is (sqrtPrice / 2^64)^2, scaled by decimals).
+function dammPriceSol(d) {
+  const sq = Number(d.poolState.sqrtPrice.toString()) / 2 ** 64;
+  const aInB = sq * sq * 10 ** (d.decA - d.decB);
+  return d.tokenIsA ? aInB : (aInB > 0 ? 1 / aInB : 0);
+}
+
+// side: "buy" (amount in SOL) | "sell" (amount in whole tokens). Works on the curve and, once the token has
+// graduated, on its DAMM v2 pool. `out` / `minOut` are what the trader actually receives AFTER the platform fee.
 export async function quote({ pool: poolAddress, side, amount, slippageBps = 100 }) {
-  const { client } = need();
-  const { pool, virtualPool, config, currentPoint } = await swapContext(poolAddress);
+  const ctx = await loadPool(poolAddress);
   const sell = side === "sell";
-  const inDec = sell ? config.tokenDecimal : 9;
-  const outDec = sell ? 9 : config.tokenDecimal;
-  const amountIn = parseUnits(amount, inDec);
-  if (!amountIn.gtn(0)) throw new Error("Enter an amount greater than zero.");
-  const q = client.pool.swapQuote2({
-    virtualPool, config, swapBaseForQuote: sell, hasReferral: false,
-    eligibleForFirstSwapWithMinFee: false, currentPoint, slippageBps,
-    swapMode: DBC.SwapMode.ExactIn, amountIn,
-  });
-  const out = q.outputAmount;
-  const minOut = q.minimumAmountOut || out.muln(10000 - slippageBps).divn(10000);
-  const cur = Number(pool.sqrtPrice.toString());
-  const nxt = Number(q.nextSqrtPrice.toString());
-  const impactPct = cur > 0 ? Math.abs((nxt / cur) ** 2 - 1) * 100 : 0;
+  const tokenDec = ctx.config.tokenDecimal;
+  const typed = parseUnits(amount, sell ? tokenDec : 9);
+  if (!typed.gtn(0)) throw new Error("Enter an amount greater than zero.");
+  // On a buy the fee comes out of the SOL typed, and the rest is swapped.
+  const buyFee = sell ? new BN(0) : platformFeeLamports(typed);
+  const amountIn = sell ? typed : typed.sub(buyFee);
+  if (!amountIn.gtn(0)) throw new Error("That amount is too small to trade.");
+  let grossOut, minOut, impactPct, poolFeeSol = null, venue, poolInfo = {};
+  if (!ctx.migrated) {
+    venue = "curve";
+    const { client } = need();
+    const c = await curveContext(ctx);
+    const q = client.pool.swapQuote2({
+      virtualPool: c.virtualPool, config: c.config, swapBaseForQuote: sell, hasReferral: false,
+      eligibleForFirstSwapWithMinFee: false, currentPoint: c.currentPoint, slippageBps,
+      swapMode: DBC.SwapMode.ExactIn, amountIn,
+    });
+    grossOut = q.outputAmount;
+    minOut = q.minimumAmountOut || grossOut.muln(10000 - slippageBps).divn(10000);
+    const cur = Number(ctx.pool.sqrtPrice.toString());
+    const nxt = Number(q.nextSqrtPrice.toString());
+    impactPct = cur > 0 ? Math.abs((nxt / cur) ** 2 - 1) * 100 : 0;
+    if (!sell) poolFeeSol = toNum(q.tradingFee.add(q.protocolFee), 9);
+  } else {
+    venue = "damm";
+    const cp = needCp();
+    const d = await dammContext(poolAddress, ctx);
+    const inputTokenMint = sell ? ctx.pool.baseMint : WSOL_MINT;
+    const q = cp.getQuote2({
+      inputTokenMint, slippage: slippageBps, currentPoint: d.currentPoint, poolState: d.poolState,
+      tokenADecimal: d.decA, tokenBDecimal: d.decB, hasReferral: false,
+      swapMode: CpSwapMode.ExactIn, amountIn,
+    });
+    grossOut = q.outputAmount;
+    minOut = q.minimumAmountOut || grossOut.muln(10000 - slippageBps).divn(10000);
+    impactPct = Number(q.priceImpact.toString());
+    if (!sell) poolFeeSol = toNum(q.includedFeeInputAmount.sub(q.excludedFeeInputAmount), 9);
+    poolInfo = { dammPool: d.addr.toBase58() };
+  }
+  // On a sell the fee comes out of the SOL the swap pays.
+  const sellFee = sell ? platformFeeLamports(grossOut) : new BN(0);
+  const sellFeeAtMin = sell ? platformFeeLamports(minOut) : new BN(0);
+  const out = sell ? grossOut.sub(sellFee) : grossOut;
+  const netMin = sell ? minOut.sub(sellFeeAtMin) : minOut;
+  const outDec = sell ? 9 : tokenDec;
+  const feeLamports = sell ? sellFee : buyFee;
   return {
-    amountIn, amountOut: out, minimumAmountOut: minOut,
-    out: toNum(out, outDec), minOut: toNum(minOut, outDec),
-    feeSol: sell ? null : toNum(q.tradingFee.add(q.protocolFee), 9),
+    venue, ...poolInfo,
+    amountIn, amountOut: grossOut, minimumAmountOut: minOut, platformFeeLamports: feeLamports,
+    out: toNum(out, outDec), minOut: toNum(netMin, outDec),
+    feeSol: poolFeeSol,                                  // the pool's own fee (buys only; shown for information)
+    platformFeeSol: toNum(feeLamports, 9), platformFeeBps: S.feeBps,
     impactPct,
   };
 }
 export async function trade({ pool: poolAddress, side, amount, slippageBps = 100 }) {
-  const { client } = need();
   const me = owner();
+  const sell = side === "sell";
+  const feeTo = S.feeBps > 0 ? await platformFeeWallet() : null; // resolved BEFORE the swap is built: no fee wallet, no trade
   const q = await quote({ pool: poolAddress, side, amount, slippageBps });
-  const tx = await client.pool.swap2({
-    owner: me, pool: pk(poolAddress), swapBaseForQuote: side === "sell", referralTokenAccount: null,
-    swapMode: DBC.SwapMode.ExactIn, amountIn: q.amountIn, minimumAmountOut: q.minimumAmountOut,
-  });
+  let tx;
+  if (q.venue === "curve") {
+    const { client } = need();
+    tx = await client.pool.swap2({
+      owner: me, pool: pk(poolAddress), swapBaseForQuote: sell, referralTokenAccount: null,
+      swapMode: DBC.SwapMode.ExactIn, amountIn: q.amountIn, minimumAmountOut: q.minimumAmountOut,
+    });
+  } else {
+    const cp = needCp();
+    const ctx = await loadPool(poolAddress);
+    const d = await dammContext(poolAddress, ctx);
+    const st = d.poolState;
+    tx = await cp.swap2({
+      payer: me, pool: d.addr,
+      inputTokenMint: sell ? ctx.pool.baseMint : WSOL_MINT,
+      outputTokenMint: sell ? WSOL_MINT : ctx.pool.baseMint,
+      tokenAMint: st.tokenAMint, tokenBMint: st.tokenBMint,
+      tokenAVault: st.tokenAVault, tokenBVault: st.tokenBVault,
+      tokenAProgram: cpTokenProgram(st.tokenAFlag), tokenBProgram: cpTokenProgram(st.tokenBFlag),
+      referralTokenAccount: null,
+      swapMode: CpSwapMode.ExactIn, amountIn: q.amountIn, minimumAmountOut: q.minimumAmountOut,
+    });
+  }
+  // The platform fee rides in the same transaction, after the swap (so on a sell the SOL has already arrived).
+  addFeeTransfer(tx, me, feeTo, q.platformFeeLamports);
   const signature = await signSendConfirm(tx);
-  return { signature, out: q.out };
+  return { signature, out: q.out, platformFeeSol: q.platformFeeSol, venue: q.venue };
 }
 
 // ---- fees -------------------------------------------------------------------------------------------

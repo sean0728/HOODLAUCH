@@ -18,6 +18,7 @@ window.IgnitionSol = {
   getBalances: core.getBalances,
   quote: core.quote,
   trade: core.trade,
+  getSwapFeeBps: core.getSwapFeeBps,
   getFeeBreakdown: core.getFeeBreakdown,
   claimFees: core.claimFees,
   previewCurve: core.previewCurve,
