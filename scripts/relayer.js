@@ -111,10 +111,11 @@ const followStore = require("../lib/followStore");
 const calloutStore = require("../lib/calloutStore");
 const { canonicalizePlatformConfig, platformConfigMessage } = require("../lib/platformConfig");
 const { canonicalizeTokenMetadata, tokenMetadataMessage } = require("../lib/tokenMetadata");
-const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD } = require("../lib/priceMath");
+const { computeTokenPriceUsd, computeMarketCapUsd, computeTaxProgressPct, FALLBACK_ETH_USD, v4TvlUsdFrom, curveTvlUsdFrom, pairTvlUsdFrom } = require("../lib/priceMath");
 const { readTrackedTokens, upsertTrackedToken, deleteTrackedToken } = require("../lib/trackedTokensStore");
 const { classifyDiscoveredLaunch } = require("../lib/launchAnnouncement");
 const { readActivity, appendActivity } = require("../lib/activityStore");
+const statsStore = require("../lib/statsStore");
 const tradeStore = require("../lib/tradeStore");
 const revenueStore = require("../lib/revenueStore");
 const revenueSummary = require("../lib/revenueSummary");
@@ -3195,6 +3196,29 @@ async function main() {
     sendJson(res, 200, { network, activity });
   }));
 
+  // ---- home page statistics ----
+  // TVL = the locked value the pollers last read for every token this relayer tracks (V4 pool liquidity, ETH held in a
+  // bonding curve, the platform token's pair); volume and traders = rolling 24h, from every real trade seen
+  // (lib/statsStore.js). All in USD. `network` says which chain's numbers these are, so a caller that has since switched
+  // networks can tell and ignore them. Cached for a few seconds because the home page polls it.
+  let statsCache = { at: 0, body: null };
+  app.get("/stats", asyncRoute(async (_req, res) => {
+    const now = Date.now();
+    if (statsCache.body && now - statsCache.at < 5000) return sendJson(res, 200, statsCache.body);
+    const tracked = (await readTrackedTokens(network)) || {};
+    const keys = Object.keys(tracked).map((k) => k.toLowerCase());
+    const t = statsStore.tvlSummary(network, "robinhood", keys);
+    const s = await statsStore.summary(network, "robinhood", now);
+    const body = {
+      network, chain: "robinhood",
+      tvlUsd: t.total, tvlTokens: { counted: t.counted, missing: t.missing },
+      volume24hUsd: s.volume, trades24h: s.trades, traders24h: s.traders,
+      asOf: now,
+    };
+    statsCache = { at: now, body };
+    sendJson(res, 200, body);
+  }));
+
   // ---- wallet trading stats + leaderboard ----
   // Built from the permanent trade ledger (lib/tradeStore.js), USD throughout,
   // average-cost PNL (lib/pnl.js): overall = realized (sells) + unrealized
@@ -4179,6 +4203,21 @@ async function main() {
     return { tokenReserve: sqrtPriceX96 * sqrtPriceX96, wethReserve: 1n << 192n };
   }
 
+  // ---- locked value (TVL) ----
+  // Uniswap V4 pool: every position the platform creates (launch liquidity, the locker, the compounder) is FULL RANGE,
+  // so all of the pool's liquidity L is in range and the pool holds amount0 = L * 2^96 / sqrtP of ETH (currency0).
+  // A full-range pool holds equal value on both sides at the current price, so its value is twice the ETH side.
+  // L is read straight from the PoolManager (Pool.State: slot0, feeGrowth0, feeGrowth1, liquidity -> offset 3).
+  async function readV4Liquidity(pm, poolId) {
+    const base = BigInt(hre.ethers.keccak256(
+      hre.ethers.AbiCoder.defaultAbiCoder().encode(["bytes32", "uint256"], [poolId, V4_POOLS_MAPPING_SLOT])
+    ));
+    return BigInt(await pm.extsload("0x" + (base + 3n).toString(16).padStart(64, "0")));
+  }
+  async function v4PoolTvlUsd(pm, poolId, sqrtPriceX96, ethUsd) {
+    return v4TvlUsdFrom(await readV4Liquidity(pm, poolId), sqrtPriceX96, ethUsd);
+  }
+
   async function pollV4TokenPrice(entry) {
     if (!entry.poolId) return; // "Deploy Token" - no pool to price yet
     const ctx = await getV4Context();
@@ -4206,6 +4245,12 @@ async function main() {
     const taxProgressPct = computeTaxProgressPct(mcapUsd, taxState.graduationTargetUsd);
     const holders = await fetchHolderCount(entry.tokenAddress);
     const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive };
+    // Locked value in the pool, read from the pool itself (see v4PoolTvlUsd). Best effort: a failed read leaves the
+    // previous snapshot in place and never costs the price sample.
+    try {
+      const tvlUsd = await v4PoolTvlUsd(ctx.pm, entry.poolId, sqrtPriceX96, ethUsd);
+      if (tvlUsd !== null) { point.tvlUsd = tvlUsd; statsStore.setTokenTvl(network, "robinhood", entry.tokenAddress.toLowerCase(), tvlUsd); }
+    } catch (err) { /* keep the last snapshot */ }
     if (holders !== null) point.holders = holders;
     await appendPricePoint(network, entry.tokenAddress, point);
   }
@@ -4232,6 +4277,11 @@ async function main() {
 
   async function appendTradeActivity(entry) {
     await appendActivity(network, entry);
+    // Rolling 24h volume / unique traders for the home page (lib/statsStore.js). The relayer's own wallet only ever
+    // trades to convert tax, so it is left out here exactly as the activity feed leaves it out.
+    if (String((entry && entry.wallet) || "").toLowerCase() !== String(relayerWallet.address).toLowerCase()) {
+      await statsStore.recordTrade(network, "robinhood", { t: entry.t, wallet: entry.wallet, volume: entry.usdValue });
+    }
     try {
       await tradeStore.recordTrade(network, entry);
     } catch (err) {
@@ -4419,6 +4469,9 @@ async function main() {
         : null;
     const holders = await fetchHolderCount(entry.tokenAddress);
     const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct, taxActive: true };
+    // Before graduation the value held is the ETH actually sitting in the curve (the virtual reserve is just pricing).
+    const curveTvlUsd = curveTvlUsdFrom(state.realEthReserve, ethUsd);
+    if (curveTvlUsd !== null) { point.tvlUsd = curveTvlUsd; statsStore.setTokenTvl(network, "robinhood", entry.tokenAddress.toLowerCase(), curveTvlUsd); }
     if (holders !== null) point.holders = holders;
     await appendPricePoint(network, entry.tokenAddress, point);
     return false;
@@ -4683,6 +4736,9 @@ async function main() {
           // appendPricePoint/GET /price-history every launched token uses)
           // doesn't have to special-case a missing field.
           const point = { t: Date.now(), p: priceUsd, mcapUsd, taxProgressPct: 100, taxActive: false };
+          // A constant-product pair holds equal value on both sides: twice the ETH side.
+          const pairTvlUsd = pairTvlUsdFrom(wethReserve, ethUsd);
+          if (pairTvlUsd !== null) { point.tvlUsd = pairTvlUsd; statsStore.setTokenTvl(network, "robinhood", entry.tokenAddress.toLowerCase(), pairTvlUsd); }
           if (holders !== null) point.holders = holders;
           await appendPricePoint(network, entry.tokenAddress, point);
           continue;
