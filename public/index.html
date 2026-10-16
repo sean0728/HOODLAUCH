@@ -15870,7 +15870,74 @@
         <p class="help-text" style="margin:2px 0 12px; font-size:.8rem; color:var(--paper-500); line-height:1.5;">The platform's share of each token's trading fees, in SOL, with a Claim button per token. Only the platform fee-claimer wallet named in the platform config can claim — connect it here; any other wallet's claim is refused by the program. The creator's share is claimed by each creator from their own Portfolio.</p>
         <div id="saFeesWallet" style="margin-bottom:12px;"></div>
         <div id="saFeesBody"><p class="admin-empty">Loading…</p></div>
+      </div>
+
+      <div class="panel admin-panel" style="grid-column:1 / -1; margin-top:20px;" id="saRestorePanel">
+        <div class="admin-panel-head"><h3>Restore token metadata</h3></div>
+        <p class="help-text" style="margin:2px 0 12px; font-size:.8rem; color:var(--paper-500); line-height:1.5;">Every Solana token points at a metadata link on this site (its name, logo and links). If that link answers "unknown metadata id" — for example after the server's storage was reset — paste it here, re-enter the token's details and logo, and it is published again under the <b>same</b> link, so wallets and explorers recover without touching the token. It only works for a link that is currently missing; an existing record is never overwritten. The details are signed with the admin wallet (free).</p>
+        <div class="field"><label for="sa_rm_uri">Metadata link (or its 32-character id)</label><input id="sa_rm_uri" type="text" autocomplete="off" spellcheck="false" placeholder="https://your-site/solana/metadata/…json"></div>
+        <div class="field"><label for="sa_rm_name">Name</label><input id="sa_rm_name" type="text" maxlength="32" autocomplete="off"></div>
+        <div class="field"><label for="sa_rm_symbol">Ticker</label><input id="sa_rm_symbol" type="text" maxlength="10" autocomplete="off"></div>
+        <div class="field"><label for="sa_rm_desc">Description (optional)</label><input id="sa_rm_desc" type="text" maxlength="500" autocomplete="off"></div>
+        <div class="field"><label for="sa_rm_website">Website (optional)</label><input id="sa_rm_website" type="text" autocomplete="off"></div>
+        <div class="field"><label for="sa_rm_twitter">X / Twitter (optional)</label><input id="sa_rm_twitter" type="text" autocomplete="off"></div>
+        <div class="field"><label for="sa_rm_telegram">Telegram (optional)</label><input id="sa_rm_telegram" type="text" autocomplete="off"></div>
+        <div class="field"><label for="sa_rm_logo">Logo image</label><input id="sa_rm_logo" type="file" accept="image/*"></div>
+        <button class="btn btn-primary" type="button" id="saRestoreBtn" style="margin-top:6px;">Restore metadata</button>
+        <div class="help-text" id="saRestoreMsg" style="margin-top:10px;" aria-live="polite"></div>
       </div>`;
+  }
+  // The restore tool above. Same write-once POST the launch wizard uses, signed by the admin's EVM wallet.
+  function saWireRestoreMetadata(){
+    const btn = document.getElementById("saRestoreBtn");
+    if(!btn) return;
+    const msg = document.getElementById("saRestoreMsg");
+    const say = (t, bad)=>{ if(msg){ msg.textContent = t; msg.style.color = bad ? "var(--critical-500)" : "var(--good-500)"; } };
+    const val = id=> { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
+    const idFrom = raw=>{
+      const m = /solana\/metadata\/([a-f0-9]{16,32})/i.exec(raw) || /^([a-f0-9]{16,32})$/i.exec(raw);
+      return m ? m[1].toLowerCase() : "";
+    };
+    const uriEl = document.getElementById("sa_rm_uri");
+    if(uriEl) uriEl.addEventListener("input", ()=>{
+      // If this id belongs to a launch the site knows, fill in the name and ticker from it.
+      const id = idFrom(uriEl.value.trim());
+      let l = null; try{ l = id ? solLaunches.find(x=> x && x.metadataId === id) : null; }catch(e){}
+      if(l){
+        const n = document.getElementById("sa_rm_name"), t = document.getElementById("sa_rm_symbol");
+        if(n && !n.value) n.value = l.name || ""; if(t && !t.value) t.value = l.symbol || "";
+        say(`Found the launch for this link: ${l.name || ""} ($${l.symbol || ""}). Check the details, add the logo, then restore.`);
+      }
+    });
+    btn.addEventListener("click", async ()=>{
+      if(!isAdminWallet(wallet) || !getEth()){ say("Connect the admin wallet first.", true); return; }
+      const id = idFrom(val("sa_rm_uri"));
+      if(!id){ say("Paste the metadata link (it ends in .json) or its 32-character id.", true); return; }
+      const name = val("sa_rm_name"), symbol = val("sa_rm_symbol"), description = val("sa_rm_desc");
+      if(!name || name.length > 32){ say("Enter the token's name (up to 32 characters).", true); return; }
+      if(!/^[A-Za-z0-9]{1,10}$/.test(symbol)){ say("The ticker must be 1-10 letters or digits.", true); return; }
+      if(description.length > 500){ say("The description can be at most 500 characters.", true); return; }
+      const file = document.getElementById("sa_rm_logo").files[0];
+      btn.disabled = true;
+      try{
+        // Never touch a record that exists.
+        const existing = await fetch(`${SOL_RELAYER}/solana/metadata/${id}.json`, { cache:"no-store" }).catch(()=> null);
+        if(existing && existing.ok){ say("That metadata link already works — nothing to restore.", false); return; }
+        let image;
+        if(file){ say("Preparing the logo…"); image = await readAndResizeImage(file, SOL_LOGO_OPTS); }
+        say("Waiting for the admin wallet signature…");
+        const ts = Date.now();
+        const link = u=> normalizeUrl(u) || undefined;
+        const data = await solAdminPost("/solana/metadata", `IgnitionX admin: solana metadata ${id} at ${ts}`, ts, {
+          id, name, symbol, description, image,
+          website: link(val("sa_rm_website")), twitter: link(val("sa_rm_twitter")), telegram: link(val("sa_rm_telegram")),
+        });
+        const check = await fetch(data.uri, { cache:"no-store" }).catch(()=> null);
+        say(check && check.ok ? `Restored. ${data.uri} works again.` : `Saved, but ${data.uri} did not load when checked — try opening it in a new tab.`, !(check && check.ok));
+      }catch(e){
+        say(solErr(e), true);
+      }finally{ btn.disabled = false; }
+    });
   }
   /* ---------------- Solana login ----------------
      A visitor with only a Solana wallet can log in with it: the header's "Connect Solana" button connects it, and
@@ -16232,6 +16299,7 @@
     saUpdateForm();
     const fr = document.getElementById("saFeesRefresh");
     if(fr) fr.addEventListener("click", ()=> renderSaFees(true));
+    saWireRestoreMetadata();
     renderSaFees();
   }
   async function runSolanaSettingsSave(btnEl){
