@@ -126,6 +126,7 @@ const solanaPub = require("../lib/solanaPublic");
 const walletLinkStore = require("../lib/walletLinkStore");
 const { CHAINS, normalizeChain } = require("../lib/chains");
 const { ROBINHOOD_NETWORKS } = require("../lib/networks");
+const rpcSettings = require("../lib/rpcSettings");
 const { isDbConfigured, ensureSchema } = require("../lib/db");
 
 // Safety net: log and keep running instead of letting one unexpected error
@@ -1702,9 +1703,51 @@ async function backfillChainLabels() {
   }
 }
 
+// ---- Robinhood RPC chosen in Admin (see lib/rpcSettings.js) ----
+// What this process actually connects to: { network, source: "env"|"admin"|"default", host, fingerprint, fellBack }.
+// Read by GET /rpc-settings so the Admin panel can say what is running and whether a restart is needed. The URL
+// itself (it holds the provider's API key) is never stored here, logged or sent anywhere.
+let activeRpc = null;
+
+// Must run before the first chain call: Hardhat builds its provider on first use, from the network config, so setting
+// the URL here is enough. Only an Admin-saved URL needs applying; the env var and the public default are already what
+// hardhat.config.js uses. Never throws — a failed lookup just leaves the normal URL in place.
+async function applyAdminRpcOverride() {
+  const network = hre.network.name;
+  if (!rpcSettings.NETWORK_NAMES.includes(network)) return; // hardhat / localhost: not a Robinhood network
+  let saved = {};
+  try {
+    saved = await rpcSettings.readSaved();
+  } catch (err) {
+    console.warn(`[rpc] couldn't read the Admin-saved RPC (${err.message}) — using the normal one.`);
+  }
+  let picked;
+  try {
+    picked = await rpcSettings.pickStartupRpc({ network, saved });
+  } catch (err) {
+    console.warn(`[rpc] couldn't check the Admin-saved RPC (${err.message}) — using the normal one.`);
+    picked = rpcSettings.resolveRpc({ network, saved: {} });
+    picked = { ...picked, apply: false, fellBack: false };
+  }
+  if (picked.apply) rpcSettings.applyRpcUrl(hre, picked.url);
+  const urlInUse = picked.url; // env value, the saved URL, or the public default: whichever is really in use
+  activeRpc = {
+    network,
+    source: picked.apply ? "admin" : picked.source,
+    host: rpcSettings.hostOf(urlInUse),
+    fingerprint: rpcSettings.fingerprint(urlInUse),
+    fellBack: !!picked.fellBack,
+    triedHost: picked.triedHost || null,
+    triedFingerprint: picked.triedFingerprint || null,
+  };
+  const label = { env: "the environment variable", admin: "the URL saved in Admin", default: "the public default" }[activeRpc.source];
+  console.log(`[rpc] ${network}: using ${label} (${activeRpc.host}).`);
+}
+
 async function main() {
   await initStorageBackend();
   await loadRelayerSettingsFromStore();
+  await applyAdminRpcOverride();
   const cfgAddr = await loadConfigAddresses();
   await backfillProtocolLabels().catch((err) => console.warn(`[protocol] backfill failed: ${err.message}`));
   await backfillChainLabels().catch((err) => console.warn(`[chain] backfill failed: ${err.message}`));
@@ -2900,6 +2943,25 @@ async function main() {
     console.log(`[admin] relayer settings saved: ${JSON.stringify(redactSecretSettings(patch))}`);
     sendJson(res, 200, { settings: redactSecretSettings(relayerSettings) });
   });
+
+  // ---- Robinhood RPC URL (admin-gated) ----
+  // GET is public but carries no secret: only host names and whether a restart is needed (the URL holds the provider's
+  // API key and never leaves this process). POST is admin-signed, see lib/rpcSettings.js for the checks and the exact
+  // message. The new URL is used the next time the relayer starts; nothing changes while it is running.
+  const rpcDeps = () => ({
+    verifyAdminSignature,
+    isFreshTimestamp,
+    getActive: () => activeRpc,
+    runningNetwork: hre.network.name,
+  });
+  app.get("/rpc-settings", asyncRoute(async (_req, res) => {
+    const out = await rpcSettings.handleGet(rpcDeps());
+    sendJson(res, out.status, out.body);
+  }));
+  app.post("/rpc-settings", asyncRoute(async (req, res) => {
+    const out = await rpcSettings.handlePost(req.body, rpcDeps());
+    sendJson(res, out.status, out.body);
+  }));
 
   // ---- manual token tracking (admin-gated) ----
   // Registers an arbitrary token address for price/activity tracking even
