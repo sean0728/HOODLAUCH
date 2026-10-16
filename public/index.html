@@ -330,7 +330,7 @@
   .stat-tile .figure{font-family:var(--font-mono); font-size:1.7rem; font-weight:600; display:flex; align-items:baseline; gap:8px;}
   .stat-tile .delta{font-size:.78rem; font-weight:600;}
   .stat-tile .delta.up{color:var(--good-500);} .stat-tile .delta.down{color:var(--critical-500);}
-  .stat-tile svg{margin-top:10px; display:block; width:100%; height:30px;}
+  .stat-net{margin-left:6px; color:var(--paper-500); letter-spacing:.06em;}
   @media (max-width: 900px){ .stat-row{grid-template-columns:repeat(2,1fr);} .hero{grid-template-columns:1fr;} }
 
   /* ---------------- market / grid ---------------- */
@@ -1140,10 +1140,10 @@
       </div>
 
       <div class="stat-row">
-        <div class="stat-tile"><div class="eyebrow">Total value locked</div><div class="figure num" id="statTvl">$0</div><svg id="sparkTvl"></svg></div>
-        <div class="stat-tile"><div class="eyebrow">24h volume</div><div class="figure num" id="statVol">$0</div><svg id="sparkVol"></svg></div>
-        <div class="stat-tile"><div class="eyebrow">Active traders</div><div class="figure num" id="statTraders">0</div><svg id="sparkTraders"></svg></div>
-        <div class="stat-tile"><div class="eyebrow">Tokens graduated</div><div class="figure num" id="statGrad">0</div><svg id="sparkGrad"></svg></div>
+        <div class="stat-tile" title="ETH or SOL actually held in bonding curves, plus both sides of every liquidity pool, at current prices. Read from the chains."><div class="eyebrow">Total value locked <span class="stat-net"></span></div><div class="figure num" id="statTvl">—</div></div>
+        <div class="stat-tile" title="Everything bought and sold in the last 24 hours, in USD (Solana converted from SOL at today's price)."><div class="eyebrow">24h volume <span class="stat-net"></span></div><div class="figure num" id="statVol">—</div></div>
+        <div class="stat-tile" title="Distinct wallets that bought or sold in the last 24 hours (a wallet that trades several tokens counts once)."><div class="eyebrow">Active traders <span class="stat-net"></span></div><div class="figure num" id="statTraders">—</div></div>
+        <div class="stat-tile"><div class="eyebrow">Tokens graduated <span class="stat-net"></span></div><div class="figure num" id="statGrad">0</div></div>
       </div>
 
       <div id="market">
@@ -2057,6 +2057,7 @@
     // network, leaving the OTHER network's tokens on screen until then.
     if(typeof renderGrid==="function") renderGrid();
     if(typeof renderStats==="function") renderStats();
+    if(typeof refreshPlatformStats==="function") refreshPlatformStats(); // the figures belong to the network just switched to
     if(wallet) ensureNetwork(appMode);
     refreshOnChainDefaults();
     refreshEthUsdPrice();
@@ -7573,28 +7574,109 @@
   function tokensForCurrentNetwork(){
     return tokens.filter(t => (t.networkMode || "demo") === appMode);
   }
-  function renderStats(){
-    const visible = tokensForCurrentNetwork();
-    const tvl = visible.reduce((a,t)=>a+t.mcap*0.22,0);
-    const vol = visible.reduce((a,t)=>a+t.vol,0);
-    const traders = visible.reduce((a,t)=>a+t.holders,0);
-    // Solana launches (shown in the same grid, only on the network the site's Solana side is on) count too.
-    const solAll = (typeof solGridAll === "function") ? solGridAll() : [];
-    const graduated = visible.filter(t=>t.status==="graduated").length + solAll.filter(s=>s.status==="graduated").length;
+  /* ---------------- platform stats (TVL / 24h volume / active traders) ----------------
+     Real numbers, read by the servers: TVL from the pools and curves themselves, volume and traders from every trade
+     the relayer / Solana tracker saw in the last 24 hours (GET /stats on the Robinhood relayer, GET /solana/stats for
+     Solana). Nothing is estimated or generated here.
 
-    document.getElementById("rdTvl").textContent = fmtUSD(tvl);
-    document.getElementById("rdLaunches").textContent = fmtInt(visible.length + solAll.length);
+     Robinhood and Solana each follow their OWN network, so Solana can go to mainnet first. A mainnet figure is never
+     added to a testnet one: if either chain is on mainnet, only the chains that are on mainnet are counted ("Mainnet");
+     when everything is still on testnet/devnet, both test networks are counted ("Testnet"). */
+  var rhStats = null, solStats = null, statsInFlight = false, statsAgain = false; // var: renderStats can run before this block initialises
+  function statsScope(){
+    const rhMain = appMode==="live";
+    const solOn = (typeof solVisible==="function") && solVisible();
+    const solMain = solOn && solIsMain();
+    const anyMain = rhMain || solMain;
+    return { rh: anyMain ? rhMain : true, sol: solOn && (anyMain ? solMain : true), label: anyMain ? "Mainnet" : "Testnet" };
+  }
+  async function refreshPlatformStats(){
+    if(statsInFlight){ statsAgain = true; return; }   // a network was switched mid-fetch: go round once more when this one ends
+    statsInFlight = true;
+    try{
+      const scope = statsScope();
+      const mode = appMode;
+      const jobs = [];
+      if(scope.rh){
+        const url = relayerApiUrl(mode);
+        jobs.push((async()=>{
+          let got = null;
+          if(url){
+            try{
+              const res = await fetch(`${url}/stats`, { cache:"no-store" });
+              if(res.ok){
+                const d = await res.json();
+                // only accept numbers for the network we are showing (the relayer says which one they are for)
+                if(d && typeof d.tvlUsd==="number" && (/mainnet/i.test(String(d.network))) === (mode==="live")) got = Object.assign({ mode }, d);
+              }
+            }catch(e){ /* relayer without /stats yet, or unreachable: shown as "—", never as a made-up number */ }
+          }
+          rhStats = got;
+        })());
+      }else rhStats = null;
+      if(scope.sol){
+        const main = solIsMain();
+        jobs.push((async()=>{
+          let got = null;
+          try{
+            const res = await fetch(`${SOL_RELAYER}/solana/stats`, { cache:"no-store" });
+            if(res.ok){
+              const d = await res.json();
+              if(d && typeof d.tvlSol==="number" && (d.cluster==="mainnet-beta") === main) got = Object.assign({ main }, d);
+            }
+          }catch(e){ /* older relayer */ }
+          solStats = got;
+          if(got) await solRefreshUsdPrice(); // needed to put SOL on the same dollar footing as ETH
+        })());
+      }else solStats = null;
+      await Promise.all(jobs);
+    }finally{
+      statsInFlight = false;
+    }
+    try{ renderStats(); }catch(e){ /* page still initialising */ }
+    if(statsAgain){ statsAgain = false; refreshPlatformStats(); }
+  }
+  // Solana launches for the counters below. Unlike the grid (which only shows Solana while it matches the Robinhood
+  // side), this follows the Solana network itself, so mainnet Solana is counted even while Robinhood is still on testnet.
+  function solCountList(){
+    let list = [];
+    try{ list = solLaunches; }catch(e){ return []; }
+    return list.filter(l=> l && l.mint).map(l=>({ mint:l.mint, status: (solInfo[l.mint] && solInfo[l.mint].migrated) ? "graduated" : "curve-trading" }));
+  }
+  function renderStats(){
+    const scope = statsScope();
+    const rhOk = scope.rh && rhStats && rhStats.mode===appMode;
+    const solOk = scope.sol && solStats && solStats.main===solIsMain();
+    const usd = solUsdPrice || 0;
+    const solWanted = scope.sol;
+    const solPending = solWanted && (!solOk);                  // Solana is counted but its numbers have not arrived
+    const rhPending = scope.rh && !rhOk;
+    // Sum in dollars. A SOL amount can't be turned into dollars until the SOL price is known: then show it in SOL
+    // beside the dollar part rather than guess.
+    const fig = (rhUsd, solAmt)=>{
+      if(rhPending || solPending) return "—";
+      const money = v=> v===0 ? "$0" : fmtUSD(v);
+      const solUsd = solOk ? solAmt * usd : 0;
+      if(solOk && !usd) return solAmt > 0 ? `${rhOk ? money(rhUsd)+" + " : ""}${solFmtSol(solAmt, 2)}` : money(rhOk ? rhUsd : 0);
+      return money((rhOk ? rhUsd : 0) + solUsd);
+    };
+    const tvlText = fig(rhOk ? rhStats.tvlUsd : 0, solOk ? solStats.tvlSol : 0);
+    const volText = fig(rhOk ? rhStats.volume24hUsd : 0, solOk ? solStats.volume24hSol : 0);
+    const traders = (rhPending || solPending) ? null : ((rhOk ? (rhStats.traders24h||0) : 0) + (solOk ? (solStats.traders24h||0) : 0));
+    // Tokens launched / graduated: the chains in scope only
+    const rhTokens = scope.rh ? tokensForCurrentNetwork() : [];
+    const solTokens = scope.sol ? solCountList() : [];
+    const graduated = rhTokens.filter(t=>t.status==="graduated").length + solTokens.filter(s=>s.status==="graduated").length;
+
+    document.getElementById("rdTvl").textContent = tvlText;
+    document.getElementById("rdLaunches").textContent = fmtInt(rhTokens.length + solTokens.length);
     document.getElementById("rdGrad").textContent = fmtInt(graduated);
 
-    document.getElementById("statTvl").textContent = fmtUSD(tvl);
-    document.getElementById("statVol").textContent = fmtUSD(vol);
-    document.getElementById("statTraders").textContent = fmtInt(traders);
+    document.getElementById("statTvl").textContent = tvlText;
+    document.getElementById("statVol").textContent = volText;
+    document.getElementById("statTraders").textContent = traders===null ? "—" : fmtInt(traders);
     document.getElementById("statGrad").textContent = fmtInt(graduated);
-
-    document.getElementById("sparkTvl").outerHTML = sparkSVG(series(1,20,tvl*0.8,0.06), {color:"var(--signal-500)"}).replace("<svg", `<svg id="sparkTvl"`);
-    document.getElementById("sparkVol").outerHTML = sparkSVG(series(2,20,vol*0.8,0.12), {color:"var(--cyan-500)"}).replace("<svg", `<svg id="sparkVol"`);
-    document.getElementById("sparkTraders").outerHTML = sparkSVG(series(3,20,traders*0.8,0.05), {color:"var(--good-500)"}).replace("<svg", `<svg id="sparkTraders"`);
-    document.getElementById("sparkGrad").outerHTML = sparkSVG(series(4,20,Math.max(graduated,1),0.2), {color:"var(--signal-500)"}).replace("<svg", `<svg id="sparkGrad"`);
+    document.querySelectorAll(".stat-net").forEach(el=>{ el.textContent = "· " + scope.label; });
   }
 
   /* ---------------- token grid ---------------- */
@@ -10162,6 +10244,7 @@
         const dbcConfig = sv.dbcConfig || (cl === "devnet" ? st.dbcConfig : "");
         const enabled = sv.enabled !== false && st.enabled && !!rpcUrl;
         solApplyNetLabels();
+        try{ refreshPlatformStats(); }catch(e){ /* page still initialising */ }   // the Solana network is now known
         return { enabled, cluster: cl, rpcUrl, dbcConfig };
       });
     }
@@ -10205,6 +10288,7 @@
       if(v && v.classList.contains("active")) showView("explore");
     }
     renderSolanaGrid();
+    try{ refreshPlatformStats(); }catch(e){ /* page still initialising */ }
   }
   // Text that names the network: the static bits of the page get their words here once the cluster is known.
   function solApplyNetLabels(){
@@ -10404,10 +10488,12 @@
           ? `Solana launching is admin-only right now, and the connected wallet is now ${fmtAddr(wallet)}. Reconnect the admin wallet.`
           : "Solana launching is admin-only right now — the admin wallet is no longer connected. Reconnect it to continue.");
       }
+      try{ refreshPlatformStats(); }catch(e){ /* page still initialising */ }   // Solana drops out of (or joins) the totals
       return;
     }
     solFetchConfig();   // learn which network the site is on so the labels are right
     if(!solLaunchesLoaded) solLoadLaunches();
+    try{ refreshPlatformStats(); }catch(e){ /* page still initialising */ }
   }
   function solSetLaunchNet(which){
     solLaunchNet = (which === "solana" && solVisible()) ? "solana" : "evm";
@@ -19672,6 +19758,8 @@
   /* ---------------- init ---------------- */
   renderStats();
   renderGrid();
+  refreshPlatformStats();
+  setInterval(refreshPlatformStats, 60000);
   seedFeed();
   setInterval(refreshLiveFeed, LIVE_FEED_POLL_MS);
   // "Check every once in awhile" for independently-added liquidity on Just
