@@ -11113,16 +11113,23 @@
   var solTradeAmount = "";
   var solTradeNote = "";   // last result line (kept across the panel's periodic re-render)
   var solQuoteSeq = 0;
-  function solRenderTradePanel(){
+  function solRenderTradePanel(force){
+    force = (force === true);   // true = a deliberate redraw (side tab / wallet change); false = a background refresh
     const panel = document.getElementById("solTradePanel");
     if(!panel) return;
     // Don't clobber the field while someone is typing in it.
-    if(panel.contains(document.activeElement) && document.activeElement.id==="solTradeAmount") return;
+    if(!force && panel.contains(document.activeElement) && document.activeElement.id==="solTradeAmount") return;
     const mint = solDetailMint;
     const info = solInfo[mint];
     const buy = solTradeSide === "buy";
     const onDamm = !!(info && info.migrated);
-    panel.innerHTML = `
+    // Never swap the buttons out from under a click. This panel is redrawn after every pool refresh (every few seconds);
+    // a redraw that lands between the mouse going down and coming up on "Buy" replaced the button and the click was
+    // lost ("nothing happens"). So: leave it alone while anything inside it has focus or a trade is running, and when
+    // a redraw would produce exactly the same markup, don't touch the DOM at all.
+    if(!force && solBusy) return;
+    if(!force && panel.contains(document.activeElement) && document.activeElement !== document.body) return;
+    const html = `
       <div class="eyebrow" style="margin-bottom:12px;">${onDamm ? "Trade on Meteora (DAMM v2)" : "Trade on the curve"}</div>
       <div class="trade-tabs">
         <button class="trade-tab" data-sol-side="buy" aria-selected="${buy}">Buy</button>
@@ -11134,8 +11141,17 @@
       <div class="hint" id="solQuoteOut" style="min-height:2.6em">Enter an amount to see a quote.</div>
       <button class="btn btn-primary" id="solTradeBtn" style="width:100%; margin-top:10px;">${buy ? "Buy" : "Sell"}</button>
       <div class="hint" id="solTradeMsg" style="margin-top:8px;">${solTradeNote || (info ? "" : escapeHtml(solLibErr || solInfoErr[solDetailMint] ? "Pool data isn't available: "+(solLibErr || solInfoErr[solDetailMint]) : "Loading pool data…"))}</div>`;
-    panel.querySelectorAll("[data-sol-side]").forEach(b=> b.addEventListener("click", ()=>{ solTradeSide = b.dataset.solSide; solTradeAmount = ""; solTradeNote = ""; solRenderTradePanel(); }));
-    solWireWalletRow(document.getElementById("solTradeWallet"), ()=>{ solRenderTradePanel(); });
+    const sig = String(mint) + "|" + html;
+    if(!force && panel.dataset.sig === sig){ if(solTradeAmount) solUpdateQuote(); return; }   // identical markup: leave the live buttons alone, just refresh the quote text
+    panel.dataset.sig = sig;
+    panel.innerHTML = html;
+    if(!panel._focusOutWired){
+      panel._focusOutWired = true;
+      // once focus leaves the panel, catch up on any refresh that was held back while it was focused
+      panel.addEventListener("focusout", ()=> setTimeout(()=>{ if(!panel.contains(document.activeElement)) solRenderTradePanel(); }, 150));
+    }
+    panel.querySelectorAll("[data-sol-side]").forEach(b=> b.addEventListener("click", ()=>{ solTradeSide = b.dataset.solSide; solTradeAmount = ""; solTradeNote = ""; solRenderTradePanel(true); }));
+    solWireWalletRow(document.getElementById("solTradeWallet"), ()=>{ solRenderTradePanel(true); });
     const inp = document.getElementById("solTradeAmount");
     let timer = null;
     inp.addEventListener("input", ()=>{
@@ -11175,9 +11191,9 @@
     }
   }
   async function solDoTrade(){
-    if(solBusy) return;
     const lib = window.IgnitionSol;
     const msg = document.getElementById("solTradeMsg");
+    if(solBusy){ if(msg) msg.textContent = "Another Solana transaction is still in progress — check your wallet, or wait for it to finish."; return; }
     const info = solInfo[solDetailMint];
     if(!lib || !lib.currentWallet()){ solNeedWallet(); if(msg) msg.textContent = "Connect your Solana wallet first."; return; }
     if(!info){
