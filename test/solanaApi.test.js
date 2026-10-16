@@ -579,7 +579,7 @@ describe("samplePoolOnce", () => {
     assert.strictEqual(client.calls.poolArg, "PoolX");
     assert.strictEqual(client.calls.configArg, "CfgAddr");
     assert.deepStrictEqual(deps.priceArgs, [POOL.sqrtPrice, 6, 9]);
-    assert.deepStrictEqual(appended, [{ mint: "MintX", point: { t: 1700000000000, p: 0.0000004, progressPct: 50, migrated: false } }]);
+    assert.deepStrictEqual(appended, [{ mint: "MintX", point: { t: 1700000000000, p: 0.0000004, progressPct: 50, migrated: false, tvlSol: 42.5 } }]);
     assert.strictEqual(r.appended, true);
   });
 
@@ -1407,5 +1407,128 @@ describe("Telegram milestones (checkMilestones) and patchLaunch", () => {
     // the public list never leaks the bookkeeping fields
     const pubRow = (await call("GET", "/solana/launches")).json.launches.find((l) => l.mint === mint);
     assert.ok(!("filledAnnouncedAt" in pubRow) && !("milestonesSeenAt" in pubRow));
+  });
+});
+
+
+// ---- real TVL / volume / traders (lib/statsStore.js + tracker + /solana/stats) ----
+describe("Solana TVL, DAMM v2 trades and /solana/stats", () => {
+  const statsStore = require("../lib/statsStore");
+  const vendor = require("../lib/vendor/solana-node.js");
+  const MINT = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+  const WSOL = "So11111111111111111111111111111111111111112";
+  const EXPECT = { pool: "4NHjBQgZ5qXEcLzRZbBBeoGX6Y3GSPXJPprdbW5bZcix", baseVault: "42eWthMDgxr8RgMRiSwkWfQ27Ep8P794XkyhHEwNYEdf", quoteVault: "HcnCLRdMEjzZLuSeBJ58qr73ZFFcteGRfP9oPTiF26R3" };
+  const cfg = () => ({ tokenDecimal: 6, migrationQuoteThreshold: bn("85000000000"), migrationFeeOption: vendor.sdk.MigrationFeeOption.FixedBps100, quoteMint: WSOL });
+  const depsFor = (extra = {}) => {
+    const appended = [];
+    return {
+      appended,
+      deps: {
+        getPriceFromSqrtPrice: () => bn("0.0000004"),
+        appendPricePoint: async (mint, point) => { appended.push({ mint, point }); return true; },
+        now: () => 1700000000000,
+        sdk: vendor.sdk, PublicKey: vendor.web3.PublicKey,
+        ...extra,
+      },
+    };
+  };
+
+  it("derives the DAMM v2 pool and both vaults the way the cp-amm SDK does", () => {
+    const { deps } = depsFor();
+    assert.deepStrictEqual(tracker.dammAddresses({ mint: MINT }, cfg(), deps), EXPECT);
+    assert.strictEqual(tracker.dammAddresses({ mint: MINT }, cfg(), {}), null); // no SDK handed in -> nothing to derive
+  });
+
+  it("a curve token's TVL is the SOL held in its curve", async () => {
+    const { deps, appended } = depsFor();
+    await tracker.samplePoolOnce(fakeClient({ pool: { ...POOL, quoteReserve: bn("12500000000") }, config: cfg() }), { mint: MINT, pool: "PoolX" }, deps);
+    assert.strictEqual(appended[0].point.tvlSol, 12.5);
+  });
+
+  it("a migrated token's TVL is twice the SOL side of its DAMM v2 pool; an unreadable pool records no TVL", async () => {
+    const asked = [];
+    const connection = { getTokenAccountBalance: async (pk) => { asked.push(pk.toBase58()); return { value: { uiAmountString: "30.25" } }; } };
+    const { deps, appended } = depsFor({ connection });
+    const client = fakeClient({ pool: { ...POOL, isMigrated: 1, quoteReserve: bn("0") }, config: cfg() });
+    await tracker.samplePoolOnce(client, { mint: MINT, pool: "PoolX" }, deps);
+    assert.deepStrictEqual(asked, [EXPECT.quoteVault]);
+    assert.strictEqual(appended[0].point.tvlSol, 60.5);
+    const broken = { getTokenAccountBalance: async () => { throw new Error("rpc down"); } };
+    const second = depsFor({ connection: broken });
+    await tracker.samplePoolOnce(client, { mint: MINT, pool: "PoolX" }, second.deps);
+    assert.ok(!("tvlSol" in second.appended[0].point)); // the price point is still recorded, just without TVL
+  });
+
+  it("sampleDammTradesOnce records swaps on the DAMM pool, ignores liquidity moves, and never replays after a restart", async () => {
+    const TRADER = randAddr();
+    const a = tracker.dammAddresses({ mint: MINT }, cfg(), depsFor().deps);
+    const bal = (idx, amount) => ({ accountIndex: idx, uiTokenAmount: { amount: String(amount) } });
+    const tx = (baseDelta, quoteDelta, blockTime) => ({
+      blockTime,
+      meta: { err: null, preTokenBalances: [bal(1, 9e9), bal(2, 5e9)], postTokenBalances: [bal(1, 9e9 + baseDelta), bal(2, 5e9 + quoteDelta)] },
+      transaction: { message: { accountKeys: [TRADER, a.baseVault, a.quoteVault].map((k, i) => ({ pubkey: { toBase58: () => k }, signer: i === 0 })) } },
+    });
+    const buySig = randTxSig(), addSig = randTxSig(), sellSig = randTxSig();
+    const txs = {
+      [buySig]: tx(-4_000_000, 500_000_000, 1_700_000_100),     // SOL in, tokens out = buy of 0.5 SOL
+      [addSig]: tx(8_000_000, 2_000_000_000, 1_700_000_150),    // both vaults grow = liquidity added, not a trade
+      [sellSig]: tx(1_000_000, -120_000_000, 1_700_000_200),    // SOL out, tokens in = sell of 0.12 SOL
+    };
+    const listing = [sellSig, addSig, buySig].map((signature) => ({ signature, blockTime: txs[signature].blockTime, err: null }));
+    const askedPools = [];
+    const connection = {
+      getSignaturesForAddress: async (pk, opts) => { askedPools.push(pk.a); return opts.until ? [] : listing; },
+      getParsedTransaction: async (sig) => txs[sig],
+    };
+    const written = [];
+    const store = { readActivity: async () => written.slice(), appendActivity: async (e) => { written.push(e); } };
+    const launch = { mint: MINT, symbol: "DMM" };
+    const ctx = { connection, PublicKey: function (x) { this.a = x; }, store, network: "solana-devnet", cursors: new Map(), decimals: 6 };
+    assert.strictEqual(await tracker.sampleDammTradesOnce(ctx, launch, a), 2);
+    assert.deepStrictEqual(askedPools, [EXPECT.pool]);
+    assert.deepStrictEqual(written.map((w) => [w.side, w.solAmount, w.wallet]), [["buy", 0.5, TRADER], ["sell", 0.12, TRADER]]);
+    // restart: no cursor, the same signatures come back, nothing is written twice
+    assert.strictEqual(await tracker.sampleDammTradesOnce({ ...ctx, cursors: new Map() }, launch, a), 0);
+    assert.strictEqual(written.length, 2);
+  });
+
+  it("solanaStore.appendActivity folds each trade into the 24h stats (SOL volume, unique traders), keyed by Solana network", async () => {
+    statsStore.resetForTests();
+    const w1 = randAddr(), w2 = randAddr();
+    const net = "solana-devnet";
+    await store.appendActivity({ t: Date.now(), txHash: randTxSig(), logIndex: 0, tokenAddress: randAddr(), symbol: "A", side: "buy", wallet: w1, tokenAmount: "1", solAmount: 1.5 }, net);
+    await store.appendActivity({ t: Date.now(), txHash: randTxSig(), logIndex: 0, tokenAddress: randAddr(), symbol: "A", side: "sell", wallet: w1, tokenAmount: "1", solAmount: 0.5 }, net);
+    await store.appendActivity({ t: Date.now(), txHash: randTxSig(), logIndex: 0, tokenAddress: randAddr(), symbol: "B", side: "buy", wallet: w2, tokenAmount: "1", solAmount: 2 }, net);
+    const s = await statsStore.summary(net, "solana");
+    assert.deepStrictEqual(s, { volume: 4, trades: 3, traders: 2 });
+    assert.deepStrictEqual(await statsStore.summary("solana-mainnet", "solana"), { volume: 0, trades: 0, traders: 0 }); // a different cluster is separate
+  });
+
+  it("GET /solana/stats returns TVL (only for launches that exist), volume and traders for the current cluster", async () => {
+    statsStore.resetForTests();
+    const net = "solana-devnet";
+    const m1 = randAddr(), m2 = randAddr(), gone = randAddr();
+    statsStore.setTokenTvl(net, "solana", m1, 10);
+    statsStore.setTokenTvl(net, "solana", m2, 2.5);
+    statsStore.setTokenTvl(net, "solana", gone, 999); // a deleted launch's stale snapshot
+    await statsStore.recordTrade(net, "solana", { t: Date.now(), wallet: randAddr(), volume: 3 });
+    const app = express();
+    api.registerSolanaRoutes(app, {
+      sendJson: (res, code, body) => { res.statusCode = code; res.setHeader("content-type", "application/json"); res.end(JSON.stringify(body)); },
+      verifyAdminSignature: () => true, isFreshTimestamp, logger: quietLogger, env: {}, startTracker: false,
+      store: { ...store, listLaunches: async () => [{ mint: m1 }, { mint: m2 }, { mint: randAddr() }], readSettings: async () => ({}) },
+    });
+    const server = http.createServer(app);
+    await new Promise((r) => server.listen(0, r));
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/solana/stats`);
+      const j = await res.json();
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(j.cluster, "devnet");
+      assert.strictEqual(j.tvlSol, 12.5);
+      assert.deepStrictEqual(j.tvlTokens, { counted: 2, missing: 1 });
+      assert.strictEqual(j.volume24hSol, 3);
+      assert.strictEqual(j.traders24h, 1);
+    } finally { server.close(); }
   });
 });
