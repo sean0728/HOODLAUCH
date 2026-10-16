@@ -16054,11 +16054,17 @@
             </ul>
             <label for="sa_confirm" style="display:block; font-size:.8rem;">Type <code>${SA_PHRASE}</code> to confirm:</label>
             <input id="sa_confirm" type="text" autocomplete="off" spellcheck="false" style="margin-top:4px; width:100%; max-width:320px;" value="${escapeHtml(had)}">
+            <div style="margin-top:10px;"><button class="btn btn-primary" type="button" id="sa_golive_btn" disabled>Go live on mainnet</button></div>
           </div>`;
         const c = document.getElementById("sa_confirm");
         if(c){ c.addEventListener("input", saUpdateForm); if(had) { c.focus(); try{ c.setSelectionRange(had.length, had.length); }catch(e){} } }
+        const ready = checks.every(x=> x.ok) && phraseOk;
+        const gb = document.getElementById("sa_golive_btn");
+        if(gb){
+          gb.disabled = !ready;
+          gb.onclick = ()=> runSolanaSettingsSave(gb);   // same save as the button at the bottom of the form
+        }
         if(btn){
-          const ready = checks.every(x=> x.ok) && phraseOk;
           btn.disabled = !ready;
           btn.textContent = "Go live on mainnet";
         }
@@ -16230,7 +16236,7 @@
       mainnetConfirm: goingLive ? saVal("sa_confirm") : "",
     };
     const result = document.getElementById("sa_result");
-    const say = (t, bad)=>{ if(result){ result.textContent = t; result.style.color = bad ? "var(--critical-500)" : "var(--good-500)"; } };
+    const say = (t, bad)=>{ if(result){ result.textContent = t; result.style.color = bad ? "var(--critical-500)" : "var(--good-500)"; } if(bad) toast(t); };   // toast too: the message line is at the bottom of a long form
     if(saVal("sa_curveRaise")){ say("You typed a \"SOL to raise\" target — press Preview first so it's turned into a graduation market cap.", true); return; }
     const label = btnEl.textContent;
     btnEl.disabled = true; btnEl.textContent = "Waiting for signature…";
@@ -19564,8 +19570,15 @@
   // Solana launches share these two windows with the Robinhood ones. Solana devnet is the platform's TESTNET and
   // mainnet-beta its MAINNET, so they show up in whichever of the two modes matches the cluster the site is on —
   // and, like the rest of the Solana UI, only while Solana is visible to this visitor (public launch on, or admin).
+  // Solana's network is independent of the Robinhood Testnet/Mainnet toggle (Solana can be on mainnet while
+  // Robinhood is still on testnet), so Solana launches/trades show whenever Solana is visible, on whatever Solana
+  // network the site is on. Each Solana row/label says which network it is.
   function solFeedActive(){
-    try{ return solVisible() && ((appMode==="live") === solIsMain()); }catch(e){ return false; }
+    try{ return solVisible(); }catch(e){ return false; }
+  }
+  // True when the Robinhood toggle and the Solana network are on different sides (e.g. RH testnet, Solana mainnet).
+  function solNetworkSplit(){
+    try{ return (appMode==="live") !== solIsMain(); }catch(e){ return false; }
   }
   function solLaunchAnnouncements(){
     if(!solFeedActive()) return [];
@@ -19709,7 +19722,9 @@
     // Solana rows live in the same activity store (chain "solana"), so /activity can already carry them; they are
     // only shown while Solana is visible and on this network, and /solana/activity is merged in (de-duplicated by
     // transaction) so the feed works even when the EVM relayer is on a different network or not configured.
-    activity = activity.filter(e => e && (e.chain !== "solana" || wantSol));
+    // The EVM relayer's /activity can carry Solana rows from ITS network's store; when Solana is on the other side of
+    // the toggle those would be the wrong network's trades, so only /solana/activity (cluster-scoped) is used then.
+    activity = activity.filter(e => e && (e.chain !== "solana" || (wantSol && !solNetworkSplit())));
     if(wantSol){
       try{
         const res = await fetch(`${SOL_RELAYER}/solana/activity`, { cache:"no-store" });
