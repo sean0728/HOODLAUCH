@@ -15694,6 +15694,257 @@
     }
   }
 
+  // ---------------- Keeper status (Admin > Relayer settings tab) ----------------
+  // Two switches decide whether the relayer's automatic V4 sweeps can run:
+  //   1. On-chain: each of the five reward/tax contracts keeps a list of "keepers", the wallets allowed to run its
+  //      sweeps. The relayer wallet must be on that list (setKeeper(relayer, true), owner only). V4deploy.js does this
+  //      for you; this panel shows whether it is still true and lets the owner wallet switch it on or off.
+  //   2. Off-chain: the relayer's own master switch (v4KeeperEnabled in Relayer settings), saved with an admin signature.
+  // Everything is read live from the chain through the connected wallet, so the pills are never cached.
+  const V4_SET_KEEPER_SELECTOR = "d1b9e853";   // setKeeper(address,bool)
+  const KEEPERS_SELECTOR = "3bbd64bc";         // keepers(address) — same getter on all five contracts
+  let keeperBusy = false;
+  let keeperArmed = null;                      // key of a contract whose "Switch off" is waiting for a second click
+  let keeperArmTimer = null;
+  let keeperRenderToken = 0;
+  let keeperLast = null;                       // the last loaded status, read by the click handlers
+
+  const KEEPER_SPOTS = [
+    { key:"converter", label:"Reflection converter", note:"Turns each token's collected tax into ETH for holder payouts." },
+    { key:"creator",   label:"Creator-rewards distributor", note:"Sweeps and pays creators' share." },
+    { key:"feeWallet", label:"Fee-wallet distributor", note:"Sweeps and pays the fee-wallet share." },
+    { key:"platform",  label:"Platform-rewards distributor", note:"Platform token buyback, burn and airdrops." },
+    { key:"tax",       label:"Platform tax distributor", note:"Collects the flat trade tax." },
+  ];
+
+  async function loadKeeperStatus(){
+    const out = { relayer:null, automationOn:null, chainOk:true, spots:[], error:null };
+    const relayerUrl = relayerApiUrl(appMode);
+    try{
+      const [hres, sres] = await Promise.all([fetch(`${relayerUrl}/health`), fetch(`${relayerUrl}/relayer-settings`)]);
+      const h = hres.ok ? await hres.json() : null;
+      const s = sres.ok ? await sres.json() : null;
+      out.relayer = h && h.relayer ? h.relayer : null;
+      if(s && s.settings) out.automationOn = s.settings.v4KeeperEnabled !== false && String(s.settings.v4KeeperEnabled) !== "false";
+    }catch(e){ out.error = "Couldn't reach the relayer."; }
+    try{
+      const want = NETWORKS[appMode] && NETWORKS[appMode].chainIdHex;
+      if(want){
+        const have = await getEth().request({ method:"eth_chainId" });
+        out.chainOk = String(have).toLowerCase() === String(want).toLowerCase();
+      }
+    }catch(e){}
+    if(!out.chainOk) return out;
+    const factory = adminFactoryAddress("v4");
+    const fromFactory = async (sel)=>{ const h = factory ? await v4Read(factory, sel) : null; return h ? decodeAddress(h) : null; };
+    const [conv, creator, feeWallet, platform] = await Promise.all([
+      fromFactory(V4_REFLECTION_CONVERTER_SELECTOR),
+      fromFactory(CREATOR_REWARDS_DISTRIBUTOR_SELECTOR),
+      fromFactory(FEE_WALLET_DISTRIBUTOR_SELECTOR),
+      fromFactory(REWARDS_DISTRIBUTOR_SELECTOR),
+    ]);
+    const tax = (platformConfig.platformTaxDistributor && platformConfig.platformTaxDistributor[appMode]) || null;
+    const addrs = { converter:conv, creator, feeWallet, platform: platform || ((platformConfig.rewardsDistributor||{})[appMode] || null), tax };
+    out.spots = await Promise.all(KEEPER_SPOTS.map(async (sp)=>{
+      const a = addrs[sp.key];
+      const r = { ...sp, addr: isZeroAddr(a) ? null : a, hasCode:null, owner:null, pending:null, keeper:null };
+      if(!r.addr) return r;
+      r.hasCode = await v4HasCode(r.addr);
+      if(!r.hasCode) return r;
+      const [oH, pH, kH] = await Promise.all([
+        v4Read(r.addr, OWNER_SELECTOR),
+        v4Read(r.addr, PENDING_OWNER_SELECTOR),
+        out.relayer ? v4Read(r.addr, KEEPERS_SELECTOR + encodeAddressParam(out.relayer)) : null,
+      ]);
+      r.owner = oH ? decodeAddress(oH) : null;
+      r.pending = pH && !isZeroAddr(decodeAddress(pH)) ? decodeAddress(pH) : null;
+      r.keeper = kH ? decodeUint256(kH) === 1n : null;
+      return r;
+    }));
+    return out;
+  }
+
+  function keeperSpotRowHTML(sp, d){
+    if(!sp.addr) return `<tr><td>${escapeHtml(sp.label)}<div class="hint" style="margin:2px 0 0;">${escapeHtml(sp.note)}</div></td><td><span class="dc-none">Not set</span></td><td class="v4s-cell">${v4Pill("warn","Not deployed here")}</td><td></td></tr>`;
+    if(sp.hasCode === false) return `<tr><td>${escapeHtml(sp.label)}</td><td>${explorerAddrHTML(sp.addr)}</td><td class="v4s-cell">${v4Pill("bad","No contract at this address")}</td><td></td></tr>`;
+    let pill;
+    if(sp.keeper === null) pill = v4Pill("warn","Couldn't check");
+    else pill = sp.keeper ? v4Pill("ok","✓ Keeper ON") : v4Pill("bad","✗ Keeper OFF — sweeps will fail here");
+    const mine = sameAddr(sp.owner, wallet);
+    let action = "";
+    if(sp.pending && sameAddr(sp.pending, wallet)){
+      action = `<button class="btn btn-primary btn-sm" type="button" data-keeper-accept="${sp.key}">Accept ownership</button>`;
+    } else if(!d.relayer){
+      action = "";
+    } else if(!mine){
+      action = `<span class="hint" style="margin:0;">Owned by ${explorerAddrHTML(sp.owner)}${sp.pending ? " (hand-off pending)" : ""} — only the owner can change this</span>`;
+    } else if(sp.keeper === false){
+      action = `<button class="btn btn-primary btn-sm" type="button" data-keeper-on="${sp.key}">Switch on</button>`;
+    } else if(sp.keeper === true){
+      action = keeperArmed === sp.key
+        ? `<button class="btn btn-ghost btn-sm" type="button" data-keeper-off="${sp.key}">Click again to confirm</button>`
+        : `<button class="btn btn-ghost btn-sm" type="button" data-keeper-off="${sp.key}">Switch off</button>`;
+    }
+    const ownerLine = sp.owner ? `<div class="hint" style="margin:2px 0 0;">Owner ${explorerAddrHTML(sp.owner)}${sp.pending ? ` · pending ${explorerAddrHTML(sp.pending)}` : ""}</div>` : "";
+    return `<tr><td>${escapeHtml(sp.label)}<div class="hint" style="margin:2px 0 0;">${escapeHtml(sp.note)}</div></td><td>${explorerAddrHTML(sp.addr)}${ownerLine}</td><td class="v4s-cell">${pill}</td><td class="v4s-cell">${action}</td></tr>`;
+  }
+
+  function keeperStatusPanelHTML(d){
+    if(d.error) return `<div class="panel admin-panel" style="grid-column:1 / -1;"><div class="admin-panel-head"><h3>Keeper status</h3></div><p class="admin-empty">${escapeHtml(d.error)}</p></div>`;
+    const net = NETWORKS[appMode] || {};
+    const autoPill = d.automationOn === null ? v4Pill("warn","Couldn't read") : d.automationOn ? v4Pill("ok","✓ Relayer automation ON") : v4Pill("bad","✗ Relayer automation OFF — all V4 sweeps paused");
+    const autoBtn = d.automationOn === null ? "" : d.automationOn
+      ? `<button class="btn btn-ghost btn-sm" type="button" data-keeper-auto="false">Pause automation</button>`
+      : `<button class="btn btn-primary btn-sm" type="button" data-keeper-auto="true">Resume automation</button>`;
+    let body;
+    if(!d.chainOk){
+      body = `<div class="admin-banner" style="margin:0 0 10px;"><span class="icon">⚠️</span><p>Your wallet is on a different network from ${escapeHtml(net.chainName || "this one")}, so the on-chain status can't be read.</p></div><button class="btn btn-primary btn-sm" type="button" data-keeper-switch>Switch wallet network</button>`;
+    } else {
+      const checked = d.spots.filter(s=> s.keeper !== null);
+      const off = d.spots.filter(s=> s.keeper === false);
+      const summary = !d.relayer ? v4Pill("warn","Relayer wallet unknown")
+        : off.length ? v4Pill("bad", `✗ ${off.length} of ${checked.length} contract${checked.length===1?"":"s"} missing the relayer`)
+        : checked.length ? v4Pill("ok", `✓ Relayer is a keeper on all ${checked.length} deployed contract${checked.length===1?"":"s"}`) : v4Pill("warn","Nothing deployed to check");
+      body = `
+        <div style="margin:0 0 10px;">${summary}</div>
+        <div class="dc-wrap"><table class="dc-table"><thead><tr><th>Contract</th><th>Address</th><th>Relayer keeper</th><th>Change</th></tr></thead><tbody>${d.spots.map(sp=> keeperSpotRowHTML(sp, d)).join("")}</tbody></table></div>`;
+    }
+    return `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3>Keeper status</h3></div>
+        <p class="help-text" style="margin:2px 0 12px;">The relayer can only run the automatic V4 sweeps on a contract while its wallet is on that contract's keeper list. <code>V4deploy.js</code> switches this on for you. Here you can check it any time and, from the owner wallet, switch it off or on. The master switch below pauses every V4 sweep without touching the contracts.</p>
+        <div class="admin-cfg-table" style="margin-bottom:12px;">
+          <div class="admin-cfg-row" style="align-items:center;">
+            <div class="admin-cfg-label">Relayer wallet</div>
+            <div class="field rpc-field">${d.relayer ? explorerAddrHTML(d.relayer) : `<span class="dc-none">Unknown</span>`}</div>
+          </div>
+          <div class="admin-cfg-row" style="align-items:center;">
+            <div class="admin-cfg-label">Master switch <span class="info-dot" title="The relayer's V4 keeper automation. Takes effect on the next tick, no restart. Same setting as 'V4 keeper (automatic sweeps)' below.">?</span></div>
+            <div class="field rpc-field" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">${autoPill}${autoBtn}</div>
+          </div>
+        </div>
+        ${body}
+      </div>`;
+  }
+
+  async function renderKeeperStatusPanel(){
+    const wrap = document.getElementById("keeperStatusWrap");
+    if(!wrap) return;
+    const token = ++keeperRenderToken;
+    const url = relayerApiUrl(appMode);
+    if(!url){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><div class="admin-panel-head"><h3>Keeper status</h3></div><p class="admin-empty">No relayer configured for this network — set a Relayer API URL in Overview → Platform contracts first.</p></div>`;
+      return;
+    }
+    if(!wrap.innerHTML.trim()) wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><div class="admin-panel-head"><h3>Keeper status</h3></div><p class="admin-empty">Checking…</p></div>`;
+    if(!getEth()){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><div class="admin-panel-head"><h3>Keeper status</h3></div><p class="admin-empty">Connect your wallet to check the keepers on-chain.</p></div>`;
+      return;
+    }
+    const d = await loadKeeperStatus();
+    if(token !== keeperRenderToken) return;                       // a newer render started while this one was reading
+    if(!isAdminWallet(wallet) || !views.admin.classList.contains("active")) return;
+    keeperLast = d;
+    wrap.innerHTML = keeperStatusPanelHTML(d);
+    wrap.querySelectorAll("[data-keeper-on]").forEach(b=> b.addEventListener("click", ()=> runKeeperChange(b.dataset.keeperOn, true, b)));
+    wrap.querySelectorAll("[data-keeper-off]").forEach(b=> b.addEventListener("click", ()=> runKeeperChange(b.dataset.keeperOff, false, b)));
+    wrap.querySelectorAll("[data-keeper-accept]").forEach(b=> b.addEventListener("click", ()=> runKeeperAccept(b.dataset.keeperAccept, b)));
+    wrap.querySelectorAll("[data-keeper-auto]").forEach(b=> b.addEventListener("click", ()=> runKeeperAutomation(b.dataset.keeperAuto === "true", b)));
+    wrap.querySelectorAll("[data-keeper-switch]").forEach(b=> b.addEventListener("click", async ()=>{ await ensureNetwork(appMode); renderKeeperStatusPanel(); }));
+  }
+
+  async function keeperSendTx(btn, to, data, busyLabel, okMsg){
+    if(keeperBusy) return;
+    keeperBusy = true;
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Confirm in wallet…";
+    try{
+      toast("Confirm the transaction in your wallet…");
+      const txHash = await getEth().request({ method:"eth_sendTransaction", params:[{ from: wallet, to, data }] });
+      btn.textContent = busyLabel;
+      const receipt = await waitForReceipt(txHash);
+      toast(receipt.status === "0x1" ? `✅ ${okMsg}` : "The transaction reverted on-chain — nothing was changed.");
+    }catch(err){
+      if(err && err.code===4001) toast("Transaction was rejected.");
+      else toast(err && err.message ? err.message : "Transaction failed.");
+    }finally{
+      keeperBusy = false;
+      btn.disabled = false;
+      btn.textContent = label;
+      renderKeeperStatusPanel();
+    }
+  }
+
+  async function runKeeperChange(key, enable, btn){
+    const sp = keeperLast && keeperLast.spots.find(s=> s.key === key);
+    const relayer = keeperLast && keeperLast.relayer;
+    if(!sp || !sp.addr || !relayer){ toast("Reload the panel first."); return; }
+    if(!sameAddr(sp.owner, wallet)){ toast("Only the contract's owner wallet can change this."); return; }
+    if(!enable && keeperArmed !== key){
+      // Switching a keeper off stops that contract's automatic sweeps: ask for a second click before sending.
+      keeperArmed = key;
+      clearTimeout(keeperArmTimer);
+      keeperArmTimer = setTimeout(()=>{ keeperArmed = null; renderKeeperStatusPanel(); }, 6000);
+      renderKeeperStatusPanel();
+      return;
+    }
+    keeperArmed = null; clearTimeout(keeperArmTimer);
+    await keeperSendTx(btn, sp.addr, encodeAddressUint256Calldata(V4_SET_KEEPER_SELECTOR, relayer, enable ? 1n : 0n),
+      "Waiting for confirmation…",
+      enable ? `${sp.label}: relayer authorised as keeper.` : `${sp.label}: relayer keeper switched off.`);
+  }
+
+  async function runKeeperAccept(key, btn){
+    const sp = keeperLast && keeperLast.spots.find(s=> s.key === key);
+    if(!sp || !sp.addr){ toast("Reload the panel first."); return; }
+    if(!sameAddr(sp.pending, wallet)){ toast("This wallet isn't the pending owner."); return; }
+    await keeperSendTx(btn, sp.addr, "0x"+ACCEPT_OWNERSHIP_SELECTOR, "Waiting for confirmation…", `${sp.label}: ownership accepted.`);
+  }
+
+  async function runKeeperAutomation(on, btn){
+    if(keeperBusy) return;
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
+    const url = relayerApiUrl(appMode);
+    if(!url){ toast("No relayer configured for this network."); return; }
+    keeperBusy = true;
+    const label = btn.textContent;
+    try{
+      // Always start from the relayer's current values so only this one setting changes. A blank Telegram token
+      // means "keep the saved one" on the server.
+      const res0 = await fetch(`${url}/relayer-settings`);
+      if(!res0.ok) throw new Error("load");
+      const cur = (await res0.json()).settings || {};
+      const settings = {};
+      for(const k of RELAYER_SETTINGS_KEYS){
+        if(k === "telegramBotToken") settings[k] = "";
+        else if(k === "v4KeeperEnabled") settings[k] = on ? "true" : "false";
+        else settings[k] = (cur[k] === undefined || cur[k] === null) ? "" : String(cur[k]);
+      }
+      const timestamp = Date.now();
+      const message = relayerSettingsMessage(settings, timestamp);
+      let signature;
+      try{ signature = await getEth().request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] }); }
+      catch(err){ toast("Signature was rejected — nothing was changed."); return; }
+      btn.disabled = true; btn.textContent = "Saving…";
+      const res = await fetch(`${url}/relayer-settings`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ settings, timestamp, signature }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't change the master switch."); return; }
+      toast(on ? "Relayer automation resumed — V4 sweeps run again on the next tick." : "Relayer automation paused — V4 sweeps are skipped until you resume it.");
+    }catch(err){
+      toast("Couldn't reach the relayer.");
+    }finally{
+      keeperBusy = false;
+      btn.disabled = false; btn.textContent = label;
+      renderKeeperStatusPanel();
+      renderRelayerSettingsPanel();
+    }
+  }
+
   // ---------------- Robinhood RPC URL (Admin > Relayer settings tab) ----------------
   // Lets the admin paste a dedicated RPC (Alchemy etc.) for the relayer without editing .env on the host. Stored on the
   // server (database) and used the next time the relayer restarts — see lib/rpcSettings.js and GET/POST /rpc-settings in
@@ -18103,6 +18354,7 @@
       <div class="admin-tab-panel" data-admin-panel="relayer" ${adminTab==="relayer"?"":"hidden"}>
         <div class="section-head"><h2>Relayer settings</h2></div>
         <div id="rpcSettingsWrap" style="margin-bottom:18px;"></div>
+        <div id="keeperStatusWrap" style="margin-bottom:18px;"></div>
         <div id="relayerSettingsWrap">
           <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
         </div>
@@ -18152,6 +18404,7 @@
     // panels' initial GETs are plain server reads that work with no wallet
     // connected at all (same reasoning as "Platform contracts" above).
     renderRpcSettingsPanel();
+    renderKeeperStatusPanel();
     renderRelayerSettingsPanel();
     renderRevenuePanel();
     renderSolanaAdminPanel();
