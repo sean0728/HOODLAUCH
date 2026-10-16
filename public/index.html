@@ -8038,22 +8038,31 @@
     }
     const solWrap = document.getElementById("topTenSolana"), solList = document.getElementById("topTenSolList");
     if(solWrap && solList){
-      const on = (typeof solFeedActive === "function") && solFeedActive();
+      // Follows the SOLANA network itself, not the Robinhood Testnet/Mainnet toggle: with Solana on mainnet and Robinhood
+      // still on testnet, this list shows the Solana mainnet tokens next to the Robinhood testnet list.
+      const on = (typeof solVisible === "function") && solVisible();
       solWrap.hidden = !on;
       if(on){
         const solNet = document.getElementById("topTenSolNet");
         if(solNet) solNet.textContent = (solIsMain() ? "Mainnet" : "Devnet") + " · by market cap";
-        const rows = solGridAll().map(it=>({ it, info: solInfo[it.mint] }))
+        const solAll = solTopTenItems();
+        const rows = solAll.map(it=>({ it, info: solInfo[it.mint] }))
           .filter(r=> r.info && isFinite(r.info.marketCapSol) && r.info.marketCapSol > 0)
           .sort((a,b)=> b.info.marketCapSol - a.info.marketCapSol).slice(0, 10);
         solList.innerHTML = rows.length
           ? rows.map((r,i)=> topTenRowHTML(i+1, `data-ttmint="${escapeHtml(r.it.mint)}"`,
               (()=>{ const img = solSafeImg(r.it.launch.image); return img ? `<img src="${img}" alt="">` : `<div class="tc-logo-ph" style="background:#ffa03a">${escapeHtml((r.it.ticker||"??").slice(0,2))}</div>`; })(),
               r.it.name, r.it.ticker, solFmtMcap(r.info.marketCapSol), escapeHtml(solFmtPrice(r.info.priceSol)))).join("")
-          : `<li class="top-ten-empty">${solGridAll().length ? "Loading Solana market caps…" : `No Solana tokens with a live market on ${escapeHtml(solNetWord())} yet.`}</li>`;
+          : `<li class="top-ten-empty">${solAll.length ? "Loading Solana market caps…" : `No Solana tokens with a live market on ${escapeHtml(solNetWord())} yet.`}</li>`;
         solList.querySelectorAll("[data-ttmint]").forEach(b=> b.addEventListener("click", ()=> openSolanaDetail(b.dataset.ttmint)));
       }
     }
+  }
+  // Every Solana launch on the Solana network the site is on, whatever the Robinhood side is set to.
+  function solTopTenItems(){
+    let list = [];
+    try{ list = solLaunches; }catch(e){ return []; }
+    return list.filter(l=> l && l.mint).map(l=>({ mint:l.mint, launch:l, name:l.name || "", ticker:l.symbol || "" }));
   }
   // The Solana launches that belong in this grid right now: only while Solana is visible to this visitor and on the
   // network the site is showing (devnet <-> Testnet, mainnet <-> Mainnet).
