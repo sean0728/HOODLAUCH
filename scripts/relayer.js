@@ -2542,6 +2542,21 @@ async function main() {
     followActions.set(addr, recent);
     return true;
   }
+  // A Solana launch is written to the platform ledger of the network that matches its cluster (devnet ->
+  // robinhoodTestnet, mainnet-beta -> robinhoodMainnet), which is NOT necessarily the network this relayer runs on:
+  // Solana can be on mainnet while Robinhood is still on testnet. So for a Solana mint, "do we know this token" has to
+  // look in both ledgers, or a mainnet token launched while the relayer is on testnet is "unknown" and can't be
+  // commented on or called out.
+  async function isKnownSolanaToken(token) {
+    try {
+      if (!isSolAddr(String(token))) return false;
+      for (const n of ["robinhoodTestnet", "robinhoodMainnet"]) {
+        const rows = await readLedger(n).catch(() => []);
+        if ((rows || []).some((e) => e && e.chain === "solana" && e.tokenAddress === String(token))) return true;
+      }
+    } catch (err) { /* fall through: unknown */ }
+    return false;
+  }
   const publicComment = (c) => ({ id: c.id, token: c.token, author: c.author, text: c.text, createdAt: c.createdAt });
 
   app.get("/comments", asyncRoute(async (req, res) => {
@@ -2582,6 +2597,7 @@ async function main() {
     const tokenKey = String(token).toLowerCase();
     let known = !!((await readTrackedTokens(net)) || {})[tokenKey];
     if (!known) known = (await readLedger(net)).some((e) => e.tokenAddress && e.tokenAddress.toLowerCase() === tokenKey);
+    if (!known) known = await isKnownSolanaToken(token);
     if (!known) return sendJson(res, 404, { error: "IgnitionX has no record of this token." });
     const prof = await profileStore.getProfile(author);
     if (!prof || !prof.name) return sendJson(res, 403, { error: "Set a display name in your Profile before commenting." });
@@ -2758,6 +2774,7 @@ async function main() {
     const tokenKey = String(token).toLowerCase();
     let known = !!((await readTrackedTokens(net)) || {})[tokenKey];
     if (!known) known = (await readLedger(net)).some((e) => e.tokenAddress && e.tokenAddress.toLowerCase() === tokenKey);
+    if (!known) known = await isKnownSolanaToken(token);
     if (!known) return sendJson(res, 404, { error: "IgnitionX has no record of this token." });
     const prof = await profileStore.getProfile(caller);
     if (!prof || !prof.name) return sendJson(res, 403, { error: "Set a display name in your Profile before making a callout." });
