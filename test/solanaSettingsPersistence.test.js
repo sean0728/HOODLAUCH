@@ -69,3 +69,36 @@ describe("Solana settings persistence", () => {
     db.isDbConfigured = () => true;
   });
 });
+
+describe("Solana token metadata persistence", () => {
+  beforeEach(() => { wipeDisk(); fs.mkdirSync(DATA_DIR, { recursive: true }); useFakeDb(); });
+  const ID = "bd5f2e049c98dd1eb9bebfc463df8f75";
+  const REC = { name: "Alpha", symbol: "ALPHA", description: "d", image: "data:image/png;base64,AAAA", links: {}, createdAt: 1 };
+
+  it("a metadata record survives the disk being wiped", async () => {
+    assert.strictEqual(await store.putMetadata(ID, REC), "created");
+    wipeDisk();
+    const back = await store.readMetadata(ID);
+    assert.strictEqual(back.name, "Alpha");
+    assert.strictEqual(back.image, REC.image);
+  });
+
+  it("a record that only exists on disk is copied into the database on first read", async () => {
+    db.isDbConfigured = () => false;
+    await store.putMetadata(ID, REC);          // old install: disk only
+    db.isDbConfigured = () => true;
+    assert.strictEqual((await store.readMetadata(ID)).symbol, "ALPHA");
+    wipeDisk();
+    assert.strictEqual((await store.readMetadata(ID)).symbol, "ALPHA", "now served from the database");
+  });
+
+  it("stays write-once: a different body for the same id is a conflict, an identical retry is unchanged", async () => {
+    await store.putMetadata(ID, REC);
+    assert.strictEqual(await store.putMetadata(ID, { ...REC, createdAt: 99 }), "unchanged");
+    assert.strictEqual(await store.putMetadata(ID, { ...REC, name: "Other" }), "conflict");
+  });
+
+  it("rejects a malformed id without touching the database", async () => {
+    assert.strictEqual(await store.readMetadata("../../etc/passwd"), null);
+  });
+});
