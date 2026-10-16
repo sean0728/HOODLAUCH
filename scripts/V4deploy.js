@@ -64,7 +64,7 @@
 //   DEPLOY_TAX_DISTRIBUTOR     "false" to skip the 0.30% tax collector.
 //   DEPLOY_PLATFORM_REWARDS    "false" to skip the platform rewards distributor (default true; it is
 //                              skipped with a warning if DEX_ROUTER_ADDRESS is not set).
-//   LAUNCH_FEE_WEI / CURVE_LAUNCH_FEE_WEI   Fees in wei (default: $100 / $25 at a live ETH price, or $3000
+//   LAUNCH_FEE_WEI / CURVE_LAUNCH_FEE_WEI   Fees in wei (default: $35 / $35 at a live ETH price, or $3000
 //                              if no price can be fetched). There is no deploy-only fee any more.
 //   LP_LOCK_DURATION_SECONDS   LP lock (default 15 days; 1 day to 10 years).
 //   SNIPE_START_BPS            anti-snipe surcharge on buys at launch (default 2500 = 25%, max 7000; 0 = off).
@@ -94,8 +94,8 @@ const KNOWN_POOL_MANAGERS = { robinhoodMainnet: "0x8366a39cc670b4001a1121b8f6a44
 // Chainlink ETH/USD "Standard Proxy" feed, confirmed for mainnet (see scripts/deploy.js).
 const KNOWN_PRICE_FEEDS = { robinhoodMainnet: "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9" };
 
-const LAUNCH_FEE_USD = 100;
-const CURVE_LAUNCH_FEE_USD = 25;
+const LAUNCH_FEE_USD = 35;
+const CURVE_LAUNCH_FEE_USD = 35;
 const FALLBACK_ETH_USD = 3000;
 
 async function fetchEthUsdPrice() {
@@ -165,6 +165,9 @@ async function main() {
   const ownerAddress = envAddr("OWNER_ADDRESS", null);
   const lpLock = BigInt(process.env.LP_LOCK_DURATION_SECONDS || 15 * 24 * 60 * 60);
   const withDistributors = String(process.env.DEPLOY_DISTRIBUTORS || "true").toLowerCase() !== "false";
+  // The relayer's wallet. It is made a keeper on every contract that has keepers (see ensureKeeper below), so the
+  // relayer's automatic sweeps work from the first block. Without it they would stay off.
+  const relayerWallet = envAddr("RELAYER_ADDRESS", null);
 
   // Precedence: env var > fees saved by an earlier run > computed from the live ETH price.
   // Saving them matters: a resumed run (or a VERIFY run) must use the same constructor
@@ -185,6 +188,18 @@ async function main() {
   }
   state.fees = { launchFee: launchFee.toString(), curveFee: curveFee.toString() };
   save();
+
+  // Contracts the relayer must be a keeper on are deployed with the DEPLOYER as their first owner, so this script can
+  // switch the keeper on itself; ownership is then proposed to OWNER_ADDRESS at the end. (Deploying them owned by
+  // OWNER_ADDRESS from the start left the deployer unable to call setKeeper, so the keeper stayed off until someone did
+  // it by hand.) A set started by an older version of this script was deployed owned by OWNER_ADDRESS; that is kept so
+  // verification arguments still match what is on-chain.
+  if (!state.initialOwner) {
+    const legacy = ["reflectionConverter", "feeWalletDistributor", "creatorRewardsDistributor", "platformRewardsDistributor"].some((k) => state[k]);
+    state.initialOwner = legacy ? (ownerAddress || deployer.address) : deployer.address;
+    save();
+  }
+  const initialOwner = state.initialOwner;
 
   // ---- PoolManager + price feed ---------------------------------------
   let poolManager = envAddr("POOL_MANAGER", KNOWN_POOL_MANAGERS[netName] || null);
@@ -263,6 +278,25 @@ async function main() {
     await tx.wait();
     console.log(`  ~ ${label}`);
   }
+  // Makes the relayer wallet a keeper on `c` (the contracts only let their owner and approved keepers run conversions,
+  // sweeps and buybacks). Only the contract's current owner can do it, so it runs while the deployer still owns
+  // everything, before the ownership proposals at the end. If the owner is someone else (a set deployed by an older
+  // version of this script), it says so loudly, and the Checks at the end FAIL until the keeper is on.
+  const keeperTargets = [];
+  async function ensureKeeper(label, c) {
+    keeperTargets.push([label, c]);
+    if (!relayerWallet) return;
+    if (await c.keepers(relayerWallet)) {
+      console.log(`  = ${label}: relayer is already a keeper`);
+      return;
+    }
+    const owner = await c.owner();
+    if (owner.toLowerCase() === deployer.address.toLowerCase()) {
+      await send(`${label}.setKeeper(relayer, true)`, () => c.setKeeper(relayerWallet, true));
+    } else {
+      console.log(`  NOTE: ${label} (${await c.getAddress()}) is owned by ${owner}, not this wallet, so the relayer could not be made a keeper here. That owner must call setKeeper(${relayerWallet}, true) on it (Admin → Relayer settings → Keeper status).`);
+    }
+  }
 
   const A = (c) => c.getAddress();
 
@@ -310,7 +344,7 @@ async function main() {
   // in ETH or another token. Set WITH_REFLECTION_CONVERTER=false to launch without that choice.
   const withConverter = (process.env.WITH_REFLECTION_CONVERTER ?? "true") !== "false";
   const reflectionConverter = withConverter
-    ? await step("reflectionConverter", "V4ReflectionConverter", [poolManager, await A(hook), ownerAddress || deployer.address])
+    ? await step("reflectionConverter", "V4ReflectionConverter", [poolManager, await A(hook), initialOwner])
     : null;
   // A factory saved by an earlier run that predates gasless launches has no launchRelay(); retire
   // it from the saved state so the current code is deployed in its place.
@@ -341,17 +375,17 @@ async function main() {
   let feeWalletDist, creatorDist;
   if (withDistributors) {
     feeWalletDist = await step("feeWalletDistributor", "V4FeeWalletDistributor", [
-      poolManager, await A(hook), ownerAddress || deployer.address, ethers.ZeroAddress, distributorFeeWallet,
+      poolManager, await A(hook), initialOwner, ethers.ZeroAddress, distributorFeeWallet,
     ]);
     creatorDist = await step("creatorRewardsDistributor", "V4CreatorRewardsDistributor", [
-      poolManager, await A(hook), ownerAddress || deployer.address,
+      poolManager, await A(hook), initialOwner,
     ]);
   }
 
   let rewardsDist;
   if (withPlatformRewards) {
     rewardsDist = await step("platformRewardsDistributor", "V4PlatformRewardsDistributor", [
-      poolManager, await A(hook), ownerAddress || deployer.address, v2Router,
+      poolManager, await A(hook), initialOwner, v2Router,
     ]);
   }
 
@@ -366,6 +400,9 @@ async function main() {
 
   // ---- wiring (each step checks on-chain state first, so re-runs are safe)
   console.log("\nWiring:");
+  if (!relayerWallet) {
+    console.log("  WARNING: RELAYER_ADDRESS is not set, so the relayer will NOT be made a keeper on any contract and its automatic sweeps will stay off. Set it and re-run, or use Admin → Relayer settings → Keeper status afterwards.");
+  }
   const factoryA = await A(factory);
   const compounderA = await A(compounder);
   const zero = ethers.ZeroAddress;
@@ -385,14 +422,7 @@ async function main() {
       await send("factory.setReflectionConverter(converter)", () => factory.setReflectionConverter(convA));
     if (!(await hook.taxExempt(convA)))
       await send("factory.setTaxExempt(converter, true)", () => factory.setTaxExempt(convA, true));
-    const relayerKeeperC = envAddr("RELAYER_ADDRESS", null);
-    const deployerOwnsC = !ownerAddress || ownerAddress.toLowerCase() === deployer.address.toLowerCase();
-    if (relayerKeeperC && deployerOwnsC) {
-      if (!(await reflectionConverter.keepers(relayerKeeperC)))
-        await send("reflectionConverter.setKeeper(relayer, true)", () => reflectionConverter.setKeeper(relayerKeeperC, true));
-    } else {
-      console.log(`  NOTE: ${deployerOwnsC ? "set RELAYER_ADDRESS, or" : ownerAddress + " owns the converter and"} call setKeeper(relayerWallet, true) on the reflection converter ${convA} so the relayer can convert reflections to ETH / other tokens.`);
-    }
+    await ensureKeeper("reflectionConverter", reflectionConverter);
   }
 
   for (const [label, f] of [["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory]]) {
@@ -409,7 +439,6 @@ async function main() {
     if ((await f.launchRelay()).toLowerCase() !== relayA.toLowerCase())
       await send(`${label}.setLaunchRelay(V4LaunchRelay)`, () => f.setLaunchRelay(relayA));
   }
-  const relayerWallet = envAddr("RELAYER_ADDRESS", null);
   const relayCap = BigInt(process.env.RELAY_MAX_GAS_REIMBURSEMENT_WEI || ethers.parseEther("0.01"));
   if (relayerWallet) {
     if ((await launchRelay.owner()).toLowerCase() === deployer.address.toLowerCase()) {
@@ -445,23 +474,10 @@ async function main() {
     for (const [label, a] of [["fee-wallet distributor", fwA], ["creator-rewards distributor", crA]]) {
       if (!(await hook.taxExempt(a))) await send(`factory.setTaxExempt(${label}, true)`, () => factory.setTaxExempt(a, true));
     }
-    // The creator-rewards and fee-wallet distributors only let their owner, approved
-    // keepers (and, for creator rewards, a token's creator) convert; claiming is
-    // open. The relayer must be a keeper on both.
-    const relayerKeeper = envAddr("RELAYER_ADDRESS", null);
-    if (relayerKeeper) {
-      const deployerOwns = !ownerAddress || ownerAddress.toLowerCase() === deployer.address.toLowerCase();
-      for (const [label, dist] of [["creatorRewardsDistributor", creatorDist], ["feeWalletDistributor", feeWalletDist]]) {
-        if (deployerOwns) {
-          if (!(await dist.keepers(relayerKeeper)))
-            await send(`${label}.setKeeper(relayer, true)`, () => dist.setKeeper(relayerKeeper, true));
-        } else {
-          console.log(`  NOTE: ${ownerAddress} owns the ${label}. It must call setKeeper(${relayerKeeper}, true) before the relayer can convert.`);
-        }
-      }
-    } else {
-      console.log("  NOTE: set RELAYER_ADDRESS (the relayer wallet) to authorise it on the creator-rewards and fee-wallet distributors, or call setKeeper(relayerWallet, true) on each as the owner.");
-    }
+    // The creator-rewards and fee-wallet distributors only let their owner, approved keepers (and, for
+    // creator rewards, a token's creator) convert; claiming is open. The relayer must be a keeper on both.
+    await ensureKeeper("creatorRewardsDistributor", creatorDist);
+    await ensureKeeper("feeWalletDistributor", feeWalletDist);
   }
 
   if (withPlatformRewards) {
@@ -471,31 +487,14 @@ async function main() {
     if (!(await hook.taxExempt(prA)))
       await send("factory.setTaxExempt(platform rewards distributor, true)", () => factory.setTaxExempt(prA, true));
     // Only the owner and approved keepers may start a buyback (airdrop rounds stay open).
-    const prKeeper = envAddr("RELAYER_ADDRESS", null);
-    if (prKeeper) {
-      const deployerOwnsPr = !ownerAddress || ownerAddress.toLowerCase() === deployer.address.toLowerCase();
-      if (deployerOwnsPr) {
-        if (!(await rewardsDist.keepers(prKeeper)))
-          await send("platformRewardsDistributor.setKeeper(relayer, true)", () => rewardsDist.setKeeper(prKeeper, true));
-      } else {
-        console.log(`  NOTE: ${ownerAddress} owns the platformRewardsDistributor. It must call setKeeper(${prKeeper}, true) before the relayer can start buybacks.`);
-      }
-    } else {
-      console.log("  NOTE: set RELAYER_ADDRESS to authorise the relayer on the platform-rewards distributor, or call setKeeper(relayerWallet, true) on it as the owner.");
-    }
+    await ensureKeeper("platformRewardsDistributor", rewardsDist);
   }
 
   if (withTaxDistributor) {
     // The tax collector is standalone and owned by the deployer. Only its owner and approved
     // keepers may convert the tax or pay holders (audit TA-1/TA-2), and a fresh deployment is
     // manual (autoDistribute false, no heartbeat), so the relayer wallet is its keeper.
-    const taxKeeper = envAddr("RELAYER_ADDRESS", null);
-    if (taxKeeper) {
-      if (!(await taxDist.keepers(taxKeeper)))
-        await send("platformTaxDistributor.setKeeper(relayer, true)", () => taxDist.setKeeper(taxKeeper, true));
-    } else {
-      console.log("  NOTE: set RELAYER_ADDRESS to authorise the relayer on the platformTaxDistributor, or call setKeeper(relayerWallet, true) on it as the owner. Also set V4_PLATFORM_TAX_DISTRIBUTOR_ADDRESS for the relayer.");
-    }
+    await ensureKeeper("platformTaxDistributor", taxDist);
   }
 
   // ---- airdrop authorisation -------------------------------------------
@@ -530,12 +529,14 @@ async function main() {
     console.log("\nOwnership (proposed; the new owner must accept each one):");
     const owned = [["V4TokenFactory", factory], ["V4LiquidityLocker", locker], ["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory], ["V4LaunchRelay", launchRelay]];
     if (withTaxDistributor) owned.push(["V4PlatformTaxDistributor", taxDist]);
+    if (withConverter) owned.push(["V4ReflectionConverter", reflectionConverter]);
+    if (withDistributors) owned.push(["V4FeeWalletDistributor", feeWalletDist], ["V4CreatorRewardsDistributor", creatorDist]);
+    if (withPlatformRewards) owned.push(["V4PlatformRewardsDistributor", rewardsDist]);
     for (const [label, c] of owned) {
       const cur = await c.owner();
       if (cur.toLowerCase() === deployer.address.toLowerCase() && (await c.pendingOwner()).toLowerCase() !== ownerAddress.toLowerCase())
         await send(`${label}.transferOwnership(${ownerAddress})`, () => c.transferOwnership(ownerAddress));
     }
-    if (withDistributors) console.log("  (distributors were deployed with that wallet as owner already)");
   }
 
   // ---- final read-back checks -----------------------------------------
@@ -560,6 +561,12 @@ async function main() {
   for (const [label, f] of [["V4CustomTokenFactory", customFactory], ["V4CurveFactory", curveFactory]])
     check((await f.launchRelay()).toLowerCase() === relayA.toLowerCase(), `${label}.launchRelay == V4LaunchRelay`);
   if (relayerWallet) check((await launchRelay.relayer()).toLowerCase() === relayerWallet.toLowerCase() || (await launchRelay.owner()).toLowerCase() !== deployer.address.toLowerCase(), "V4LaunchRelay relayer set");
+  // The relayer's keeper permission: without it the relayer's automatic sweeps, conversions and buybacks can't run.
+  if (!relayerWallet) {
+    check(false, "RELAYER_ADDRESS is set (needed to switch the relayer's keeper on)");
+  } else {
+    for (const [label, c] of keeperTargets) check(await c.keepers(relayerWallet), `relayer is a keeper on ${label}`);
+  }
   check((await factory.platformFeeWallet()).toLowerCase() === platformFeeWallet.toLowerCase(), "platform fee wallet set");
   check((await factory.priceFeed()).toLowerCase() === priceFeed.toLowerCase(), "price feed set");
   if (withDistributors) {
@@ -619,7 +626,12 @@ async function main() {
   console.log(`  V4_COMPOUNDER_ADDRESS=${summary.v4LiquidityCompounder}`);
   if (withConverter) console.log(`  (reflection converter ${summary.v4ReflectionConverter} is read from the V4 factory by the relayer; no env var needed)`);
   console.log(`  V4_LAUNCH_RELAY_ADDRESS=${summary.v4LaunchRelay}`);
-  console.log(`  V4_KEEPER_ENABLED=false    (optional; keeper is ON by default, toggle it in Admin → Relayer settings)`);
+  console.log(`  (the relayer's keeper automation is ON by default; check it and switch it in Admin → Relayer settings → Keeper status)`);
+  if (ownerAddress && ownerAddress.toLowerCase() !== deployer.address.toLowerCase()) {
+    console.log(`\n=== Still to do from the owner wallet ${ownerAddress} ===`);
+    console.log("  Accept ownership of each contract it was proposed for (listed under \"Ownership\" above). Until then the deployer wallet still owns them.");
+    console.log("  Admin → Overview has Accept buttons for the factories, locker and launch relay; Admin → Relayer settings → Keeper status has them for the rest.");
+  }
   if (!ephemeral) console.log(`\nSaved: ${statePath}`);
 
   if (String(process.env.VERIFY || "").toLowerCase() === "true" && !isLocal) {
@@ -634,16 +646,16 @@ async function main() {
       [summary.v4TokenFactory, [summary.plainTokenImpl, poolManager, summary.v4LiquidityLocker, summary.v4TaxHook, launchFee, treasury, lpLock, platformFeeWallet, priceFeed]],
       [summary.v4SwapRouter, [poolManager, summary.v4TaxHook]],
       [summary.v4LiquidityCompounder, [poolManager, summary.v4TaxHook]],
-      ...(withConverter ? [[summary.v4ReflectionConverter, [poolManager, summary.v4TaxHook, ownerAddress || deployer.address]]] : []),
+      ...(withConverter ? [[summary.v4ReflectionConverter, [poolManager, summary.v4TaxHook, initialOwner]]] : []),
       [summary.v4CustomTokenFactory, [summary.customTokenImpl, summary.v4TokenFactory, summary.v4LiquidityCompounder, launchFee, lpLock]],
       [summary.v4CurveFactory, [summary.plainTokenImpl, summary.customTokenImpl, summary.v4TokenFactory, summary.v4LiquidityCompounder, curveFee, lpLock]],
       [summary.v4LaunchRelay, [summary.v4CustomTokenFactory, summary.v4CurveFactory, summary.v4TokenFactory]],
     ];
     if (withDistributors) {
-      v.push([summary.feeWalletDistributor, [poolManager, summary.v4TaxHook, ownerAddress || deployer.address, zero, distributorFeeWallet]]);
-      v.push([summary.creatorRewardsDistributor, [poolManager, summary.v4TaxHook, ownerAddress || deployer.address]]);
+      v.push([summary.feeWalletDistributor, [poolManager, summary.v4TaxHook, initialOwner, zero, distributorFeeWallet]]);
+      v.push([summary.creatorRewardsDistributor, [poolManager, summary.v4TaxHook, initialOwner]]);
     }
-    if (withPlatformRewards) v.push([summary.platformRewardsDistributor, [poolManager, summary.v4TaxHook, ownerAddress || deployer.address, v2Router]]);
+    if (withPlatformRewards) v.push([summary.platformRewardsDistributor, [poolManager, summary.v4TaxHook, initialOwner, v2Router]]);
     if (withTaxDistributor) v.push([summary.platformTaxDistributor, [v2Router, zero, taxFeeWallet]]);
     for (const [addr, a] of v) {
       const r = await verifyContract(addr, a);
