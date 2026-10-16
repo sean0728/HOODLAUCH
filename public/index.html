@@ -349,7 +349,53 @@
   .search::placeholder{color:var(--paper-700);}
   .search:focus{outline:none; border-color:var(--cyan-500); box-shadow:0 0 0 3px var(--cyan-wash);}
 
-  .token-grid{display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; margin-bottom:64px;}
+  .token-grid{display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; margin-bottom:24px;}
+
+  /* Page controls under the launches grid */
+  .pager{display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:6px 8px; margin:0 0 56px;}
+  .pager[hidden]{display:none;}
+  .pg-btn{
+    appearance:none; cursor:pointer; min-width:36px; height:36px; padding:0 12px; background:var(--ink-900); border:1px solid var(--line);
+    color:var(--paper-300); font-family:var(--font-mono); font-size:.78rem; border-radius:var(--radius-sm); transition:border-color .15s, color .15s, background .15s;
+  }
+  .pg-btn:hover:not(:disabled){border-color:var(--paper-500); color:var(--paper-100);}
+  .pg-btn:disabled{opacity:.4; cursor:default;}
+  .pg-btn[aria-current="page"]{border-color:var(--signal-500); color:var(--signal-300); background:var(--signal-wash);}
+  .pg-btn:focus-visible, .pg-jump input:focus-visible{outline:2px solid var(--cyan-500); outline-offset:2px;}
+  .pg-gap{color:var(--paper-700); font-family:var(--font-mono); padding:0 2px;}
+  .pg-info{font-family:var(--font-mono); font-size:.76rem; color:var(--paper-500); margin:0 6px;}
+  .pg-jump{display:inline-flex; align-items:center; gap:6px; margin-left:8px;}
+  .pg-jump label{font-family:var(--font-mono); font-size:.76rem; color:var(--paper-500);}
+  .pg-jump input{
+    width:64px; height:36px; background:var(--ink-900); border:1px solid var(--line); color:var(--paper-100); font-family:var(--font-mono);
+    font-size:.82rem; padding:0 8px; border-radius:var(--radius-sm); text-align:center;
+  }
+
+  /* Top 10 by market cap, one list per chain */
+  .top-tens{display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:16px; margin-bottom:64px; align-items:start;}
+  .top-tens:has(.top-ten[hidden]){grid-template-columns:minmax(0,1fr);}
+  .top-ten{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:18px 18px 8px;}
+  .top-ten[hidden]{display:none;}
+  .top-ten-head{display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px;}
+  .top-ten-head h3{font-size:1.05rem;}
+  .top-ten-list{list-style:none; margin:0; padding:0;}
+  .top-ten-row{
+    display:grid; grid-template-columns:26px 34px minmax(0,1fr) auto; align-items:center; gap:12px; width:100%; padding:10px 6px;
+    background:none; border:0; border-top:1px solid var(--line); color:inherit; text-align:left; cursor:pointer; font:inherit; transition:background .15s;
+  }
+  li:first-child > .top-ten-row{border-top:0;}
+  .top-ten-row:hover{background:var(--ink-850);}
+  .top-ten-row:focus-visible{outline:2px solid var(--cyan-500); outline-offset:-2px;}
+  .tt-rank{font-family:var(--font-mono); font-size:.8rem; color:var(--paper-500); text-align:right;}
+  .tt-logo{width:34px; height:34px; border-radius:8px; overflow:hidden; display:flex; align-items:center; justify-content:center; background:var(--ink-800);}
+  .tt-logo img{width:100%; height:100%; object-fit:cover; display:block;}
+  .tt-logo .tc-logo-ph{width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-family:var(--font-mono); font-size:.72rem; font-weight:700; color:#120d0c; text-transform:uppercase;}
+  .tt-name{font-size:.88rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .tt-tick{font-family:var(--font-mono); font-size:.72rem; color:var(--paper-500);}
+  .tt-mcap{font-family:var(--font-mono); font-size:.86rem; font-weight:600; text-align:right; white-space:nowrap;}
+  .tt-sub{font-family:var(--font-mono); font-size:.7rem; text-align:right; color:var(--paper-500); white-space:nowrap;}
+  .top-ten-empty{padding:18px 6px 20px; font-size:.82rem; color:var(--paper-500);}
+  @media (max-width: 900px){ .top-tens{grid-template-columns:minmax(0,1fr);} }
   @media (max-width: 980px){ .token-grid{grid-template-columns:repeat(2,1fr);} }
   @media (max-width: 640px){ .token-grid{grid-template-columns:1fr;} }
 
@@ -1105,13 +1151,31 @@
           <h2>Live launches</h2>
           <div class="filter-row">
             <input class="search" id="searchInput" type="search" placeholder="Search name, ticker, or contract address…" aria-label="Search tokens">
-            <button class="chip" aria-pressed="true" data-filter="recent">Recently Launched</button>
+            <button class="chip" aria-pressed="true" data-filter="all">All</button>
+            <button class="chip" aria-pressed="false" data-filter="recent">Recently Launched</button>
             <button class="chip" aria-pressed="false" data-filter="launched">Launched</button>
-            <button class="chip" aria-pressed="false" data-filter="deployed">Deployed</button>
             <button class="chip" aria-pressed="false" data-filter="graduated">Graduated</button>
           </div>
         </div>
         <div class="token-grid" id="tokenGrid"></div>
+        <nav class="pager" id="gridPager" aria-label="Launches pages" hidden></nav>
+
+        <div class="top-tens" id="topTens">
+          <section class="top-ten" id="topTenRobinhood" aria-labelledby="topTenRhTitle">
+            <div class="top-ten-head">
+              <h3 id="topTenRhTitle">Top 10 · Robinhood Chain</h3>
+              <span class="eyebrow" id="topTenRhNet">by market cap</span>
+            </div>
+            <ol class="top-ten-list" id="topTenRhList"></ol>
+          </section>
+          <section class="top-ten" id="topTenSolana" aria-labelledby="topTenSolTitle" hidden>
+            <div class="top-ten-head">
+              <h3 id="topTenSolTitle">Top 10 · Solana</h3>
+              <span class="eyebrow" id="topTenSolNet">by market cap</span>
+            </div>
+            <ol class="top-ten-list" id="topTenSolList"></ol>
+          </section>
+        </div>
       </div>
 
     </section>
@@ -1982,6 +2046,7 @@
   // server's value is first synced in (or changes later) and, for the
   // admin, right after a successful POST /active-network.
   function setMode(mode){
+    if(mode !== appMode){ try{ gridPage = 1; }catch(e){ /* grid not initialised yet */ } } // the other network's list has a different length
     appMode = mode;
     refreshModeUI();
     // Re-filter the grid/header stats to this network's own tokens right
@@ -7533,7 +7598,8 @@
   }
 
   /* ---------------- token grid ---------------- */
-  let activeFilter = "recent", searchTerm = "";
+  let activeFilter = "all", searchTerm = "", gridPage = 1, gridCardCount = 0;
+  const GRID_PAGE_SIZE = 9;
   const RECENT_LAUNCH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // "Recently Launched" = createdAtMs within the last 7 days, recomputed on every render so it rolls forward daily on its own — no stored "is recent" flag to keep in sync.
   // The four simplified tabs, mapped onto t.status (itself already a direct
   // mirror of the server's own 0/1/2 tokenStatus — see statusFromTokenStatus
@@ -7548,7 +7614,6 @@
     // real, live, tradeable market (against the curve) from the moment it's
     // created, same reasoning "taxed" gets grouped there.
     if(filter==="launched") return t.status==="taxed" || t.status==="live-pool" || t.status==="pool-detected" || t.status==="curve-trading";
-    if(filter==="deployed") return t.status==="creator-held";
     if(filter==="graduated") return t.status==="graduated";
     return true;
   }
@@ -7736,6 +7801,7 @@
   }
   function renderGrid(){
     const grid = document.getElementById("tokenGrid");
+    try{ renderTopTens(); }catch(e){ console.error("[top10]", e); }
     const q = searchTerm.trim().toLowerCase();
     const networkTokens = tokensForCurrentNetwork();
     const solItems = solGridItems(q);
@@ -7755,6 +7821,7 @@
     if(!filtered.length && !solItems.length){
       if(networkTokens.length || solGridAll().length){
         grid.innerHTML = `<div class="empty" style="grid-column:1/-1">No launches match that filter yet.</div>`;
+        renderPager(1, 0);
         return;
       }
       grid.innerHTML = `<div class="empty" style="grid-column:1/-1; display:flex; flex-direction:column; gap:14px; align-items:center;">
@@ -7762,6 +7829,7 @@
         <button class="btn btn-primary" data-goto="create">Launch the first token</button>
       </div>`;
       grid.querySelectorAll("[data-goto]").forEach(b=> b.addEventListener("click", ()=>showView(b.dataset.goto)) );
+      renderPager(1, 0);
       return;
     }
     // Solana launches share this grid (and its filters) with the Robinhood ones: each is slotted in by launch time
@@ -7771,7 +7839,14 @@
       const at = cards.findIndex(c=> !c.sol && typeof c.t.createdAtMs==="number" && c.t.createdAtMs < it.createdAtMs);
       if(at === -1) cards.push({ sol: it }); else cards.splice(at, 0, { sol: it });
     });
-    grid.innerHTML = cards.map(c=> c.sol
+    // 9 cards per page; the page number survives background refreshes and is pulled back in range when the list shrinks.
+    gridCardCount = cards.length;
+    const pages = Math.max(1, Math.ceil(cards.length / GRID_PAGE_SIZE));
+    if(gridPage > pages) gridPage = pages;
+    if(gridPage < 1) gridPage = 1;
+    const pageCards = cards.slice((gridPage-1)*GRID_PAGE_SIZE, gridPage*GRID_PAGE_SIZE);
+    renderPager(pages, cards.length);
+    grid.innerHTML = pageCards.map(c=> c.sol
       ? `<button class="token-card" data-solmint="${escapeHtml(c.sol.mint)}">${solCardHTML(c.sol.launch)}</button>`
       : `<button class="token-card" data-id="${c.t.id}">${tokenCardHTML(c.t)}</button>`).join("");
     grid.querySelectorAll(".token-card[data-id]").forEach(card=>{
@@ -7780,6 +7855,123 @@
     grid.querySelectorAll(".token-card[data-solmint]").forEach(card=>{
       card.addEventListener("click", ()=> openSolanaDetail(card.dataset.solmint) );
     });
+  }
+  /* ---------------- page controls ---------------- */
+  // Rebuilt only when the page or the page count changes, so a half-typed "go to page" number survives the
+  // background refreshes that call renderGrid().
+  let pagerSig = "";
+  function pagerNumbers(cur, pages){
+    // 1 … cur-1 cur cur+1 … last, with the gaps collapsed (short lists show every number)
+    if(pages <= 7) return Array.from({length:pages}, (_,i)=>i+1);
+    const set = new Set([1, pages, cur-1, cur, cur+1]);
+    if(cur <= 3){ set.add(2); set.add(3); set.add(4); }
+    if(cur >= pages-2){ set.add(pages-1); set.add(pages-2); set.add(pages-3); }
+    const out = [];
+    let prev = 0;
+    [...set].filter(n=> n>=1 && n<=pages).sort((a,b)=>a-b).forEach(n=>{
+      if(n - prev > 1) out.push(0);   // 0 = gap
+      out.push(n); prev = n;
+    });
+    return out;
+  }
+  function renderPager(pages, total){
+    const el = document.getElementById("gridPager");
+    if(!el) return;
+    if(pages <= 1){ el.hidden = true; el.innerHTML = ""; pagerSig = ""; return; }
+    const sig = gridPage + "/" + pages + "/" + total;
+    el.hidden = false;
+    if(sig === pagerSig) return;
+    pagerSig = sig;
+    const first = (gridPage-1)*GRID_PAGE_SIZE + 1, last = Math.min(total, gridPage*GRID_PAGE_SIZE);
+    el.innerHTML = `
+      <button type="button" class="pg-btn" data-pg="prev" ${gridPage<=1?"disabled":""} aria-label="Previous page">← Back</button>
+      ${pagerNumbers(gridPage, pages).map(n=> n===0
+        ? `<span class="pg-gap" aria-hidden="true">…</span>`
+        : `<button type="button" class="pg-btn" data-pg="${n}" ${n===gridPage?'aria-current="page"':""} aria-label="Page ${n}">${n}</button>`).join("")}
+      <button type="button" class="pg-btn" data-pg="next" ${gridPage>=pages?"disabled":""} aria-label="Next page">Next →</button>
+      <span class="pg-info" aria-live="polite">Page ${gridPage} of ${pages} · ${first}–${last} of ${total}</span>
+      <span class="pg-jump"><label for="pgJumpInput">Go to</label><input id="pgJumpInput" type="number" min="1" max="${pages}" step="1" inputmode="numeric" placeholder="${gridPage}" aria-label="Jump to page number (1 to ${pages})"><button type="button" class="pg-btn" data-pg="jump">Go</button></span>`;
+  }
+  function gridGoTo(n){
+    const total = Math.max(1, Math.ceil(gridCardCount / GRID_PAGE_SIZE));
+    n = Math.round(Number(n));
+    if(!isFinite(n)) return;
+    n = Math.min(total, Math.max(1, n));
+    if(n === gridPage) return;
+    gridPage = n;
+    renderGrid();
+    const m = document.getElementById("market");
+    if(m) m.scrollIntoView({ behavior:"smooth", block:"start" });
+  }
+  (function wirePager(){
+    const el = document.getElementById("gridPager");
+    if(!el) return;
+    el.addEventListener("click", (e)=>{
+      const b = e.target.closest("[data-pg]");
+      if(!b || b.disabled) return;
+      const k = b.dataset.pg;
+      if(k === "prev") gridGoTo(gridPage-1);
+      else if(k === "next") gridGoTo(gridPage+1);
+      else if(k === "jump"){ const i = document.getElementById("pgJumpInput"); if(i && i.value !== "") gridGoTo(i.value); }
+      else gridGoTo(k);
+    });
+    el.addEventListener("keydown", (e)=>{
+      if(e.key === "Enter" && e.target && e.target.id === "pgJumpInput"){ e.preventDefault(); if(e.target.value !== "") gridGoTo(e.target.value); }
+    });
+  })();
+
+  /* ---------------- top 10 by market cap ---------------- */
+  // Robinhood side: only tokens that actually have a tracked market (the same cards that show a price/Mcap); Solana
+  // side: launches whose pool has been read. Independent of the search box and the filter chips.
+  function topTenHasMarket(t){
+    if(!(t.mcap > 0)) return false;
+    if(t.status==="creator-held" || t.status==="pool-detected" || t.status==="live-pool") return false;
+    if(t.status==="curve-trading") return !!(t.onChain && t.networkMode===appMode && t.tokenAddress && t.factoryAddress);
+    return true;
+  }
+  function topTenLogoHTML(t){
+    const src = safeImageSrc(t.logo);
+    return src ? `<img src="${src}" alt="">`
+      : `<div class="tc-logo-ph" style="background:${escapeHtml(t.catColor||"var(--signal-500)")}">${escapeHtml((t.ticker||"??").slice(0,2))}</div>`;
+  }
+  function topTenRowHTML(rank, attr, logoHTML, name, ticker, mcapText, subHTML){
+    return `<li><button type="button" class="top-ten-row" ${attr}>
+      <span class="tt-rank">${rank}</span>
+      <span class="tt-logo">${logoHTML}</span>
+      <span style="min-width:0"><div class="tt-name">${escapeHtml(name)}</div><div class="tt-tick">$${escapeHtml(ticker)}</div></span>
+      <span><div class="tt-mcap">${mcapText}</div><div class="tt-sub">${subHTML}</div></span>
+    </button></li>`;
+  }
+  function renderTopTens(){
+    const rhList = document.getElementById("topTenRhList");
+    const rhNet = document.getElementById("topTenRhNet");
+    if(rhNet) rhNet.textContent = (appMode==="live" ? "Mainnet" : "Testnet") + " · by market cap";
+    if(rhList){
+      const rows = tokensForCurrentNetwork().filter(topTenHasMarket).sort((a,b)=> b.mcap - a.mcap).slice(0, 10);
+      rhList.innerHTML = rows.length
+        ? rows.map((t,i)=> topTenRowHTML(i+1, `data-ttid="${escapeHtml(String(t.id))}"`, topTenLogoHTML(t), t.name, t.ticker, fmtUSD(t.mcap),
+            `<span style="color:${t.change24h>=0?"var(--good-500)":"var(--critical-500)"}">${fmtPct(t.change24h)}</span> ${escapeHtml(changeLabelFor(t))}`)).join("")
+        : `<li class="top-ten-empty">No Robinhood Chain tokens with a live market on ${escapeHtml(NETWORKS[appMode].label)} yet.</li>`;
+      rhList.querySelectorAll("[data-ttid]").forEach(b=> b.addEventListener("click", ()=> openDetail(b.dataset.ttid)));
+    }
+    const solWrap = document.getElementById("topTenSolana"), solList = document.getElementById("topTenSolList");
+    if(solWrap && solList){
+      const on = (typeof solFeedActive === "function") && solFeedActive();
+      solWrap.hidden = !on;
+      if(on){
+        const solNet = document.getElementById("topTenSolNet");
+        if(solNet) solNet.textContent = (solIsMain() ? "Mainnet" : "Devnet") + " · by market cap";
+        const rows = solGridAll().map(it=>({ it, info: solInfo[it.mint] }))
+          .filter(r=> r.info && isFinite(r.info.marketCapSol) && r.info.marketCapSol > 0)
+          .sort((a,b)=> b.info.marketCapSol - a.info.marketCapSol).slice(0, 10);
+        solList.innerHTML = rows.length
+          ? rows.map((r,i)=> topTenRowHTML(i+1, `data-ttmint="${escapeHtml(r.it.mint)}"`,
+              (()=>{ const img = solSafeImg(r.it.launch.image); return img ? `<img src="${img}" alt="">` : `<div class="tc-logo-ph" style="background:#ffa03a">${escapeHtml((r.it.ticker||"??").slice(0,2))}</div>`; })(),
+              r.it.name, r.it.ticker, solFmtMcap(r.info.marketCapSol), escapeHtml(solFmtPrice(r.info.priceSol)))).join("")
+          : `<li class="top-ten-empty">${solGridAll().length ? "Loading Solana market caps…" : `No Solana tokens with a live market on ${escapeHtml(solNetWord())} yet.`}</li>`;
+        solList.querySelectorAll("[data-ttmint]").forEach(b=> b.addEventListener("click", ()=> openSolanaDetail(b.dataset.ttmint)));
+      }
+    }
   }
   // The Solana launches that belong in this grid right now: only while Solana is visible to this visitor and on the
   // network the site is showing (devnet <-> Testnet, mainnet <-> Mainnet).
@@ -7807,10 +7999,11 @@
       document.querySelectorAll(".chip").forEach(c=>c.setAttribute("aria-pressed","false"));
       chip.setAttribute("aria-pressed","true");
       activeFilter = chip.dataset.filter;
+      gridPage = 1;
       renderGrid();
     });
   });
-  document.getElementById("searchInput").addEventListener("input", (e)=>{ searchTerm = e.target.value; renderGrid(); });
+  document.getElementById("searchInput").addEventListener("input", (e)=>{ searchTerm = e.target.value; gridPage = 1; renderGrid(); });
 
   /* ---------------- detail view ---------------- */
   let tradeSide = "buy";
