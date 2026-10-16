@@ -15411,6 +15411,10 @@
   var SA_PHRASE = "GO LIVE ON MAINNET";
   var saCluster = "devnet";          // which network the form currently has selected
   var saLiveCluster = "devnet";      // which network the site is on right now
+  // True once the admin has typed in (or changed) the Solana form and not yet saved. The Admin view re-renders itself
+  // on a 60 s timer (platform-config poll); without this guard that wiped whatever was typed but not yet saved, which
+  // looked like "the value won't save".
+  var saDirty = false;
   var saConfigConfirm = {};          // "create config" two-step confirm timers, by cluster
   function saAgo(ms){
     if(!ms) return "never";
@@ -15885,18 +15889,26 @@
       btnEl.textContent = `Create a new ${cl === "mainnet-beta" ? "mainnet" : "devnet"} platform config…`;
     }
   }
-  async function renderSolanaAdminPanel(){
+  async function renderSolanaAdminPanel(force){
     const wrap = document.getElementById("solanaAdminWrap");
     if(!wrap) return;
+    if(force === true) saDirty = false;
+    // Never rebuild the form underneath unsaved edits (background refreshes call this with no argument).
+    if(saDirty && wrap.querySelector("#sa_publicBaseUrl")) return;
     const data = await solFetchSettings(true);
     const st = await solFetchStatic();
+    if(saDirty && wrap.querySelector("#sa_publicBaseUrl")) return;
     if(!data){
       wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Couldn't load Solana settings from the relayer. Make sure the relayer has been updated with the Solana files (lib/solanaApi.js, lib/solanaSettings.js) and restarted.</p></div>`;
       return;
     }
     if(!isAdminWallet(wallet) || !views.admin.classList.contains("active")) return;
     wrap.innerHTML = solanaAdminPanelHTML(data, st);
-    wrap.querySelectorAll("[data-sa-cluster]").forEach(b=> b.addEventListener("click", ()=>{ saCluster = b.dataset.saCluster; saUpdateForm(); }));
+    wrap.querySelectorAll("[data-sa-cluster]").forEach(b=> b.addEventListener("click", ()=>{ saCluster = b.dataset.saCluster; saDirty = true; saUpdateForm(); }));
+    wrap.querySelectorAll("input, select, textarea").forEach(el=>{
+      el.addEventListener("input", ()=>{ saDirty = true; });
+      el.addEventListener("change", ()=>{ saDirty = true; });
+    });
     wrap.querySelectorAll("[data-sa-create]").forEach(b=> b.addEventListener("click", ()=> saCreateConfig(b.dataset.saCreate, b)));
     wrap.querySelectorAll("[data-sa-check]").forEach(b=> b.addEventListener("click", async ()=>{ b.disabled = true; try{ await saCheckConfig(b.dataset.saCheck); } finally{ b.disabled = false; } }));
     const pvb = document.getElementById("saCurvePreviewBtn");
@@ -15940,7 +15952,8 @@
       toast(data.warning || (goingLive ? "Solana is now LIVE on mainnet." : "Solana settings saved."));
       solResetAll();
       await solFetchConfig();      // re-reads the saved settings and refreshes the labels
-      await renderSolanaAdminPanel();
+      saDirty = false;
+      await renderSolanaAdminPanel(true);
       const r2 = document.getElementById("sa_result");
       if(r2){ r2.style.color = data.warning ? "var(--critical-500)" : "var(--good-500)"; r2.textContent = data.warning || (nowLive ? "Saved. The site is on Solana mainnet." : "Saved. The site is on Solana devnet."); }
       if(solVisible()) solLoadLaunches();
