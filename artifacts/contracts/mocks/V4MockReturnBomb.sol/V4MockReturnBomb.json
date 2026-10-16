@@ -1,0 +1,41 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "V4MockReturnBomb",
+  "sourceName": "contracts/mocks/V4MockReturnBomb.sol",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "s",
+          "type": "uint256"
+        }
+      ],
+      "name": "setSize",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "size",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "stateMutability": "payable",
+      "type": "receive"
+    }
+  ],
+  "bytecode": "0x60808060405234601a5762030d405f5560a0908161001f8239f35b5f80fdfe60806040526004361015601a575b36156016575f80fd5b6065565b5f3560e01c8063170ab40514604f5763949d225d03600d5734604b575f366003190112604b575f5460805260206080f35b5f80fd5b34604b576020366003190112604b576004355f55005b5f545ff3fea2646970667358221220ce4a365e4837d38b253b46034ac0b6fb20ec655e08d9cf0144171d871b4df2bd64736f6c63430008180033",
+  "deployedBytecode": "0x60806040526004361015601a575b36156016575f80fd5b6065565b5f3560e01c8063170ab40514604f5763949d225d03600d5734604b575f366003190112604b575f5460805260206080f35b5f80fd5b34604b576020366003190112604b576004355f55005b5f545ff3fea2646970667358221220ce4a365e4837d38b253b46034ac0b6fb20ec655e08d9cf0144171d871b4df2bd64736f6c63430008180033",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}

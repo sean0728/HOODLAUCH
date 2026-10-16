@@ -1,0 +1,24 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "IV4PayoutLauncher",
+  "sourceName": "contracts/V4CustomToken.sol",
+  "abi": [
+    {
+      "inputs": [],
+      "name": "taxSource",
+      "outputs": [
+        {
+          "internalType": "contract IV4PayoutTaxSource",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x",
+  "deployedBytecode": "0x",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}

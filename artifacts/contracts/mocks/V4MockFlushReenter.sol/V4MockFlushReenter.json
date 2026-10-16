@@ -1,0 +1,98 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "V4MockFlushReenter",
+  "sourceName": "contracts/mocks/V4MockFlushReenter.sol",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "hook_",
+          "type": "address"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "poolId_",
+          "type": "bytes32"
+        }
+      ],
+      "name": "arm",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "attempted",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "hook",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "poolId",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "received",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "reenterReverted",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "stateMutability": "payable",
+      "type": "receive"
+    }
+  ],
+  "bytecode": "0x6080806040523461001657610243908161001b8239f35b5f80fdfe608060409080825260043610156100d3575b50361561001c575f80fd5b6003543481018091116100bf576003555f546001600160a01b03168061003e57005b600160ff19600254161760025560015490803b156100bb5760245f93928493519485938492632420e41960e11b845260048401525af19081610093575b506100915761010061ff00196002541617600255005b005b67ffffffffffffffff106100a7575f61007b565b634e487b7160e01b5f52604160045260245ffd5b5f80fd5b634e487b7160e01b5f52601160045260245ffd5b5f3560e01c9081633d51c7b0146101eb575080633e0dc34e146101cd5780637f5a7c7b146101a657806383a6deb514610188578063917f51b4146101655763e55df47414610121575f610011565b346100bb573660031901126100bb576004356001600160a01b038116908190036100bb576bffffffffffffffffffffffff60a01b5f5416175f556024356001555f80f35b50346100bb575f3660031901126100bb5760209060ff6002541690519015158152f35b50346100bb575f3660031901126100bb576020906003549051908152f35b50346100bb575f3660031901126100bb575f5490516001600160a01b039091168152602090f35b50346100bb575f3660031901126100bb576020906001549051908152f35b346100bb575f3660031901126100bb5760209060ff60025460081c1615158152f3fea26469706673582212201c9d3081ea36ed9021c5672b90e72bcfa112532828b19ec29069aa5b9cbff64264736f6c63430008180033",
+  "deployedBytecode": "0x608060409080825260043610156100d3575b50361561001c575f80fd5b6003543481018091116100bf576003555f546001600160a01b03168061003e57005b600160ff19600254161760025560015490803b156100bb5760245f93928493519485938492632420e41960e11b845260048401525af19081610093575b506100915761010061ff00196002541617600255005b005b67ffffffffffffffff106100a7575f61007b565b634e487b7160e01b5f52604160045260245ffd5b5f80fd5b634e487b7160e01b5f52601160045260245ffd5b5f3560e01c9081633d51c7b0146101eb575080633e0dc34e146101cd5780637f5a7c7b146101a657806383a6deb514610188578063917f51b4146101655763e55df47414610121575f610011565b346100bb573660031901126100bb576004356001600160a01b038116908190036100bb576bffffffffffffffffffffffff60a01b5f5416175f556024356001555f80f35b50346100bb575f3660031901126100bb5760209060ff6002541690519015158152f35b50346100bb575f3660031901126100bb576020906003549051908152f35b50346100bb575f3660031901126100bb575f5490516001600160a01b039091168152602090f35b50346100bb575f3660031901126100bb576020906001549051908152f35b346100bb575f3660031901126100bb5760209060ff60025460081c1615158152f3fea26469706673582212201c9d3081ea36ed9021c5672b90e72bcfa112532828b19ec29069aa5b9cbff64264736f6c63430008180033",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}

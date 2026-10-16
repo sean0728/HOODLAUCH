@@ -1,0 +1,54 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "V4MockGasBurner",
+  "sourceName": "contracts/mocks/V4MockGasBurner.sol",
+  "abi": [
+    {
+      "inputs": [],
+      "name": "rounds",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "r",
+          "type": "uint256"
+        }
+      ],
+      "name": "setRounds",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "sink",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "stateMutability": "payable",
+      "type": "receive"
+    }
+  ],
+  "bytecode": "0x6080806040523461001b57609660015561011390816100208239f35b5f80fdfe60808060405260049060043610156067575b503615601b575f80fd5b5f905b60019182548110156065575f5492818401809411605257808401809411605257600192935f5581018161100001550190601e565b601183634e487b7160e01b5f525260245ffd5b005b5f3560e01c908163a2e800ad1460c557508063c74e820e1460ab5763d5c5d6b9146090575f6011565b3460a757602036600319011260a757600435600155005b5f80fd5b3460a7575f36600319011260a75760205f54604051908152f35b3460a7575f36600319011260a7576020906001548152f3fea26469706673582212202d8c4740266f2a30346aeb6c52e6a38a1e3af98f703a7dab053a4854d0ff99ce64736f6c63430008180033",
+  "deployedBytecode": "0x60808060405260049060043610156067575b503615601b575f80fd5b5f905b60019182548110156065575f5492818401809411605257808401809411605257600192935f5581018161100001550190601e565b601183634e487b7160e01b5f525260245ffd5b005b5f3560e01c908163a2e800ad1460c557508063c74e820e1460ab5763d5c5d6b9146090575f6011565b3460a757602036600319011260a757600435600155005b5f80fd5b3460a7575f36600319011260a75760205f54604051908152f35b3460a7575f36600319011260a7576020906001548152f3fea26469706673582212202d8c4740266f2a30346aeb6c52e6a38a1e3af98f703a7dab053a4854d0ff99ce64736f6c63430008180033",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}
