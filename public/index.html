@@ -984,6 +984,9 @@
   .admin-cfg-label .info-dot{cursor:help; color:var(--paper-700); font-size:.6rem; font-family:var(--font-mono); border:1px solid var(--line-strong); border-radius:999px; width:14px; height:14px; flex:none; display:inline-flex; align-items:center; justify-content:center;}
   .admin-cfg-label .info-dot:hover{color:var(--signal-300); border-color:var(--signal-500);}
   @media (max-width: 760px){ .admin-cfg-row{grid-template-columns:1fr;} .admin-cfg-head{display:none;} }
+  .rpc-field{grid-column:2 / -1; min-width:0;}
+  .rpc-field .help-text{overflow-wrap:anywhere;}
+  @media (max-width: 760px){ .rpc-field{grid-column:auto;} }
   .switch-row{display:flex; align-items:center; gap:14px; margin-top:4px;}
   .switch{position:relative; display:inline-block; width:42px; height:24px; flex:none;}
   .switch input{position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer;}
@@ -15691,6 +15694,148 @@
     }
   }
 
+  // ---------------- Robinhood RPC URL (Admin > Relayer settings tab) ----------------
+  // Lets the admin paste a dedicated RPC (Alchemy etc.) for the relayer without editing .env on the host. Stored on the
+  // server (database) and used the next time the relayer restarts — see lib/rpcSettings.js and GET/POST /rpc-settings in
+  // scripts/relayer.js. The URL holds the provider's API key, so the server never sends it back: this panel only ever
+  // learns the host name. rpcSettingsMessage() MUST stay byte-identical to lib/rpcSettings.js's, or a signed save
+  // never verifies (nothing is saved).
+  const RPC_NETS = [
+    { key: "robinhoodMainnet", label: "Mainnet", placeholder: "https://robinhood-mainnet.g.alchemy.com/v2/YOUR_KEY" },
+    { key: "robinhoodTestnet", label: "Testnet", placeholder: "https://robinhood-testnet.g.alchemy.com/v2/YOUR_KEY" },
+  ];
+  var rpcDraft = { robinhoodMainnet: "", robinhoodTestnet: "" };   // what is typed but not yet saved; survives the Admin view redrawing itself
+  var rpcSaving = false;
+
+  async function rpcFingerprint(url){
+    if(!(window.crypto && window.crypto.subtle)) throw new Error("This browser can't compute the signing fingerprint (it needs a secure https page).");
+    const buf = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(url));
+    return Array.from(new Uint8Array(buf)).map(b=> b.toString(16).padStart(2,"0")).join("").slice(0,16);
+  }
+  async function rpcSettingsMessage(network, url, timestamp){
+    return url
+      ? `Hood Launch admin: set ${network} RPC to URL fingerprint ${await rpcFingerprint(url)} at ${timestamp}`
+      : `Hood Launch admin: set ${network} RPC back to the default at ${timestamp}`;
+  }
+
+  function rpcSettingsPanelHTML(st){
+    const nets = st.networks || {};
+    const src = { env: "the server's environment variable", admin: "the URL saved here", default: "the public default" };
+    let status = "";
+    if(st.runningNetwork && st.active){
+      status += `<p class="help-text" style="margin:2px 0 8px;">This relayer is running on <strong>${escapeHtml(st.runningNetwork)}</strong> and is connected through <strong>${escapeHtml(src[st.active.source] || st.active.source)}</strong> (${escapeHtml(st.active.host || "")}).</p>`;
+    }
+    if(st.active && st.active.fellBack){
+      status += `<div class="admin-banner" style="margin:0 0 10px;"><span class="icon">⚠️</span><p>The URL saved here (${escapeHtml(st.active.triedHost || "unknown host")}) did not pass its check when the relayer last started, so the public default is being used. Check the URL or the key, and save it again.</p></div>`;
+    }
+    if(st.restartNeeded){
+      status += `<div class="admin-banner" style="margin:0 0 10px;"><span class="icon">🔄</span><p><strong>Restart the relayer to switch over.</strong> What is saved here is different from what the running relayer is using.</p></div>`;
+    }
+    const rows = RPC_NETS.map(n=>{
+      const info = nets[n.key] || {};
+      const isRunning = st.runningNetwork === n.key;
+      const envNote = info.envOverride
+        ? `<div class="help-text" style="margin-top:4px;color:var(--warn, #b45309);">The server has <code>${escapeHtml(info.envVar || "")}</code> set, and it takes priority over anything saved here. Remove it from the server's environment to use this setting.</div>`
+        : "";
+      const savedLine = info.savedHost
+        ? `Saved: <strong>${escapeHtml(info.savedHost)}</strong> (the key is hidden)`
+        : `Nothing saved. The public default (${escapeHtml(info.defaultHost || "")}) is used.`;
+      return `
+        <div class="admin-cfg-row" style="align-items:start;">
+          <div class="admin-cfg-label">${escapeHtml(n.label)} RPC URL${isRunning ? ` <span class="info-dot" title="The relayer is running on this network.">●</span>` : ""}<div class="help-text" style="margin-top:2px;">Chain ${escapeHtml(String(info.chainId || ""))}</div></div>
+          <div class="field rpc-field">
+            <input type="text" id="rpc_${n.key}" value="${escapeHtml(rpcDraft[n.key] || "")}" placeholder="${escapeHtml(n.placeholder)}" autocomplete="off" spellcheck="false" aria-label="${escapeHtml(n.label)} RPC URL">
+            <div class="help-text" style="margin-top:4px;">${savedLine}</div>
+            ${envNote}
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+              <button class="btn btn-primary" type="button" data-rpc-save="${n.key}">Save ${escapeHtml(n.label.toLowerCase())} RPC</button>
+              ${info.savedHost ? `<button class="btn btn-ghost" type="button" data-rpc-reset="${n.key}">Use the public default</button>` : ""}
+            </div>
+          </div>
+        </div>`;
+    }).join("");
+    return `
+      <div class="panel admin-panel" style="grid-column:1 / -1;">
+        <div class="admin-panel-head"><h3>Robinhood RPC</h3></div>
+        <p class="help-text" style="margin:2px 0 12px;">The node address the relayer uses to read the chain and send transactions. The public address works for light use but is rate-limited; paste your own (Alchemy, for example) before real traffic arrives. The URL is checked against the right chain, stored on the server, and used the next time the relayer restarts. If a saved URL ever stops working, the relayer falls back to the public default instead of failing to start.</p>
+        ${status}
+        <div class="admin-cfg-table">${rows}</div>
+      </div>`;
+  }
+
+  async function renderRpcSettingsPanel(){
+    const wrap = document.getElementById("rpcSettingsWrap");
+    if(!wrap) return;
+    const url = relayerApiUrl(appMode);
+    if(!url){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">No relayer configured for this network — set a Relayer API URL in Overview → Platform contracts first.</p></div>`;
+      return;
+    }
+    let data;
+    try{
+      const res = await fetch(`${url}/rpc-settings`);
+      if(!res.ok) throw new Error("bad response");
+      data = await res.json();
+    }catch(err){
+      wrap.innerHTML = `<div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Couldn't load the RPC setting. If the relayer was just updated, make sure it was restarted with the new files (lib/rpcSettings.js and scripts/relayer.js).</p></div>`;
+      return;
+    }
+    if(!isAdminWallet(wallet) || !views.admin.classList.contains("active")) return;
+    wrap.innerHTML = rpcSettingsPanelHTML(data || {});
+    RPC_NETS.forEach(n=>{
+      const el = document.getElementById(`rpc_${n.key}`);
+      if(el) el.addEventListener("input", ()=>{ rpcDraft[n.key] = el.value; });
+    });
+    wrap.querySelectorAll("[data-rpc-save]").forEach(b=> b.addEventListener("click", ()=> runRpcSettingsSave(b.dataset.rpcSave, false, b)));
+    wrap.querySelectorAll("[data-rpc-reset]").forEach(b=> b.addEventListener("click", ()=> runRpcSettingsSave(b.dataset.rpcReset, true, b)));
+  }
+
+  async function runRpcSettingsSave(network, reset, btnEl){
+    if(rpcSaving) return;
+    if(!isAdminWallet(wallet)){ toast("Connect the admin wallet first."); return; }
+    if(!getEth()){ toast("No wallet connected."); return; }
+    const relayerUrl = relayerApiUrl(appMode);
+    if(!relayerUrl){ toast("No relayer configured for this network."); return; }
+    const typed = reset ? "" : (document.getElementById(`rpc_${network}`) || {}).value;
+    const rpcUrl = String(typed || "").trim();
+    if(!reset && !rpcUrl){ toast("Paste the RPC URL first."); return; }
+    if(!reset && !/^https:\/\//i.test(rpcUrl)){ toast("The RPC URL must start with https://"); return; }
+    const timestamp = Date.now();
+    let message;
+    try{ message = await rpcSettingsMessage(network, rpcUrl, timestamp); }
+    catch(err){ toast(err.message || "Couldn't prepare the signature."); return; }
+    let signature;
+    try{
+      signature = await getEth().request({ method: "personal_sign", params: ["0x"+utf8Hex(message), wallet] });
+    }catch(err){
+      toast("Signature was rejected — nothing was saved.");
+      return;
+    }
+    const label = btnEl.textContent;
+    rpcSaving = true;
+    btnEl.disabled = true;
+    btnEl.textContent = reset ? "Resetting…" : "Checking…";
+    try{
+      const res = await fetch(`${relayerUrl}/rpc-settings`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ network, url: rpcUrl, timestamp, signature }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){ toast(data.error || "Couldn't save the RPC URL."); return; }
+      rpcDraft[network] = "";
+      toast(reset ? "Back to the public default. Restart the relayer to switch over." : "RPC URL checked and saved. Restart the relayer to switch over.");
+      rpcSaving = false;
+      renderRpcSettingsPanel();
+    }catch(err){
+      toast("Couldn't reach the relayer to save the RPC URL.");
+    }finally{
+      rpcSaving = false;
+      btnEl.disabled = false;
+      btnEl.textContent = label;
+    }
+  }
+
   // ---------------- Admin → Solana (network switch + settings) ----------------
   // Everything here is saved on the relayer (POST /solana/settings, signed by the admin wallet like the relayer
   // settings above) and applies immediately: no redeploy, no restart. See lib/solanaSettings.js for the rules.
@@ -17957,6 +18102,7 @@
 
       <div class="admin-tab-panel" data-admin-panel="relayer" ${adminTab==="relayer"?"":"hidden"}>
         <div class="section-head"><h2>Relayer settings</h2></div>
+        <div id="rpcSettingsWrap" style="margin-bottom:18px;"></div>
         <div id="relayerSettingsWrap">
           <div class="panel admin-panel" style="grid-column:1 / -1;"><p class="admin-empty">Loading…</p></div>
         </div>
@@ -18005,6 +18151,7 @@
     // gated behind the window.ethereum/on-chain-read guard below, since both
     // panels' initial GETs are plain server reads that work with no wallet
     // connected at all (same reasoning as "Platform contracts" above).
+    renderRpcSettingsPanel();
     renderRelayerSettingsPanel();
     renderRevenuePanel();
     renderSolanaAdminPanel();
