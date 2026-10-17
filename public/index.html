@@ -15766,7 +15766,7 @@
 
   function keeperSpotRowHTML(sp, d){
     if(!sp.addr) return `<tr><td>${escapeHtml(sp.label)}<div class="hint" style="margin:2px 0 0;">${escapeHtml(sp.note)}</div></td><td><span class="dc-none">Not set</span></td><td class="v4s-cell">${v4Pill("warn","Not deployed here")}</td><td></td></tr>`;
-    if(sp.hasCode === false) return `<tr><td>${escapeHtml(sp.label)}</td><td>${explorerAddrHTML(sp.addr)}</td><td class="v4s-cell">${v4Pill("bad","No contract at this address")}</td><td></td></tr>`;
+    if(sp.hasCode === false) return `<tr><td>${escapeHtml(sp.label)}<div class="hint" style="margin:2px 0 0;">${escapeHtml(sp.note)}</div></td><td>${explorerAddrHTML(sp.addr)}</td><td class="v4s-cell">${v4Pill("warn","This is a wallet, not a contract: nothing to switch on")}</td><td></td></tr>`;
     let pill;
     if(sp.keeper === null) pill = v4Pill("warn","Couldn't check");
     else pill = sp.keeper ? v4Pill("ok","✓ Keeper ON") : v4Pill("bad","✗ Keeper OFF — sweeps will fail here");
