@@ -4869,6 +4869,17 @@ async function main() {
     const slots = await hre.ethers.getContractAt(V4_FACTORY_SLOTS_ABI, ctx.slotsAddress, hre.ethers.provider);
     const address = await slots[slotGetter]();
     if (!address || address === hre.ethers.ZeroAddress) return null;
+    // A slot can legitimately hold a plain wallet (rewards paid straight to an address) instead of a distributor
+    // contract. There is nothing to sweep then, so skip it quietly instead of failing every tick.
+    const code = await hre.ethers.provider.getCode(address);
+    if (!code || code === "0x") {
+      v4KeeperWarnOnce(
+        `eoa:${slotGetter}:${address}`,
+        `[v4-keeper] ${label} slot on the factory (${slotGetter}) holds ${address}, which is a wallet and not a contract, so there is nothing for the keeper to sweep there. ` +
+          "That is fine if you meant to pay that wallet directly; set it to the real distributor (Admin → V4 → Rewards) when you deploy one."
+      );
+      return null;
+    }
     const contract = await hre.ethers.getContractAt(abi, address, relayerWallet);
     // A distributor the hook doesn't exempt has its own sales taxed again;
     // the sweep still works (the quote accounts for it) but it's almost
