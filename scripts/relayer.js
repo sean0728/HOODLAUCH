@@ -3360,23 +3360,76 @@ async function main() {
     sendJson(res, 200, { network, address, ...sum, recent });
   }));
 
+  // The Solana side of the ledger (SOL-denominated; see lib/tradeStore.js), for whichever Solana cluster is in force.
+  // Same shape as pnlSnapshot(): every wallet's positions plus each token's latest price (in SOL), cached briefly.
+  let solPnlCache = { at: 0, key: null, version: -1, wallets: null, prices: null };
+  async function solanaPnlSnapshot() {
+    if (!solanaBridge) return null;
+    let key;
+    try { key = await solanaBridge.networkKey(); } catch (err) { return null; }
+    const now = Date.now();
+    if (solPnlCache.wallets && solPnlCache.key === key && solPnlCache.version === tradeStore.ledgerVersion() && now - solPnlCache.at < PNL_CACHE_MS) return solPnlCache;
+    const wallets = pnlLib.buildPositions(await tradeStore.readAllTrades(key));
+    const tokenSet = new Set();
+    for (const w of wallets.values()) for (const tok of w.positions.keys()) tokenSet.add(tok);
+    const prices = {};
+    for (const tok of tokenSet) {
+      try {
+        const h = await solanaBridge.priceHistory(tok);
+        const last = h && h.length ? h[h.length - 1] : null;
+        if (last && last.p > 0) prices[tok] = last.p;
+      } catch (err) { /* no price: PNL falls back to the last trade price */ }
+    }
+    solPnlCache = { at: now, key, version: tradeStore.ledgerVersion(), wallets, prices };
+    return solPnlCache;
+  }
+
+  // Ranks ACCOUNTS (a named profile and every wallet linked to it, on either chain), not single wallets. The Robinhood
+  // part is in USD and the Solana part in SOL, because the server keeps no SOL/USD price (the page converts with its own
+  // and does the final ranking, see renderLeaderboard in public/index.html). The top-level totalUsd / realizedUsd /
+  // unrealizedUsd / trades / tokens are the Robinhood figures only, as before; `solana` carries the Solana ones.
+  const LEADERBOARD_CANDIDATES = 200;
   app.get("/leaderboard", asyncRoute(async (_req, res) => {
     const snap = await pnlSnapshot();
-    const profiles = await profileStore.listProfiles(); // { addressLower: { name, avatarV } }
-    const rows = [];
+    const solSnap = await solanaPnlSnapshot();
+    const profiles = await profileStore.listProfiles(); // { addressCanon: { name, avatarV } }
+    const links = await walletLinkStore.listAll(); // { walletCanon: ownerCanon }
+    const accounts = new Map(); // owner -> { owner, evm, sol }
+    const accountOf = (wallet) => {
+      const owner = links[wallet] || wallet;
+      const prof = profiles[owner];
+      if (!prof || !prof.name) return null; // named members only
+      let a = accounts.get(owner);
+      if (!a) { a = { owner, prof, evm: null, sol: null }; accounts.set(owner, a); }
+      return a;
+    };
+    const add = (acc, sum) => {
+      const base = acc || { total: 0, realized: 0, unrealized: 0, trades: 0, tokens: 0 };
+      base.total += sum.overall.totalUsd; base.realized += sum.overall.realizedUsd; base.unrealized += sum.overall.unrealizedUsd;
+      base.trades += sum.overall.buys + sum.overall.sells; base.tokens += sum.overall.tokens;
+      return base;
+    };
     for (const entry of snap.wallets.values()) {
-      const prof = profiles[entry.wallet];
-      if (!prof || !prof.name) continue; // named members only
-      const sum = pnlLib.summarizeWallet(entry, (tok) => snap.prices[tok]);
-      rows.push({
-        address: entry.wallet, name: prof.name, avatarV: prof.avatarV || null,
-        totalUsd: round(sum.overall.totalUsd), realizedUsd: round(sum.overall.realizedUsd), unrealizedUsd: round(sum.overall.unrealizedUsd),
-        trades: sum.overall.buys + sum.overall.sells, tokens: sum.overall.tokens,
-      });
+      const a = accountOf(entry.wallet);
+      if (a) a.evm = add(a.evm, pnlLib.summarizeWallet(entry, (tok) => snap.prices[tok]));
     }
+    if (solSnap) {
+      for (const entry of solSnap.wallets.values()) {
+        const a = accountOf(entry.wallet);
+        if (a) a.sol = add(a.sol, pnlLib.summarizeWallet(entry, (tok) => solSnap.prices[tok]));
+      }
+    }
+    const rows = [...accounts.values()].map((a) => ({
+      address: a.owner, name: a.prof.name, avatarV: a.prof.avatarV || null,
+      totalUsd: round(a.evm ? a.evm.total : 0), realizedUsd: round(a.evm ? a.evm.realized : 0), unrealizedUsd: round(a.evm ? a.evm.unrealized : 0),
+      trades: a.evm ? a.evm.trades : 0, tokens: a.evm ? a.evm.tokens : 0,
+      solana: a.sol ? { totalSol: round(a.sol.total, 9), realizedSol: round(a.sol.realized, 9), unrealizedSol: round(a.sol.unrealized, 9), trades: a.sol.trades, tokens: a.sol.tokens } : null,
+    }));
     rows.sort((a, b) => b.totalUsd - a.totalUsd);
-    const entries = rows.slice(0, LEADERBOARD_SIZE).map((r, i) => ({ rank: i + 1, ...r }));
-    sendJson(res, 200, { network, updatedAt: snap.at, entries });
+    const entries = rows.slice(0, LEADERBOARD_CANDIDATES).map((r, i) => ({ rank: i + 1, ...r }));
+    let solanaCluster = null;
+    try { solanaCluster = solanaBridge ? await solanaBridge.cluster() : null; } catch (err) { /* leave null */ }
+    sendJson(res, 200, { network, updatedAt: snap.at, solanaCluster, entries });
   }));
 
   app.get("/price-history/:tokenAddress", asyncRoute(async (req, res) => {
