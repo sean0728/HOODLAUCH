@@ -446,6 +446,8 @@
   }
 
   /* ---- network badge (which chain a token lives on); files: brand/chains/<chain>.svg ---- */
+  .lb-chains{display:inline-flex; gap:4px; align-items:center;}
+  .lb-chains .chain-badge{width:18px; height:18px;}
   .chain-badge{width:24px; height:24px; flex:none; border-radius:50%; object-fit:contain; background:var(--ink-800); display:block;}
   .tc-head .chain-badge{margin-right:-2px;}
   .detail-head .chain-badge{width:32px; height:32px;}
@@ -19896,22 +19898,45 @@
       wrap.innerHTML = `<div class="panel">
         <div class="eyebrow" style="margin-bottom:6px;">Leaderboard</div>
         <h2 style="font-size:1.3rem; margin:0 0 4px;">Top 10 traders by overall PNL</h2>
-        <p class="pf-soon" style="margin:0 0 14px;">Live ranking of members with a profile name, by realized + unrealized profit &amp; loss in USD. Updates as trades happen.</p>
+        <p class="pf-soon" style="margin:0 0 14px;">Live ranking of members with a profile name, across Robinhood Chain and Solana, by realized + unrealized profit &amp; loss in USD. Wallets linked to one profile are added together. Updates as trades happen.</p>
         <div id="lbBody"><p class="pf-soon">Loading…</p></div>
-        <p class="pnl-note">Ranks named members only — set a name in your Profile to appear. Only trades made after tracking began are counted.</p></div>`;
+        <p class="pnl-note">Ranks named members only — set a name in your Profile to appear. Only trades made after tracking began are counted. Solana results are converted to USD at the current SOL price.</p></div>`;
     }
     const d = await fetchJsonFrom("/leaderboard");
     const body = document.getElementById("lbBody");
     if(!body) return;
     if(d===null){ body.innerHTML = `<p class="pf-soon">The leaderboard isn't available — no relayer is configured for this network.</p>`; return; }
     if(d===undefined){ body.innerHTML = `<p class="pf-soon">Couldn't load the leaderboard right now.</p>`; return; }
-    if(!d.entries.length){ body.innerHTML = `<p class="pf-soon">No ranked traders yet. Members who trade IgnitionX tokens will appear here.</p>`; return; }
+    // Each account can have Robinhood figures (USD, from the relayer) and Solana figures (SOL). The server keeps no SOL/USD
+    // price, so the page converts the Solana part with its own price (the same one the market caps use) and ranks the
+    // combined total here. With no SOL price at all, the Solana part is left out of the ranking rather than guessed.
+    const entries = Array.isArray(d.entries) ? d.entries : [];
+    const hasSol = entries.some(e=>e.solana);
+    const solPx = hasSol ? await solRefreshUsdPrice() : null;
+    const rows = entries.map(e=>{
+      const sol = e.solana || null;
+      const solOk = !!(sol && solPx);
+      const k = solOk ? solPx : 0;
+      const hasRh = (e.trades||0) > 0;
+      return {
+        address: e.address,
+        rh: hasRh, sol: !!sol,
+        totalUsd: (e.totalUsd||0) + (sol ? sol.totalSol*k : 0),
+        realizedUsd: (e.realizedUsd||0) + (sol ? sol.realizedSol*k : 0),
+        unrealizedUsd: (e.unrealizedUsd||0) + (sol ? sol.unrealizedSol*k : 0),
+        trades: (e.trades||0) + (solOk ? sol.trades : 0),
+      };
+    }).filter(r=>r.trades>0 && (r.rh || solPx));   // a Solana-only account can't be valued without a SOL price
+    rows.sort((a,b)=>b.totalUsd-a.totalUsd);
+    const top = rows.slice(0, 10).map((r,i)=>({ ...r, rank:i+1 }));
+    if(!top.length){ body.innerHTML = `<p class="pf-soon">No ranked traders yet. Members who trade IgnitionX tokens on Robinhood Chain or Solana will appear here.</p>`; return; }
     const me = myAccount() || "";
-    body.innerHTML = `<div class="pnl-tablewrap"><table class="pnl-table lb"><thead><tr><th>#</th><th>Member</th><th>Overall PNL</th><th>Realized</th><th>Unrealized</th><th>Trades</th></tr></thead><tbody>${
-      d.entries.map(e=>`<tr class="${e.rank<=3?"top"+e.rank:""} ${e.address===me?"me":""}">
-        <td class="pnl-rank">${e.rank}</td><td>${profileChipHTML(e.address,{link:true,size:24})}</td>
+    const chains = r => `<span class="lb-chains">${r.rh ? chainBadgeHTML("robinhood") : ""}${r.sol ? chainBadgeHTML("solana") : ""}</span>`;
+    body.innerHTML = `<div class="pnl-tablewrap"><table class="pnl-table lb"><thead><tr><th>#</th><th>Member</th><th>Chains</th><th>Overall PNL</th><th>Realized</th><th>Unrealized</th><th>Trades</th></tr></thead><tbody>${
+      top.map(e=>`<tr class="${e.rank<=3?"top"+e.rank:""} ${e.address===me?"me":""}">
+        <td class="pnl-rank">${e.rank}</td><td>${profileChipHTML(e.address,{link:true,size:24})}</td><td>${chains(e)}</td>
         <td><strong>${pnlSpan(e.totalUsd)}</strong></td><td>${pnlSpan(e.realizedUsd)}</td><td>${pnlSpan(e.unrealizedUsd)}</td><td>${e.trades}</td></tr>`).join("")
-    }</tbody></table></div>`;
+    }</tbody></table></div>${hasSol && !solPx ? `<p class="pnl-note">Solana profit &amp; loss is left out right now because the SOL price couldn't be loaded.</p>` : ""}`;
   }
   // Keep whichever of these is on screen fresh.
   setInterval(()=>{
