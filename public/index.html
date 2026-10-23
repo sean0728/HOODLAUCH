@@ -8321,6 +8321,19 @@
     }
   }
 
+  // Total supply on the token page, read straight off the token contract (works for every launched token, whichever
+  // way it was launched) over the public RPC of the network the token lives on.
+  async function fillDetailSupply(t){
+    const el = document.getElementById("detailSupplyVal");
+    if(!el || !t || !t.tokenAddress || !t.onChain) return;
+    try{
+      const mode = t.networkMode || appMode;
+      const raw = await publicRpcCall(mode, "eth_call", [{ to: t.tokenAddress, data: "0x"+TOTAL_SUPPLY_SELECTOR }, "latest"]);
+      const whole = decodeUint256(raw) / (10n ** 18n);
+      const again = document.getElementById("detailSupplyVal");
+      if(again) again.textContent = whole.toLocaleString("en-US");
+    }catch(e){ /* leave the dash */ }
+  }
   function openDetail(id){
     const t = tokens.find(x=>x.id===id);
     if(!t) return;
@@ -8672,10 +8685,11 @@
           ${progressHTML}
 
           ${noPriceChart ? "" : `
-          <div class="stat-mini-row">
+          <div class="stat-mini-row" style="grid-template-columns:repeat(2,1fr);">
             <div class="stat-mini"><div class="v num">${fmtUSD(t.mcap)}</div><div class="l">Market cap</div></div>
             <div class="stat-mini"><div class="v num">${fmtUSD(t.vol)}</div><div class="l">24h volume</div></div>
             <div class="stat-mini"><div class="v num">${fmtInt(t.holders)}</div><div class="l">Holders</div></div>
+            <div class="stat-mini"><div class="v num" id="detailSupplyVal">—</div><div class="l">Total supply</div></div>
           </div>
 
           <div style="margin-top:22px;">
@@ -8715,6 +8729,7 @@
 
     initComments(t);
     initCalloutBox(t);
+    fillDetailSupply(t);
 
     mountCandleChart(document.getElementById("chartWrap"), t);
 
