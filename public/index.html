@@ -4161,12 +4161,20 @@
   }
   async function waitForReceipt(txHash, {intervalMs=1500, timeoutMs=180000}={}){
     const start = Date.now();
+    let tick = 0;
     while(Date.now()-start < timeoutMs){
-      const receipt = await getEth().request({ method:"eth_getTransactionReceipt", params:[txHash] });
+      // The wallet's own connection to the chain can lag behind (or be rate-limited) while the transaction is already
+      // mined. So besides asking the wallet, every other pass also asks the network's public RPC directly.
+      let receipt = null;
+      try{ receipt = await getEth().request({ method:"eth_getTransactionReceipt", params:[txHash] }); }catch(e){ /* try the public RPC below */ }
+      if(!receipt && tick % 2 === 1){
+        try{ receipt = await publicRpcCall(appMode, "eth_getTransactionReceipt", [txHash]); }catch(e){ /* keep polling */ }
+      }
       if(receipt) return receipt;
+      tick++;
       await new Promise(r=>setTimeout(r, intervalMs));
     }
-    throw new Error("Timed out waiting for the transaction to confirm — check your wallet or the block explorer.");
+    throw new Error(`Timed out waiting for the transaction to confirm (${txHash}) — check your wallet or the block explorer.`);
   }
 
   // Confirms block-explorer *source* verification for a freshly deployed
@@ -4928,7 +4936,8 @@
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
     });
-    onStep("deploy", "active", "Deposit sent — waiting for confirmation…");
+    console.log("[launch] deposit tx hash:", depositTxHash);
+    onStep("deploy", "active", `Deposit sent (<span class="num">${fmtAddrSafe(depositTxHash)}</span>) — waiting for confirmation…`);
     const depositReceipt = await waitForReceipt(depositTxHash);
     if(depositReceipt.status !== "0x1"){
       onStep("deploy", "error", "The deposit transaction reverted — nothing was deployed, and no fee was collected.");
@@ -5432,7 +5441,8 @@
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
     });
-    onStep("deploy", "active", "Deposit sent — waiting for confirmation…");
+    console.log("[launch] deposit tx hash:", depositTxHash);
+    onStep("deploy", "active", `Deposit sent (<span class="num">${fmtAddrSafe(depositTxHash)}</span>) — waiting for confirmation…`);
     const depositReceipt = await waitForReceipt(depositTxHash);
     if(depositReceipt.status !== "0x1"){
       onStep("deploy", "error", "The deposit transaction reverted — nothing was deployed, and no fee was collected.");
@@ -5909,7 +5919,8 @@
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
     });
-    onStep("deploy", "active", "Deposit sent — waiting for confirmation…");
+    console.log("[launch] deposit tx hash:", depositTxHash);
+    onStep("deploy", "active", `Deposit sent (<span class="num">${fmtAddrSafe(depositTxHash)}</span>) — waiting for confirmation…`);
     const depositReceipt = await waitForReceipt(depositTxHash);
     if(depositReceipt.status !== "0x1"){
       onStep("deploy", "error", "The deposit transaction reverted — nothing was deployed, and no fee was collected.");
@@ -6040,7 +6051,8 @@
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: factoryAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
     });
-    onStep("deploy", "active", "Deposit sent — waiting for confirmation…");
+    console.log("[launch] deposit tx hash:", depositTxHash);
+    onStep("deploy", "active", `Deposit sent (<span class="num">${fmtAddrSafe(depositTxHash)}</span>) — waiting for confirmation…`);
     const depositReceipt = await waitForReceipt(depositTxHash);
     if(depositReceipt.status !== "0x1"){
       onStep("deploy", "error", "The deposit transaction reverted — nothing was deployed, and no fee was collected.");
@@ -6502,7 +6514,8 @@
       method:"eth_sendTransaction",
       params:[{ from: wallet, to: relayAddress, value: "0x"+depositWei.toString(16), data: encodeDepositForRelayedLaunchCalldata(voucherHash, voucher.deadline) }],
     });
-    onStep("deploy", "active", "Deposit sent — waiting for confirmation…");
+    console.log("[launch] deposit tx hash:", depositTxHash);
+    onStep("deploy", "active", `Deposit sent (<span class="num">${fmtAddrSafe(depositTxHash)}</span>) — waiting for confirmation…`);
     const depositReceipt = await waitForReceipt(depositTxHash);
     if(depositReceipt.status !== "0x1"){
       onStep("deploy", "error", "The deposit transaction reverted — nothing was launched, and no fee was collected.");
