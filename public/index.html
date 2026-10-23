@@ -8224,6 +8224,23 @@
       return { mode:0, token:null, symbol:null, decimals:18 };
     }
   }
+  // Fills the "Reflections paid in" row from the token contract itself. Runs for every on-chain V4
+  // custom-tax token — including a token still on its curve, a token loaded from the relayer's list
+  // (which carries no payout info), and a visitor with no wallet connected. Without this the row
+  // showed "Same token" for any token whose payout choice the page hadn't been told about locally.
+  async function refreshV4PaidInRow(t){
+    try{
+      const row = document.getElementById("v4PaidInVal");
+      if(!row || !t.tokenAddress) return;
+      const cfg = await readV4PayoutConfig(t.tokenAddress);
+      if(currentDetailTokenId!==t.id) return;
+      const el = document.getElementById("v4PaidInVal");
+      if(!el) return;
+      el.textContent = cfg.mode===1 ? "ETH"
+        : cfg.mode===2 ? `${cfg.symbol} (${shortAddr(cfg.token)})`
+        : `Same token ($${t.ticker})`;
+    }catch(e){}
+  }
   async function wireV4ReflectionPanel(t){
     const box = document.getElementById("v4ReflectionBox");
     if(!box) return;
@@ -8752,7 +8769,7 @@
     if(detailActivateBtn) detailActivateBtn.addEventListener("click", ()=> activateCustomTokenTax(t.id, detailActivateBtn) );
 
     if(!noPriceChart && t.onChain && t.tokenAddress) fetchAndRenderHolderDistribution(t);
-    if(t.customTax && isV4Token && t.onChain && t.tokenAddress) wireV4ReflectionPanel(t);
+    if(t.customTax && isV4Token && t.onChain && t.tokenAddress){ refreshV4PaidInRow(t); wireV4ReflectionPanel(t); }
 
     if(useV4Panel && v4Tradable){
       tradeSide = "buy";
