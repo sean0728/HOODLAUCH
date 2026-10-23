@@ -7121,7 +7121,11 @@
       // V4 custom-tax fields (V4CustomTokenFactory launches, and V4 custom
       // curves): in-kind rates straight off the relayer's tracked record.
       ...(isV4Entry && entry.customTax ? {
-        customTax: true, reflectionAsset: null, reflectionInKind: true,
+        customTax: true, reflectionAsset: null,
+        // The relayer's record carries the payout the creator chose (0 in kind, 1 ETH, 2 another token).
+        reflectionInKind: !(Number(entry.payoutMode) > 0),
+        payoutMode: Number(entry.payoutMode) || 0,
+        payoutToken: entry.payoutToken || null,
         marketingWallet: entry.marketingWallet || null,
         buyFees: entry.buyFees || undefined, sellFees: entry.sellFees || undefined,
       } : {}),
@@ -8348,9 +8352,29 @@
       const mode = t.networkMode || appMode;
       const raw = await publicRpcCall(mode, "eth_call", [{ to: t.tokenAddress, data: "0x"+TOTAL_SUPPLY_SELECTOR }, "latest"]);
       const nowWei = decodeUint256(raw);
-      const whole = nowWei / (10n ** 18n);
+      const fmtW = (w)=> (w / (10n ** 18n)).toLocaleString("en-US");
+      // Circulating supply. While a token is still on its bonding curve, most of the supply is held by the curve
+      // contract (and the rest is reserved for the pool it graduates into), so only what the curve has sold so far
+      // (curveSupply - tokensRemaining, creator buy-in included) is in anyone's hands. After graduation the whole
+      // (post-burn) supply is out, so the figure is totalSupply().
+      let circWei = nowWei, onCurve = false;
+      if(t.status==="curve-trading" && t.factoryAddress){
+        try{
+          const data = "0x19076e27" + t.tokenAddress.toLowerCase().replace(/^0x/, "").padStart(64, "0"); // curveState(address)
+          const out = await publicRpcCall(mode, "eth_call", [{ to: t.factoryAddress, data }, "latest"]);
+          const words = String(out).replace(/^0x/, "").match(/.{64}/g) || [];
+          if(words.length >= 4){
+            const curveSupply = BigInt("0x"+words[2]), remaining = BigInt("0x"+words[3]);
+            if(curveSupply >= remaining){ circWei = curveSupply - remaining; onCurve = true; }
+          }
+        }catch(e){ /* fall back to total supply */ }
+      }
       const again = document.getElementById("detailSupplyVal");
-      if(again) again.textContent = whole.toLocaleString("en-US");
+      if(again) again.textContent = fmtW(circWei);
+      const labelEl = document.getElementById("detailSupplyLabel");
+      if(labelEl) labelEl.textContent = "Circulating supply";
+      const totalEl = document.getElementById("detailTotalSupply");
+      if(totalEl) totalEl.textContent = onCurve ? ` · of ${fmtW(nowWei)} total` : "";
       // Burns shrink totalSupply, so the figure above is already the current supply. If the launch-time supply is known,
       // also say how much has been burned since.
       if(t.initialSupplyWei){
@@ -8715,7 +8739,7 @@
             <div class="stat-mini"><div class="v num">${fmtUSD(t.mcap)}</div><div class="l">Market cap</div></div>
             <div class="stat-mini"><div class="v num">${fmtUSD(t.vol)}</div><div class="l">24h volume</div></div>
             <div class="stat-mini"><div class="v num">${fmtInt(t.holders)}</div><div class="l">Holders</div></div>
-            <div class="stat-mini"><div class="v num" id="detailSupplyVal">—</div><div class="l">Total supply<span id="detailBurned" style="text-transform:none; letter-spacing:0;"></span></div></div>
+            <div class="stat-mini"><div class="v num" id="detailSupplyVal">—</div><div class="l"><span id="detailSupplyLabel">Circulating supply</span><span id="detailTotalSupply" style="text-transform:none; letter-spacing:0;"></span><span id="detailBurned" style="text-transform:none; letter-spacing:0;"></span></div></div>
           </div>
 
           <div style="margin-top:22px;">
