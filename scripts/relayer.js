@@ -526,9 +526,46 @@ function sendRelayerTx(fn) {
 // A real revert still fails exactly as before, at the estimate step, before anything is sent.
 async function sendWithGasBuffer(contract, method, args) {
   const fn = contract[method];
-  const gas = await fn.estimateGas(...args);
   const pct = BigInt(Math.max(100, Math.min(300, Number(process.env.RELAY_GAS_BUFFER_PCT || 130))));
-  return fn(...args, { gasLimit: (gas * pct) / 100n });
+  const attempt = async () => {
+    const gas = await fn.estimateGas(...args);
+    return fn(...args, { gasLimit: (gas * pct) / 100n });
+  };
+  try {
+    return await attempt();
+  } catch (err) {
+    // An RPC that is a little behind can hand out a nonce that was just used ("nonce too low" / "already known").
+    // One short pause and a fresh nonce fixes it. If the first send had actually landed, the second estimate reverts
+    // ("voucher already relayed") and the caller's recovery check (recoverSettledRelayReceipt) picks the launch up.
+    if (!/nonce too low|already known|nonce has already been used|replacement transaction underpriced/i.test(String((err && err.message) || err))) throw err;
+    console.warn(`[relayer] ${method}: ${(err && err.shortMessage) || err.message} — retrying once with a fresh nonce.`);
+    await new Promise((r) => setTimeout(r, 1500));
+    return attempt();
+  }
+}
+
+// A send can report an error (for example "nonce too low" when an RPC forwards one signed transaction twice) although the
+// launch DID land. Before a launch is recorded as failed, ask the chain: if the creator's deposit shows as settled, find the
+// transaction through its RelayedFeeSettled event and carry on from its receipt. Returns null when it did not land.
+async function recoverSettledRelayReceipt(watcher, voucher, voucherHash) {
+  const provider = hre.ethers.provider;
+  const addr = await relayContractOf(watcher).getAddress();
+  const c = new hre.ethers.Contract(
+    addr,
+    ["function deposits(address,bytes32) view returns (uint256 amount, uint256 deadline, bool settled, bool reclaimed)", ...V4_LAUNCH_FEE_EVENTS_ABI],
+    provider
+  );
+  let settled = false;
+  for (let i = 0; i < 4 && !settled; i++) {
+    const d = await c.deposits(voucher.creator, voucherHash);
+    settled = !!d.settled;
+    if (!settled) await new Promise((r) => setTimeout(r, 2000)); // the node may need a moment to show the mined state
+  }
+  if (!settled) return null;
+  const latest = await provider.getBlockNumber();
+  const logs = await c.queryFilter(c.filters.RelayedFeeSettled(voucherHash), Math.max(0, latest - 2000), latest);
+  if (!logs.length) return null;
+  return provider.getTransactionReceipt(logs[logs.length - 1].transactionHash);
 }
 
 const ERC20_BALANCE_OF_ABI = ["function balanceOf(address) view returns (uint256)"];
@@ -3813,9 +3850,17 @@ async function main() {
     console.log(`[${watcher.kind}] deposit confirmed for ${voucherHash}, relaying...`);
 
     try {
-      const tx = await sendRelayerTx(() => watcher.relayFn(voucher, record.signature));
-      console.log(`[${watcher.kind}] submitted relay tx ${tx.hash} for ${voucherHash}, waiting for confirmation...`);
-      const receipt = await tx.wait();
+      let receipt;
+      try {
+        const tx = await sendRelayerTx(() => watcher.relayFn(voucher, record.signature));
+        console.log(`[${watcher.kind}] submitted relay tx ${tx.hash} for ${voucherHash}, waiting for confirmation...`);
+        receipt = await tx.wait();
+      } catch (sendErr) {
+        // The error may be a false alarm (see recoverSettledRelayReceipt): if the launch is on-chain, continue from it.
+        receipt = await recoverSettledRelayReceipt(watcher, voucher, voucherHash).catch(() => null);
+        if (!receipt) throw sendErr;
+        console.warn(`[${watcher.kind}] the send reported "${(sendErr && sendErr.shortMessage) || (sendErr && sendErr.message) || sendErr}" but the launch for ${voucherHash} is on-chain (tx ${receipt.hash}); recording it as relayed.`);
+      }
 
       const parsedLogs = receipt.logs.map((log) => {
         try {
