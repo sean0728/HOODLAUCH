@@ -518,6 +518,19 @@ function sendRelayerTx(fn) {
   return run;
 }
 
+// Launch transactions get the node's gas ESTIMATE plus a safety margin. A relayed launch is heavy (clone + token setup +
+// curve registration + fee payouts) and the estimate can come out a hair low on this chain, for example when the L1 data
+// fee moves between the estimate and the send. A transaction given exactly its estimate can then run out of gas at the very
+// end, revert, and still cost the relayer the gas (the creator's deposit stays safe, but the launch fails). The extra gas is
+// only a limit: what is not used is not charged. RELAY_GAS_BUFFER_PCT (default 130 = estimate x 1.3) tunes it.
+// A real revert still fails exactly as before, at the estimate step, before anything is sent.
+async function sendWithGasBuffer(contract, method, args) {
+  const fn = contract[method];
+  const gas = await fn.estimateGas(...args);
+  const pct = BigInt(Math.max(100, Math.min(300, Number(process.env.RELAY_GAS_BUFFER_PCT || 130))));
+  return fn(...args, { gasLimit: (gas * pct) / 100n });
+}
+
 const ERC20_BALANCE_OF_ABI = ["function balanceOf(address) view returns (uint256)"];
 
 // ---- token discovery / activity / price polling (backs GET /activity and
@@ -1804,7 +1817,7 @@ async function main() {
         voucherUintFields: LAUNCH_VOUCHER_UINT_FIELDS,
         hashFn: (v) => factory.hashLaunchVoucher(v),
         expectedDepositFn: expectedDepositForToken,
-        relayFn: (v, sig) => factory.relayedCreateToken(v, sig),
+        relayFn: (v, sig) => sendWithGasBuffer(factory, "relayedCreateToken", [v, sig]),
         createdEventName: "TokenCreated",
         // V4's LiquidityAdded: (token, creator, ethAmount, tokenAmount,
         // liquidity, unlockTime, lockId).
@@ -1864,7 +1877,7 @@ async function main() {
               voucherUintFields: V4_CUSTOM_VOUCHER_UINT_FIELDS,
               hashFn: (v) => v4Relay.hashCustomVoucher(v),
               expectedDepositFn: expectedDepositForV4Custom,
-              relayFn: (v, sig) => v4Relay.relayedCreateCustomToken(v, sig),
+              relayFn: (v, sig) => sendWithGasBuffer(v4Relay, "relayedCreateCustomToken", [v, sig]),
               implementationFn: () => factory.tokenImplementation(),
             }
           : {}),
@@ -1899,7 +1912,7 @@ async function main() {
               voucherUintFields: V4_CURVE_VOUCHER_UINT_FIELDS,
               hashFn: (v) => v4Relay.hashCurveVoucher(v),
               expectedDepositFn: expectedDepositForCurve,
-              relayFn: (v, sig) => v4Relay.relayedCreateCurveToken(v, sig),
+              relayFn: (v, sig) => sendWithGasBuffer(v4Relay, "relayedCreateCurveToken", [v, sig]),
               implementationFn: () => factory.plainTokenImplementation(),
             }
           : {}),
@@ -1914,7 +1927,7 @@ async function main() {
           voucherUintFields: V4_CUSTOM_CURVE_VOUCHER_UINT_FIELDS,
           hashFn: (v) => v4Relay.hashCustomCurveVoucher(v),
           expectedDepositFn: expectedDepositForCurve,
-          relayFn: (v, sig) => v4Relay.relayedCreateCustomCurveToken(v, sig),
+          relayFn: (v, sig) => sendWithGasBuffer(v4Relay, "relayedCreateCustomCurveToken", [v, sig]),
           implementationFn: () => factory.customTokenImplementation(),
           createdEventName: "CurveTokenCreated",
           liquidityEventName: null,
