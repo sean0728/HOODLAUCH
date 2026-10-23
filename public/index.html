@@ -7283,7 +7283,12 @@
     // The shared ledger also holds Solana launches (chain "solana"); they have their own grid, detail page and the
     // "New launches" entries below — never feed them to the EVM token code paths.
     // V4-only platform: legacy V2 launches still in the relayer's ledger are not shown.
-    const launches = (Array.isArray(payload && payload.launches) ? payload.launches : []).filter(e => !(e && e.chain === "solana") && e && e.protocol === "v4");
+    // The relayer serves ONE network (this host: Robinhood mainnet), and every ledger row says which. At page load the site starts
+    // in Demo (testnet) mode for a moment, before the live setting is read, and Demo's relayer URL is this same host, so mainnet
+    // launches used to be copied in labelled as TESTNET tokens. Opening one of those showed "different network" with no way to
+    // trade. Only rows that belong to the network being loaded are kept now (rows without a network field are kept as before).
+    const wantNet = mode === "live" ? "robinhoodMainnet" : "robinhoodTestnet";
+    const launches = (Array.isArray(payload && payload.launches) ? payload.launches : []).filter(e => !(e && e.chain === "solana") && e && e.protocol === "v4" && (!e.network || e.network === wantNet));
     const alreadySeeded = remoteLaunchesSeededModes.has(mode);
     const pruned = pruneSyncedTokens(mode, launches, payload && payload.deleted);
     if(!launches.length){
