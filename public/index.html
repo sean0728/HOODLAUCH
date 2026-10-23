@@ -3071,7 +3071,8 @@
   // own `watchers` array) to the adminFactoryAddress()/adminFactoryPanelHTML
   // key for the matching factory — so a failed voucher can be looked up
   // against the right contract.
-  const RELAY_KIND_TO_FACTORY_KEY = { token: "tf", custom: "ctf", curve: "bcf", "custom-curve": "cbcf" };
+  // V4 kinds: the plain-token factory holds its own escrow ("v4"); custom, curve and custom-curve deposits live in V4LaunchRelay ("v4relay").
+  const RELAY_KIND_TO_FACTORY_KEY = { token: "tf", custom: "ctf", curve: "bcf", "custom-curve": "cbcf", v4token: "v4", v4custom: "v4relay", v4curve: "v4relay", "v4custom-curve": "v4relay" };
   function decodeDepositInfo(hex){
     const words = splitWords(hex.replace(/^0x/i,""));
     return {
@@ -13012,18 +13013,33 @@
     // launch that already settled or was already reclaimed never flashes a
     // misleading "you're owed ETH" row.
     const resolved = await Promise.all(mine.map(async f => {
+      const who = escapeHtml(f.name || f.symbol || "A launch");
       try{
         const factoryKey = RELAY_KIND_TO_FACTORY_KEY[f.kind];
         const factoryAddress = factoryKey ? adminFactoryAddress(factoryKey) : null;
-        if(!factoryAddress || !f.voucherHash) return null;
+        if(!factoryAddress || !f.voucherHash) return { note: `${who}: this page has no escrow contract configured for a "${escapeHtml(f.kind||"unknown")}" launch on this network, so it can't look the deposit up.` };
         const raw = await publicEthCall(appMode, factoryAddress, encodeDepositsCalldata(f.creator, f.voucherHash));
         const dep = decodeDepositInfo(raw);
-        if(dep.amountWei === 0n || dep.reclaimed || dep.settled) return null; // nothing actionable left
+        if(dep.amountWei === 0n) return { note: `${who}: no ETH is escrowed for this failed launch (nothing was deposited, or it was already paid out).` };
+        if(dep.reclaimed) return { note: `${who}: the deposit was already reclaimed. The ETH is back in your wallet.` };
+        if(dep.settled) return { note: `${who}: this launch actually went through on-chain, so there is nothing to reclaim.` };
         return { f, factoryAddress, dep };
-      }catch(e){ return null; }
+      }catch(e){ return { note: `${who}: couldn't read the on-chain escrow (${escapeHtml(e && e.message ? e.message : "unknown error")}).` }; }
     }));
-    const stuck = resolved.filter(Boolean);
-    if(!stillCurrent() || !stuck.length) return;
+    const stuck = resolved.filter(r => r && r.f);
+    const notes = resolved.filter(r => r && r.note).map(r => r.note);
+    if(!stillCurrent()) return;
+    if(!stuck.length){
+      // Failed launches exist for this wallet but none has a reclaimable deposit: say why instead of showing nothing.
+      if(notes.length){
+        wrap.innerHTML = `
+          <div class="panel" style="margin-bottom:20px;">
+            <div class="eyebrow" style="margin-bottom:6px;">Failed launches</div>
+            ${notes.map(n => `<p style="color:var(--paper-500); font-size:.86rem; margin:6px 0 0;">${n}</p>`).join("")}
+          </div>`;
+      }
+      return;
+    }
 
     wrap.innerHTML = `
       <div class="panel" style="margin-bottom:20px;">
