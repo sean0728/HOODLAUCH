@@ -7158,6 +7158,7 @@
       lpLockDurationDays: isLiquidity ? lpLockDurationDays : null,
       lpWithdrawn: false,
       networkMode: mode,
+      initialSupplyWei: (entry.totalSupply != null && /^\d+$/.test(String(entry.totalSupply))) ? String(entry.totalSupply) : null, // supply at launch (wei), to show how much has been burned
       // The real on-chain creator, straight off the ledger — not just
       // "whoever's wallet is connected right now." This is what lets
       // renderPortfolio's "Your launches" correctly find a token you
@@ -8329,9 +8330,17 @@
     try{
       const mode = t.networkMode || appMode;
       const raw = await publicRpcCall(mode, "eth_call", [{ to: t.tokenAddress, data: "0x"+TOTAL_SUPPLY_SELECTOR }, "latest"]);
-      const whole = decodeUint256(raw) / (10n ** 18n);
+      const nowWei = decodeUint256(raw);
+      const whole = nowWei / (10n ** 18n);
       const again = document.getElementById("detailSupplyVal");
       if(again) again.textContent = whole.toLocaleString("en-US");
+      // Burns shrink totalSupply, so the figure above is already the current supply. If the launch-time supply is known,
+      // also say how much has been burned since.
+      if(t.initialSupplyWei){
+        const initWei = BigInt(t.initialSupplyWei);
+        const burnedEl = document.getElementById("detailBurned");
+        if(burnedEl && initWei > nowWei) burnedEl.textContent = ` · ${((initWei - nowWei) / (10n ** 18n)).toLocaleString("en-US")} burned`;
+      }
     }catch(e){ /* leave the dash */ }
   }
   function openDetail(id){
@@ -8689,7 +8698,7 @@
             <div class="stat-mini"><div class="v num">${fmtUSD(t.mcap)}</div><div class="l">Market cap</div></div>
             <div class="stat-mini"><div class="v num">${fmtUSD(t.vol)}</div><div class="l">24h volume</div></div>
             <div class="stat-mini"><div class="v num">${fmtInt(t.holders)}</div><div class="l">Holders</div></div>
-            <div class="stat-mini"><div class="v num" id="detailSupplyVal">—</div><div class="l">Total supply</div></div>
+            <div class="stat-mini"><div class="v num" id="detailSupplyVal">—</div><div class="l">Total supply<span id="detailBurned" style="text-transform:none; letter-spacing:0;"></span></div></div>
           </div>
 
           <div style="margin-top:22px;">
