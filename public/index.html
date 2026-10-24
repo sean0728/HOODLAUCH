@@ -1178,6 +1178,50 @@
   .tf-foot b{color:var(--paper-100); font-size:.9rem;}
   .tf-note{margin-top:10px;}
   @media (max-width:520px){ .tf-grid{grid-template-columns:12px minmax(28px,.6fr) minmax(0,3fr);} .tf-txt small{font-size:.7rem;} }
+
+  /* ---- How it works ---- */
+  .hiw{margin:10px 0 44px;}
+  .hiw-card{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:22px; position:relative;}
+  .hiw-card::before{content:""; position:absolute; top:0; left:16px; right:16px; height:2px; background:linear-gradient(90deg, transparent, var(--cyan-500), var(--signal-500), transparent); opacity:.5; pointer-events:none;}
+  .hiw-ctl{display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:26px;}
+  .hiw-seg{display:inline-flex; border:1px solid var(--line-strong); border-radius:999px; padding:3px; background:var(--ink-850);}
+  .hiw-seg button{font-family:var(--font-mono); font-size:.74rem; font-weight:600; letter-spacing:.03em; padding:7px 15px; border-radius:999px; border:0; background:transparent; color:var(--paper-500); cursor:pointer; white-space:nowrap;}
+  .hiw-seg button[aria-pressed="true"]{background:var(--paper-100); color:var(--ink-950);}
+  .hiw-seg button:focus-visible,.hiw-play:focus-visible,.hiw-step button:focus-visible{outline:2px solid var(--signal-500); outline-offset:2px;}
+  .hiw-play{margin-left:auto; display:inline-flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:.72rem; letter-spacing:.05em; text-transform:uppercase; color:var(--paper-500); background:transparent; border:1px solid var(--line-strong); border-radius:999px; padding:6px 13px; cursor:pointer;}
+  .hiw-pp{width:8px; height:8px; border-radius:50%; background:var(--cyan-500); box-shadow:0 0 8px var(--cyan-500); animation:tlPulse 2s infinite; --c:255,160,58;}
+  .hiw-play.paused .hiw-pp{animation:none; background:var(--paper-700); box-shadow:none;}
+  .hiw-track{list-style:none; margin:0 0 24px; padding:0; position:relative; display:grid; grid-template-columns:repeat(var(--n,4),1fr);}
+  .hiw-track::before,.hiw-track::after{content:""; position:absolute; top:26px; height:3px; border-radius:2px; left:calc(50%/var(--n,4)); }
+  .hiw-track::before{right:calc(50%/var(--n,4)); background:var(--ink-700);}
+  .hiw-track::after{width:calc((100% - 100%/var(--n,4)) * var(--p,0)); background:linear-gradient(90deg,#4c9bf0,var(--cyan-500),var(--signal-500)); box-shadow:0 0 8px rgba(255,160,58,.45); transition:width .6s cubic-bezier(.2,.7,.2,1);}
+  .hiw-step{position:relative; z-index:1; text-align:center;}
+  .hiw-step button{all:unset; box-sizing:border-box; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:10px; width:100%; padding:0 4px;}
+  .hiw-node{width:54px; height:54px; border-radius:50%; background:var(--ink-850); border:1.5px solid var(--line-strong); display:flex; align-items:center; justify-content:center; color:var(--paper-500); transition:all .3s;}
+  .hiw-step button:hover .hiw-node{border-color:rgba(255,160,58,.5); color:var(--paper-100);}
+  .hiw-step button.past .hiw-node{border-color:rgba(255,160,58,.55); color:var(--cyan-400);}
+  .hiw-step button.on .hiw-node{background:var(--signal-wash); border-color:var(--signal-500); color:var(--paper-100); box-shadow:var(--glow-signal); transform:scale(1.08);}
+  .hiw-lbl{font-family:var(--font-mono); font-size:.76rem; font-weight:600; color:var(--paper-500); line-height:1.25; max-width:130px;}
+  .hiw-lbl i{font-style:normal; display:block; font-size:.62rem; letter-spacing:.08em; color:var(--paper-700); margin-bottom:2px;}
+  .hiw-step button.on .hiw-lbl{color:var(--paper-100);}
+  .hiw-detail{display:grid; grid-template-columns:auto 1fr minmax(210px,.8fr); gap:26px; align-items:center; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--ink-850); padding:20px 22px;}
+  .hiw-detail.in{animation:hiwIn .45s ease;}
+  @keyframes hiwIn{from{opacity:0; transform:translateY(6px);}to{opacity:1; transform:none;}}
+  .hiw-ring.tl-ring{width:84px; height:84px;}
+  .hiw-ring .tl-ring svg{width:100%;height:100%;}
+  .hiw-ringin{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; line-height:1;}
+  .hiw-ringin .num{font-size:1.5rem; font-weight:700;}
+  .hiw-ringin small{font-family:var(--font-mono); font-size:.6rem; color:var(--paper-700); margin-top:3px; letter-spacing:.05em; text-transform:uppercase;}
+  .hiw-copy h3{font-family:var(--font-display); font-size:1.35rem; margin:0 0 6px;}
+  .hiw-copy p{margin:0; color:var(--paper-300); font-size:.95rem; line-height:1.5; max-width:62ch;}
+  .hiw-facts{margin:0; display:grid; gap:1px; background:var(--line); border:1px solid var(--line); border-radius:var(--radius-sm); overflow:hidden;}
+  .hiw-facts div{background:var(--ink-900); padding:9px 12px; display:flex; justify-content:space-between; gap:14px; align-items:baseline;}
+  .hiw-facts dt{font-family:var(--font-mono); font-size:.64rem; letter-spacing:.05em; text-transform:uppercase; color:var(--paper-700); flex:none;}
+  .hiw-facts dd{margin:0; font-size:.82rem; font-weight:600; text-align:right;}
+  .hiw-foot{display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; margin-top:16px; font-size:.78rem; color:var(--paper-700);}
+  @media (max-width:900px){ .hiw-detail{grid-template-columns:auto 1fr;} .hiw-facts{grid-column:1/-1;} }
+  @media (max-width:560px){ .hiw-lbl{font-size:.64rem;} .hiw-node{width:44px;height:44px;} .hiw-track::before,.hiw-track::after{top:21px;} .hiw-seg button{padding:7px 11px; font-size:.7rem;} .hiw-play{margin-left:0;} .hiw-detail{grid-template-columns:1fr; gap:16px;} .hiw-ring.tl-ring{width:70px;height:70px;} }
+  @media (prefers-reduced-motion:reduce){ .hiw-detail.in{animation:none;} .hiw-pp{animation:none;} .hiw-track::after,.hiw-node{transition:none;} }
 </style>
 </head>
 <body>
@@ -1330,6 +1374,29 @@
           <span class="eyebrow">Newest first · both chains</span>
         </div>
         <div class="newrow" id="launchFeedBody" tabindex="0" aria-label="New launches"></div>
+      </section>
+
+      <section class="hiw" id="hiw" aria-labelledby="hiwTitle">
+        <div class="section-head">
+          <h2 id="hiwTitle">How it works</h2>
+          <span class="eyebrow">Pick a launch path · click any step</span>
+        </div>
+        <div class="hiw-card">
+          <div class="hiw-ctl">
+            <div class="hiw-seg" role="group" aria-label="Launch path">
+              <button type="button" data-path="pool" aria-pressed="true">Launch with liquidity</button>
+              <button type="button" data-path="curve" aria-pressed="false">Quick Launch</button>
+            </div>
+            <div class="hiw-seg" role="group" aria-label="Creator tax">
+              <button type="button" data-tax="none" aria-pressed="true">0% tax</button>
+              <button type="button" data-tax="custom" aria-pressed="false">Custom tax</button>
+            </div>
+            <button type="button" class="hiw-play" id="hiwPlay" aria-pressed="true" aria-label="Pause the walkthrough"><span class="hiw-pp" aria-hidden="true"></span><span id="hiwPlayTxt">Auto</span></button>
+          </div>
+          <ol class="hiw-track" id="hiwTrack"></ol>
+          <div class="hiw-detail" id="hiwDetail" aria-live="polite"></div>
+          <div class="hiw-foot"><span>Solana Quick Launches follow the curve stages and graduate to a Meteora pool; the platform tax steps apply to Robinhood Chain.</span><button class="btn btn-primary btn-sm" data-goto="create">Start a launch</button></div>
+        </div>
       </section>
 
       <div id="market">
@@ -20937,8 +21004,114 @@
     refreshLiveFeed();
   }
 
+
+  // ===== "How it works": interactive walkthrough of the launch paths =====
+  const HIW_ICONS = {
+    seed:  '<path d="M12 5v14M5 12h14"/><circle cx="12" cy="12" r="9"/>',
+    pool:  '<path d="M12 3c3.5 4.2 6 7 6 10a6 6 0 0 1-12 0c0-3 2.5-5.800 6-10z"/>',
+    curve: '<path d="M3 20c6 0 8-1.500 10-6s4-9 8-10"/><path d="M3 20h18"/>',
+    fill:  '<path d="M4 8h16v8H4z"/><path d="M4 12h9" stroke-width="3.500"/>',
+    climb: '<path d="M4 17l6-6 4 4 6-8"/><path d="M15 7h5v5"/>',
+    done:  '<circle cx="12" cy="12" r="9"/><path d="M8 12.500l2.800 2.800L16.500 9.500"/>',
+  };
+  function hiwSteps(path, tax){
+    const custom = tax==="custom";
+    const lockD = `${LP_LOCK_DAYS} days`;
+    let target = "1.5";
+    try{ target = curvePoolSeedEthDisplay(custom ? "customCurve" : "curve") || "1.5"; }catch(e){}
+    const F = (k,v)=>({k,v});
+    if(path==="pool") return [
+      { ic:"seed", title:"Deploy & seed", body: custom
+          ? "Your token is verified and created, and your own ETH is paired into a live pool — all in one transaction. You choose the tax before you launch."
+          : "Your token is verified and created, and your own ETH is paired into a live pool — all in one transaction.",
+        facts:[F("You provide","Your own ETH"), custom ? F("Your tax","Up to 5% per side") : F("Creator tax","0%")] },
+      { ic:"pool", title:"Pool is live", body:`Trading opens immediately. Your liquidity position is locked to you for ${lockD}.`,
+        facts:[F("LP lock",lockD), F("Trading","From the first block")] },
+      { ic:"climb", title:"Tax climb", body: custom
+          ? "Every buy and sell pays the platform's 1.00% plus your own tax — reflections, marketing, auto-liquidity and burn — while the token climbs to a fixed $50,000 market cap."
+          : "A 1.00% tax on every buy and sell funds the climb to a fixed $50,000 market cap.",
+        facts:[F("Platform tax","1.00%"), custom ? F("Your tax","Reflections · Marketing · Liquidity · Burn") : F("Target","$50,000 market cap")] },
+      { ic:"done", title:"Graduated", body: custom
+          ? "At $50,000 the platform tax shuts off for good. Your own rates stay locked in; only the marketing wallet can ever change."
+          : "At $50,000 the tax shuts off for good — from here trades pay no token tax at all.",
+        facts:[F("Platform tax","Off for good"), custom ? F("Your tax","Stays on, locked at launch") : F("Token tax","0%")] },
+    ];
+    return [
+      { ic:"seed", title:"Launch", body: custom
+          ? "No liquidity to provide. Your token trades on a bonding curve from the first block, with your own buy/sell tax recorded and waiting."
+          : "No liquidity to provide. Your token trades on a bonding curve from the first block.",
+        facts:[F("Liquidity needed","None"), custom ? F("Your tax","Up to 5% per side") : F("Creator tax","0%")] },
+      { ic:"curve", title:"Trade on the curve", body:"Every buy lifts the price along the curve and every sell lowers it. A 1.00% curve fee applies to curve trades.",
+        facts:[F("Curve fee","1.00%"), F("Price","Set by the curve")] },
+      { ic:"fill", title:"Curve fills", body: `When the curve holds ${target} ETH it goes live on its own on a real DEX pool with the liquidity locked.${custom ? " Your tax switches on at this moment." : ""}`,
+        facts:[F("Goes live at",`${target} ETH`), F("Pool","Robinhood Chain: DEX pool · Solana: Meteora")] },
+      { ic:"climb", title:"Tax climb", body: custom
+          ? "Now in a pool, every trade pays the platform's 1.00% plus your own tax until the token reaches $50,000 market cap."
+          : "Now in a pool, a 1.00% tax applies on every trade until the token reaches $50,000 market cap.",
+        facts:[F("Platform tax","1.00%"), custom ? F("Your tax","Active") : F("Target","$50,000 market cap")] },
+      { ic:"done", title:"Graduated", body: custom
+          ? "At $50,000 the platform tax shuts off for good. Your own rates keep running, locked in at launch."
+          : "At $50,000 the tax shuts off for good — trades pay no token tax at all.",
+        facts:[F("Platform tax","Off for good"), custom ? F("Your tax","Stays on") : F("Token tax","0%")] },
+    ];
+  }
+  function initHowItWorks(){
+    const root = document.getElementById("hiw");
+    if(!root) return;
+    const track = document.getElementById("hiwTrack"), detail = document.getElementById("hiwDetail");
+    const playBtn = document.getElementById("hiwPlay"), playTxt = document.getElementById("hiwPlayTxt");
+    const st = { path:"pool", tax:"none", i:0, playing: !REDUCE_MOTION };
+    let steps = [], timer = null, visible = true;
+    const icon = (k)=> `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${HIW_ICONS[k]}</svg>`;
+    function build(){
+      steps = hiwSteps(st.path, st.tax);
+      if(st.i >= steps.length) st.i = 0;
+      track.style.setProperty("--n", steps.length);
+      track.innerHTML = steps.map((x,i)=>`
+        <li class="hiw-step"><button type="button" data-i="${i}" aria-label="Step ${i+1}: ${x.title}"><span class="hiw-node">${icon(x.ic)}</span><span class="hiw-lbl"><i class="num">${i+1}</i>${x.title}</span></button></li>`).join("");
+      track.querySelectorAll("button").forEach(b=> b.addEventListener("click", ()=>{ stop(); st.i = +b.dataset.i; paint(); }));
+      paint();
+    }
+    function paint(){
+      const n = steps.length, x = steps[st.i];
+      track.style.setProperty("--p", (st.i/(n-1)).toFixed(4));
+      track.querySelectorAll("button").forEach((b,i)=>{
+        b.classList.toggle("on", i===st.i); b.classList.toggle("past", i<st.i);
+        if(i===st.i) b.setAttribute("aria-current","step"); else b.removeAttribute("aria-current");
+      });
+      const pct = Math.round(st.i/(n-1)*100);
+      detail.innerHTML = `
+        <div class="hiw-ring tl-ring${st.i===0 ? " no-ring" : ""}">${ringSvgFor(pct)}<div class="hiw-ringin"><span class="num">${st.i+1}</span><small>of ${n}</small></div></div>
+        <div class="hiw-copy"><h3>${x.title}</h3><p>${x.body}</p></div>
+        <dl class="hiw-facts">${x.facts.map(f=>`<div><dt>${f.k}</dt><dd class="num">${escapeHtml(f.v)}</dd></div>`).join("")}</dl>`;
+      detail.classList.remove("in"); void detail.offsetWidth; detail.classList.add("in");
+    }
+    function schedule(){
+      clearInterval(timer); timer = null;
+      if(st.playing) timer = setInterval(()=>{ if(!visible || document.hidden) return; st.i = (st.i+1) % steps.length; paint(); }, 5200);
+      playBtn.setAttribute("aria-pressed", st.playing ? "true" : "false");
+      playBtn.setAttribute("aria-label", st.playing ? "Pause the walkthrough" : "Play the walkthrough");
+      playBtn.classList.toggle("paused", !st.playing);
+      playTxt.textContent = st.playing ? "Auto" : "Paused";
+    }
+    function stop(){ st.playing = false; schedule(); }
+    root.querySelectorAll("[data-path]").forEach(b=> b.addEventListener("click", ()=>{
+      st.path = b.dataset.path; st.i = 0;
+      root.querySelectorAll("[data-path]").forEach(x=> x.setAttribute("aria-pressed", x===b ? "true" : "false"));
+      stop(); build();
+    }));
+    root.querySelectorAll("[data-tax]").forEach(b=> b.addEventListener("click", ()=>{
+      st.tax = b.dataset.tax;
+      root.querySelectorAll("[data-tax]").forEach(x=> x.setAttribute("aria-pressed", x===b ? "true" : "false"));
+      stop(); build();
+    }));
+    playBtn.addEventListener("click", ()=>{ st.playing = !st.playing; schedule(); });
+    if("IntersectionObserver" in window) new IntersectionObserver(es=>{ visible = es[0].isIntersecting; }, {threshold:.25}).observe(root);
+    build(); schedule();
+  }
   /* ---------------- init ---------------- */
   renderStats();
+  initHowItWorks();
   renderGrid();
   refreshPlatformStats();
   setInterval(refreshPlatformStats, 60000);
