@@ -1000,6 +1000,84 @@
   .switch input:disabled + .track{opacity:.5;}
   .switch-label .t{font-weight:600; color:var(--paper-100); font-size:.92rem;}
   .switch-label .d{font-size:.8rem; color:var(--paper-500); margin-top:2px;}
+
+  /* ================= Live hero (v3) ================= */
+  .hero{padding:56px 0 30px; align-items:start;}
+  .hero .stat-row{margin:28px 0 0; grid-template-columns:repeat(2,1fr);}
+  .hero .stat-tile{padding:16px 18px;}
+  .hero .stat-tile .figure{font-size:1.55rem; letter-spacing:-.01em;}
+  .hero-readouts{display:none;}
+  .hero .hero-logo{width:min(100%,300px); margin:-6px 0 10px -4px;}
+  .hero .hero-eyebrow{margin-bottom:10px;}
+  .hero .hero-sub{margin:12px 0 20px; font-size:.95rem; max-width:52ch;}
+  .hero .stat-row{margin-top:22px;}
+  .stat-split{display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; min-height:0; font-family:var(--font-mono); font-size:.72rem; color:var(--paper-500);}
+  .stat-split span{display:inline-flex; align-items:center; gap:6px;}
+  .stat-split img{width:14px; height:14px; border-radius:50%; object-fit:contain; background:var(--ink-800);}
+  .stat-split b{font-weight:500; color:var(--paper-300);}
+  .figure.flash{animation:figFlash .9s ease-out;}
+  @keyframes figFlash{0%{color:var(--signal-300); text-shadow:0 0 16px rgba(255,74,28,.55);} 100%{text-shadow:0 0 0 transparent;}}
+  #feedBody{height:430px;}
+  .feed-line .side{font-size:.64rem; font-weight:700; letter-spacing:.08em; min-width:38px; text-align:center; padding:2px 0; border-radius:6px; flex:none; align-self:center;}
+  .feed-line .side.buy{color:var(--good-500); background:var(--good-wash);}
+  .feed-line .side.sell{color:var(--critical-500); background:var(--critical-wash);}
+  .feed-line .msg{flex:1; min-width:0; display:flex; align-items:center; gap:6px; flex-wrap:wrap;}
+  .feed-line .feed-chain{width:14px; height:14px; border-radius:50%; object-fit:contain; flex:none; background:var(--ink-800);}
+  .feed-line .amt{margin-left:auto; color:var(--paper-100); font-weight:500; flex:none;}
+
+  .tape{position:relative; margin:0 0 6px; height:40px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--ink-900); overflow:hidden; display:flex; align-items:center;}
+  .tape[hidden]{display:none;}
+  .tape::before,.tape::after{content:""; position:absolute; top:0; bottom:0; width:64px; z-index:2; pointer-events:none;}
+  .tape::before{left:0; background:linear-gradient(90deg, var(--ink-900), transparent);}
+  .tape::after{right:0; background:linear-gradient(270deg, var(--ink-900), transparent);}
+  .tape-track{display:inline-flex; white-space:nowrap; will-change:transform; animation:tapeRun var(--tape-dur,60s) linear infinite;}
+  .tape:hover .tape-track{animation-play-state:paused;}
+  @keyframes tapeRun{to{transform:translateX(-50%);}}
+  .tp{display:inline-flex; align-items:center; gap:8px; padding:0 22px; font-family:var(--font-mono); font-size:.78rem; color:var(--paper-500); border-right:1px solid var(--line);}
+  .tp img{width:15px; height:15px; border-radius:50%; object-fit:contain; background:var(--ink-800);}
+  .tp b{color:var(--paper-100); font-weight:600;}
+  .tp .b{color:var(--good-500);} .tp .s{color:var(--critical-500);} .tp .n{color:var(--signal-300);}
+
+  .newwrap{margin:30px 0 40px;}
+  .newwrap .section-head{margin-bottom:12px;}
+  .live-led{display:inline-block; width:8px; height:8px; margin-right:10px; border-radius:50%; background:var(--signal-500); vertical-align:middle; animation:ledPulse 2s infinite;}
+  @keyframes ledPulse{0%{box-shadow:0 0 0 0 rgba(255,74,28,.55);} 70%,100%{box-shadow:0 0 0 7px rgba(255,74,28,0);}}
+  .newrow{display:flex; gap:12px; overflow-x:auto; padding:4px 2px 14px; scroll-snap-type:x proximity; scrollbar-width:thin; scrollbar-color:var(--signal-500) var(--ink-700);}
+  .newrow .empty{flex:1;}
+  .nl{position:relative; flex:0 0 250px; scroll-snap-align:start; display:flex; flex-direction:column; gap:10px; padding:13px 14px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--ink-900); cursor:pointer; transition:border-color .18s, transform .15s;}
+  .nl:hover{border-color:rgba(255,160,58,.38); transform:translateY(-2px);}
+  .nl::before{content:""; position:absolute; top:-1px; left:16px; right:16px; height:2px; border-radius:0 0 2px 2px; background:var(--acc, var(--signal-500));}
+  .nl[data-chain="robinhood"]{--acc:linear-gradient(90deg, transparent, #c6f24e, transparent);}
+  .nl[data-chain="solana"]{--acc:linear-gradient(90deg, transparent, #a07bff, #4fe3c1, transparent);}
+  .nl.in{animation:nlIn .8s cubic-bezier(.2,.8,.2,1);}
+  @keyframes nlIn{0%{opacity:0; transform:translateX(-26px) scale(.96);} 100%{opacity:1; transform:none;}}
+  .nl-hd{display:flex; align-items:center; gap:10px;}
+  .nl-av{position:relative; width:44px; height:44px; flex:none;}
+  .nl-av .nl-img,.nl-av .nl-ph{width:44px; height:44px; border-radius:50%; object-fit:cover; display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:700; font-size:1rem; color:#0d0b0b; box-shadow:inset 0 0 0 1px rgba(255,255,255,.14);}
+  .nl-av .chain-badge{position:absolute; right:-5px; bottom:-5px; width:18px; height:18px; box-shadow:0 0 0 2px var(--ink-900);}
+  .nl-id{min-width:0;}
+  .nl-nm{font-family:var(--font-display); font-weight:600; font-size:1rem; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .nl-tk{font-family:var(--font-mono); font-size:.72rem; color:var(--paper-500);}
+  .nl-when{margin-left:auto; display:flex; flex-direction:column; align-items:flex-end; gap:3px; font-family:var(--font-mono); font-size:.7rem; color:var(--paper-700); white-space:nowrap;}
+  .nl-new{font-size:.58rem; font-weight:700; letter-spacing:.08em; padding:1px 6px; border-radius:4px; background:var(--signal-500); color:#1a0f04;}
+  .nl-line{display:flex; justify-content:space-between; gap:8px; font-family:var(--font-mono); font-size:.7rem; color:var(--paper-500);}
+  .nl-line span:first-child{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .nl-bar{height:6px; border-radius:999px; background:var(--ink-800); overflow:hidden;}
+  .nl-bar i{display:block; height:100%; border-radius:999px;}
+  .nl-ft{display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:.7rem; color:var(--paper-300);}
+
+  /* progress ring around a token's logo (curve / tax progress) */
+  .tc-logo.has-ring .tc-logo-img,.tc-logo.has-ring .tc-logo-ph{width:74px; height:74px; border-radius:50%;}
+  .tc-logo.has-ring .tc-logo-ph{font-size:1.6rem;}
+  .tc-ring{position:absolute; left:50%; top:50%; width:104px; height:104px; transform:translate(-50%,-50%) rotate(-90deg); pointer-events:none; overflow:visible;}
+  .tc-ring .trk{fill:none; stroke:rgba(255,255,255,.08); stroke-width:5;}
+  .tc-ring .arc{fill:none; stroke-width:5; stroke-linecap:round; filter:drop-shadow(0 0 4px var(--glow, transparent));}
+  .tc-ring-pct{position:absolute; right:10px; top:10px; padding:1px 8px; border-radius:999px; border:1px solid var(--line-strong); background:var(--ink-900); font-family:var(--font-mono); font-size:.7rem; font-weight:600;}
+  .token-card::after{content:""; position:absolute; top:-1px; left:22px; right:22px; height:2px; border-radius:0 0 2px 2px; background:var(--acc, transparent); pointer-events:none;}
+  .token-card[data-chain="robinhood"]{--acc:linear-gradient(90deg, transparent, #c6f24e, transparent);}
+  .token-card[data-chain="solana"]{--acc:linear-gradient(90deg, transparent, #a07bff, #4fe3c1, transparent);}
+  @media (max-width:900px){ .hero{padding-top:36px;} #feedBody{height:340px;} }
+  @media (prefers-reduced-motion:reduce){ .tape-track,.nl.in,.live-led,.figure.flash{animation:none !important;} }
 </style>
 </head>
 <body>
@@ -1118,6 +1196,13 @@
             <button class="btn btn-primary" data-goto="create">Launch a token</button>
             <button class="btn btn-ghost" data-goto-scroll="market">View live launches</button>
           </div>
+      <div class="stat-row">
+        <div class="stat-tile" title="ETH or SOL actually held in bonding curves, plus both sides of every liquidity pool, at current prices. Read from the chains."><div class="eyebrow">Total value locked <span class="stat-net"></span></div><div class="figure num" id="statTvl">—</div><div class="stat-split" id="splitTvl"></div></div>
+        <div class="stat-tile" title="Everything bought and sold in the last 24 hours, in USD (Solana converted from SOL at today's price)."><div class="eyebrow">24h volume <span class="stat-net"></span></div><div class="figure num" id="statVol">—</div><div class="stat-split" id="splitVol"></div></div>
+        <div class="stat-tile" title="Distinct wallets that bought or sold in the last 24 hours (a wallet that trades several tokens counts once)."><div class="eyebrow">Active traders <span class="stat-net"></span></div><div class="figure num" id="statTraders">—</div><div class="stat-split" id="splitTraders"></div></div>
+        <div class="stat-tile"><div class="eyebrow">Tokens graduated <span class="stat-net"></span></div><div class="figure num" id="statGrad">0</div><div class="stat-split" id="splitGrad"></div></div>
+      </div>
+
           <div class="hero-readouts">
             <div class="readout"><div class="val num" id="rdTvl">—</div><div class="lbl">Value locked</div></div>
             <div class="readout"><div class="val num" id="rdLaunches">—</div><div class="lbl">Tokens launched</div></div>
@@ -1134,22 +1219,18 @@
             <div class="console-body" id="feedBody"></div>
           </div>
 
-          <div class="console launch-console">
-            <div class="console-head">
-              <span class="eyebrow">New launches</span>
-              <div class="dots"><span></span><span></span><span></span></div>
-            </div>
-            <div class="console-body" id="launchFeedBody"></div>
-          </div>
         </div>
       </div>
 
-      <div class="stat-row">
-        <div class="stat-tile" title="ETH or SOL actually held in bonding curves, plus both sides of every liquidity pool, at current prices. Read from the chains."><div class="eyebrow">Total value locked <span class="stat-net"></span></div><div class="figure num" id="statTvl">—</div></div>
-        <div class="stat-tile" title="Everything bought and sold in the last 24 hours, in USD (Solana converted from SOL at today's price)."><div class="eyebrow">24h volume <span class="stat-net"></span></div><div class="figure num" id="statVol">—</div></div>
-        <div class="stat-tile" title="Distinct wallets that bought or sold in the last 24 hours (a wallet that trades several tokens counts once)."><div class="eyebrow">Active traders <span class="stat-net"></span></div><div class="figure num" id="statTraders">—</div></div>
-        <div class="stat-tile"><div class="eyebrow">Tokens graduated <span class="stat-net"></span></div><div class="figure num" id="statGrad">0</div></div>
-      </div>
+      <div class="tape" id="tape" hidden aria-hidden="true"><div class="tape-track" id="tapeTrack"></div></div>
+
+      <section class="newwrap" aria-labelledby="newLaunchesTitle">
+        <div class="section-head">
+          <h2 id="newLaunchesTitle"><span class="live-led" aria-hidden="true"></span>New launches</h2>
+          <span class="eyebrow">Newest first · both chains</span>
+        </div>
+        <div class="newrow" id="launchFeedBody" tabindex="0" aria-label="New launches"></div>
+      </section>
 
       <div id="market">
         <div class="section-head">
@@ -7672,6 +7753,14 @@
     try{ list = solLaunches; }catch(e){ return []; }
     return list.filter(l=> l && l.mint).map(l=>({ mint:l.mint, status: (solInfo[l.mint] && solInfo[l.mint].migrated) ? "graduated" : "curve-trading" }));
   }
+  // Sets a headline figure and gives it a short flash when the number actually changed.
+  function setFig(id, text){
+    const el = document.getElementById(id); if(!el) return;
+    if(el.textContent===text) return;
+    const had = el.textContent && el.textContent!=="—";
+    el.textContent = text;
+    if(had){ el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+  }
   function renderStats(){
     const scope = statsScope();
     const rhOk = scope.rh && rhStats && rhStats.mode===appMode;
@@ -7701,10 +7790,21 @@
     document.getElementById("rdLaunches").textContent = fmtInt(rhTokens.length + solTokens.length);
     document.getElementById("rdGrad").textContent = fmtInt(graduated);
 
-    document.getElementById("statTvl").textContent = tvlText;
-    document.getElementById("statVol").textContent = volText;
-    document.getElementById("statTraders").textContent = traders===null ? "—" : fmtInt(traders);
-    document.getElementById("statGrad").textContent = fmtInt(graduated);
+    setFig("statTvl", tvlText);
+    setFig("statVol", volText);
+    setFig("statTraders", traders===null ? "—" : fmtInt(traders));
+    setFig("statGrad", fmtInt(graduated));
+    // Per-chain breakdown under each figure (only chains that are counted and have their numbers).
+    const chainRow = (chain, val)=> `<span><img src="${CHAINS[chain].icon}" alt="${CHAINS[chain].label}" title="${CHAINS[chain].label}"><b class="num">${val}</b></span>`;
+    const split = (id, rhVal, solVal)=>{
+      const el = document.getElementById(id); if(!el) return;
+      const both = scope.rh && rhOk && scope.sol && solOk;
+      el.innerHTML = both ? chainRow("robinhood", rhVal) + chainRow("solana", solVal) : ""; // one chain alone would just repeat the figure above
+    };
+    split("splitTvl", fmtUSD(rhOk ? rhStats.tvlUsd : 0), solOk ? solFmtSol(solStats.tvlSol, 2) : "—");
+    split("splitVol", fmtUSD(rhOk ? rhStats.volume24hUsd : 0), solOk ? solFmtSol(solStats.volume24hSol, 2) : "—");
+    split("splitTraders", fmtInt(rhOk ? (rhStats.traders24h||0) : 0), fmtInt(solOk ? (solStats.traders24h||0) : 0));
+    split("splitGrad", fmtInt(rhTokens.filter(t=>t.status==="graduated").length), fmtInt(solTokens.filter(x=>x.status==="graduated").length));
     document.querySelectorAll(".stat-net").forEach(el=>{ el.textContent = "· " + scope.label; });
   }
 
@@ -7856,6 +7956,32 @@
     const c = CHAINS[chain] || CHAINS.robinhood;
     return `<img class="chain-badge" data-chain="${chain in CHAINS ? chain : "robinhood"}" src="${c.icon}" alt="${c.label}" title="${c.label}" width="24" height="24">`;
   }
+  // ---- progress ring around the logo: cold (blue) at the start, hot (ember) near graduation; green stays reserved for "up" ----
+  const RING_STOPS = [[0,[76,155,240]],[.55,[255,194,122]],[1,[255,74,28]]];
+  function ringColor(p){
+    for(let i=1;i<RING_STOPS.length;i++){
+      if(p<=RING_STOPS[i][0]){
+        const [a,ca]=RING_STOPS[i-1], [b,cb]=RING_STOPS[i], k=(p-a)/(b-a);
+        return "rgb("+ca.map((v,j)=>Math.round(v+(cb[j]-v)*k)).join(",")+")";
+      }
+    }
+    return "rgb(255,74,28)";
+  }
+  // The percentage the ring shows: curve progress while a Quick Launch token is on its curve, then full; the $50K tax
+  // climb for a taxed token; full once graduated. null (no ring) when there is no progress to show.
+  function ringPctForToken(t){
+    if(!t) return null;
+    if(t.mode==="curve" || t.mode==="customCurve") return t.status==="curve-trading" ? curveProgressPct(t) : 100;
+    if(t.status==="taxed") return Math.max(0, Math.min(100, Number(t.taxProgress)||0));
+    if(t.status==="graduated") return 100;
+    return null;
+  }
+  function ringLogoTileHTML(inner, pct, hint){
+    const R = 46, C = 2*Math.PI*R, p = Math.max(0, Math.min(1, pct/100)), col = ringColor(p);
+    return `<div class="tc-logo has-ring">${inner}
+      <svg class="tc-ring" viewBox="0 0 104 104" aria-hidden="true"><circle class="trk" cx="52" cy="52" r="${R}"/><circle class="arc" cx="52" cy="52" r="${R}" stroke="${col}" stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${(C*(1-p)).toFixed(2)}" style="--glow:${col}"/></svg>
+      <span class="tc-ring-pct">${Math.round(pct)}%</span>${hint ? `<span class="tc-logo-hint">${hint}</span>` : ""}</div>`;
+  }
   function tcLogoTileHTML(t, hint){
     const initials = escapeHtml((t.ticker||"??").slice(0,2));
     const catColor = escapeHtml(t.catColor||"var(--signal-500)");
@@ -7863,6 +7989,8 @@
     const inner = safeLogo
       ? `<img class="tc-logo-img" src="${safeLogo}" alt="">`
       : `<div class="tc-logo-ph" style="background:${catColor}">${initials}</div>`;
+    const ringPct = ringPctForToken(t);
+    if(ringPct!==null) return ringLogoTileHTML(inner, ringPct, hint);
     return `<div class="tc-logo">${inner}${hint ? `<span class="tc-logo-hint">${hint}</span>` : ""}</div>`;
   }
   function tokenCardHTML(t){
@@ -7958,14 +8086,15 @@
     const pageCards = cards.slice((gridPage-1)*GRID_PAGE_SIZE, gridPage*GRID_PAGE_SIZE);
     renderPager(pages, cards.length);
     grid.innerHTML = pageCards.map(c=> c.sol
-      ? `<button class="token-card" data-solmint="${escapeHtml(c.sol.mint)}">${solCardHTML(c.sol.launch)}</button>`
-      : `<button class="token-card" data-id="${c.t.id}">${tokenCardHTML(c.t)}</button>`).join("");
+      ? `<button class="token-card" data-chain="solana" data-solmint="${escapeHtml(c.sol.mint)}">${solCardHTML(c.sol.launch)}</button>`
+      : `<button class="token-card" data-chain="${chainOf(c.t)}" data-id="${c.t.id}">${tokenCardHTML(c.t)}</button>`).join("");
     grid.querySelectorAll(".token-card[data-id]").forEach(card=>{
       card.addEventListener("click", ()=> openDetail(card.dataset.id) );
     });
     grid.querySelectorAll(".token-card[data-solmint]").forEach(card=>{
       card.addEventListener("click", ()=> openSolanaDetail(card.dataset.solmint) );
     });
+    try{ updateLaunchTiles(); }catch(e){ /* strip not drawn yet */ }
   }
   /* ---------------- page controls ---------------- */
   // Rebuilt only when the page or the page count changes, so a half-typed "go to page" number survives the
@@ -10672,6 +10801,8 @@
     const inner = img
       ? `<img class="tc-logo-img" src="${img}" alt="">`
       : `<div class="tc-logo-ph" style="background:#ffa03a">${escapeHtml((l.symbol||"??").slice(0,2))}</div>`;
+    const inf = solInfo[l.mint];
+    if(inf && Number.isFinite(inf.progressPct)) return ringLogoTileHTML(inner, inf.migrated ? 100 : Math.max(0, Math.min(100, inf.progressPct)), hint);
     return `<div class="tc-logo">${inner}${hint ? `<span class="tc-logo-hint">${hint}</span>` : ""}</div>`;
   }
   function solCardHTML(l){
@@ -20134,6 +20265,29 @@
   const MAX_FEED_ITEMS = 40; // newest on top; the window scrolls
   let seenActivityKeys = new Set();
 
+  // ---- ticker tape: the latest trades and launches, looping; fed by the same data as the live trades panel ----
+  const tapeItems = [];            // newest last; each is an HTML string
+  function tapeRender(){
+    const tape = document.getElementById("tape"), track = document.getElementById("tapeTrack");
+    if(!tape || !track) return;
+    if(!tapeItems.length){ tape.hidden = true; return; }
+    tape.hidden = false;
+    const html = tapeItems.join("");
+    track.innerHTML = html + html; // doubled so the -50% loop is seamless
+    requestAnimationFrame(()=>{ track.style.setProperty("--tape-dur", Math.max(25, (track.scrollWidth/2)/45)+"s"); });
+  }
+  function tapeAddTrade(entry){
+    const sol = entry.chain==="solana", chain = sol ? "solana" : "robinhood";
+    const usd = Number(entry.usdValue);
+    tapeItems.push(`<span class="tp"><img src="${CHAINS[chain].icon}" alt=""><span class="${entry.side==="buy" ? "b" : "s"}">${entry.side==="buy" ? "▲ BUY" : "▼ SELL"}</span><b>$${escapeHtml(entry.symbol||"TOKEN")}</b>${Number.isFinite(usd)&&usd>0 ? `<span class="num">${fmtUSD(usd)}</span>` : ""}</span>`);
+    while(tapeItems.length>24) tapeItems.shift();
+  }
+  function tapeAddLaunch(t){
+    const chain = chainOf(t);
+    tapeItems.push(`<span class="tp"><img src="${CHAINS[chain].icon}" alt=""><span class="n">◆ NEW LAUNCH</span><b>$${escapeHtml(t.ticker||"TOKEN")}</b><span>${escapeHtml(t.name||"")}</span></span>`);
+    while(tapeItems.length>24) tapeItems.shift();
+    tapeRender();
+  }
   function activityKey(entry){ return `${entry.txHash}:${entry.logIndex}`; }
 
   function activityLineHTML(entry){
@@ -20155,7 +20309,10 @@
     const isCurveTrade = isSol || (!!knownToken && (knownToken.mode==="curve" || knownToken.mode==="customCurve"));
     const div = document.createElement("div");
     div.className = "feed-line";
-    div.innerHTML = `<span class="t mono">${time}</span><span class="dot" style="background:${dotColor}"></span><span class="msg">${isCurveTrade ? `<span class="feed-curve-tag">⚡</span> ` : ""}<span class="feed-who" data-wallet="${escapeHtml(entry.wallet || "")}">${feedWhoHTML(entry.wallet)}</span> ${verb} <span class="tk">$${escapeHtml(symbol)}</span>${isSol ? ` <span class="feed-chain-tag">Solana</span>` : ""}</span>`;
+    const chainKey = isSol ? "solana" : "robinhood";
+    const usdNum = Number(entry.usdValue);
+    const amt = Number.isFinite(usdNum) && usdNum>0 ? `<span class="amt num">${fmtUSD(usdNum)}</span>` : "";
+    div.innerHTML = `<span class="t mono">${time}</span><span class="side ${entry.side==="buy" ? "buy" : "sell"}">${entry.side==="buy" ? "BUY" : "SELL"}</span><span class="msg"><img class="feed-chain" src="${CHAINS[chainKey].icon}" alt="${CHAINS[chainKey].label}" title="${CHAINS[chainKey].label}">${isCurveTrade ? `<span class="feed-curve-tag">⚡</span>` : ""}<span class="tk">$${escapeHtml(symbol)}</span><span class="feed-who" data-wallet="${escapeHtml(entry.wallet || "")}">${feedWhoHTML(entry.wallet)}</span></span>${amt}`;
     if(isSol && entry.tokenAddress){
       div.classList.add("feed-sol-link");
       div.dataset.solmint = entry.tokenAddress;
@@ -20204,24 +20361,79 @@
     try{ openSolanaDetail(el.dataset.solmint); }catch(e){ /* Solana UI not ready */ }
   });
 
-  function launchAnnouncementHTML(t){
-    const when = new Date(t.createdAtMs || Date.now());
-    const clock = when.toLocaleTimeString("en-US", {hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
-    // Clock time alone is ambiguous across midnight, so a launch from an earlier day carries its date.
-    const time = (when.toDateString() === new Date().toDateString()) ? clock : `${when.getMonth()+1}/${when.getDate()} ${clock}`;
+  function agoText(ms){
+    const sec = Math.max(1, Math.floor((Date.now()-ms)/1000));
+    return sec<60 ? sec+"s ago" : sec<3600 ? Math.floor(sec/60)+"m ago" : sec<86400 ? Math.floor(sec/3600)+"h ago" : Math.floor(sec/86400)+"d ago";
+  }
+  // Progress shown on a "New launches" tile: a Solana pool's curve progress, or the same figure the card ring uses.
+  function launchTilePct(t){
+    if(t.chain==="solana"){
+      const inf = (()=>{ try{ return solInfo[t.mint]; }catch(e){ return null; } })();
+      return (inf && Number.isFinite(inf.progressPct)) ? (inf.migrated ? 100 : Math.max(0, Math.min(100, inf.progressPct))) : null;
+    }
+    return ringPctForToken(t);
+  }
+  function setTileProgress(el, pct, kind){
+    const bar = el.querySelector(".nl-bar i"), lab = el.querySelector(".nl-ft span:first-child"), val = el.querySelector(".nl-ft span:last-child");
+    if(!bar) return;
+    bar.style.width = (pct===null ? 0 : pct)+"%";
+    bar.style.background = pct===null ? "transparent" : ringColor(pct/100);
+    if(lab) lab.textContent = kind==="Quick Launch" ? "Curve progress" : "Progress";
+    if(val) val.textContent = pct===null ? "—" : Math.round(pct)+"%";
+  }
+  // Called whenever the grid redraws, so tiles pick up curve progress that arrives after they were first drawn.
+  function updateLaunchTiles(){
+    document.querySelectorAll("#launchFeedBody .nl").forEach(el=>{
+      let t = null;
+      if(el.dataset.solmint) t = { chain:"solana", mint:el.dataset.solmint };
+      else if(el.dataset.tid) t = tokens.find(x=>String(x.id)===el.dataset.tid) || null;
+      if(t) setTileProgress(el, launchTilePct(t), el.dataset.kind);
+    });
+  }
+  function launchAnnouncementHTML(t, fresh){
     const isSol = t.chain === "solana";
-    const badge = isSol ? "⚡ Quick Launch · Solana" : (t.mode==="curve"||t.mode==="customCurve") ? "⚡ Quick Launch" : "New launch";
+    const chain = isSol ? "solana" : chainOf(t);
+    const created = t.createdAtMs || Date.now();
+    let logo = null;
+    if(isSol){
+      const l = (()=>{ try{ return solLaunches.find(x=>x && x.mint===t.mint); }catch(e){ return null; } })();
+      logo = l ? solSafeImg(l.image) : null;
+    }else{
+      logo = safeImageSrc(t.logo);
+    }
+    const pct = launchTilePct(t);
+    const initials = escapeHtml((t.ticker||"??").slice(0,2));
+    const av = logo ? `<img class="nl-img" src="${logo}" alt="">` : `<div class="nl-ph" style="background:${escapeHtml(t.catColor||"var(--signal-500)")}">${initials}</div>`;
+    const by = profileNameOf(t.creatorWallet);
+    const kind = (isSol || t.mode==="curve" || t.mode==="customCurve") ? "Quick Launch" : "New launch";
+    const isNew = fresh || (Date.now()-created) < 10*60*1000;
     const div = document.createElement("div");
-    div.className = "feed-line feed-announce";
-    div.innerHTML = `<span class="t mono">${time}</span><span class="feed-announce-badge">${badge}</span><span class="msg">🚀 <span class="tk">$${escapeHtml(t.ticker)}</span> just launched on IgnitionX — ${escapeHtml(t.name)}${profileNameOf(t.creatorWallet) ? ` · by ${escapeHtml(profileNameOf(t.creatorWallet))}` : ""}</span>`;
+    div.className = "nl" + (fresh ? " in" : "");
+    div.dataset.chain = chain;
+    div.dataset.created = String(created);
+    div.innerHTML = `<div class="nl-hd"><div class="nl-av">${av}${chainBadgeHTML(chain)}</div>
+        <div class="nl-id"><div class="nl-nm">${escapeHtml(t.name)}</div><div class="nl-tk">$${escapeHtml(t.ticker)}</div></div>
+        <div class="nl-when"><span class="nl-age">${agoText(created)}</span>${isNew ? `<span class="nl-new">NEW</span>` : ""}</div></div>
+      <div class="nl-line"><span>${by ? "by "+escapeHtml(by) : kind}</span><span>${CHAINS[chain].label}</span></div>
+      <div class="nl-bar"><i></i></div><div class="nl-ft"><span></span><span class="num"></span></div>`;
+    div.dataset.kind = kind;
+    setTileProgress(div, pct, kind);
     if(isSol && t.mint){
       div.classList.add("feed-sol-link");
       div.dataset.solmint = t.mint;
-      div.style.cursor = "pointer";
       div.title = "Open this Solana token";
+    }else if(t.id){
+      div.dataset.tid = String(t.id);
+      div.addEventListener("click", ()=>{ try{ openDetail(t.id); }catch(e){} });
     }
     return div;
   }
+  // keep the "x ago" labels on the tiles current
+  setInterval(()=>{
+    document.querySelectorAll("#launchFeedBody .nl").forEach(el=>{
+      const a = el.querySelector(".nl-age"); if(a) a.textContent = agoText(Number(el.dataset.created));
+    });
+  }, 30000);
 
   // Rebuilds the "New launches" window from scratch out of whatever's
   // already in the global `tokens` array for the current network — used to
@@ -20260,7 +20472,8 @@
     const body = document.getElementById("launchFeedBody");
     if(!body) return;
     if(body.querySelector(".empty")) body.innerHTML = "";
-    body.insertBefore(launchAnnouncementHTML(t), body.firstChild);
+    body.insertBefore(launchAnnouncementHTML(t, true), body.firstChild);
+    tapeAddLaunch(t);
     while(body.children.length > MAX_LAUNCH_FEED_ITEMS) body.removeChild(body.lastChild);
     body.scrollTop = 0;
   }
@@ -20369,7 +20582,9 @@
     for(const entry of fresh){
       seenActivityKeys.add(activityKey(entry));
       body.insertBefore(activityLineHTML(entry), body.firstChild);
+      tapeAddTrade(entry);
     }
+    tapeRender();
     while(body.children.length>MAX_FEED_ITEMS) body.removeChild(body.lastChild);
     if(keepScroll) body.scrollTop += (body.scrollHeight - keepScroll);
   }
