@@ -1078,6 +1078,45 @@
   .token-card[data-chain="solana"]{--acc:linear-gradient(90deg, transparent, #a07bff, #4fe3c1, transparent);}
   @media (max-width:900px){ .hero{padding-top:36px;} #feedBody{height:340px;} }
   @media (prefers-reduced-motion:reduce){ .tape-track,.nl.in,.live-led,.figure.flash{animation:none !important;} }
+
+  /* ---- launch tile (matches the v3 mockup) ---- */
+  .token-card .tl-cap{display:flex; align-items:center; gap:8px;}
+  .tl-chain{display:inline-flex; align-items:center; gap:8px; padding:3px 11px 3px 4px; border:1px solid var(--line-strong); border-radius:999px; font-family:var(--font-mono); font-size:.72rem; font-weight:600; letter-spacing:.03em; color:var(--paper-100);}
+  .tl-chain img{width:20px; height:20px; border-radius:50%; object-fit:contain; background:var(--ink-800);}
+  .token-card[data-chain="robinhood"] .tl-chain{border-color:rgba(198,242,78,.35);}
+  .token-card[data-chain="solana"] .tl-chain{border-color:rgba(160,123,255,.4);}
+  .tl-age{margin-left:auto; font-family:var(--font-mono); font-size:.74rem; color:var(--paper-700);}
+  .token-card .tl-top{display:flex; align-items:center; gap:18px; margin-top:16px;}
+  .tl-ring{position:relative; width:112px; height:112px; flex:none;}
+  .tl-ring svg{width:100%; height:100%; transform:rotate(-90deg); overflow:visible;}
+  .tl-ring .trk{fill:none; stroke:rgba(255,255,255,.07); stroke-width:7;}
+  .tl-ring .arc{fill:none; stroke-width:7; stroke-linecap:round; filter:drop-shadow(0 0 5px var(--glow, transparent));}
+  .tl-av{position:absolute; inset:15px; border-radius:50%; overflow:hidden; box-shadow:inset 0 0 0 1px rgba(255,255,255,.14), 0 0 22px rgba(255,74,28,.14);}
+  .tl-ring.no-ring .tl-av{inset:12px;}
+  .tl-av img{width:100%; height:100%; object-fit:cover; display:block; background:var(--ink-800);}
+  .tl-ph{width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:700; font-size:1.5rem; color:#0d0b0b;}
+  .tl-pct{position:absolute; left:50%; bottom:-9px; transform:translateX(-50%); padding:1px 9px; background:var(--ink-900); border:1px solid var(--line-strong); border-radius:999px; font-size:.72rem; font-weight:600;}
+  .tl-id{min-width:0; flex:1;}
+  .tl-nm{font-family:var(--font-display); font-weight:600; font-size:1.2rem; line-height:1.2; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .tl-tk{font-family:var(--font-mono); font-size:.78rem; color:var(--paper-500); margin-top:2px;}
+  .tl-meta{display:grid; grid-template-columns:auto auto; justify-content:start; gap:8px 20px; margin-top:12px; font-family:var(--font-mono); font-size:.7rem; color:var(--paper-700);}
+  .tl-meta span{white-space:nowrap; text-transform:none;}
+  .tl-meta b{display:block; color:var(--paper-100); font-weight:500; font-size:.88rem; margin-top:1px;}
+  .tl-chart{display:block; width:100%; height:auto; aspect-ratio:280/76; overflow:visible; margin-top:14px;}
+  .tl-chart.tl-spark{aspect-ratio:280/44;}
+  .tl-chart text{font-family:var(--font-mono); font-size:9px; fill:var(--paper-700);}
+  .tl-tags{display:flex; flex-wrap:wrap; gap:6px; margin-top:14px; min-height:0;}
+  .tl-tags:empty{display:none;}
+  .tl-tag{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--line); border-radius:6px; padding:2px 7px; font-family:var(--font-mono); font-size:.68rem; color:var(--paper-300);}
+  .tl-tag i{width:6px; height:6px; border-radius:50%; display:block;}
+  .tl-foot{margin-top:auto; padding-top:14px; border-top:1px solid var(--line); display:flex; align-items:center; gap:10px; font-family:var(--font-mono); font-size:.74rem; font-weight:500; color:var(--paper-300);}
+  .token-card > .tl-foot{margin-top:16px;}
+  .tl-foot .tl-go{margin-left:auto; padding:7px 14px; font-size:.8rem; pointer-events:none;}
+  .tl-led{width:8px; height:8px; border-radius:50%; flex:none; background:#4c9bf0; animation:tlPulse 2s infinite; --c:76,155,240;}
+  .tl-led.heat{background:var(--cyan-500); --c:255,160,58;}
+  .tl-led.good{background:var(--good-500); --c:52,221,156;}
+  @keyframes tlPulse{0%{box-shadow:0 0 0 0 rgba(var(--c),.6);} 70%,100%{box-shadow:0 0 0 7px rgba(var(--c),0);}}
+  @media (prefers-reduced-motion:reduce){ .tl-led{animation:none;} }
 </style>
 </head>
 <body>
@@ -7993,50 +8032,92 @@
     if(ringPct!==null) return ringLogoTileHTML(inner, ringPct, hint);
     return `<div class="tc-logo">${inner}${hint ? `<span class="tc-logo-hint">${hint}</span>` : ""}</div>`;
   }
-  function tokenCardHTML(t){
-    const isCreatorHeld = t.status==="creator-held";
-    const isPoolDetected = t.status==="pool-detected";
-    const isLivePool = t.status==="live-pool";
-    const isCurveTrading = t.status==="curve-trading";
-    // Quick Launch tokens DO have a real, live market (the curve itself),
-    // and relayer.js's pollTokenPrices now samples it directly off
-    // curveState() (see that function's own curve branch) the same way it
-    // samples a real pool for every other token — so a curve token actually
-    // viewable on-chain (real deploy, correct network, known factory — same
-    // gating as openDetail's own isCurveToken) gets the real price/sparkline
-    // here too. Only a still-simulated curve token (never deployed, or
-    // viewed on the wrong network — nothing for refreshLiveTokenPrices to
-    // fetch) falls back to the plain placeholder.
-    const isRealCurveToken = isCurveTrading && t.onChain && t.networkMode===appMode && t.tokenAddress && t.factoryAddress;
-    const noSimulatedMarket = isCreatorHeld || isPoolDetected || isLivePool || (isCurveTrading && !isRealCurveToken);
-    const emptyText = isPoolDetected
-      ? "A pool was found for this token, added independently — but its configured tax stays inactive until the creator activates it. Price isn't tracked here."
-      : isLivePool
-        ? (t.customTax
-          ? "Liquidity was detected on-chain for this token — added independently, outside IgnitionX. Its creator's configured tax is active, but there's no platform tax or LP lock, and price isn't tracked here."
-          : "Liquidity was detected on-chain for this token — added independently, outside IgnitionX. No platform tax, no LP lock, and price isn't tracked here.")
-        : isCurveTrading
-          ? "Trading live on the bonding curve on its own network — switch networks (or check back once it's really deployed) to see its live price here."
-          : "Deployed and verified — 100% of supply is in the creator's wallet. No pool exists here.";
+  // ---- the launch tile (shared by EVM and Solana cards): chain pill + age, big progress ring around the logo,
+  // name and key numbers, a mini bonding-curve chart, tags, status + Trade. ----
+  let _tileSeq = 0;
+  // The curve shape is illustrative (a constant-product style rise); the dot is the real progress to graduation.
+  function tileCurveChartHTML(pct, rightLabel){
+    const W=280, H=76, padB=16, padT=10, k=3.2;
+    const p=Math.max(0,Math.min(1,pct/100)), col=ringColor(p);
+    const f=x=>Math.pow(1+k*x,2), top=f(1);
+    const X=x=>x*W, Y=x=>H-padB-((f(x)-1)/(top-1))*(H-padB-padT);
+    const pts=[], cur=[];
+    for(let i=0;i<=48;i++){ const x=i/48; pts.push([X(x),Y(x)]); if(x<=p+1e-9) cur.push([X(x),Y(x)]); }
+    cur.push([X(p),Y(p)]);
+    const d=a=>a.map((q,i)=>(i?"L":"M")+q[0].toFixed(1)+" "+q[1].toFixed(1)).join(" ");
+    const id="tg"+(++_tileSeq), px=X(p).toFixed(1), py=Y(p).toFixed(1);
+    return `<svg class="tl-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Bonding curve: ${Math.round(pct)}% of the way to graduation"><title>Bonding curve (illustrative shape). The dot is where this launch sits now.</title>
+      <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${col}" stop-opacity=".34"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></linearGradient></defs>
+      <line x1="0" y1="${H-padB}" x2="${W}" y2="${H-padB}" stroke="rgba(255,255,255,.1)"/>
+      <path d="${d(pts)}" fill="none" stroke="rgba(255,255,255,.2)" stroke-width="1.4" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
+      <path d="${d(cur)} L${px} ${H-padB} L0 ${H-padB}Z" fill="url(#${id})"/>
+      <path d="${d(cur)}" fill="none" stroke="${col}" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+      <line x1="${px}" y1="${py}" x2="${px}" y2="${H-padB}" stroke="${col}" stroke-opacity=".5" stroke-dasharray="2 3"/>
+      <circle cx="${px}" cy="${py}" r="8" fill="${col}" opacity=".18"/><circle cx="${px}" cy="${py}" r="4" fill="${col}" stroke="#100d0d" stroke-width="1.5"/>
+      <text x="0" y="${H-3}">launch</text><text x="${W}" y="${H-3}" text-anchor="end">${escapeHtml(rightLabel||"graduation")}</text></svg>`;
+  }
+  function tileSparkHTML(vals, col){
+    const W=280, H=44, a=vals.filter(v=>Number.isFinite(v));
+    if(a.length<3) return "";
+    const min=Math.min(...a), max=Math.max(...a), span=(max-min)||1;
+    const pts=a.map((v,i)=>[i/(a.length-1)*W, H-4-((v-min)/span)*(H-10)]);
+    const d=pts.map((q,i)=>(i?"L":"M")+q[0].toFixed(1)+" "+q[1].toFixed(1)).join(" ");
+    const id="tg"+(++_tileSeq);
+    return `<svg class="tl-chart tl-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${col}" stop-opacity=".28"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><path d="${d} L${W} ${H} L0 ${H}Z" fill="url(#${id})"/><path d="${d}" fill="none" stroke="${col}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
+  }
+  function tileTagHTML(label, dot){ return `<span class="tl-tag">${dot ? `<i style="background:${dot}"></i>` : ""}${label}</span>`; }
+  function tileTaxTagsHTML(t){
+    const keys = [["reflectionBps","Reflect","var(--cyan-500)"],["burnBps","Burn","var(--signal-500)"],["liquidityBps","Liquidity","var(--good-500)"],["marketingBps","Marketing","#b6a4ff"]];
+    return keys.filter(([k])=> Math.max(Number(t.buyFees&&t.buyFees[k])||0, Number(t.sellFees&&t.sellFees[k])||0) > 0)
+      .map(([,label,col])=>tileTagHTML(label,col)).join("");
+  }
+  function tileHTML(m){
+    const chain = m.chain, ch = CHAINS[chain] || CHAINS.robinhood;
+    const ring = m.pct===null ? "" : (()=>{
+      const R=46, C=2*Math.PI*R, p=Math.max(0,Math.min(1,m.pct/100)), col=ringColor(p);
+      return `<svg viewBox="0 0 112 112" aria-hidden="true"><circle class="trk" cx="56" cy="56" r="${R}"/><circle class="arc" cx="56" cy="56" r="${R}" stroke="${col}" stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${(C*(1-p)).toFixed(2)}" style="--glow:${col}"/></svg>`;
+    })();
     return `
-      ${tcLogoTileHTML(t, noSimulatedMarket ? "" : "View chart ›")}
-      <div class="tc-head">
-        ${chainBadgeHTML(chainOf(t))}
-        <div><div class="tc-name">${escapeHtml(t.name)}</div><div class="tc-ticker">$${escapeHtml(t.ticker)} ${protoBadgeHTML(t, "margin-left:4px;")}${profileNameOf(t.creatorWallet) ? `<span class="tc-by" title="Created by ${escapeHtml(profileNameOf(t.creatorWallet))}">by ${escapeHtml(profileNameOf(t.creatorWallet))}</span>` : ""}</div></div>
-        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px; margin-left:auto;">
-          ${(!noSimulatedMarket && t.mcap>0) ? `<div class="tc-mcap"><span class="l">Mcap</span>${fmtUSD(t.mcap)}</div>` : ""}
-          ${(t.mode==="curve"||t.mode==="customCurve") ? `<span class="tc-quicklaunch-badge">⚡ Quick Launch</span>` : ""}
-          <div style="display:flex; gap:6px;">${statusBadgeHTML(t.mode, t.status)}</div>
-        </div>
+      <div class="tl-cap"><span class="tl-chain"><img src="${ch.icon}" alt="" width="20" height="20">${ch.label}</span>${m.createdAtMs ? `<span class="tl-age">${agoText(m.createdAtMs)}</span>` : ""}</div>
+      <div class="tl-top">
+        <div class="tl-ring${m.pct===null ? " no-ring" : ""}">${ring}<div class="tl-av">${m.logoInner}</div>${m.pct!==null ? `<div class="tl-pct num">${Math.round(m.pct)}%</div>` : ""}</div>
+        <div class="tl-id"><div class="tl-nm">${escapeHtml(m.name)}</div><div class="tl-tk">$${escapeHtml(m.ticker)}${m.tickerExtra||""}</div>
+          <div class="tl-meta">${m.meta.map(x=>`<span>${x.l}<b class="num"${x.style ? ` style="${x.style}"` : ""}>${x.v}</b></span>`).join("")}</div></div>
       </div>
-      <p class="tc-desc">${escapeHtml(t.desc)}</p>
-      ${noSimulatedMarket
-        ? `<div class="empty" style="padding:20px 14px; margin-bottom:14px; font-size:.78rem;">${emptyText}</div>`
-        : `<div class="tc-metrics">
-        <div class="m"><div class="v num">${fmtUSD(t.price)}</div><div class="l">Price</div></div>
-        <div class="m"><div class="v num" style="color:${t.change24h>=0?'var(--good-500)':'var(--critical-500)'}">${fmtPct(t.change24h)}</div><div class="l">${changeLabelFor(t)}</div></div>
-      </div>`}
-      ${tokenBottomHTML(t)}`;
+      ${m.chart||""}
+      <div class="tl-tags">${m.tags||""}</div>
+      <div class="tl-foot"><span class="tl-led ${m.led||"cool"}"></span><span class="tl-st">${m.status}</span><span class="btn btn-ghost btn-sm tl-go">Trade</span></div>`;
+  }
+  function tokenCardHTML(t){
+    const isCurveMode = t.mode==="curve" || t.mode==="customCurve";
+    const onCurve = t.status==="curve-trading";
+    const noMarket = t.status==="creator-held" || t.status==="pool-detected" || t.status==="live-pool";
+    const pct = ringPctForToken(t);
+    const safeLogo = safeImageSrc(t.logo);
+    const logoInner = safeLogo ? `<img src="${safeLogo}" alt="">` : `<div class="tl-ph" style="background:${escapeHtml(t.catColor||"var(--signal-500)")}">${escapeHtml((t.ticker||"??").slice(0,2))}</div>`;
+    const by = profileNameOf(t.creatorWallet);
+    const tickerExtra = ` ${protoBadgeHTML(t, "margin-left:4px;")}${by ? `<span class="tc-by" title="Created by ${escapeHtml(by)}">by ${escapeHtml(by)}</span>` : ""}`;
+    let meta, chart = "", status, led = "cool";
+    if(onCurve){
+      const tgt = weiToEtherString(BigInt(t.curvePoolSeedTargetWeiVal || CURVE_POOL_SEED_TARGET_WEI_DEFAULT.toString()), 2);
+      const raised = weiToEtherString(BigInt(t.curveRealEthReserveWei || "0"), 2);
+      meta = [{l:"Raised, ETH", v:`${raised} / ${tgt}`},{l:"Mkt cap", v:t.mcap>0 ? fmtUSD(t.mcap) : "—"}];
+      chart = tileCurveChartHTML(pct===null ? 0 : pct, `graduates at ${tgt} ETH`);
+      status = pct>=85 ? "Graduating soon" : "On the curve"; led = pct>=85 ? "heat" : "cool";
+    }else if(noMarket){
+      meta = [{l:"Price", v:"—"},{l:"Mkt cap", v:"—"}];
+      status = t.status==="creator-held" ? "No pool on IgnitionX" : t.status==="pool-detected" ? "Pool found · tax not active" : "Independent pool · no LP lock";
+      led = "heat";
+    }else{
+      meta = [{l:"Price", v:fmtUSD(t.price)},{l:`<span title="${escapeHtml(changeLabelFor(t))}">Change</span>`, v:fmtPct(t.change24h), style:`color:${t.change24h>=0?"var(--good-500)":"var(--critical-500)"}`}];
+      if(t.mcap>0) meta.push({l:"Mkt cap", v:fmtUSD(t.mcap)});
+      chart = tileSparkHTML(t.hist||[], t.change24h>=0 ? "#34dd9c" : "#f0405f");
+      status = t.status==="graduated" ? "Graduated · tax disabled" : (isCurveMode ? "Live on DEX · 1.00% tax to $50K" : "1.00% tax · to $50K");
+      led = t.status==="graduated" ? "heat" : "good";
+    }
+    const payout = t.customTax ? (t.payoutMode===1 ? tileTagHTML("Pays ETH") : t.payoutMode===2 ? tileTagHTML("Pays token") : "") : "";
+    const tags = (isCurveMode ? tileTagHTML("⚡ Quick Launch") : "") + (t.customTax ? tileTaxTagsHTML(t) + payout : "");
+    return tileHTML({ chain:chainOf(t), createdAtMs:t.createdAtMs, pct, logoInner, name:t.name, ticker:t.ticker, tickerExtra, meta, chart, tags, status, led });
   }
   function renderGrid(){
     const grid = document.getElementById("tokenGrid");
@@ -10808,26 +10889,14 @@
   function solCardHTML(l){
     const info = solInfo[l.mint];
     const grad = !!(info && info.migrated);
-    const pct = info ? Math.max(0, Math.min(100, info.progressPct)) : 0;
-    return `
-      ${solLogoTileHTML(l, "View chart ›")}
-      <div class="tc-head">
-        ${chainBadgeHTML(chainOf(l))}
-        <div><div class="tc-name">${escapeHtml(l.name)}</div><div class="tc-ticker">$${escapeHtml(l.symbol)}</div></div>
-        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px; margin-left:auto;">
-          <span class="tc-quicklaunch-badge">⚡ Quick Launch</span>
-          <div style="display:flex; gap:6px;">${statusBadgeHTML("curve", grad ? "graduated" : "curve-trading")}</div>
-        </div>
-      </div>
-      <div class="tc-metrics">
-        <div class="m"><div class="v">${info ? solFmtPrice(info.priceSol) : "—"}</div><div class="l">Price</div></div>
-        <div class="m"><div class="v">${info ? solFmtMcap(info.marketCapSol) : "—"}</div><div class="l">Market cap</div></div>
-      </div>
-      <div class="bond-gauge" style="margin:0;">
-        <div class="bond-labels"><span>Curve progress</span><span>${info ? pct.toFixed(1)+"%" : "—"}</span></div>
-        <div class="bond-track"><div class="bond-fill" style="width:${pct}%"></div><div class="bond-ticks"></div></div>
-      </div>
-      <div class="tc-quicklaunch-badge${solIsMain()?" live":""}" style="align-self:flex-start; margin-top:12px;">Solana · ${solNetWord()}</div>`;
+    const pct = (info && Number.isFinite(info.progressPct)) ? (grad ? 100 : Math.max(0, Math.min(100, info.progressPct))) : null;
+    const img = solSafeImg(l.image);
+    const logoInner = img ? `<img src="${img}" alt="">` : `<div class="tl-ph" style="background:#ffa03a">${escapeHtml((l.symbol||"??").slice(0,2))}</div>`;
+    const meta = [{l:"Price", v:info ? solFmtPrice(info.priceSol) : "—"},{l:"Mkt cap", v:info ? solFmtMcap(info.marketCapSol) : "—"}];
+    const chart = (!grad && pct!==null) ? tileCurveChartHTML(pct, "graduation") : "";
+    const status = grad ? "Graduated · pool live" : (pct!==null && pct>=85 ? "Graduating soon" : "On the curve");
+    const tags = tileTagHTML("⚡ Quick Launch") + tileTagHTML(`Solana · ${solNetWord()}`);
+    return tileHTML({ chain:"solana", createdAtMs:(typeof l.createdAt==="number" ? l.createdAt : 0), pct, logoInner, name:l.name, ticker:l.symbol, tickerExtra:"", meta, chart, tags, status, led: grad || (pct!==null && pct>=85) ? "heat" : "cool" });
   }
   // The Solana cards live in the main "Live launches" grid now (see renderGrid / solGridAll).
   function renderSolanaGrid(){ try{ renderGrid(); }catch(e){ /* page still initialising */ } }
