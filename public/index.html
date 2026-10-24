@@ -1117,6 +1117,67 @@
   .tl-led.good{background:var(--good-500); --c:52,221,156;}
   @keyframes tlPulse{0%{box-shadow:0 0 0 0 rgba(var(--c),.6);} 70%,100%{box-shadow:0 0 0 7px rgba(var(--c),0);}}
   @media (prefers-reduced-motion:reduce){ .tl-led{animation:none;} }
+
+  /* ---- Mission-control token page ---- */
+  .dh{display:flex; align-items:center; gap:24px; flex-wrap:wrap; margin-bottom:6px;}
+  .dh-ring.tl-ring{width:112px; height:112px; margin-bottom:8px;}
+  .dh-ring .tl-ph{width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:700; font-size:1.8rem; color:#0d0b0b;}
+  .dh-id{flex:1; min-width:210px;}
+  .dh-pills{display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:10px;}
+  .dh-id h2{font-family:var(--font-display); font-size:clamp(1.7rem,3.6vw,2.3rem); line-height:1.04; margin:0; letter-spacing:-.01em;}
+  .dh-id .tc-ticker{margin-top:4px; font-size:.9rem;}
+  .dh-pills .tc-status{margin-left:0;}
+  .dh-chain[data-chain="robinhood"]{border-color:rgba(198,242,78,.35);}
+  .dh-chain[data-chain="solana"]{border-color:rgba(160,123,255,.4);}
+  .mc-readout{display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-top:20px;}
+  .mc-readout .detail-price{font-size:clamp(2rem,4.4vw,2.8rem); margin:0; letter-spacing:-.02em;}
+  .mc-readout #solDPrice{font-size:clamp(1.6rem,3.4vw,2.2rem);}
+  .mc-delta{display:inline-flex; align-items:center; gap:2px; padding:3px 10px; border-radius:999px; font-size:.82rem; border:1px solid var(--line-strong);}
+  .mc-delta span{color:var(--paper-500); font-weight:500; margin-left:4px;}
+  .mc-delta.up{color:var(--good-500); background:var(--good-wash); border-color:rgba(52,221,156,.28);}
+  .mc-delta.down{color:var(--critical-500); background:var(--critical-wash); border-color:rgba(240,64,95,.28);}
+  .stat-mini-row.mc-stats{grid-template-columns:repeat(4,1fr);}
+  .stat-mini-row.mc-stats.mc-3{grid-template-columns:repeat(3,1fr);}
+  .mc-stats .stat-mini{display:flex; flex-direction:column-reverse; justify-content:flex-end; gap:6px; padding:14px 14px 13px;}
+  .mc-stats .stat-mini .l{margin:0;}
+  .mc-stats .stat-mini .v{font-size:1.08rem;}
+  @media (max-width:760px){ .stat-mini-row.mc-stats{grid-template-columns:repeat(2,1fr);} .stat-mini-row.mc-stats.mc-3{grid-template-columns:repeat(3,1fr);} }
+
+  /* ---- tax-flow diagram ---- */
+  .tf-head{display:flex; align-items:flex-start; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-bottom:18px;}
+  .tf-sub{font-size:.82rem; color:var(--paper-500); margin-top:4px;}
+  .tf-toggle{display:inline-flex; border:1px solid var(--line-strong); border-radius:999px; padding:3px; background:var(--ink-850);}
+  .tf-toggle button{font-family:var(--font-mono); font-size:.74rem; font-weight:600; letter-spacing:.04em; text-transform:uppercase; padding:5px 14px; border-radius:999px; border:0; background:transparent; color:var(--paper-500); cursor:pointer;}
+  .tf-toggle button[aria-pressed="true"]{background:var(--paper-100); color:var(--ink-950);}
+  .tf-toggle button:focus-visible{outline:2px solid var(--signal-500); outline-offset:2px;}
+  .tf-grid{display:grid; grid-template-columns:14px minmax(46px,1fr) minmax(0,2.3fr); column-gap:0; align-items:start;}
+  .tf-srcbar{display:flex; flex-direction:column; width:14px; border-radius:4px; overflow:hidden; gap:1px;}
+  .tf-seg{display:block; width:100%; min-height:2px; transition:opacity .15s;}
+  .tf-svg{display:block; overflow:visible;}
+  .tf-band{opacity:.34; transition:opacity .15s;}
+  .tf-band.net{opacity:.2;}
+  .tf-flow{fill:none; stroke:rgba(255,255,255,.75); stroke-width:1.4; stroke-dasharray:2 10; animation:tfFlow 1.4s linear infinite; transition:opacity .15s;}
+  .tf-ghostline{fill:none; stroke-width:1.2; stroke-dasharray:3 5; opacity:.4;}
+  @keyframes tfFlow{to{stroke-dashoffset:-12;}}
+  @media (prefers-reduced-motion:reduce){ .tf-flow{animation:none;} }
+  .tf-rows{display:flex; flex-direction:column;}
+  .tf-row{display:flex; align-items:center; gap:12px; padding:0 0 0 6px; border-bottom:1px solid var(--line); box-sizing:border-box; transition:opacity .15s;}
+  .tf-row:last-child{border-bottom:0;}
+  .tf-row.ghost{opacity:.62;}
+  .tf-dot{width:10px; height:10px; border-radius:50%; background:var(--c); box-shadow:0 0 9px var(--c); flex:none;}
+  .tf-row.ghost .tf-dot{background:transparent; border:1.5px dashed var(--c); box-shadow:none;}
+  .tf-txt{flex:1; min-width:0; display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 8px;}
+  .tf-txt b{font-size:.92rem; font-weight:600;}
+  .tf-txt small{flex-basis:100%; font-size:.74rem; line-height:1.3; color:var(--paper-500);}
+  .tf-tag{font-family:var(--font-mono); font-size:.62rem; letter-spacing:.05em; text-transform:uppercase; color:var(--paper-700); border:1px solid var(--line-strong); border-radius:999px; padding:0 7px;}
+  .tf-tag.soon{color:var(--signal-300); border-color:rgba(255,74,28,.4);}
+  .tf-pct{font-size:1rem; font-weight:600; flex:none;}
+  .tf-row.net .tf-pct{color:var(--c);}
+  .tf-grid .dim{opacity:.16 !important;}
+  .tf-foot{display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-top:14px; padding-top:12px; border-top:1px solid var(--line-strong); font-family:var(--font-mono); font-size:.78rem; color:var(--paper-500);}
+  .tf-foot b{color:var(--paper-100); font-size:.9rem;}
+  .tf-note{margin-top:10px;}
+  @media (max-width:520px){ .tf-grid{grid-template-columns:12px minmax(28px,.6fr) minmax(0,3fr);} .tf-txt small{font-size:.7rem;} }
 </style>
 </head>
 <body>
@@ -8614,6 +8675,182 @@
       }
     }catch(e){ /* leave the dash */ }
   }
+
+  // ===== Mission-control token page: header + "where every trade goes" tax-flow diagram =====
+  function ringSvgFor(pct){
+    if(pct===null || pct===undefined || isNaN(pct)) return "";
+    const R=46, C=2*Math.PI*R, p=Math.max(0,Math.min(1,pct/100)), col=ringColor(p);
+    return `<svg viewBox="0 0 112 112" aria-hidden="true"><circle class="trk" cx="56" cy="56" r="${R}"/><circle class="arc" cx="56" cy="56" r="${R}" stroke="${col}" stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${(C*(1-p)).toFixed(2)}" style="--glow:${col}"/></svg>`;
+  }
+  function detailHeadHTML(t, isOwner){
+    const pct = ringPctForToken(t);
+    const ch = CHAINS[chainOf(t)];
+    const safeLogo = safeImageSrc(t.logo);
+    const logoInner = safeLogo ? `<img src="${safeLogo}" alt="">` : `<div class="tl-ph" style="background:${escapeHtml(t.catColor||"var(--signal-500)")}">${escapeHtml((t.ticker||"??").slice(0,2))}</div>`;
+    const ring = pct===null ? "" : (()=>{
+      const R=46, C=2*Math.PI*R, p=Math.max(0,Math.min(1,pct/100)), col=ringColor(p);
+      return `<svg viewBox="0 0 112 112" aria-hidden="true"><circle class="trk" cx="56" cy="56" r="${R}"/><circle class="arc" cx="56" cy="56" r="${R}" stroke="${col}" stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${(C*(1-p)).toFixed(2)}" style="--glow:${col}"/></svg>`;
+    })();
+    const ringTitle = t.status==="curve-trading" ? "Progress to graduation" : t.status==="taxed" ? "Progress to the $50K market-cap target" : "";
+    return `
+      <div class="dh">
+        <div class="tl-ring dh-ring${pct===null ? " no-ring" : ""}"${ringTitle ? ` title="${ringTitle}"` : ""}>${ring}<div class="tl-av">${logoInner}</div>${pct!==null ? `<div class="tl-pct num">${Math.round(pct)}%</div>` : ""}</div>
+        <div class="dh-id">
+          <div class="dh-pills">
+            <span class="tl-chain dh-chain" data-chain="${chainOf(t)}"><img src="${ch.icon}" alt="" width="20" height="20">${ch.label}</span>
+            ${statusBadgeHTML(t.mode, t.status, "display:inline-block;")}
+            ${tokenProtocol(t)==="v4" ? `<span class="proto-badge v4" id="detailProtocolBadge" title="Launched on Uniswap V4">V4</span>` : ""}
+          </div>
+          <h2>${escapeHtml(t.name)}</h2>
+          <div class="tc-ticker">$${escapeHtml(t.ticker)}</div>
+          ${t.creatorWallet ? `<div class="detail-by">Created by ${profileChipHTML(t.creatorWallet, {link:true, size:20})}</div>` : ""}
+        </div>
+        ${isOwner ? `<button class="btn btn-ghost" id="detailEditBtn" style="padding:8px 14px; font-size:.8rem; align-self:flex-start;">Edit token</button>` : ""}
+      </div>`;
+  }
+
+  const TF_COLORS = { net:"#f5f1ef", lp:"#8c8184", curve:"#b8aeb0", plat:"#b8aeb0", platTax:"#d9cfd1", snipe:"#ffb59e", refl:"#ffa03a", liq:"#4c9bf0", burn:"#ff4a1c", mkt:"#c49bff" };
+  function tfEligible(t){ return t && (t.status==="taxed" || t.status==="curve-trading" || t.status==="graduated"); }
+  function taxFlowHTML(t){
+    if(!tfEligible(t)) return "";
+    return `
+      <div class="panel tf" id="taxFlowPanel" style="margin-top:20px;">
+        <div class="tf-head">
+          <div><div class="eyebrow">Where every trade goes</div><div class="tf-sub">Every fee on this token, taken out of each trade — drawn to scale.</div></div>
+          <div class="tf-toggle" role="group" aria-label="Trade side">
+            <button type="button" data-side="buy" aria-pressed="true">Buy</button>
+            <button type="button" data-side="sell" aria-pressed="false">Sell</button>
+          </div>
+        </div>
+        <div id="taxFlowBody"></div>
+      </div>`;
+  }
+  function tfRows(t, side, st){
+    const onCurve = t.status==="curve-trading";
+    const f = t.customTax ? (side==="buy" ? t.buyFees : t.sellFees) : null;
+    const rows = [];
+    const add = (k,label,bps,dest,tag,ghost)=>{ bps = Number(bps)||0; if(bps>0) rows.push({k,label,bps,dest,tag:tag||"",ghost:!!ghost}); };
+    if(onCurve) add("curve","Curve fee",100,"Skimmed from the ETH side of every curve trade","ETH");
+    else add("lp","Pool fee",30,"Liquidity providers in the pool","ETH");
+    if(platformTaxDistributorAddress(t.networkMode)!==ZERO_ADDRESS) add("plat","Platform trade fee",Number(PLATFORM_TRADE_TAX_BPS),"IgnitionX platform","ETH");
+    if(!onCurve){
+      add("platTax","Platform tax",st.platBps,"Funds the climb to $50K market cap · switches off at graduation","");
+      if(side==="buy") add("snipe","Early-buy surcharge",st.snipeBps,"Anti-sniper surcharge on early buys · falls to 0","ETH");
+    }
+    if(f){
+      const g = onCurve; // custom rates only begin once the token is in a pool
+      add("refl","Reflections",f.reflectionBps,`Every holder, pro rata · paid in ${st.payLabel}`,"token",g);
+      add("liq","Liquidity",f.liquidityBps,"Added to the pool as permanent liquidity","token",g);
+      add("burn","Burn",f.burnBps,"Removed from supply for good","token",g);
+      add("mkt","Marketing",f.marketingBps, t.marketingWallet ? `Marketing wallet ${shortAddr(t.marketingWallet)}` : "No wallet set · burned","ETH",g);
+    }
+    return rows;
+  }
+  function tfRender(t, side, st){
+    const rows = tfRows(t, side, st);
+    const live = rows.filter(r=>!r.ghost);
+    const totalBps = live.reduce((a,r)=>a+r.bps,0);
+    const netBps = Math.max(0, 10000-totalBps);
+    const ROW = st.narrow ? 92 : 56, n = rows.length+1;
+    const MINBAND = 3;
+    const baseH = n*ROW;
+    const th = live.map(r=> Math.max(MINBAND, r.bps/10000*(baseH-16)));
+    const smallSum = th.reduce((a,b)=>a+b,0);
+    const netTh = Math.max(16, (baseH-16) - smallSum);
+    const srcH = netTh + smallSum;
+    const H = Math.max(baseH, srcH+16);
+    const y0 = (H-srcH)/2;
+    const all = [{k:"net", net:true, th:netTh}].concat(live.map((r,i)=>Object.assign({}, r, {th:th[i]})));
+    // y position (center) of each right-hand row: net first, then rows in order (ghosts keep their slot)
+    const rowCenter = (idx)=> (idx+0.5)*ROW + (H-baseH)/2;
+    let cum = y0, segs = "", bands = "";
+    const idxOf = new Map(rows.map((r,i)=>[r.k,i+1]));
+    all.forEach(a=>{
+      const sy = cum + a.th/2, ey = rowCenter(a.net ? 0 : idxOf.get(a.k));
+      const col = a.net ? (side==="buy" ? "#34dd9c" : "#d2cac7") : TF_COLORS[a.k];
+      segs += `<i class="tf-seg" data-k="${a.k}" style="height:${a.th.toFixed(2)}px; background:${col}"></i>`;
+      const d = `M0,${sy.toFixed(2)} C45,${sy.toFixed(2)} 55,${ey.toFixed(2)} 100,${ey.toFixed(2)}`;
+      const t1 = (sy-a.th/2).toFixed(2), b1 = (sy+a.th/2).toFixed(2);
+      const w2 = Math.min(a.th, ROW-18), t2 = (ey-w2/2).toFixed(2), b2 = (ey+w2/2).toFixed(2);
+      bands += `<path class="tf-band${a.net?" net":""}" data-k="${a.k}" d="M0,${t1} C45,${t1} 55,${t2} 100,${t2} L100,${b2} C55,${b2} 45,${b1} 0,${b1} Z" fill="${col}"/>`;
+      if(!a.net) bands += `<path class="tf-flow" data-k="${a.k}" d="${d}" vector-effect="non-scaling-stroke"/>`;
+      cum += a.th;
+    });
+    rows.filter(r=>r.ghost).forEach(r=>{
+      const ey = rowCenter(idxOf.get(r.k)), sy = y0+srcH;
+      bands += `<path class="tf-ghostline" data-k="${r.k}" d="M0,${sy.toFixed(2)} C45,${sy.toFixed(2)} 55,${ey.toFixed(2)} 100,${ey.toFixed(2)}" stroke="${TF_COLORS[r.k]}" vector-effect="non-scaling-stroke"/>`;
+    });
+    const pctTxt = (bps)=> (bps/100).toFixed(2).replace(/\.?0+$/,"") + "%";
+    const netCol = side==="buy" ? "#34dd9c" : "#d2cac7";
+    const rowHTML = [`
+      <div class="tf-row net" data-k="net" style="--c:${netCol}; height:${ROW}px;">
+        <i class="tf-dot"></i>
+        <div class="tf-txt"><b>You receive</b><small>${side==="buy" ? `$${escapeHtml(t.ticker)} straight to your wallet` : "ETH straight to your wallet"}</small></div>
+        <span class="tf-pct num">${(netBps/100).toFixed(2)}%</span>
+      </div>`].concat(rows.map(r=>`
+      <div class="tf-row${r.ghost ? " ghost" : ""}" data-k="${r.k}" style="--c:${TF_COLORS[r.k]}; height:${ROW}px;">
+        <i class="tf-dot"></i>
+        <div class="tf-txt"><b>${r.label}</b>${r.tag ? `<span class="tf-tag">in ${r.tag==="token" ? "$"+escapeHtml(t.ticker) : "ETH"}</span>` : ""}${r.ghost ? `<span class="tf-tag soon">after graduation</span>` : ""}<small>${r.dest}</small></div>
+        <span class="tf-pct num">${pctTxt(r.bps)}</span>
+      </div>`)).join("");
+    const notes = [];
+    if(!st.platKnown) notes.push("Reading the live platform tax from the pool…");
+    if(st.platOff) notes.push("The platform tax has switched off — this token has passed its $50K market-cap target.");
+    if(t.status==="curve-trading") notes.push(t.customTax ? "On the curve only the curve fee applies. The dashed rows are this token's own tax, which begins once it graduates into a pool." : "On the curve only the curve fee applies; the pool fee and any tax begin once it graduates.");
+    if(side==="buy" && !t.customTax && st.snipeBps>0) {/* shown as a row */}
+    return `
+      <div class="tf-grid" style="height:${H}px;">
+        <div class="tf-src" style="padding-top:${y0.toFixed(2)}px;"><div class="tf-srcbar">${segs}</div></div>
+        <svg class="tf-svg" viewBox="0 0 100 ${H.toFixed(2)}" preserveAspectRatio="none" width="100%" height="${H}" aria-hidden="true">${bands}</svg>
+        <div class="tf-rows" style="padding-top:${((H-baseH)/2).toFixed(2)}px;">${rowHTML}</div>
+      </div>
+      <div class="tf-foot"><span>Total taken <b class="num">${(totalBps/100).toFixed(2)}%</b></span><span>You keep <b class="num" style="color:${netCol}">${(netBps/100).toFixed(2)}%</b></span></div>
+      ${notes.length ? `<div class="hint tf-note">${notes.join(" ")}</div>` : ""}`;
+  }
+  function wireTaxFlow(t){
+    const panel = document.getElementById("taxFlowPanel");
+    if(!panel) return;
+    const body = document.getElementById("taxFlowBody");
+    const alive = ()=> currentDetailTokenId===t.id && document.getElementById("taxFlowPanel")===panel;
+    const isV4 = tokenProtocol(t)==="v4";
+    const onCurve = t.status==="curve-trading";
+    const st = {
+      platBps: (!isV4 && t.status==="taxed" && !(t.customTax && t.mode==="just")) ? 100 : 0,
+      snipeBps: 0,
+      platOff: false,
+      platKnown: !(isV4 && t.poolId && !onCurve),
+      payLabel: isV4 ? escapeHtml(v4PayoutLabelFor(t.payoutMode, t.payoutToken, t.ticker).replace(/^Same token/,"the token itself")) : reflectionAssetLabel(t.reflectionAsset, t.ticker, t.tokenAddress),
+    };
+    let side = "buy";
+    const draw = ()=>{
+      if(!alive()) return;
+      st.narrow = body.clientWidth < 520;
+      body.innerHTML = tfRender(t, side, st);
+      const grid = body.querySelector(".tf-grid");
+      const setHl = (k)=>{
+        grid.querySelectorAll("[data-k]").forEach(el=> el.classList.toggle("dim", !!k && el.dataset.k!==k));
+      };
+      grid.querySelectorAll(".tf-row").forEach(r=>{
+        r.addEventListener("mouseenter", ()=> setHl(r.dataset.k));
+        r.addEventListener("mouseleave", ()=> setHl(null));
+      });
+    };
+    panel.querySelectorAll(".tf-toggle button").forEach(b=> b.addEventListener("click", ()=>{
+      side = b.dataset.side;
+      panel.querySelectorAll(".tf-toggle button").forEach(x=> x.setAttribute("aria-pressed", x===b ? "true" : "false"));
+      draw();
+    }));
+    let lastNarrow = null;
+    window.addEventListener("resize", ()=>{ if(!alive()) return; const n = body.clientWidth < 520; if(n!==st.narrow) draw(); });
+    draw();
+    if(isV4 && t.poolId && !onCurve){
+      readV4Tax(t).then(tax=>{
+        st.platKnown = true; st.platBps = tax.active ? Number(tax.bps) : 0; st.snipeBps = Number(tax.snipe||0n); st.platOff = !tax.active;
+        draw();
+      }).catch(()=>{ st.platKnown = true; draw(); });
+    }
+  }
+
   function openDetail(id){
     const t = tokens.find(x=>x.id===id);
     if(!t) return;
@@ -8946,17 +9183,11 @@
       <div>
         <div class="panel">
           ${safeImageSrc(t.banner) ? `<div class="detail-banner"><img src="${safeImageSrc(t.banner)}" alt=""></div>` : ""}
-          <div class="detail-head">
-            ${tcMarkHTML(t)}
-            ${chainBadgeHTML(chainOf(t))}
-            <div style="flex:1;"><h2>${escapeHtml(t.name)}</h2><div class="tc-ticker">$${escapeHtml(t.ticker)} · ${statusBadgeHTML(t.mode, t.status, "display:inline-block; margin-left:4px;")} ${tokenProtocol(t)==='v4' ? `<span class="proto-badge v4" id="detailProtocolBadge" title="Launched on Uniswap V4">V4</span>` : ""}</div></div>
-            ${isOwner ? `<button class="btn btn-ghost" id="detailEditBtn" style="padding:8px 14px; font-size:.8rem;">Edit token</button>` : ""}
-          </div>
-          ${t.creatorWallet ? `<div class="detail-by">Created by ${profileChipHTML(t.creatorWallet, {link:true, size:20})}</div>` : ""}
+          ${detailHeadHTML(t, isOwner)}
           ${isCreatorHeld ? `<p style="color:var(--paper-500); margin:18px 0 0;">No pool — 100% of the supply is in the creator's wallet. IgnitionX has no further role here: if this creator adds liquidity, it happens off-platform, on their own terms.</p>` : ""}
           ${noPriceChart ? "" : `
-          <div class="detail-price num">${fmtUSD(t.price)}</div>
-          <div class="detail-delta num" style="color:${t.change24h>=0?'var(--good-500)':'var(--critical-500)'}">${fmtPct(t.change24h)} · ${changeLabelFor(t)}</div>
+          <div class="mc-readout"><div class="detail-price num">${fmtUSD(t.price)}</div>
+          <div class="detail-delta num mc-delta ${t.change24h>=0?'up':'down'}">${fmtPct(t.change24h)}<span> · ${changeLabelFor(t)}</span></div></div>
           ${isLiveTrackedToken(t) ? `<div class="hint" style="margin-top:2px;">Live price, sampled from this pool's own reserves${t.livePriceUpdatedAt ? ` · updated ${fmtAgo(Date.now()-t.livePriceUpdatedAt)}` : ""}.</div>` : ""}
 
           <div class="chart-wrap" id="chartWrap">
@@ -8965,7 +9196,7 @@
           ${progressHTML}
 
           ${noPriceChart ? "" : `
-          <div class="stat-mini-row" style="grid-template-columns:repeat(2,1fr);">
+          <div class="stat-mini-row mc-stats">
             <div class="stat-mini"><div class="v num">${fmtUSD(t.mcap)}</div><div class="l">Market cap</div></div>
             <div class="stat-mini"><div class="v num">${fmtUSD(t.vol)}</div><div class="l">24h volume</div></div>
             <div class="stat-mini"><div class="v num">${fmtInt(t.holders)}</div><div class="l">Holders</div></div>
@@ -8993,6 +9224,7 @@
 
           ${socialLinksHTML(t)}
         </div>
+        ${taxFlowHTML(t)}
         ${t.onChain && t.tokenAddress ? `
         <div class="panel" id="calloutPanel" style="margin-top:20px;">
           <div class="eyebrow" style="margin-bottom:10px;">Callout</div>
@@ -9010,6 +9242,7 @@
     initComments(t);
     initCalloutBox(t);
     fillDetailSupply(t);
+    wireTaxFlow(t);
 
     mountCandleChart(document.getElementById("chartWrap"), t);
 
@@ -11323,14 +11556,19 @@
     el.innerHTML = `
       <div class="panel" id="solDetailRoot" data-mint="${escapeHtml(mint)}">
         ${solSafeBanner(l.banner) ? `<div class="detail-banner"><img src="${solSafeBanner(l.banner)}" alt=""></div>` : ""}
-        <div class="detail-head">
-          <div class="tc-mark" style="background:#ffa03a">${img ? `<img src="${img}" alt="">` : escapeHtml((l.symbol||"?").slice(0,1))}</div>
-          ${chainBadgeHTML(chainOf(l))}
-          <div><div class="tc-name" style="font-size:1.25rem">${escapeHtml(l.name)}</div><div class="tc-ticker">$${escapeHtml(l.symbol)} · Solana ${solNetWord()}</div></div>
-          <span class="tc-status curve-trading" id="solDStatus" style="margin-left:auto">Curve</span>
+        <div class="dh">
+          <div class="tl-ring dh-ring no-ring" id="solDRing" title="Progress to graduation"><div class="tl-av">${img ? `<img src="${img}" alt="">` : `<div class="tl-ph" style="background:#ffa03a">${escapeHtml((l.symbol||"?").slice(0,1))}</div>`}</div></div>
+          <div class="dh-id">
+            <div class="dh-pills">
+              <span class="tl-chain dh-chain" data-chain="solana"><img src="${CHAINS.solana.icon}" alt="" width="20" height="20">Solana · ${solNetWord()}</span>
+              <span class="tc-status curve-trading" id="solDStatus">Curve</span>
+            </div>
+            <h2>${escapeHtml(l.name)}</h2>
+            <div class="tc-ticker">$${escapeHtml(l.symbol)}</div>
+            <div class="detail-by">${l.creator ? `Created by ${profileChipHTML(l.creator, {link:true, size:20})} · ` : ""}Mint <a href="${solExplorer("address", mint)}" target="_blank" rel="noopener noreferrer">${escapeHtml(mint.slice(0,6)+"…"+mint.slice(-4))}</a> · Pool <a href="${solExplorer("address", l.pool)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.pool.slice(0,6)+"…"+l.pool.slice(-4))}</a></div>
+          </div>
         </div>
-        <div class="detail-by">${l.creator ? `Created by ${profileChipHTML(l.creator, {link:true, size:20})} · ` : ""}Mint <a href="${solExplorer("address", mint)}" target="_blank" rel="noopener noreferrer">${escapeHtml(mint.slice(0,6)+"…"+mint.slice(-4))}</a> · Pool <a href="${solExplorer("address", l.pool)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.pool.slice(0,6)+"…"+l.pool.slice(-4))}</a></div>
-        <div class="detail-price num" id="solDPrice">—</div>
+        <div class="mc-readout"><div class="detail-price num" id="solDPrice">—</div></div>
         <div class="sol-status err" id="solDError"></div>
         <div class="chart-wrap" id="chartWrap"></div>
         <div class="bond-gauge" style="margin-top:20px;">
@@ -11338,7 +11576,7 @@
           <div class="bond-track"><div class="bond-fill" id="solDGaugeFill" style="width:0%"></div><div class="bond-ticks"></div></div>
           <div class="hint" style="margin-top:8px;" id="solDGaugeHint">Graduates to a Meteora DAMM v2 pool once the curve has raised its SOL target.</div>
         </div>
-        <div class="stat-mini-row">
+        <div class="stat-mini-row mc-stats mc-3">
           <div class="stat-mini"><div class="v num" id="solDMcap">—</div><div class="l">Market cap</div></div>
           <div class="stat-mini"><div class="v num" id="solDRaised">—</div><div class="l">Raised</div></div>
           <div class="stat-mini"><div class="v num" id="solDTarget">—</div><div class="l">Target</div></div>
@@ -11406,6 +11644,14 @@
     set("solDRaised", solFmtSol(info.raisedSol, 2));
     set("solDTarget", solFmtSol(info.thresholdSol, 1));
     set("solDGaugePct", info.progressPct.toFixed(1)+"%");
+    const ringEl = document.getElementById("solDRing");
+    if(ringEl){
+      const pct = info.migrated ? 100 : info.progressPct;
+      ringEl.querySelectorAll("svg,.tl-pct").forEach(x=>x.remove());
+      ringEl.classList.remove("no-ring");
+      ringEl.insertAdjacentHTML("afterbegin", ringSvgFor(pct));
+      ringEl.insertAdjacentHTML("beforeend", `<div class="tl-pct num">${Math.round(pct)}%</div>`);
+    }
     const fill = document.getElementById("solDGaugeFill");
     if(fill) fill.style.width = Math.max(0, Math.min(100, info.progressPct))+"%";
     const st = document.getElementById("solDStatus");
