@@ -1233,7 +1233,7 @@
           <p class="hero-sub">IgnitionX is a mission-control panel for launching community tokens on Robinhood Chain. Launch with liquidity: pair your own ETH into a live pool atomically, with a 1.00% tax funding the climb to a fixed $50,000 market cap before it shuts off for good. Or Quick Launch: no liquidity to provide, your token trades on a bonding curve from the first block and graduates to a locked pool.</p>
           <div class="hero-cta">
             <button class="btn btn-primary" data-goto="create">Launch a token</button>
-            <button class="btn btn-ghost" data-goto-scroll="market">View live launches</button>
+            <button class="btn btn-ghost" data-goto-scroll="market">Explore launches</button>
           </div>
       <div class="stat-row">
         <div class="stat-tile" title="ETH or SOL actually held in bonding curves, plus both sides of every liquidity pool, at current prices. Read from the chains."><div class="eyebrow">Total value locked <span class="stat-net"></span></div><div class="figure num" id="statTvl">—</div><div class="stat-split" id="splitTvl"></div></div>
@@ -1273,13 +1273,14 @@
 
       <div id="market">
         <div class="section-head">
-          <h2>Live launches</h2>
+          <h2>Explore</h2>
           <div class="filter-row">
             <input class="search" id="searchInput" type="search" placeholder="Search name, ticker, or contract address…" aria-label="Search tokens">
             <button class="chip" aria-pressed="true" data-filter="all">All</button>
-            <button class="chip" aria-pressed="false" data-filter="recent">Recently Launched</button>
-            <button class="chip" aria-pressed="false" data-filter="launched">Launched</button>
-            <button class="chip" aria-pressed="false" data-filter="graduated">Graduated</button>
+            <button class="chip" aria-pressed="false" data-filter="launched" title="Launched with liquidity added">Launched</button>
+            <button class="chip" aria-pressed="false" data-filter="curve" title="On the bonding curve, pending graduation">On the curve</button>
+            <button class="chip" aria-pressed="false" data-filter="soon" title="On the curve and 85% or more of the way to graduating">Graduating soon</button>
+            <button class="chip" aria-pressed="false" data-filter="graduated" title="Graduated from the curve to a live pool">Graduated</button>
           </div>
         </div>
         <div class="token-grid" id="tokenGrid"></div>
@@ -1307,7 +1308,7 @@
 
     <!-- ===================== DETAIL ===================== -->
     <section class="view" id="view-detail">
-      <button class="back-link" id="backFromDetail">← Back to live launches</button>
+      <button class="back-link" id="backFromDetail">← Back to Explore</button>
       <div class="detail-grid" id="detailContent"></div>
     </section>
 
@@ -7823,7 +7824,7 @@
     // Tokens launched / graduated: the chains in scope only
     const rhTokens = scope.rh ? tokensForCurrentNetwork() : [];
     const solTokens = scope.sol ? solCountList() : [];
-    const graduated = rhTokens.filter(t=>t.status==="graduated").length + solTokens.filter(s=>s.status==="graduated").length;
+    const graduated = rhTokens.filter(t=>matchesStatusFilter(t,"graduated")).length + solTokens.filter(x=>matchesStatusFilter(x,"graduated")).length;
 
     document.getElementById("rdTvl").textContent = tvlText;
     document.getElementById("rdLaunches").textContent = fmtInt(rhTokens.length + solTokens.length);
@@ -7843,7 +7844,7 @@
     split("splitTvl", fmtUSD(rhOk ? rhStats.tvlUsd : 0), solOk ? solFmtSol(solStats.tvlSol, 2) : "—");
     split("splitVol", fmtUSD(rhOk ? rhStats.volume24hUsd : 0), solOk ? solFmtSol(solStats.volume24hSol, 2) : "—");
     split("splitTraders", fmtInt(rhOk ? (rhStats.traders24h||0) : 0), fmtInt(solOk ? (solStats.traders24h||0) : 0));
-    split("splitGrad", fmtInt(rhTokens.filter(t=>t.status==="graduated").length), fmtInt(solTokens.filter(x=>x.status==="graduated").length));
+    split("splitGrad", fmtInt(rhTokens.filter(t=>matchesStatusFilter(t,"graduated")).length), fmtInt(solTokens.filter(x=>matchesStatusFilter(x,"graduated")).length));
     document.querySelectorAll(".stat-net").forEach(el=>{ el.textContent = "· " + scope.label; });
   }
 
@@ -7859,12 +7860,31 @@
   // outside IgnitionX, never through recordLaunch/tokenStatus) — folded
   // into the "Launched" tab since they do have a live pool, same as "taxed",
   // rather than inventing a 5th tab for what's a rare edge case.
+  // Tabs on the Explore grid (each token lands in exactly one of Launched / On the curve / Graduating soon / Graduated;
+  // a deploy-only token with no pool shows under All only):
+  //   Launched         launched with liquidity added (a pool from the start): taxed, or an independently added pool
+  //   On the curve     Quick Launch token still on its bonding curve, under 85% of the way to graduating
+  //   Graduating soon  still on the curve, 85% or more of the way
+  //   Graduated        a curve token that has moved to its pool (Robinhood or Solana), or a pool token whose tax target is met
+  // Works for both Robinhood tokens and the Solana grid items (which carry a mint instead of a tokenAddress).
+  const GRADUATING_SOON_PCT = 85;
+  function curveFilterPct(t){
+    if(t.mint && !t.tokenAddress){
+      const inf = (()=>{ try{ return solInfo[t.mint]; }catch(e){ return null; } })();
+      return (inf && Number.isFinite(inf.progressPct)) ? (inf.migrated ? 100 : inf.progressPct) : 0;
+    }
+    const p = ringPctForToken(t);
+    return p===null ? 0 : p;
+  }
   function matchesStatusFilter(t, filter){
-    // "curve-trading" folds into "launched" — a Quick Launch token has a
-    // real, live, tradeable market (against the curve) from the moment it's
-    // created, same reasoning "taxed" gets grouped there.
-    if(filter==="launched") return t.status==="taxed" || t.status==="live-pool" || t.status==="pool-detected" || t.status==="curve-trading";
-    if(filter==="graduated") return t.status==="graduated";
+    const isCurve = (t.mint && !t.tokenAddress) || t.mode==="curve" || t.mode==="customCurve";
+    if(filter==="curve" || filter==="soon"){
+      if(t.status!=="curve-trading") return false;
+      const soon = curveFilterPct(t) >= GRADUATING_SOON_PCT;
+      return filter==="soon" ? soon : !soon;
+    }
+    if(filter==="graduated") return isCurve ? (t.status==="taxed" || t.status==="graduated") : t.status==="graduated";
+    if(filter==="launched") return !isCurve && (t.status==="taxed" || t.status==="live-pool" || t.status==="pool-detected");
     return true;
   }
   // Cached curve reserves (updated at launch time, and whenever the detail
