@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="IgnitionX documentation — how the platform works today: launch modes, ETH-side fees, graduation, Solana Quick Launch, and a step-by-step guide to deploying a token.">
+<meta name="description" content="IgnitionX documentation — how the platform works today: exploring launches on Robinhood Chain and Solana, launch modes, ETH-side fees, graduation, Solana Quick Launch, and a step-by-step guide to deploying a token.">
 <!-- Same defense-in-depth CSP as index.html: single static file, no
      per-request nonce available, so script-src keeps 'unsafe-inline' and
      relies on this page never writing untrusted input into the DOM (it
@@ -270,6 +270,7 @@
     <div class="hud-spacer"></div>
     <nav class="hud-nav" aria-label="Docs sections">
       <a href="#whats-new">What's new</a>
+      <a href="#explore">Explore</a>
       <a href="#launch-modes">Launch modes</a>
       <a href="#fees">Fees</a>
       <a href="#solana">Solana</a>
@@ -287,6 +288,7 @@
       <a href="#overview">Overview</a>
       <a href="#whats-new">What's new</a>
       <a href="#getting-started">Getting started</a>
+      <a href="#explore">Exploring launches</a>
     </div>
     <div class="docs-nav-group">
       <span class="eyebrow">Launching</span>
@@ -320,7 +322,7 @@
       <div class="doc-hero">
         <span class="eyebrow">Documentation</span>
         <h1>How IgnitionX works today, and how to launch on it.</h1>
-        <p>IgnitionX is a token launchpad for Robinhood Chain, with pump.fun-style quick launches on Solana alongside. Every Robinhood Chain token trades on Uniswap V4. This page covers the platform as it runs now: the launch modes, how the 1% fee is taken, what happens at graduation, and a step-by-step guide to your first launch.</p>
+        <p>IgnitionX is a token launchpad on two chains: Robinhood Chain, where every token trades on Uniswap V4, and Solana, with pump.fun-style quick launches on Meteora. This page covers the platform as it runs now: how to explore launches, the launch modes on each chain, how fees work, what happens at graduation, and a step-by-step guide to your first launch.</p>
         <div class="doc-hero-cta">
           <a class="btn btn-primary" href="#how-to-deploy">Jump to: Deploy a token</a>
           <a class="btn btn-ghost" href="#whats-new">See what's new</a>
@@ -328,7 +330,7 @@
       </div>
       <div class="callout">
         <span class="callout-icon">◆</span>
-        <p><b>The platform is currently running on testnet.</b> Robinhood Chain testnet and Solana devnet use test funds with no real value. The network pill next to your wallet always shows which network is active, and the same setting applies to everyone using the site.</p>
+        <p><b>IgnitionX is live on mainnet, on Robinhood Chain and Solana.</b> Launches, trades and prices there use real ETH and SOL, and trades are real and irreversible. A testnet mode (Robinhood Chain testnet and Solana devnet, with free test funds) is kept for practice. The network pill next to your wallet always shows which network is active, and the same setting applies to everyone using the site.</p>
       </div>
       <div class="callout warn">
         <span class="callout-icon">◆</span>
@@ -340,6 +342,26 @@
       <h2><span class="eyebrow">Recent updates</span>What's new</h2>
       <p class="section-intro">The changes that matter most if you used the platform earlier, or have only read older descriptions of it.</p>
       <div class="update-list" style="margin-top:20px;">
+        <div class="update-card">
+          <span class="tag">Platform</span>
+          <h3>Live on mainnet, on both chains</h3>
+          <p>Robinhood Chain mainnet and Solana both run on real funds. The network pill next to your wallet shows which network the site is on, and testnet and devnet stay available for practice. See <a href="#getting-started">Getting started</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Explore</span>
+          <h3>A live home page for Robinhood Chain and Solana</h3>
+          <p>The top of the home page now shows live totals (value locked, 24h volume, active traders, tokens graduated), a ticker of the latest launches and trades, and a <b>New launches</b> row. Every token appears as a tile with its chain, a progress ring and a mini curve. Below that, <b>Explore</b> lists every launch with tabs for Launched, On the curve, Graduating soon and Graduated. See <a href="#explore">Exploring launches</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Token page</span>
+          <h3>A clearer token page, with a fee diagram</h3>
+          <p>Each token page opens with its progress ring, chain, status, price and key numbers. On Robinhood Chain it also shows <b>Where every trade goes</b>: a to-scale diagram of every fee taken from a buy or a sell. Solana token pages use the same header. See <a href="#explore">Exploring launches</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Guide</span>
+          <h3>Interactive "How it works"</h3>
+          <p>A step-by-step walkthrough on the home page. Pick Robinhood Chain or Solana and, on Robinhood Chain, the launch path and tax type, then step through what happens from launch to graduation.</p>
+        </div>
         <div class="update-card">
           <span class="tag">Fees</span>
           <h3>The 1% fee is taken in ETH at the trade, not by selling tokens</h3>
@@ -358,7 +380,7 @@
         <div class="update-card">
           <span class="tag">Platform</span>
           <h3>Uniswap V4 only</h3>
-          <p>Every Robinhood Chain launch now runs on Uniswap V4 and carries a V4 tag. Older V2-era tokens are hidden from the grid rather than deleted.</p>
+          <p>Every Robinhood Chain launch now runs on Uniswap V4 and carries a V4 tag. Older V2-era tokens are hidden from Explore rather than deleted.</p>
         </div>
         <div class="update-card">
           <span class="tag">Trading</span>
@@ -368,7 +390,7 @@
         <div class="update-card">
           <span class="tag">Solana</span>
           <h3>Solana Quick Launch is open to anyone</h3>
-          <p>Launch from a Solana wallet with the same four-step wizard. Solana tokens appear in the main grid and live feed next to Robinhood Chain tokens, and show market cap in dollars. See <a href="#solana">Solana Quick Launch</a>.</p>
+          <p>Launch from a Solana wallet with the same four-step wizard. Solana tokens appear in Explore, in New launches and in the live feed next to Robinhood Chain tokens, with the same curve progress rings, and show market cap in dollars. See <a href="#solana">Solana Quick Launch</a>.</p>
         </div>
         <div class="update-card">
           <span class="tag">Grid</span>
@@ -389,14 +411,52 @@
       <div class="table-wrap" style="margin-top:16px;">
         <table class="kv-table">
           <tr><th>Connect a wallet</th><td>For Robinhood Chain, click <b>Connect Wallet</b> and approve in whichever wallet your browser has injected (such as MetaMask). For Solana, click <b>Connect Solana</b> and pick a Solana wallet. There is no sign-up beyond that. You can connect either one, or both. With only a Solana wallet connected, click your name in the header to open your profile or portfolio, or to disconnect; the Robinhood button then becomes an optional extra.</td></tr>
-          <tr><th>Check the network</th><td>The network pill next to your wallet shows whether the platform is on <b>Testnet</b> or <b>Mainnet</b>. It is a platform-wide setting, not a personal one. Solana devnet counts as testnet and Solana mainnet as mainnet.</td></tr>
+          <tr><th>Check the network</th><td>The network pill next to your wallet shows whether the platform is on <b>Testnet</b> or <b>Mainnet</b>. It is a platform-wide setting, not a personal one. Solana devnet counts as testnet and Solana mainnet as mainnet. The site is live on mainnet; testnet remains for practice.</td></tr>
           <tr><th>Know which one is real</th><td>Testnet funds have no value. Mainnet is the real chain: real ETH or SOL, real tokens, real and irreversible trades. Always check the pill before sending anything.</td></tr>
         </table>
       </div>
     </section>
 
+    <section id="explore">
+      <h2><span class="eyebrow">02</span>Exploring launches</h2>
+      <p class="section-intro">The home page is a live view of both chains. Everything on it updates from real on-chain activity on whichever network the site is on.</p>
+
+      <div class="table-wrap" style="margin-top:16px;">
+        <table class="kv-table">
+          <tr><th>Live totals</th><td>Value locked, 24h volume, active traders and tokens graduated, counted across Robinhood Chain and Solana. When both chains contribute, the figure shows each chain's share.</td></tr>
+          <tr><th>Ticker</th><td>A scrolling tape of the latest launches and trades from both chains. Each trade shows its side, token and size.</td></tr>
+          <tr><th>New launches</th><td>The newest tokens, newest first, as tiles. Each tile shows the chain, how long ago it launched, a ring with its progress, key numbers, a mini bonding-curve chart for curve tokens, tags (Quick Launch, custom-tax shares, payout type) and a Trade button.</td></tr>
+          <tr><th>Explore</th><td>The full list of launches, with search by name, ticker or contract address. Use the tabs to filter by stage.</td></tr>
+        </table>
+      </div>
+
+      <h3 style="margin-top:26px;">The Explore tabs</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>All</th><td>Every launch on the active network, both chains.</td></tr>
+          <tr><th>Launched</th><td>Tokens launched with liquidity added, trading in a pool from the start.</td></tr>
+          <tr><th>On the curve</th><td>Quick Launch tokens still on their bonding curve, waiting to graduate. Robinhood Chain and Solana.</td></tr>
+          <tr><th>Graduating soon</th><td>Curve tokens that are about 85% or more of the way to their graduation target.</td></tr>
+          <tr><th>Graduated</th><td>Curve tokens that have moved into a real pool (a Uniswap V4 pool on Robinhood Chain, a Meteora DAMM v2 pool on Solana), and pool tokens whose platform fee has switched off.</td></tr>
+        </table>
+      </div>
+
+      <h3 style="margin-top:26px;">Reading a tile</h3>
+      <ul class="doc-list">
+        <li><b>The chain badge</b> in the top corner says whether the token is on Robinhood Chain or Solana.</li>
+        <li><b>The ring</b> around the logo shows progress and changes colour as it fills, from cool blue through amber to ember. Green is kept for price rises.</li>
+        <li><b>The mini curve</b> is an illustration of a bonding curve's shape; the dot on it marks the token's real progress toward graduation.</li>
+      </ul>
+
+      <h3 style="margin-top:26px;">The token page</h3>
+      <p>Click any tile to open the token's page. The header carries the same ring, chain and status, then the price with its 24h change, the chart and the key numbers (market cap, 24h volume, holders and circulating supply). Robinhood Chain tokens add the holder distribution, the custom-tax structure and the <b>Where every trade goes</b> fee diagram (see <a href="#fees">How fees work</a>). Solana token pages show the curve progress and the raised and target amounts. On both chains the buy and sell panel sits beside the page, with comments and callouts below it.</p>
+
+      <h3 style="margin-top:26px;">How it works, interactive</h3>
+      <p>Below New launches, the <b>How it works</b> panel walks through a launch step by step. Choose <b>Robinhood Chain</b> or <b>Solana</b>. On Robinhood Chain, also choose <b>Launch with liquidity</b> or <b>Quick Launch</b> and <b>0% tax</b> or <b>Custom tax</b>. Solana shows its single path, Quick Launch with 0% tax from launch to graduation. Click any step to read what happens, or let it play through on its own. The figures it shows are the platform's current settings; your launch review shows the exact numbers before you confirm.</p>
+    </section>
+
     <section id="launch-modes">
-      <h2><span class="eyebrow">02</span>Launch modes</h2>
+      <h2><span class="eyebrow">03</span>Launch modes</h2>
       <p class="section-intro">Every launch starts the same way (name, symbol, supply), then goes one of four ways on Robinhood Chain, or the single quick-launch path on Solana.</p>
 
       <div class="mode-grid" style="margin-top:20px;">
@@ -439,6 +499,11 @@
         <div class="mode-card" style="grid-column:1 / -1;">
           <div class="mode-card-head"><h3>Solana Quick Launch</h3><span class="mode-badge quick">⚡ Solana wallet</span></div>
           <p>A pump.fun-style launch on Meteora's Dynamic Bonding Curve, signed only by your Solana wallet. The token graduates to a Meteora DAMM v2 pool when the curve fills. See <a href="#solana">Solana Quick Launch</a> for the details.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>No IgnitionX launch fee, only the Solana network cost (and an optional first buy)</li>
+            <li><span class="k">On the curve</span>A trading fee on the curve (1% by default); the creator earns a share of it</li>
+            <li><span class="k">Token tax</span>0% from launch to graduation. There is no custom-tax option on Solana</li>
+          </ul>
         </div>
       </div>
 
@@ -449,7 +514,7 @@
     </section>
 
     <section id="how-to-deploy">
-      <h2><span class="eyebrow">03</span>How to deploy a token</h2>
+      <h2><span class="eyebrow">04</span>How to deploy a token</h2>
       <p class="section-intro">The launch wizard is the same four steps for every mode. Only what you fill in on steps 2 and 3 changes.</p>
 
       <div class="steps-list" style="margin-top:24px;">
@@ -493,14 +558,14 @@
           <div class="doc-step-num" aria-hidden="true"></div>
           <div>
             <h3>You're live</h3>
-            <p>Once it confirms, your token appears on the grid, a launch announcement posts to the live feed (and to the Telegram launches channel), and it is listed under <b>Your launches</b> in your Portfolio. See <a href="#after-launch">After you launch</a>.</p>
+            <p>Once it confirms, your token appears in Explore and in New launches, a launch announcement posts to the live feed (and to the Telegram launches channel), and it is listed under <b>Your launches</b> in your Portfolio. See <a href="#after-launch">After you launch</a>.</p>
           </div>
         </div>
       </div>
     </section>
 
     <section id="gasless">
-      <h2><span class="eyebrow">04</span>Gasless launches</h2>
+      <h2><span class="eyebrow">05</span>Gasless launches</h2>
       <p class="section-intro">All four Robinhood Chain modes can be launched without paying your own gas.</p>
       <div class="table-wrap">
         <table class="kv-table">
@@ -513,7 +578,7 @@
     </section>
 
     <section id="custom-tax">
-      <h2><span class="eyebrow">05</span>Custom tax tokens</h2>
+      <h2><span class="eyebrow">06</span>Custom tax tokens</h2>
       <p class="section-intro">A custom-tax token lets you choose a buy tax and a sell tax independently and split each across four mechanics. Total rates are capped per side, and every rate is locked at launch with no setter afterwards.</p>
       <div class="table-wrap" style="margin-top:16px;">
         <table class="kv-table">
@@ -538,25 +603,26 @@
     </section>
 
     <section id="solana">
-      <h2><span class="eyebrow">06</span>Solana Quick Launch</h2>
-      <p class="section-intro">Solana launches use Meteora's Dynamic Bonding Curve, an audited program that already runs on Solana. IgnitionX doesn't deploy a contract for it. Anyone with a Solana wallet can launch, and it currently runs on devnet with free test SOL.</p>
+      <h2><span class="eyebrow">07</span>Solana Quick Launch</h2>
+      <p class="section-intro">Solana launches use Meteora's Dynamic Bonding Curve, an audited program that already runs on Solana. IgnitionX doesn't deploy a contract for it. Anyone with a Solana wallet can launch. On mainnet it uses real SOL; on the testnet setting it runs on devnet with free test SOL.</p>
       <div class="table-wrap" style="margin-top:16px;">
         <table class="kv-table">
           <tr><th>Launch</th><td>You sign two free messages and the launch transaction with your Solana wallet. Your Robinhood wallet is never asked to confirm anything. The launch can include your own first buy.</td></tr>
-          <tr><th>Trade</th><td>Anyone buys and sells against the curve. In the grid, the token shows <b>Bonding curve</b> while it trades there, and its market cap is shown in dollars.</td></tr>
-          <tr><th>Graduate</th><td>When the curve has raised its SOL target, Meteora migrates the liquidity to a DAMM v2 pool. Most of the migrated LP is permanently locked to the platform and a share goes to the creator. From then on the token shows as graduated.</td></tr>
+          <tr><th>Trade</th><td>Anyone buys and sells against the curve from the token's page, paying in SOL. In Explore, the token sits under <b>On the curve</b> (or <b>Graduating soon</b> once the curve is mostly full), with a ring showing its progress, and its market cap is shown in dollars.</td></tr>
+          <tr><th>Graduate</th><td>When the curve has raised its SOL target, Meteora migrates the liquidity to a DAMM v2 pool. Most of the migrated LP is permanently locked to the platform and a share goes to the creator. From then on the token shows as graduated, sits under <b>Graduated</b> in Explore, and keeps trading from the same page against the DAMM v2 pool.</td></tr>
+          <tr><th>Token tax</th><td>None. Solana tokens carry no platform tax and no custom tax at any stage, before or after graduation. The $50,000 fee stage on Robinhood Chain does not exist on Solana.</td></tr>
           <tr><th>Fees</th><td>A trading fee applies on the curve; Meteora takes its protocol share first, then the creator receives a share of the remainder and the platform the rest. The numbers (starting and graduation market cap, fee, creator share) are set by the platform and fixed into each token's curve when it launches.</td></tr>
         </table>
       </div>
-      <p style="margin-top:14px;">Solana tokens sit in the same <b>Live launches</b> grid, the home page's New launches window and the live feed as Robinhood Chain tokens, and use the same comments, callouts and follows. Solana buys and sells are detected from the pool and appear in the live feed within about a minute. The Robinhood Chain fee model described below (ETH-side fee, creator rewards, platform-token buyback) is specific to Robinhood Chain; Solana follows Meteora's own fee rules.</p>
+      <p style="margin-top:14px;">Solana tokens sit in the same <b>Explore</b> list, the home page's New launches row and the live feed as Robinhood Chain tokens, each marked with a Solana badge, and use the same comments, callouts and follows. Solana buys and sells are detected from the pool and appear in the live feed within about a minute. The Robinhood Chain fee model described below (ETH-side fee, creator rewards, platform-token buyback) is specific to Robinhood Chain; Solana follows Meteora's own fee rules.</p>
       <div class="callout warn">
         <span class="callout-icon">◆</span>
-        <p><b>Solana is on devnet.</b> Devnet SOL is free test currency with no value. Check the network pill before launching or trading.</p>
+        <p><b>Check the network pill before you launch or trade.</b> On mainnet, Solana launches and trades use real SOL and cannot be undone. On the testnet setting they run on devnet, where SOL is free test currency with no value.</p>
       </div>
     </section>
 
     <section id="after-launch">
-      <h2><span class="eyebrow">07</span>After you launch</h2>
+      <h2><span class="eyebrow">08</span>After you launch</h2>
       <div class="feature-grid" style="grid-template-columns:repeat(2,1fr); margin-top:16px;">
         <div class="feature-card">
           <h3>Edit your token</h3>
@@ -587,25 +653,27 @@
     </section>
 
     <section id="trading">
-      <h2><span class="eyebrow">08</span>Buying &amp; selling</h2>
+      <h2><span class="eyebrow">09</span>Buying &amp; selling</h2>
       <p class="section-intro">Trades happen on the token's own page. What it trades against depends on which side of graduation the token is on.</p>
       <div class="table-wrap">
         <table class="kv-table">
           <tr><th>Pool token</th><td>Deploy + Add Liquidity and Custom Tax tokens trade in a Uniswap V4 pool from the moment they launch. Use the Buy/Sell panel on the token's page: enter an amount, see the estimate, price impact and the fees included, and confirm. Sells need one approval the first time.</td></tr>
           <tr><th>Quick Launch, on the curve</th><td>Trades go against the bonding curve itself. Price rises with every buy and falls with every sell. There is no pool yet and the token shows <b>Bonding curve</b>.</td></tr>
           <tr><th>Quick Launch, graduated</th><td>It behaves like a pool token from then on: same trade panel, same live pricing.</td></tr>
+          <tr><th>Solana token</th><td>Connect a Solana wallet and use the trade panel on the token's page: pay in SOL on the curve, and the same panel trades against the Meteora DAMM v2 pool once the token has graduated. A graduated token can need two approvals in one trade (curve fees first, then pool fees).</td></tr>
         </table>
       </div>
       <ul class="doc-list" style="margin-top:16px;">
         <li><b>Slippage.</b> The default is 2%. The minimum you'll accept is enforced on-chain, so a trade that would fill worse than your setting reverts instead of filling badly.</li>
         <li><b>The estimate includes the fees.</b> The 0.30% pool fee, the platform's 1% fee, any early-buy surcharge, and a custom token's own rates are all in the quote.</li>
-        <li><b>Live feed.</b> Curve trades carry a small <span class="badge-pill signal">⚡</span> marker so you can tell them apart from pool trades.</li>
+        <li><b>Live feed.</b> Every trade shows its chain, and curve trades carry a small <span class="badge-pill signal">⚡</span> marker so you can tell them apart from pool trades. The ticker above New launches runs the same trades across both chains.</li>
+        <li><b>Solana quotes.</b> Solana trades are quoted in SOL, and the fee model below (the 1% ETH-side fee, creator rewards, the platform-token buyback) is Robinhood Chain only.</li>
       </ul>
     </section>
 
     <section id="fees">
-      <h2><span class="eyebrow">09</span>How fees work</h2>
-      <p class="section-intro">On Robinhood Chain the platform takes one 1% fee on a token's trades. It is taken in ETH, out of the trade itself, and it stops on its own once the token has grown.</p>
+      <h2><span class="eyebrow">10</span>How fees work</h2>
+      <p class="section-intro">On Robinhood Chain the platform takes one 1% fee on a token's trades. It is taken in ETH, out of the trade itself, and it stops on its own once the token has grown. Solana works differently and is covered at the end of this section.</p>
 
       <div class="compare">
         <div class="panel before">
@@ -662,10 +730,23 @@
           <tr><th>Pool fee</th><td>The 0.30% Uniswap V4 pool fee, which goes to the pool's liquidity providers.</td></tr>
         </table>
       </div>
+
+      <h3 style="margin-top:26px;">See it on a token page</h3>
+      <p>Every Robinhood Chain token page has a <b>Where every trade goes</b> panel. Use the Buy / Sell switch to see how a trade is split, drawn to scale: what you receive, the pool fee, the platform's own fees, and, for a custom-tax token, the reflection, liquidity, burn and marketing shares, each tagged as taken in the token or in ETH. A token still on its curve shows only the curve fee, with its own tax rows dashed and marked <i>after graduation</i>. Once the platform fee has switched off, the panel says so and drops that row.</p>
+
+      <h3 style="margin-top:26px;">On Solana</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Launch cost</th><td>No IgnitionX launch fee. You pay only the Solana network cost, plus any first buy you choose to make.</td></tr>
+          <tr><th>Curve fee</th><td>A trading fee applies on the curve, 1% by default. Meteora takes its protocol share first, then the creator receives a share of the remainder (10% by default) and the platform the rest. The exact numbers are fixed into each token's curve when it launches.</td></tr>
+          <tr><th>Token tax</th><td>None. There is no platform tax and no custom tax on Solana tokens, before or after graduation.</td></tr>
+          <tr><th>After graduation</th><td>The token trades in a Meteora DAMM v2 pool under Meteora's own pool fee rules.</td></tr>
+        </table>
+      </div>
     </section>
 
     <section id="graduation">
-      <h2><span class="eyebrow">10</span>Graduation &amp; anti-snipe</h2>
+      <h2><span class="eyebrow">11</span>Graduation &amp; anti-snipe</h2>
       <p class="section-intro">Every token is built to stop being charged the platform fee once it has grown, and new pools protect early buyers from bots.</p>
 
       <h3>The fee switches itself off</h3>
@@ -674,8 +755,9 @@
         <li>A <b>Quick Launch</b> charges its curve fee until the curve graduates, then the pool's 1% fee runs until the same $50,000 target is reached and switches off.</li>
         <li>The market cap is measured in dollars from the pool price and a live ETH price feed. If the feed is stale or unavailable the fee simply stays on and trading is never blocked.</li>
         <li>What switches off is the <b>platform</b> fee. A custom-tax token's own rates, including its marketing share, keep working.</li>
+        <li><b>Solana</b> tokens have no platform fee stage. They graduate when the curve has raised its SOL target and the liquidity moves to a Meteora DAMM v2 pool; no token tax applies before or after.</li>
       </ul>
-      <p class="mini-note">On the grid, a token shows <b>Graduated</b> once its fee has switched off. A curve token first shows <b>Bonding curve</b>, and shows as live on a DEX only once it has moved into a pool.</p>
+      <p class="mini-note">In Explore, a Robinhood Chain token shows <b>Graduated</b> once its fee has switched off. A curve token first shows <b>On the curve</b> (and <b>Graduating soon</b> once it is about 85% of the way to its target), and shows as live on a DEX only once it has moved into a pool. A Solana token shows <b>Graduated</b> once it has migrated to its DAMM v2 pool.</p>
 
       <h3 style="margin-top:22px;">Early-buy surcharge</h3>
       <p>A new pool charges an extra fee on <b>buys only</b> that starts high at the moment the pool is created and falls in a straight line to zero over a short window. A bot buying in the first blocks hands much of its position to the platform; someone buying a couple of minutes later pays little or nothing. Sells are never charged.</p>
@@ -693,7 +775,7 @@
     </section>
 
     <section id="community">
-      <h2><span class="eyebrow">11</span>Profiles &amp; social</h2>
+      <h2><span class="eyebrow">12</span>Profiles &amp; social</h2>
       <p class="section-intro">An account is identified by its main wallet, which can be a Robinhood wallet or a Solana wallet. A Solana wallet on its own is a complete account.</p>
       <div class="feature-grid" style="margin-top:16px;">
         <div class="feature-card">
@@ -724,11 +806,11 @@
     </section>
 
     <section id="security">
-      <h2><span class="eyebrow">12</span>Security &amp; disclosures</h2>
+      <h2><span class="eyebrow">13</span>Security &amp; disclosures</h2>
       <div class="feature-grid" style="grid-template-columns:repeat(2,1fr); margin-top:16px;">
         <div class="feature-card">
           <h3>Locked liquidity</h3>
-          <p>Every Robinhood Chain launch locks its liquidity position to the creator for a fixed period. Neither the creator, the platform nor anyone else can pull it out early.</p>
+          <p>Every Robinhood Chain launch locks its liquidity position to the creator for a fixed period. Neither the creator, the platform nor anyone else can pull it out early. On Solana, most of the liquidity that migrates to a Meteora DAMM v2 pool is permanently locked.</p>
         </div>
         <div class="feature-card">
           <h3>Immutable custom rates</h3>
@@ -748,7 +830,7 @@
         </div>
         <div class="feature-card">
           <h3>Testnet vs. mainnet</h3>
-          <p>The network switch is platform-wide. On mainnet every launch, trade and price reflects real on-chain activity and real funds.</p>
+          <p>The network switch is platform-wide and covers both chains. On mainnet every launch, trade and price reflects real on-chain activity and real funds, on Robinhood Chain and on Solana.</p>
         </div>
       </div>
       <div class="callout warn" style="margin-top:20px;">
@@ -758,7 +840,7 @@
     </section>
 
     <section id="faq">
-      <h2><span class="eyebrow">13</span>FAQ</h2>
+      <h2><span class="eyebrow">14</span>FAQ</h2>
       <div style="margin-top:8px;">
         <details class="faq-item">
           <summary>Do I need ETH to launch a token?</summary>
@@ -794,7 +876,19 @@
         </details>
         <details class="faq-item">
           <summary>What's the difference between Testnet and Mainnet?</summary>
-          <p>Testnet runs on Robinhood Chain's test network and Solana devnet, where nothing has real value. Mainnet is the real chain, with real and irreversible trades. The network pill next to your wallet shows which is active, and it is the same for everyone.</p>
+          <p>Testnet runs on Robinhood Chain's test network and Solana devnet, where nothing has real value. Mainnet is the real chain, with real ETH and SOL and real, irreversible trades. IgnitionX is live on mainnet; testnet stays available for practice. The network pill next to your wallet shows which is active, and it is the same for everyone.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What do the Explore tabs mean?</summary>
+          <p><b>Launched</b> is a token with a real pool and liquidity added from the start. <b>On the curve</b> is a Quick Launch still trading on its bonding curve. <b>Graduating soon</b> is a curve token about 85% or more of the way to its target. <b>Graduated</b> is a curve token that has moved into a pool, or a pool token whose platform fee has switched off. <b>All</b> shows everything. Robinhood Chain and Solana tokens appear together in every tab.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is there a tax on Solana tokens?</summary>
+          <p>No. Solana launches have a trading fee on the bonding curve (1% by default, with the creator earning a share) and nothing more: no platform tax and no custom tax, before or after graduation.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What does the ring around a token's logo show?</summary>
+          <p>Progress. On the curve it fills toward graduation, going from cool blue to amber to ember as it nears the target. Once a token is in a pool it shows its climb toward the $50,000 market-cap target, and it is full once graduated.</p>
         </details>
         <details class="faq-item">
           <summary>Is IgnitionX affiliated with Robinhood?</summary>
