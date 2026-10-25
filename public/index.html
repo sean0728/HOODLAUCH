@@ -1222,6 +1222,40 @@
   @media (max-width:900px){ .hiw-detail{grid-template-columns:auto 1fr;} .hiw-facts{grid-column:1/-1;} }
   @media (max-width:560px){ .hiw-lbl{font-size:.64rem;} .hiw-node{width:44px;height:44px;} .hiw-track::before,.hiw-track::after{top:21px;} .hiw-seg button{padding:7px 11px; font-size:.7rem;} .hiw-play{margin-left:0;} .hiw-detail{grid-template-columns:1fr; gap:16px;} .hiw-ring.tl-ring{width:70px;height:70px;} }
   @media (prefers-reduced-motion:reduce){ .hiw-detail.in{animation:none;} .hiw-pp{animation:none;} .hiw-track::after,.hiw-node{transition:none;} }
+  .hiw-seg[hidden],.hiw-solnote[hidden]{display:none;}
+  .hiw-chain button{display:inline-flex; align-items:center; gap:7px;}
+  .hiw-chain img{width:18px; height:18px; border-radius:50%; object-fit:contain; background:var(--ink-800);}
+  .hiw-solnote{font-family:var(--font-mono); font-size:.74rem; color:var(--paper-300); border:1px solid var(--line-strong); border-radius:999px; padding:8px 14px; background:var(--ink-850);}
+  .feed-curve-tag .ico{width:11px; height:11px; margin:0; color:var(--cyan-500);}
+  .ico{width:1.1em; height:1.1em; flex:none; vertical-align:-.17em; margin-right:.45em;}
+  .ico:only-child{margin-right:0;}
+  .admin-banner .icon .ico{width:20px; height:20px; margin:0;}
+  .admin-locked .glyph .ico{width:34px; height:34px; margin:0;}
+  .tl-tag .ico{width:12px; height:12px; margin-right:5px; vertical-align:-1px;}
+  .curve-card .name{display:flex; align-items:center; gap:9px;}
+  .curve-card .name .ico{width:17px; height:17px; margin:0; color:var(--cyan-500);}
+  .btn .ico{width:1.05em; height:1.05em;}
+
+  /* ---- motion: entrances, scroll reveal, ring draw-in ---- */
+  @keyframes riseIn{from{opacity:0; transform:translateY(16px);} to{opacity:1; transform:none;}}
+  @keyframes arcIn{from{stroke-dashoffset:289.03;}}
+  .hero .hero-logo,.hero .hero-eyebrow,.hero h1.hero-h,.hero .hero-sub,.hero .hero-cta,.hero .stat-tile,.hero .console{animation:riseIn .8s cubic-bezier(.2,.8,.2,1) backwards;}
+  .hero .hero-eyebrow{animation-delay:.05s;} .hero h1.hero-h{animation-delay:.12s;} .hero .hero-sub{animation-delay:.2s;} .hero .hero-cta{animation-delay:.28s;}
+  .hero .stat-tile:nth-child(1){animation-delay:.36s;} .hero .stat-tile:nth-child(2){animation-delay:.43s;} .hero .stat-tile:nth-child(3){animation-delay:.5s;} .hero .stat-tile:nth-child(4){animation-delay:.57s;}
+  .hero .console{animation-delay:.3s;}
+  .token-card.enter{animation:riseIn .6s cubic-bezier(.2,.8,.2,1) backwards; animation-delay:var(--d,0ms);}
+  .token-card.enter .tl-ring .arc{animation:arcIn 1.1s cubic-bezier(.2,.8,.2,1) backwards; animation-delay:calc(var(--d,0ms) + 150ms);}
+  .dh-ring .arc,.hiw-ring .arc{animation:arcIn 1.1s cubic-bezier(.2,.8,.2,1) backwards;}
+  #detailContent.dv-enter .panel{animation:riseIn .6s cubic-bezier(.2,.8,.2,1) backwards;}
+  #detailContent.dv-enter .panel:nth-child(2){animation-delay:.08s;} #detailContent.dv-enter .panel:nth-child(3){animation-delay:.16s;} #detailContent.dv-enter .panel:nth-child(4){animation-delay:.24s;}
+  #detailContent.dv-enter .tf-band{animation:bandIn .9s cubic-bezier(.2,.8,.2,1) backwards;}
+  @keyframes bandIn{from{opacity:0;}}
+  .rv{opacity:0; transform:translateY(18px); transition:opacity .75s ease, transform .75s cubic-bezier(.2,.8,.2,1);}
+  .rv.rv-in{opacity:1; transform:none;}
+  @media (prefers-reduced-motion:reduce){
+    .hero *,.token-card.enter,.token-card.enter .tl-ring .arc,.dh-ring .arc,.hiw-ring .arc,#detailContent.dv-enter .panel,#detailContent.dv-enter .tf-band{animation:none !important;}
+    .rv{opacity:1; transform:none; transition:none;}
+  }
 </style>
 </head>
 <body>
@@ -1383,19 +1417,24 @@
         </div>
         <div class="hiw-card">
           <div class="hiw-ctl">
-            <div class="hiw-seg" role="group" aria-label="Launch path">
+            <div class="hiw-seg hiw-chain" role="group" aria-label="Chain">
+              <button type="button" data-chain="robinhood" aria-pressed="true"><img src="brand/chains/robinhood.svg" alt="" width="18" height="18">Robinhood Chain</button>
+              <button type="button" data-chain="solana" aria-pressed="false"><img src="brand/chains/solana.svg" alt="" width="18" height="18">Solana</button>
+            </div>
+            <div class="hiw-seg" id="hiwPathSeg" role="group" aria-label="Launch path">
               <button type="button" data-path="pool" aria-pressed="true">Launch with liquidity</button>
               <button type="button" data-path="curve" aria-pressed="false">Quick Launch</button>
             </div>
-            <div class="hiw-seg" role="group" aria-label="Creator tax">
+            <div class="hiw-seg" id="hiwTaxSeg" role="group" aria-label="Creator tax">
               <button type="button" data-tax="none" aria-pressed="true">0% tax</button>
               <button type="button" data-tax="custom" aria-pressed="false">Custom tax</button>
             </div>
+            <span class="hiw-solnote" id="hiwSolNote" hidden>Quick Launch · 0% tax from launch to graduation</span>
             <button type="button" class="hiw-play" id="hiwPlay" aria-pressed="true" aria-label="Pause the walkthrough"><span class="hiw-pp" aria-hidden="true"></span><span id="hiwPlayTxt">Auto</span></button>
           </div>
           <ol class="hiw-track" id="hiwTrack"></ol>
           <div class="hiw-detail" id="hiwDetail" aria-live="polite"></div>
-          <div class="hiw-foot"><span>Solana Quick Launches follow the curve stages and graduate to a Meteora pool; the platform tax steps apply to Robinhood Chain.</span><button class="btn btn-primary btn-sm" data-goto="create">Start a launch</button></div>
+          <div class="hiw-foot"><span id="hiwFootTxt"></span><button class="btn btn-primary btn-sm" data-goto="create">Start a launch</button></div>
         </div>
       </section>
 
@@ -1720,6 +1759,23 @@
   // Swaps the initials avatar for an uploaded logo wherever a token's mark
   // is shown, without duplicating the initials-vs-image branch at each
   // call site.
+  // ---- line-icon set (replaces emoji in rendered UI) ----
+  const ICO = {
+    bolt:'<path d="M13 2L4.500 13.500H11L10 22l8.500-11.500H13z"/>',
+    lock:'<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+    unlock:'<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.500-2"/>',
+    sliders:'<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+    rocket:'<path d="M14 4c3.500-1 5.500-1 6-1 0 .500 0 2.500-1 6l-6 6-5-5z"/><path d="M8.500 11.500L5 12l-2 3 4 1M12.500 15.500L12 19l-3 2-1-4"/><circle cx="15.500" cy="8.500" r="1.200"/>',
+    spark:'<path d="M12 3l1.900 5.100L19 10l-5.100 1.900L12 17l-1.900-5.100L5 10l5.100-1.900z"/><path d="M19 16v4M17 18h4"/>',
+    check:'<path d="M5 12.500l4.500 4.500L19 7"/>',
+    eye:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+    coins:'<circle cx="12" cy="12" r="8.500"/><path d="M12 7.500v9M9.500 10c0-1 1-1.500 2.500-1.500s2.500.500 2.500 1.500-1 1.500-2.500 1.500-2.500.500-2.500 1.500 1 1.500 2.500 1.500 2.500-.500 2.500-1.500"/>',
+    warn:'<path d="M12 3.500l9.500 16.500h-19z"/><path d="M12 10v4.500M12 17.500v.010"/>',
+    refresh:'<path d="M20 11a8 8 0 0 0-14-4L4 9M4 4v5h5M4 13a8 8 0 0 0 14 4l2-2M20 20v-5h-5"/>',
+  };
+  function ico(name){
+    return `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICO[name]||""}</svg>`;
+  }
   function tcMarkHTML(t, extraStyle=""){
     // initials is capped at 2 chars from t.ticker (never truly untrusted —
     // catColor is always the hardcoded "var(--signal-500)" at every call
@@ -1868,6 +1924,7 @@
   const FEE_BPS = 100; // 1.00% transfer tax on buys and sells, matches LaunchedToken.sol's default feeBps — active only while status is "taxed"
 
   /* ---------------- nav / views ---------------- */
+  let detailAnimKey = null, gridEnter = true; const gridSeen = new Map();
   const tabs = document.querySelectorAll(".tab");
   const views = { explore: document.getElementById("view-explore"), create: document.getElementById("view-create"), portfolio: document.getElementById("view-portfolio"), leaderboard: document.getElementById("view-leaderboard"), profile: document.getElementById("view-profile"), detail: document.getElementById("view-detail"), admin: document.getElementById("view-admin") };
 
@@ -1883,6 +1940,7 @@
     }
     Object.values(views).forEach(v=>v.classList.remove("active"));
     views[name].classList.add("active");
+    if(name!=="detail") detailAnimKey = null;
     tabs.forEach(t=> t.setAttribute("aria-selected", String(t.dataset.view===name)) );
     window.scrollTo({top:0, behavior: REDUCE_MOTION ? "auto" : "smooth"});
     if(name==="portfolio") renderPortfolio();
@@ -5366,11 +5424,11 @@
       syncTokenMetadataToServer(newToken).catch(()=>{});
       if(isLiquidity && !isV4Launch) refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real price
       if(isLiquidity){
-        setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on ${escapeHtml(NETWORKS[appMode].chainName)}.`);
-        toast(`🚀 $${newToken.ticker} launched on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
+        setLaunchStep("live", "done", `${ico("spark")}$${escapeHtml(newToken.ticker)} is live on ${escapeHtml(NETWORKS[appMode].chainName)}.`);
+        toast(`$${newToken.ticker} launched on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
       } else {
-        setLaunchStep("live", "done", `✅ $${escapeHtml(newToken.ticker)} is deployed and verified on ${escapeHtml(NETWORKS[appMode].chainName)} — 100% of supply is in your wallet. <strong>It has no liquidity pool yet, so it isn't tradeable.</strong> Add liquidity yourself (e.g. on Uniswap) whenever you're ready to make it live.`);
-        toast(`✅ $${newToken.ticker} deployed on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}. Add liquidity yourself to make it tradeable.`);
+        setLaunchStep("live", "done", `${ico("check")}$${escapeHtml(newToken.ticker)} is deployed and verified on ${escapeHtml(NETWORKS[appMode].chainName)} — 100% of supply is in your wallet. <strong>It has no liquidity pool yet, so it isn't tradeable.</strong> Add liquidity yourself (e.g. on Uniswap) whenever you're ready to make it live.`);
+        toast(`$${newToken.ticker} deployed on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}. Add liquidity yourself to make it tradeable.`);
       }
       appendLaunchActions(newToken);
       renderStats();
@@ -5825,11 +5883,11 @@
       syncTokenMetadataToServer(newToken).catch(()=>{});
       if(addLiquidity) refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real price
       if(addLiquidity){
-        setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on ${escapeHtml(NETWORKS[appMode].chainName)}.`);
-        toast(`🚀 $${newToken.ticker} launched on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
+        setLaunchStep("live", "done", `${ico("spark")}$${escapeHtml(newToken.ticker)} is live on ${escapeHtml(NETWORKS[appMode].chainName)}.`);
+        toast(`$${newToken.ticker} launched on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
       } else {
-        setLaunchStep("live", "done", `✅ $${escapeHtml(newToken.ticker)} is deployed and verified on ${escapeHtml(NETWORKS[appMode].chainName)} — 100% of supply is in your wallet. <strong>It has no liquidity pool yet, so it isn't tradeable and none of your configured tax is active.</strong> Add liquidity yourself (e.g. on Uniswap) whenever you're ready to make it live.`);
-        toast(`✅ $${newToken.ticker} deployed on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}. Add liquidity yourself to make it tradeable.`);
+        setLaunchStep("live", "done", `${ico("check")}$${escapeHtml(newToken.ticker)} is deployed and verified on ${escapeHtml(NETWORKS[appMode].chainName)} — 100% of supply is in your wallet. <strong>It has no liquidity pool yet, so it isn't tradeable and none of your configured tax is active.</strong> Add liquidity yourself (e.g. on Uniswap) whenever you're ready to make it live.`);
+        toast(`$${newToken.ticker} deployed on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}. Add liquidity yourself to make it tradeable.`);
       }
       appendLaunchActions(newToken);
       renderStats();
@@ -6409,8 +6467,8 @@
       saveCustomTokens();
       syncTokenMetadataToServer(newToken).catch(()=>{});
       refreshLiveTokenPrices(); // don't wait for the next 60s poll to show a real curve price for what just launched
-      setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on the bonding curve on ${escapeHtml(NETWORKS[appMode].chainName)} — trades against the curve immediately, and goes live on a real DEX pool once it holds ${curvePoolSeedEthDisplay(draft.mode)} ETH.`);
-      toast(`⚡ $${newToken.ticker} Quick Launched on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
+      setLaunchStep("live", "done", `${ico("spark")}$${escapeHtml(newToken.ticker)} is live on the bonding curve on ${escapeHtml(NETWORKS[appMode].chainName)} — trades against the curve immediately, and goes live on a real DEX pool once it holds ${curvePoolSeedEthDisplay(draft.mode)} ETH.`);
+      toast(`$${newToken.ticker} Quick Launched on ${NETWORKS[appMode].chainName} — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
       appendLaunchActions(newToken);
       renderStats();
       renderGrid();
@@ -6909,11 +6967,11 @@
       syncTokenMetadataToServer(newToken).catch(()=>{});
       if(isCurve) refreshLiveTokenPrices();
       if(isCurve){
-        setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on the bonding curve on ${escapeHtml(NETWORKS[appMode].chainName)} — a Uniswap V4 pool is created automatically once it holds ${curvePoolSeedEthDisplay(mode)} ETH.`);
-        toast(`⚡ $${newToken.ticker} Quick Launched on V4 — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
+        setLaunchStep("live", "done", `${ico("spark")}$${escapeHtml(newToken.ticker)} is live on the bonding curve on ${escapeHtml(NETWORKS[appMode].chainName)} — a Uniswap V4 pool is created automatically once it holds ${curvePoolSeedEthDisplay(mode)} ETH.`);
+        toast(`$${newToken.ticker} Quick Launched on V4 — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
       }else{
-        setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on Uniswap V4 with your custom tax.`);
-        toast(`🚀 $${newToken.ticker} launched on V4 — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
+        setLaunchStep("live", "done", `${ico("spark")}$${escapeHtml(newToken.ticker)} is live on Uniswap V4 with your custom tax.`);
+        toast(`$${newToken.ticker} launched on V4 — tx ${fmtAddr(result.txHash)}, token ${fmtAddr(result.tokenAddress)}.`);
       }
       appendLaunchActions(newToken);
       renderStats();
@@ -7778,10 +7836,10 @@
                 changed = true;
                 if(t.customTax){
                   t.status = "pool-detected";
-                  toast(`👀 $${t.ticker} now has a pool — activate your configured tax from its detail page whenever you're ready.`);
+                  toast(`$${t.ticker} now has a pool — activate your configured tax from its detail page whenever you're ready.`);
                 } else {
                   t.status = "live-pool";
-                  toast(`👀 $${t.ticker} now has a pool — liquidity was added independently.`);
+                  toast(`$${t.ticker} now has a pool — liquidity was added independently.`);
                 }
               }
             } else { // "pool-detected" — customTax tokens only
@@ -7789,7 +7847,7 @@
               if(onChainPair.toLowerCase() !== ZERO_ADDRESS){
                 t.status = "live-pool";
                 changed = true;
-                toast(`🎉 $${t.ticker}'s tax is now active on its pool.`);
+                toast(`$${t.ticker}'s tax is now active on its pool.`);
               }
             }
           }catch(e){ /* transient RPC error — retried on the next poll tick */ }
@@ -7922,11 +7980,36 @@
     return list.filter(l=> l && l.mint).map(l=>({ mint:l.mint, status: (solInfo[l.mint] && solInfo[l.mint].migrated) ? "graduated" : "curve-trading" }));
   }
   // Sets a headline figure and gives it a short flash when the number actually changed.
+  // Count a formatted figure ("$48.2K", "1,284", "37") up to its new value instead of swapping the text.
+  function parseNumText(t){ const m = /^(\D*?)(\d[\d,]*(?:\.\d+)?)(.*)$/.exec(String(t)); return m ? { pre:m[1], num:m[2], suf:m[3] } : null; }
+  function countUp(el, text, fromText){
+    if(el._cu){ cancelAnimationFrame(el._cu); el._cu = 0; }
+    const to = parseNumText(text);
+    if(REDUCE_MOTION || !to){ el.textContent = text; return; }
+    let fromVal = 0;
+    if(fromText){
+      const f = parseNumText(fromText);
+      if(f && f.suf===to.suf && f.pre===to.pre) fromVal = parseFloat(f.num.replace(/,/g,""));
+      else { el.textContent = text; return; }
+    }
+    const toVal = parseFloat(to.num.replace(/,/g,"")), dec = (to.num.split(".")[1]||"").length, commas = to.num.includes(",");
+    if(!isFinite(toVal) || fromVal===toVal){ el.textContent = text; return; }
+    const fmt = v=>{ let t = v.toFixed(dec); if(commas){ const [i,d] = t.split("."); t = i.replace(/\B(?=(\d{3})+(?!\d))/g,",") + (d ? "."+d : ""); } return to.pre + t + to.suf; };
+    const t0 = performance.now(), dur = 950;
+    const step = (now)=>{
+      const k = Math.min(1, (now-t0)/dur), e = 1 - Math.pow(1-k, 3);
+      if(k<1){ el.textContent = fmt(fromVal + (toVal-fromVal)*e); el._cu = requestAnimationFrame(step); }
+      else { el.textContent = text; el._cu = 0; }
+    };
+    el._cu = requestAnimationFrame(step);
+  }
   function setFig(id, text){
     const el = document.getElementById(id); if(!el) return;
-    if(el.textContent===text) return;
-    const had = el.textContent && el.textContent!=="—";
-    el.textContent = text;
+    if(el.dataset.figTarget===text) return;
+    const prev = el.textContent;
+    const had = prev && prev!=="—";
+    el.dataset.figTarget = text;
+    countUp(el, text, had ? prev : "");
     if(had){ el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
   }
   function renderStats(){
@@ -8264,7 +8347,7 @@
       led = t.status==="graduated" ? "heat" : "good";
     }
     const payout = t.customTax ? (t.payoutMode===1 ? tileTagHTML("Pays ETH") : t.payoutMode===2 ? tileTagHTML("Pays token") : "") : "";
-    const tags = (isCurveMode ? tileTagHTML("⚡ Quick Launch") : "") + (t.customTax ? tileTaxTagsHTML(t) + payout : "");
+    const tags = (isCurveMode ? tileTagHTML(ico("bolt")+"Quick Launch") : "") + (t.customTax ? tileTaxTagsHTML(t) + payout : "");
     return tileHTML({ chain:chainOf(t), createdAtMs:t.createdAtMs, pct, logoInner, name:t.name, ticker:t.ticker, tickerExtra, meta, chart, tags, status, led });
   }
   function renderGrid(){
@@ -8317,6 +8400,18 @@
     grid.innerHTML = pageCards.map(c=> c.sol
       ? `<button class="token-card" data-chain="solana" data-solmint="${escapeHtml(c.sol.mint)}">${solCardHTML(c.sol.launch)}</button>`
       : `<button class="token-card" data-chain="${chainOf(c.t)}" data-id="${c.t.id}">${tokenCardHTML(c.t)}</button>`).join("");
+    if(!REDUCE_MOTION){
+      // Cards ease in the first time they appear (and after a filter/search change). Background re-renders replace the
+      // DOM, so a card that is mid-entrance resumes from where it was instead of snapping.
+      if(gridEnter){ gridEnter = false; gridSeen.clear(); }
+      const now = performance.now();
+      grid.querySelectorAll(".token-card").forEach((c,i)=>{
+        const key = c.dataset.id || c.dataset.solmint || String(i);
+        if(!gridSeen.has(key)) gridSeen.set(key, { t0: now, i: Math.min(i,10) });
+        const e = gridSeen.get(key), delay = e.i*45 - (now - e.t0);
+        if(delay > -700){ c.style.setProperty("--d", delay.toFixed(0)+"ms"); c.classList.add("enter"); }
+      });
+    }
     grid.querySelectorAll(".token-card[data-id]").forEach(card=>{
       card.addEventListener("click", ()=> openDetail(card.dataset.id) );
     });
@@ -8477,11 +8572,11 @@
       document.querySelectorAll(".chip").forEach(c=>c.setAttribute("aria-pressed","false"));
       chip.setAttribute("aria-pressed","true");
       activeFilter = chip.dataset.filter;
-      gridPage = 1;
+      gridPage = 1; gridEnter = true;
       renderGrid();
     });
   });
-  document.getElementById("searchInput").addEventListener("input", (e)=>{ searchTerm = e.target.value; gridPage = 1; renderGrid(); });
+  document.getElementById("searchInput").addEventListener("input", (e)=>{ searchTerm = e.target.value; gridPage = 1; gridEnter = true; renderGrid(); });
 
   /* ---------------- detail view ---------------- */
   let tradeSide = "buy";
@@ -8644,7 +8739,7 @@
           toast("Claim sent — waiting for confirmation…");
           const receipt = await waitForReceipt(txHash);
           if(receipt.status!=="0x1") throw new Error("The claim reverted on-chain.");
-          toast(`✅ Reflections claimed for $${t.ticker}.`);
+          toast(`Reflections claimed for $${t.ticker}.`);
         }catch(err){
           toast(err && err.code===4001 ? "Transaction was rejected in your wallet." : "Claim failed: "+((err && err.message) ? err.message : String(err)));
         }
@@ -9006,7 +9101,7 @@
         : "";
       const lockLabel = t.lpWithdrawn ? "LP withdrawn" : fmtTimeLeft(lpMsLeft(t));
       const unlockCta = (isOwner && lpIsUnlockable(t))
-        ? `<button class="btn btn-primary btn-sm" id="detailUnlockBtn" style="margin-top:10px;">🔓 Unlock LP now</button>`
+        ? `<button class="btn btn-primary btn-sm" id="detailUnlockBtn" style="margin-top:10px;">${ico("unlock")}Unlock LP now</button>`
         : "";
       const curveBarHTML = curveDone ? `
           <div class="bond-gauge">
@@ -9057,7 +9152,7 @@
         : "";
       const lockLabel = t.lpWithdrawn ? "LP withdrawn" : fmtTimeLeft(lpMsLeft(t));
       const unlockCta = (isOwner && lpIsUnlockable(t))
-        ? `<button class="btn btn-primary btn-sm" id="detailUnlockBtn" style="margin-top:10px;">🔓 Unlock LP now</button>`
+        ? `<button class="btn btn-primary btn-sm" id="detailUnlockBtn" style="margin-top:10px;">${ico("unlock")}Unlock LP now</button>`
         : "";
       const graduatedHint = `This pool crossed $50,000 in market cap — the 1.00% transfer tax disabled permanently. LP tokens stay locked to the creator until the lock matures; trading continues here with no protocol fee.${buyInNote}`;
       progressHTML = `
@@ -9072,7 +9167,7 @@
       // tax to activate, so checkPendingLiquidity() sends it straight to
       // "live-pool" instead (see that function's own comment).
       const activateCta = isOwner
-        ? `<button class="btn btn-primary btn-sm" id="detailActivateBtn" style="margin-top:10px;">🔓 Activate my tax now</button>`
+        ? `<button class="btn btn-primary btn-sm" id="detailActivateBtn" style="margin-top:10px;">${ico("unlock")}Activate my tax now</button>`
         : "";
       progressHTML = `
           <div class="bond-gauge">
@@ -9103,14 +9198,14 @@
     // Lock status for the creator's seeded position (V4LiquidityLocker).
     const v4LockMsLeft = (t.unlockAt!=null) ? (t.unlockAt - Date.now()) : null;
     const v4LockLine = !v4HasPool ? "" : t.lpWithdrawn
-      ? `<span style="color:var(--good-500);">🔓 Position withdrawn — the pool's seeded liquidity has been removed.</span>`
+      ? `<span style="color:var(--good-500);">${ico("unlock")}Position withdrawn — the pool's seeded liquidity has been removed.</span>`
       : (v4LockMsLeft==null)
         ? `The creator's liquidity position is locked in V4LiquidityLocker (lock ID ${escapeHtml(String(t.lockId==null?"—":t.lockId))}).`
         : (v4LockMsLeft>0)
-          ? `🔒 The creator's liquidity position is locked in V4LiquidityLocker · ${fmtTimeLeft(v4LockMsLeft)} (unlocks ${escapeHtml(new Date(t.unlockAt).toISOString().slice(0,10))}).`
-          : `🔓 The lock has matured${isOwner ? " — you can withdraw the position below." : "."}`;
+          ? `${ico("lock")}The creator's liquidity position is locked in V4LiquidityLocker · ${fmtTimeLeft(v4LockMsLeft)} (unlocks ${escapeHtml(new Date(t.unlockAt).toISOString().slice(0,10))}).`
+          : `${ico("unlock")}The lock has matured${isOwner ? " — you can withdraw the position below." : "."}`;
     const v4UnlockCta = (isOwner && lpIsUnlockable(t))
-      ? `<button class="btn btn-primary btn-sm" id="detailUnlockBtn" style="margin-top:8px;">🔓 Withdraw position</button>
+      ? `<button class="btn btn-primary btn-sm" id="detailUnlockBtn" style="margin-top:8px;">${ico("unlock")}Withdraw position</button>
          <p style="margin:6px 0 0; font-size:.78rem; color:var(--paper-500); line-height:1.5;">Removes the entire seeded position — ETH, tokens and accrued trading fees go to your wallet, and the pool stops having that liquidity (trading will be thin or stop).</p>`
       : "";
     const v4InfoHTML = `
@@ -9310,6 +9405,13 @@
     initCalloutBox(t);
     fillDetailSupply(t);
     wireTaxFlow(t);
+    {
+      const dc = document.getElementById("detailContent");
+      const fresh = detailAnimKey!==t.id;
+      detailAnimKey = t.id;
+      dc.classList.toggle("dv-enter", fresh && !REDUCE_MOTION);
+      if(fresh) dc.querySelectorAll(".mc-stats .stat-mini .v").forEach(v=>{ if(!v.id && v.textContent.trim()) countUp(v, v.textContent.trim(), ""); });
+    }
 
     mountCandleChart(document.getElementById("chartWrap"), t);
 
@@ -9648,7 +9750,7 @@
           toast("Transaction sent — waiting for confirmation…");
           const receipt = await waitForReceipt(txHash);
           if(receipt.status !== "0x1") throw new Error("The buy reverted on-chain — try a smaller amount or a higher slippage tolerance.");
-          toast(`✅ Bought $${t.ticker} — check your wallet or the explorer for the exact amount received.`);
+          toast(`Bought $${t.ticker} — check your wallet or the explorer for the exact amount received.`);
         } else {
           const out = v4QuoteSell(wei, state, sideTax("sell"));
           if(out<=0n) throw new Error("This pool can't quote that amount right now — try a smaller amount.");
@@ -9696,7 +9798,7 @@
               }
             }
           }
-          toast(`✅ Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
+          toast(`Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
         }
         amtInput.value = "";
         refreshPool();
@@ -9919,7 +10021,7 @@
           toast("Transaction sent — waiting for confirmation…");
           const receipt = await waitForReceipt(txHash);
           if(receipt.status !== "0x1") throw new Error("The buy reverted on-chain — try a smaller amount or a higher slippage tolerance.");
-          toast(`✅ Bought $${t.ticker} — check your wallet or the explorer for the exact amount received.`);
+          toast(`Bought $${t.ticker} — check your wallet or the explorer for the exact amount received.`);
         } else {
           const tokensIn = parseEtherToWei(amtStr);
           if(tokensIn<=0n) throw new Error("Enter an amount greater than 0.");
@@ -9989,7 +10091,7 @@
               }
             }
           }
-          toast(`✅ Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
+          toast(`Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
         }
         amtInput.value = "";
         renderQuote();
@@ -10163,7 +10265,7 @@
           toast("Transaction sent — waiting for confirmation…");
           const receipt = await waitForReceipt(txHash);
           if(receipt.status !== "0x1") throw new Error("The buy reverted on-chain — try a smaller amount or a higher slippage tolerance.");
-          toast(`✅ Bought $${t.ticker} — check your wallet or the explorer for the exact amount received.`);
+          toast(`Bought $${t.ticker} — check your wallet or the explorer for the exact amount received.`);
         } else {
           const tokensIn = parseEtherToWei(amtStr);
           if(tokensIn<=0n) throw new Error("Enter an amount greater than 0.");
@@ -10220,7 +10322,7 @@
               }
             }
           }
-          toast(`✅ Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
+          toast(`Sold $${t.ticker} — check your wallet or the explorer for the exact ETH received.`);
         }
         amtInput.value = "";
         renderQuote();
@@ -10331,7 +10433,7 @@
       if(justGraduated){
         if(!t.unlockAt) t.unlockAt = Date.now() + LP_LOCK_DAYS*86400000;
         if(t.taxProgress==null) t.taxProgress = 0;
-        toast(`🎉 $${t.ticker} graduated — its Uniswap V4 pool is now live and tradeable.`);
+        toast(`$${t.ticker} graduated — its Uniswap V4 pool is now live and tradeable.`);
       }
     } else if(justGraduated || pairStillMissing){
       try{
@@ -10345,7 +10447,7 @@
       if(justGraduated){
         t.unlockAt = Date.now() + LP_LOCK_DAYS*86400000;
         if(t.taxProgress==null) t.taxProgress = 0; // refreshLiveTokenPrices fills this in for real momentarily — see the call right after this function's callers
-        toast(`🎉 $${t.ticker} is now live on DEX — it trades on a live, LP-locked pool. A 1.00% tax applies until it crosses $50,000 in market cap, when it fully graduates.`);
+        toast(`$${t.ticker} is now live on DEX — it trades on a live, LP-locked pool. A 1.00% tax applies until it crosses $50,000 in market cap, when it fully graduates.`);
       }
     }
     return state;
@@ -11215,7 +11317,7 @@
     const meta = [{l:"Price", v:info ? solFmtPrice(info.priceSol) : "—"},{l:"Mkt cap", v:info ? solFmtMcap(info.marketCapSol) : "—"}];
     const chart = (!grad && pct!==null) ? tileCurveChartHTML(pct, "graduation") : "";
     const status = grad ? "Graduated · pool live" : (pct!==null && pct>=85 ? "Graduating soon" : "On the curve");
-    const tags = tileTagHTML("⚡ Quick Launch") + tileTagHTML(`Solana · ${solNetWord()}`);
+    const tags = tileTagHTML(ico("bolt")+"Quick Launch") + tileTagHTML(`Solana · ${solNetWord()}`);
     return tileHTML({ chain:"solana", createdAtMs:(typeof l.createdAt==="number" ? l.createdAt : 0), pct, logoInner, name:l.name, ticker:l.symbol, tickerExtra:"", meta, chart, tags, status, led: grad || (pct!==null && pct>=85) ? "heat" : "cool" });
   }
   // The Solana cards live in the main "Live launches" grid now (see renderGrid / solGridAll).
@@ -11403,7 +11505,7 @@
         <p style="color:var(--paper-500); font-size:.86rem; margin:0 0 18px;">Solana launches use one mode. Nothing here is reversible after you launch.</p>
         <div class="curve-options">
           <div class="curve-card selected" style="text-align:left; padding:16px;">
-            <div class="name" style="margin-bottom:6px;">⚡ Quick Launch (0% tax) · Solana ${solNetWord()}</div>
+            <div class="name" style="margin-bottom:6px;">${ico("bolt")}Quick Launch (0% tax) · Solana ${solNetWord()}</div>
             <div class="desc">Pump.fun-style: no liquidity to provide. Your token trades immediately against a Meteora bonding curve, then moves to a Meteora DAMM v2 pool once the curve has raised about ${solNum(s.raise)} SOL.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">No IgnitionX launch fee · network cost about 0.02 SOL</div>
           </div>
@@ -11450,9 +11552,9 @@
         <div class="review-row" style="background:var(--ink-850);"><span class="k" style="color:var(--paper-100); font-weight:600;">Platform fee</span><span class="v num" style="color:var(--signal-300);">none (network cost about ${custom ? "0.03" : "0.02"} SOL${fb && Number(fb) > 0 ? " + your first buy" : ""})</span></div>
       </div>
       ${ready ? `<label class="agree-row"><input type="checkbox" id="fAgree" ${solBusy ? "checked disabled" : ""}><span><strong>This sends real transactions</strong> from your Solana wallet on Solana ${solNetWord()}${solIsMain() ? ", spending real SOL" : " (test SOL)"}. I've reviewed the details and want to launch.</span></label>
-      <div class="wizard-actions">${back}<button class="btn btn-primary" id="wizLaunch" ${solBusy ? "disabled" : ""}>${solBusy ? "Launching…" : `🚀 Launch on Solana ${solNetWord()}${solIsMain() ? " (real SOL)" : ""}`}</button></div>`
+      <div class="wizard-actions">${back}<button class="btn btn-primary" id="wizLaunch" ${solBusy ? "disabled" : ""}>${solBusy ? "Launching…" : `${ico("rocket")}Launch on Solana ${solNetWord()}${solIsMain() ? " (real SOL)" : ""}`}</button></div>`
         : `<div class="hint" role="alert" style="border-left:2px solid var(--critical-500); padding-left:10px; margin:14px 0;"><strong>Solana launching isn't set up yet.</strong> ${isAdminWallet(wallet) ? "Create the platform config in the box above first." : "Check back soon."}</div>
-      <div class="wizard-actions">${back}<button class="btn btn-primary" id="wizLaunch" disabled>🚀 Launch unavailable</button></div>`}
+      <div class="wizard-actions">${back}<button class="btn btn-primary" id="wizLaunch" disabled>${ico("rocket")}Launch unavailable</button></div>`}
       <div id="solLaunchStatus" class="sol-status" aria-live="polite"></div>`;
   }
   function solBindWizard(){
@@ -12292,22 +12394,22 @@
         <p class="hint" style="margin:0 0 18px;">${ethPriceNote()}</p>
         <div class="curve-options">
           <div class="curve-card ${draft.mode==='liquidity'?'selected':''} ${lockCls('liquidity')}" data-mode="liquidity" style="text-align:left; padding:16px;">
-            <div class="name" style="margin-bottom:6px;">🔒 Launch 0% Tax Token</div>
+            <div class="name" style="margin-bottom:6px;">${ico("lock")}Launch 0% Tax Token</div>
             <div class="desc">Creation and liquidity happen atomically, in one transaction. A live pool exists immediately, taxed 1.00% on buys &amp; sells until market cap hits $50,000 — then the tax shuts off for good. LP locked to you for 15 days. 0% creator tax — you don't configure a rate here.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("liquidity")}</div>
           </div>
           <div class="curve-card ${draft.mode==='custom'?'selected':''} ${lockCls('custom')}" data-mode="custom" style="text-align:left; padding:16px;">
-            <div class="name" style="margin-bottom:6px;">🎛️ Launch Custom Tax Token</div>
+            <div class="name" style="margin-bottom:6px;">${ico("sliders")}Launch Custom Tax Token</div>
             <div class="desc">Custom Tax Token: you choose the tax — reflections, marketing wallet, auto-liquidity, true burn — up to 5% total per side, buy and sell configured independently. Creation and liquidity happen atomically; a live pool exists immediately, LP locked to you for ${LP_LOCK_DAYS} days. Same platform 1.00%-until-$50,000 tax applies on top, same as every launch with a pool.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("custom")}</div>
           </div>
           <div class="curve-card ${draft.mode==='curve'?'selected':''} ${lockCls('curve')}" data-mode="curve" style="text-align:left; padding:16px;">
-            <div class="name" style="margin-bottom:6px;">⚡ Quick Launch (0% tax)</div>
+            <div class="name" style="margin-bottom:6px;">${ico("bolt")}Quick Launch (0% tax)</div>
             <div class="desc">Pump.fun-style: no liquidity to provide. Your token trades immediately against an on-chain bonding curve, then goes live on its own on a real, LP-locked DEX pool once the curve holds ${curvePoolSeedEthDisplay("curve")} ETH. 0% creator tax — you don't configure a rate here.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("curve")}</div>
           </div>
           <div class="curve-card ${draft.mode==='customCurve'?'selected':''} ${lockCls('customCurve')}" data-mode="customCurve" style="text-align:left; padding:16px;">
-            <div class="name" style="margin-bottom:6px;">⚡ Quick Launch (custom tax)</div>
+            <div class="name" style="margin-bottom:6px;">${ico("bolt")}Quick Launch (custom tax)</div>
             <div class="desc">Same Quick Launch mechanics — no liquidity to provide, live on a bonding curve immediately — plus your own configured buy/sell tax, up to 5% total per side. Your tax activates once this curve goes live on a real DEX pool at ${curvePoolSeedEthDisplay("customCurve")} ETH; it stays recorded but inactive until then.</div>
             <div class="desc num" style="margin-top:10px; color:var(--paper-300); font-weight:600;">${feeLineText("customCurve")}</div>
           </div>
@@ -12467,9 +12569,9 @@
       <div class="hint" style="margin:-4px 0 14px;">${ethPriceNote()}.</div>
       ${protoV4 && !v4Ready
         ? `<div class="hint" role="alert" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:14px;"><strong>Launch is disabled.</strong> ${v4Block}</div>
-      <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizLaunch" disabled>🚀 Launch (V4 unavailable)</button></div>`
+      <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizLaunch" disabled>${ico("rocket")}Launch (V4 unavailable)</button></div>`
         : `${protoV4 ? `<div class="hint" style="border-left:2px solid var(--critical-500); padding-left:10px; margin-bottom:14px;">V4 launch via <strong>${v4FactoryNameForMode(draft.mode)}</strong> — real ETH. Gasless through the relayer when it is available: you sign a free message and send one deposit, and the relayer submits the launch. If it is not available you send the launch transaction yourself and pay its gas.${(draft.mode==="curve"||draft.mode==="customCurve") ? " The Uniswap V4 pool is created automatically when the curve graduates." : ""}</div>` : ""}<label class="agree-row"><input type="checkbox" id="fAgree">${agreeLabel}</label>
-      <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizLaunch">${(isRealLaunch || protoV4) ? "🚀 Launch (real transaction)" : "🚀 Launch token"}</button></div>`}
+      <div class="wizard-actions"><button class="btn btn-ghost" id="wizBack">Back</button><button class="btn btn-primary" id="wizLaunch">${(isRealLaunch || protoV4) ? ico("rocket")+"Launch (real transaction)" : ico("rocket")+"Launch token"}</button></div>`}
     `;
   }
 
@@ -13189,11 +13291,11 @@
     tokens.unshift(newToken);
     saveCustomTokens();
     if(addLiquidity){
-      setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on IgnitionX (simulated).`);
-      toast(`🚀 $${newToken.ticker} launched with your own tax configuration on top of the platform's 1.00% (demo).`);
+      setLaunchStep("live", "done", `${ico("spark")}$${escapeHtml(newToken.ticker)} is live on IgnitionX (simulated).`);
+      toast(`$${newToken.ticker} launched with your own tax configuration on top of the platform's 1.00% (demo).`);
     } else {
-      setLaunchStep("live", "done", `✅ $${escapeHtml(newToken.ticker)} is deployed and verified (simulated) — 100% of supply is in your wallet. <strong>It has no liquidity pool yet, so it isn't tradeable and none of your configured tax is active.</strong> You'd need to add liquidity yourself (e.g. on Uniswap) to make it live.`);
-      toast(`✅ $${newToken.ticker} created and verified — 100% of supply is in your wallet, your tax configuration is recorded but inactive until you add liquidity (demo).`);
+      setLaunchStep("live", "done", `${ico("check")}$${escapeHtml(newToken.ticker)} is deployed and verified (simulated) — 100% of supply is in your wallet. <strong>It has no liquidity pool yet, so it isn't tradeable and none of your configured tax is active.</strong> You'd need to add liquidity yourself (e.g. on Uniswap) to make it live.`);
+      toast(`$${newToken.ticker} created and verified — 100% of supply is in your wallet, your tax configuration is recorded but inactive until you add liquidity (demo).`);
     }
     appendLaunchActions(newToken);
     renderStats();
@@ -13258,8 +13360,8 @@
 
     tokens.unshift(newToken);
     saveCustomTokens();
-    setLaunchStep("live", "done", `🎉 $${escapeHtml(newToken.ticker)} is live on the bonding curve (simulated) — goes live on a DEX pool once it holds ${curvePoolSeedEthDisplay(draft.mode)} ETH.`);
-    toast(`⚡ $${newToken.ticker} Quick Launched — trading live on a bonding curve, no liquidity provided (demo).`);
+    setLaunchStep("live", "done", `${ico("spark")}$${escapeHtml(newToken.ticker)} is live on the bonding curve (simulated) — goes live on a DEX pool once it holds ${curvePoolSeedEthDisplay(draft.mode)} ETH.`);
+    toast(`$${newToken.ticker} Quick Launched — trading live on a bonding curve, no liquidity provided (demo).`);
     appendLaunchActions(newToken);
     renderStats();
     renderGrid();
@@ -13293,7 +13395,7 @@
       if(!t.onChain){
         t.lpWithdrawn = true;
         saveCustomTokens();
-        toast(`🔓 $${t.ticker}'s LP unlocked (demo) — no real contract call, since this token was never deployed on-chain.`);
+        toast(`$${t.ticker}'s LP unlocked (demo) — no real contract call, since this token was never deployed on-chain.`);
       } else {
         if(!getEth()) throw new Error("No wallet connected.");
         if(!wallet) throw new Error("Connect your wallet first.");
@@ -13352,8 +13454,8 @@
           t.lpWithdrawn = true;
           saveCustomTokens();
           toast(tokenProtocol(t)==="v4"
-            ? `🔓 $${t.ticker}'s V4 position was withdrawn — the ETH and tokens (plus accrued fees) are in your wallet.`
-            : `🔓 $${t.ticker}'s LP tokens are back in your wallet.`);
+            ? `$${t.ticker}'s V4 position was withdrawn — the ETH and tokens (plus accrued fees) are in your wallet.`
+            : `$${t.ticker}'s LP tokens are back in your wallet.`);
         }
       }
     }catch(err){
@@ -13398,7 +13500,7 @@
       if(!t.onChain){
         t.status = "live-pool";
         saveCustomTokens();
-        toast(`🎉 $${t.ticker}'s tax activated (demo) — no real contract call, since this token was never deployed on-chain.`);
+        toast(`$${t.ticker}'s tax activated (demo) — no real contract call, since this token was never deployed on-chain.`);
       } else {
         if(!getEth()) throw new Error("No wallet connected.");
         if(!wallet) throw new Error("Connect your wallet first.");
@@ -13436,7 +13538,7 @@
 
           t.status = "live-pool";
           saveCustomTokens();
-          toast(`🎉 $${t.ticker}'s configured tax is now active on its pool — no platform tax, ever, on this token.`);
+          toast(`$${t.ticker}'s configured tax is now active on its pool — no platform tax, ever, on this token.`);
         }
       }
     }catch(err){
@@ -13501,10 +13603,10 @@
           const lpMeta = t.mode!=="liquidity" ? "" : `
             <div class="mtr-meta" style="margin-top:3px;">
               ${t.lpWithdrawn
-                ? `<span style="color:var(--good-500);">🔓 LP unlocked</span>`
+                ? `<span style="color:var(--good-500);">${ico("unlock")}LP unlocked</span>`
                 : lpIsUnlockable(t)
-                  ? `<span style="color:var(--signal-300);">🔒 LP ready to unlock</span>`
-                  : `🔒 LP locked · ${fmtTimeLeft(lpMsLeft(t))}`}
+                  ? `<span style="color:var(--signal-300);">${ico("lock")}LP ready to unlock</span>`
+                  : `${ico("lock")}LP locked · ${fmtTimeLeft(lpMsLeft(t))}`}
             </div>`;
           const unlockBtn = lpIsUnlockable(t)
             ? `<button class="btn btn-primary" style="padding:7px 12px; font-size:.8rem;" data-unlock-token="${t.id}">Unlock LP</button>`
@@ -13910,7 +14012,7 @@
         const claimableStr = `${weiToEtherString(claimableWei,6)} ETH claimable`;
         const pendingStr = pendingWei>0n ? ` · ${weiToEtherString(pendingWei,4)} $${escapeHtml(t.ticker)} pending conversion to ETH` : "";
         lineEl.innerHTML = `
-          <span>💰 ${claimableStr}${pendingStr}</span>
+          <span>${ico("coins")}${claimableStr}${pendingStr}</span>
           <span class="mtr-reward-actions" style="display:inline-flex; gap:6px; margin-left:8px;">
             ${pendingWei>0n ? `<button class="btn btn-ghost" style="padding:3px 8px; font-size:.72rem;" data-convert-creator-rewards="${t.tokenAddress}" data-distributor="${distributorAddress}">Convert to ETH</button>` : ""}
             <button class="btn btn-primary" style="padding:3px 8px; font-size:.72rem;" data-claim-creator-rewards="${t.tokenAddress}" data-distributor="${distributorAddress}" ${claimableWei>0n ? "" : "disabled"}>Claim</button>
@@ -14065,7 +14167,7 @@
       toast("Transaction sent — waiting for confirmation…");
       const receipt = await waitForReceipt(txHash);
       if(receipt.status !== "0x1") throw new Error("The claim transaction reverted on-chain.");
-      toast("🎉 Creator rewards claimed — check your wallet's ETH balance.");
+      toast("Creator rewards claimed — check your wallet's ETH balance.");
     }catch(err){
       console.error(err);
       if(err && err.code===4001) toast("Transaction was rejected in your wallet.");
@@ -14776,7 +14878,7 @@
       if(receipt.status !== "0x1"){
         toast("The transaction reverted on-chain — nothing was changed.");
       } else {
-        toast(`✅ ${successMsg}`);
+        toast(`${successMsg}`);
       }
     }catch(err){
       if(err && err.code===4001) toast("Transaction was rejected.");
@@ -15141,7 +15243,7 @@
       if(receipt.status !== "0x1"){
         toast("The transaction reverted on-chain — nothing was changed.");
       } else {
-        toast(`✅ ${successMsg}`);
+        toast(`${successMsg}`);
       }
     }catch(err){
       if(err && err.code===4001) toast("Transaction was rejected.");
@@ -15639,7 +15741,7 @@
           return;
         }
       }
-      toast(turnOn ? "✅ Platform rewards enabled." : "✅ Platform rewards disabled — future launches and future tax collection keep 100% of fees as platform profit.");
+      toast(turnOn ? "Platform rewards enabled." : "Platform rewards disabled — future launches and future tax collection keep 100% of fees as platform profit.");
     }catch(err){
       if(err && err.code===4001) toast("Transaction was rejected.");
       else toast(err && err.message ? err.message : "Transaction failed.");
@@ -15732,7 +15834,7 @@
         ? `Relayer is sweeping <span class="admin-addr-line" style="display:inline; padding:0; border:0; background:none;">${escapeHtml(row.resolved || "—")}</span>`
         : `Not configured on the relayer — set ${row.label==="Creator rewards" ? "CREATOR_REWARDS_DISTRIBUTOR_ADDRESS" : row.label==="Fee wallet" ? "FEE_WALLET_DISTRIBUTOR_ADDRESS" : "PLATFORM_REWARDS_DISTRIBUTOR_ADDRESS"} in the relayer's environment and restart it.`;
       const mismatchLine = mismatch
-        ? `<p class="admin-empty" style="margin:4px 0 0; color:var(--signal-300);">⚠ This differs from the ${escapeHtml(row.label==="Platform rewards"?"platform token":row.label.toLowerCase()+" distributor")} address the factory panel below is currently configured with (${escapeHtml(row.onChainAddr)}). The keeper is watching a stale or different contract than this page shows — restart the relayer after updating its env var, or repoint the factory back to match.</p>`
+        ? `<p class="admin-empty" style="margin:4px 0 0; color:var(--signal-300);">${ico("warn")}This differs from the ${escapeHtml(row.label==="Platform rewards"?"platform token":row.label.toLowerCase()+" distributor")} address the factory panel below is currently configured with (${escapeHtml(row.onChainAddr)}). The keeper is watching a stale or different contract than this page shows — restart the relayer after updating its env var, or repoint the factory back to match.</p>`
         : "";
       return `
         <div class="admin-readout" style="grid-column:span 1;">
@@ -15789,7 +15891,7 @@
         ? `Gasless relaying is disabled for this factory (relayer() is unset) — depositForRelayedLaunch/reclaimDeposit still work, but relayedCreate… will always revert until an owner calls setRelayer below.`
         : matches
           ? `Matches the relayer process's own wallet — relayed launches through this factory should work.`
-          : `⚠ On-chain relayer is <span class="admin-addr-line" style="display:inline; padding:0; border:0; background:none;">${escapeHtml(onChainRelayer)}</span>, but the running relayer process is using <span class="admin-addr-line" style="display:inline; padding:0; border:0; background:none;">${h.relayer ? escapeHtml(h.relayer) : "an unknown wallet"}</span> — every relayed launch through this factory will revert with "caller is not the relayer" until the factory owner calls setRelayer(${h.relayer ? escapeHtml(h.relayer) : "…"}) below, or the relayer process is restarted with the key for ${escapeHtml(onChainRelayer)}.`;
+          : `${ico("warn")}On-chain relayer is <span class="admin-addr-line" style="display:inline; padding:0; border:0; background:none;">${escapeHtml(onChainRelayer)}</span>, but the running relayer process is using <span class="admin-addr-line" style="display:inline; padding:0; border:0; background:none;">${h.relayer ? escapeHtml(h.relayer) : "an unknown wallet"}</span> — every relayed launch through this factory will revert with "caller is not the relayer" until the factory owner calls setRelayer(${h.relayer ? escapeHtml(h.relayer) : "…"}) below, or the relayer process is restarted with the key for ${escapeHtml(onChainRelayer)}.`;
       return `
         <div class="admin-readout" style="grid-column:span 1;">
           <div class="l">${escapeHtml(f.label)} relayer ${badge}</div>
@@ -16432,7 +16534,7 @@
       : `<button class="btn btn-primary btn-sm" type="button" data-keeper-auto="true">Resume automation</button>`;
     let body;
     if(!d.chainOk){
-      body = `<div class="admin-banner" style="margin:0 0 10px;"><span class="icon">⚠️</span><p>Your wallet is on a different network from ${escapeHtml(net.chainName || "this one")}, so the on-chain status can't be read.</p></div><button class="btn btn-primary btn-sm" type="button" data-keeper-switch>Switch wallet network</button>`;
+      body = `<div class="admin-banner" style="margin:0 0 10px;"><span class="icon">${ico("warn")}</span><p>Your wallet is on a different network from ${escapeHtml(net.chainName || "this one")}, so the on-chain status can't be read.</p></div><button class="btn btn-primary btn-sm" type="button" data-keeper-switch>Switch wallet network</button>`;
     } else {
       const checked = d.spots.filter(s=> s.keeper !== null);
       const off = d.spots.filter(s=> s.keeper === false);
@@ -16498,7 +16600,7 @@
       const txHash = await getEth().request({ method:"eth_sendTransaction", params:[{ from: wallet, to, data }] });
       btn.textContent = busyLabel;
       const receipt = await waitForReceipt(txHash);
-      toast(receipt.status === "0x1" ? `✅ ${okMsg}` : "The transaction reverted on-chain — nothing was changed.");
+      toast(receipt.status === "0x1" ? `${okMsg}` : "The transaction reverted on-chain — nothing was changed.");
     }catch(err){
       if(err && err.code===4001) toast("Transaction was rejected.");
       else toast(err && err.message ? err.message : "Transaction failed.");
@@ -16611,10 +16713,10 @@
       status += `<p class="help-text" style="margin:2px 0 8px;">This relayer is running on <strong>${escapeHtml(st.runningNetwork)}</strong> and is connected through <strong>${escapeHtml(src[st.active.source] || st.active.source)}</strong> (${escapeHtml(st.active.host || "")}).</p>`;
     }
     if(st.active && st.active.fellBack){
-      status += `<div class="admin-banner" style="margin:0 0 10px;"><span class="icon">⚠️</span><p>The URL saved here (${escapeHtml(st.active.triedHost || "unknown host")}) did not pass its check when the relayer last started, so the public default is being used. Check the URL or the key, and save it again.</p></div>`;
+      status += `<div class="admin-banner" style="margin:0 0 10px;"><span class="icon">${ico("warn")}</span><p>The URL saved here (${escapeHtml(st.active.triedHost || "unknown host")}) did not pass its check when the relayer last started, so the public default is being used. Check the URL or the key, and save it again.</p></div>`;
     }
     if(st.restartNeeded){
-      status += `<div class="admin-banner" style="margin:0 0 10px;"><span class="icon">🔄</span><p><strong>Restart the relayer to switch over.</strong> What is saved here is different from what the running relayer is using.</p></div>`;
+      status += `<div class="admin-banner" style="margin:0 0 10px;"><span class="icon">${ico("refresh")}</span><p><strong>Restart the relayer to switch over.</strong> What is saved here is different from what the running relayer is using.</p></div>`;
     }
     const rows = RPC_NETS.map(n=>{
       const info = nets[n.key] || {};
@@ -17440,7 +17542,7 @@
 
       <div class="panel admin-panel" style="grid-column:1 / -1;">
         <div class="admin-banner" style="margin-bottom:22px;">
-          <span class="icon">⚠️</span>
+          <span class="icon">${ico("warn")}</span>
           <p>This runs the full deploy pipeline from THIS relayer's own wallet (<code>${escapeHtml(hints.deployerAddress || "")}</code>) — real gas, real contracts, potentially several minutes end to end. Every contract it deploys fresh proposes ownership to your wallet (<code>${escapeHtml(hints.adminWallet || ADMIN_WALLET)}</code>) when it finishes; accept it from the Contract admin tab afterward. PlatformTaxDistributor is standalone and NOT included here — it still needs its own <code>npx hardhat run scripts/deploy.js</code> run; once deployed, set its address in the "Platform contracts" panel below (no code edit needed).</p>
         </div>
 
@@ -18922,7 +19024,7 @@
     if(!isAdminWallet(wallet)){
       wrap.innerHTML = `
         <div class="admin-locked">
-          <div class="glyph">🔒</div>
+          <div class="glyph">${ico("lock")}</div>
           <h3 style="margin-bottom:10px;">Admin access required</h3>
           <p style="color:var(--paper-500); font-size:.9rem;">Connect wallet ${escapeHtml(fmtAddr(ADMIN_WALLET))} to manage platform settings. Remember: this check only controls what this browser tab shows — the contracts enforce the real access control on-chain.</p>
         </div>`;
@@ -18931,7 +19033,7 @@
 
     wrap.innerHTML = `
       <div class="admin-banner">
-        <span class="icon">⚠️</span>
+        <span class="icon">${ico("warn")}</span>
         <p><strong>This tab is a UI convenience, not the security boundary.</strong> Every action below is an ordinary transaction — the V4 contracts enforce <code>onlyOwner</code> on-chain (Ownable2Step), so any call here still reverts unless the connected wallet is the real contract owner, regardless of what this page shows or hides. Anyone who reads this file's source can see the ${escapeHtml(ADMIN_WALLET)} check and knows it's only gating this tab's visibility, not gating anything on-chain.</p>
       </div>
       <div class="admin-tabbar" id="adminTabbar" role="tablist" aria-label="Admin sections">
@@ -19278,7 +19380,7 @@
       if(receipt.status !== "0x1"){
         toast("The transaction reverted on-chain — nothing was changed. Double-check this wallet is actually the contract's owner.");
       } else {
-        toast(`✅ ${successMsg}`);
+        toast(`${successMsg}`);
       }
     }catch(err){
       if(err && err.code===4001) toast("Transaction was rejected.");
@@ -19390,7 +19492,7 @@
       if(receipt.status !== "0x1"){
         toast("The transaction reverted on-chain — nothing was changed.");
       } else {
-        toast(`✅ ${successMsg}`);
+        toast(`${successMsg}`);
       }
     }catch(err){
       if(err && err.code===4001) toast("Transaction was rejected.");
@@ -20714,7 +20816,7 @@
     const chainKey = isSol ? "solana" : "robinhood";
     const usdNum = Number(entry.usdValue);
     const amt = Number.isFinite(usdNum) && usdNum>0 ? `<span class="amt num">${fmtUSD(usdNum)}</span>` : "";
-    div.innerHTML = `<span class="t mono">${time}</span><span class="side ${entry.side==="buy" ? "buy" : "sell"}">${entry.side==="buy" ? "BUY" : "SELL"}</span><span class="msg"><img class="feed-chain" src="${CHAINS[chainKey].icon}" alt="${CHAINS[chainKey].label}" title="${CHAINS[chainKey].label}">${isCurveTrade ? `<span class="feed-curve-tag">⚡</span>` : ""}<span class="tk">$${escapeHtml(symbol)}</span><span class="feed-who" data-wallet="${escapeHtml(entry.wallet || "")}">${feedWhoHTML(entry.wallet)}</span></span>${amt}`;
+    div.innerHTML = `<span class="t mono">${time}</span><span class="side ${entry.side==="buy" ? "buy" : "sell"}">${entry.side==="buy" ? "BUY" : "SELL"}</span><span class="msg"><img class="feed-chain" src="${CHAINS[chainKey].icon}" alt="${CHAINS[chainKey].label}" title="${CHAINS[chainKey].label}">${isCurveTrade ? `<span class="feed-curve-tag" title="Bonding-curve trade">${ico("bolt")}</span>` : ""}<span class="tk">$${escapeHtml(symbol)}</span><span class="feed-who" data-wallet="${escapeHtml(entry.wallet || "")}">${feedWhoHTML(entry.wallet)}</span></span>${amt}`;
     if(isSol && entry.tokenAddress){
       div.classList.add("feed-sol-link");
       div.dataset.solmint = entry.tokenAddress;
@@ -21014,7 +21116,24 @@
     climb: '<path d="M4 17l6-6 4 4 6-8"/><path d="M15 7h5v5"/>',
     done:  '<circle cx="12" cy="12" r="9"/><path d="M8 12.500l2.800 2.800L16.500 9.500"/>',
   };
+  function hiwSolSteps(){
+    let s = { startMc:30, raise:72, feePct:1, creatorPct:10 };
+    try{ s = solStdInfo(); }catch(e){}
+    const F = (k,v)=>({k,v});
+    const raise = `~${solNum(s.raise)} SOL`;
+    return [
+      { ic:"seed", title:"Launch", body:"Connect your Solana wallet and launch in one transaction. If you want, make the first buy in that same transaction, before anyone else can.",
+        facts:[F("Liquidity needed","None"), F("IgnitionX fee","None · network cost only")] },
+      { ic:"curve", title:"Trade on the curve", body:`Your token trades on a Meteora bonding curve straight away, starting around ${solNum(s.startMc)} SOL market cap. Every buy lifts the price along the curve.`,
+        facts:[F("Trading fee",`${solNum(s.feePct)}% on the curve`), F("Creator earns",`${solNum(s.creatorPct)}% of fees`)] },
+      { ic:"fill", title:"Curve fills", body:`Once the curve has raised about ${solNum(s.raise)} SOL, the token moves to a Meteora DAMM v2 pool on its own.`,
+        facts:[F("Moves at",`${raise} raised`), F("Pool","Meteora DAMM v2")] },
+      { ic:"done", title:"Graduated", body:"Trading carries on in the DAMM v2 pool — you can still buy and sell right here. There is no token tax at any stage, before or after graduation.",
+        facts:[F("Token tax","0% throughout"), F("Trades on","Meteora DAMM v2")] },
+    ];
+  }
   function hiwSteps(path, tax){
+    if(path==="solana") return hiwSolSteps();
     const custom = tax==="custom";
     const lockD = `${LP_LOCK_DAYS} days`;
     let target = "1.5";
@@ -21060,12 +21179,20 @@
     if(!root) return;
     const track = document.getElementById("hiwTrack"), detail = document.getElementById("hiwDetail");
     const playBtn = document.getElementById("hiwPlay"), playTxt = document.getElementById("hiwPlayTxt");
-    const st = { path:"pool", tax:"none", i:0, playing: !REDUCE_MOTION };
+    const st = { chain:"robinhood", path:"pool", tax:"none", i:0, playing: !REDUCE_MOTION };
+    const pathKey = ()=> st.chain==="solana" ? "solana" : st.path;
     let steps = [], timer = null, visible = true;
     const icon = (k)=> `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${HIW_ICONS[k]}</svg>`;
     function build(){
-      steps = hiwSteps(st.path, st.tax);
+      steps = hiwSteps(pathKey(), st.tax);
       if(st.i >= steps.length) st.i = 0;
+      const sol = st.chain==="solana";
+      document.getElementById("hiwPathSeg").hidden = sol;
+      document.getElementById("hiwTaxSeg").hidden = sol;
+      document.getElementById("hiwSolNote").hidden = !sol;
+      document.getElementById("hiwFootTxt").textContent = sol
+        ? "Solana launches run on Meteora's bonding curve and DAMM v2 pools. Figures shown are the platform's current curve settings."
+        : "Rates shown are the platform's standard settings; your launch review shows the exact numbers before you confirm.";
       track.style.setProperty("--n", steps.length);
       track.innerHTML = steps.map((x,i)=>`
         <li class="hiw-step"><button type="button" data-i="${i}" aria-label="Step ${i+1}: ${x.title}"><span class="hiw-node">${icon(x.ic)}</span><span class="hiw-lbl"><i class="num">${i+1}</i>${x.title}</span></button></li>`).join("");
@@ -21073,6 +21200,7 @@
       paint();
     }
     function paint(){
+      if(st.chain==="solana") steps = hiwSteps("solana", st.tax);   // refresh figures once the live curve settings load
       const n = steps.length, x = steps[st.i];
       track.style.setProperty("--p", (st.i/(n-1)).toFixed(4));
       track.querySelectorAll("button").forEach((b,i)=>{
@@ -21095,6 +21223,11 @@
       playTxt.textContent = st.playing ? "Auto" : "Paused";
     }
     function stop(){ st.playing = false; schedule(); }
+    root.querySelectorAll("[data-chain]").forEach(b=> b.addEventListener("click", ()=>{
+      st.chain = b.dataset.chain; st.i = 0;
+      root.querySelectorAll("[data-chain]").forEach(x=> x.setAttribute("aria-pressed", x===b ? "true" : "false"));
+      stop(); build();
+    }));
     root.querySelectorAll("[data-path]").forEach(b=> b.addEventListener("click", ()=>{
       st.path = b.dataset.path; st.i = 0;
       root.querySelectorAll("[data-path]").forEach(x=> x.setAttribute("aria-pressed", x===b ? "true" : "false"));
@@ -21109,7 +21242,18 @@
     if("IntersectionObserver" in window) new IntersectionObserver(es=>{ visible = es[0].isIntersecting; }, {threshold:.25}).observe(root);
     build(); schedule();
   }
+  // Sections ease in as they scroll into view (skipped entirely with reduced motion or no IntersectionObserver).
+  function initReveal(){
+    if(REDUCE_MOTION || !("IntersectionObserver" in window)) return;
+    const els = document.querySelectorAll(".newwrap, .hiw-card, .hiw .section-head, #market > .section-head");
+    const io = new IntersectionObserver(es=>{ es.forEach(e=>{ if(e.isIntersecting){ e.target.classList.add("rv-in"); io.unobserve(e.target); } }); }, { threshold:.08, rootMargin:"0px 0px -6% 0px" });
+    els.forEach(el=>{ el.classList.add("rv"); io.observe(el); });
+    // never leave anything hidden if the observer is slow (e.g. a background tab)
+    setTimeout(()=> els.forEach(el=> el.classList.add("rv-in")), 4000);
+  }
+
   /* ---------------- init ---------------- */
+  initReveal();
   renderStats();
   initHowItWorks();
   renderGrid();
