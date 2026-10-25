@@ -8806,11 +8806,10 @@
       const raw = await publicRpcCall(mode, "eth_call", [{ to: t.tokenAddress, data: "0x"+TOTAL_SUPPLY_SELECTOR }, "latest"]);
       const nowWei = decodeUint256(raw);
       const fmtW = (w)=> (w / (10n ** 18n)).toLocaleString("en-US");
-      // Circulating supply. While a token is still on its bonding curve, most of the supply is held by the curve
-      // contract (and the rest is reserved for the pool it graduates into), so only what the curve has sold so far
-      // (curveSupply - tokensRemaining, creator buy-in included) is in anyone's hands. After graduation the whole
-      // (post-burn) supply is out, so the figure is totalSupply().
-      let circWei = nowWei, onCurve = false;
+      // Supply shown = the token's current supply (totalSupply(), which already drops when tokens are burned). On a
+      // bonding curve the curve contract holds most of it, so we also show how much has been bought off the curve so
+      // far (curveSupply - tokensRemaining, creator buy-in included) as a secondary note.
+      let soldWei = null;
       if(t.status==="curve-trading" && t.factoryAddress){
         try{
           const data = "0x19076e27" + t.tokenAddress.toLowerCase().replace(/^0x/, "").padStart(64, "0"); // curveState(address)
@@ -8818,16 +8817,16 @@
           const words = String(out).replace(/^0x/, "").match(/.{64}/g) || [];
           if(words.length >= 4){
             const curveSupply = BigInt("0x"+words[2]), remaining = BigInt("0x"+words[3]);
-            if(curveSupply >= remaining){ circWei = curveSupply - remaining; onCurve = true; }
+            if(curveSupply >= remaining) soldWei = curveSupply - remaining;
           }
-        }catch(e){ /* fall back to total supply */ }
+        }catch(e){ /* just skip the note */ }
       }
       const again = document.getElementById("detailSupplyVal");
-      if(again) again.textContent = fmtW(circWei);
+      if(again) again.textContent = fmtW(nowWei);
       const labelEl = document.getElementById("detailSupplyLabel");
       if(labelEl) labelEl.textContent = "Circulating supply";
       const totalEl = document.getElementById("detailTotalSupply");
-      if(totalEl) totalEl.textContent = onCurve ? ` · of ${fmtW(nowWei)} total` : "";
+      if(totalEl) totalEl.textContent = soldWei!==null ? ` · ${fmtW(soldWei)} bought off the curve` : "";
       // Burns shrink totalSupply, so the figure above is already the current supply. If the launch-time supply is known,
       // also say how much has been burned since.
       if(t.initialSupplyWei){
