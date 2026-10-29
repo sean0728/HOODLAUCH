@@ -79,6 +79,8 @@ const fs = require("fs"); // used only by the temporary /debug/data-dirs route b
 const https = require("https"); // used only by sendTelegramMessage below — Node's built-in client, no extra dependency
 const express = require("express");
 const hre = require("hardhat");
+const http = require("http"); // the X marketing scheduler reads this relayer's own public endpoints over loopback
+const xPosterLib = require("../lib/xPoster");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
 const { recordLaunch, updateLaunch, deleteLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = require("../lib/launchStore");
 const {
@@ -93,6 +95,8 @@ const {
   setPlatformConfig,
   getRelayerSettings,
   setRelayerSettings,
+  getXState,
+  setXState,
   getDeletedLaunches,
   addDeletedLaunch,
   removeDeletedLaunch,
@@ -308,6 +312,25 @@ const RELAYER_SETTINGS_DEFAULTS = {
   telegramBotToken: String(process.env.TELEGRAM_BOT_TOKEN || ""),
   telegramLaunchesChatId: String(process.env.TELEGRAM_LAUNCHES_CHAT_ID || ""),
   telegramAlertsChatId: String(process.env.TELEGRAM_ALERTS_CHAT_ID || ""),
+  // ---- X (Twitter) posting — optional, off until switched on in Admin -> Relayer settings. Keys come from an X
+  // developer app (OAuth 1.0a user context, "Read and write"). The four secrets are write-only like the Telegram
+  // token. See lib/xPoster.js for what is posted and how cost is capped.
+  xEnabled: /^(1|true|yes|on)$/i.test(String(process.env.X_POSTING_ENABLED || "")),
+  xApiKey: String(process.env.X_API_KEY || ""),
+  xApiSecret: String(process.env.X_API_SECRET || ""),
+  xAccessToken: String(process.env.X_ACCESS_TOKEN || ""),
+  xAccessSecret: String(process.env.X_ACCESS_SECRET || ""),
+  xMonthlyCap: Number(process.env.X_MONTHLY_CAP || 100),
+  xSiteUrl: String(process.env.X_SITE_URL || "https://ignitionx.xyz"),
+  xPostLaunches: true,
+  xPostMilestones: true,
+  xPostRecap: true,
+  xPostMovers: true,
+  xPostPromos: true,
+  xRecapHourUtc: 15,
+  xMoversIntervalHours: 8,
+  xPromoIntervalHours: 12,
+  xPromoMessages: "",
   // Master switch for the V4 distributor + compounder keepers. ON by default;
   // the V4_KEEPER_ENABLED env var only seeds the starting value (set it to
   // false/0/off to start disabled), and the Admin toggle overrides it from
@@ -348,6 +371,22 @@ const RELAYER_SETTINGS_BOUNDS = {
   telegramBotToken: { type: "secret", maxLength: 200 },
   telegramLaunchesChatId: { type: "string", maxLength: 64 },
   telegramAlertsChatId: { type: "string", maxLength: 64 },
+  xEnabled: { type: "boolean" },
+  xApiKey: { type: "secret", maxLength: 200 },
+  xApiSecret: { type: "secret", maxLength: 200 },
+  xAccessToken: { type: "secret", maxLength: 200 },
+  xAccessSecret: { type: "secret", maxLength: 200 },
+  xMonthlyCap: { min: 0, max: 5000 },
+  xSiteUrl: { type: "string", maxLength: 200 },
+  xPostLaunches: { type: "boolean" },
+  xPostMilestones: { type: "boolean" },
+  xPostRecap: { type: "boolean" },
+  xPostMovers: { type: "boolean" },
+  xPostPromos: { type: "boolean" },
+  xRecapHourUtc: { min: 0, max: 23 },
+  xMoversIntervalHours: { min: 1, max: 72 },
+  xPromoIntervalHours: { min: 1, max: 168 },
+  xPromoMessages: { type: "string", maxLength: 3000 },
   v4KeeperEnabled: { type: "boolean" },
 };
 // The live, mutable object every poll loop actually reads — seeded from
@@ -358,6 +397,76 @@ const RELAYER_SETTINGS_BOUNDS = {
 // file/DB row and into a sendJson response body — with BigInt math done
 // only at the point of use via the *Big() helpers below.
 const relayerSettings = { ...RELAYER_SETTINGS_DEFAULTS };
+
+// ---- X poster: instance, event hooks and the marketing loop (see lib/xPoster.js) ----
+// Only MAINNET activity is ever posted (a testnet launch must never reach the public account); X_ALLOW_TESTNET=true
+// lifts that for testing only.
+const xPoster = xPosterLib.createXPoster({
+  getSettings: () => relayerSettings,
+  getState: () => getXState(),
+  setState: (s) => setXState(s),
+  allowTestnet: /^(1|true|yes|on)$/i.test(String(process.env.X_ALLOW_TESTNET || "")),
+});
+function xSiteUrl() {
+  const u = String(relayerSettings.xSiteUrl || "").trim();
+  return /^https:\/\/\S+$/.test(u) ? u : "";
+}
+function xAnnounceRhLaunch(network, kind, { token, name, symbol, hasPool }) {
+  try {
+    if (!xPoster.allowed(network === "robinhoodMainnet")) return;
+    const kindNote =
+      kind === "v4curve" || kind === "v4custom-curve" ? "Quick Launch (bonding curve)" : kind === "v4custom" ? "Custom-tax launch" : hasPool ? "Launch + liquidity" : "Token launch";
+    xPoster.post(xPosterLib.launchText({ name, symbol, chain: "Robinhood Chain", kindNote, url: xSiteUrl() }), { kind: "launch", key: `launch:rh:${String(token).toLowerCase()}` });
+  } catch (err) { console.warn(`[x] launch hook failed: ${err.message}`); }
+}
+function xAnnounceSolLaunch(launch) {
+  try {
+    if (!xPoster.allowed(launch.cluster === "mainnet-beta")) return;
+    xPoster.post(xPosterLib.launchText({ name: launch.name, symbol: launch.symbol, chain: "Solana", kindNote: "Quick Launch (Meteora bonding curve)", url: xSiteUrl() }), { kind: "launch", key: `launch:sol:${launch.mint}` });
+  } catch (err) { console.warn(`[x] Solana launch hook failed: ${err.message}`); }
+}
+function xAnnounceRhMilestone(network, entry, milestone) {
+  try {
+    if (!xPoster.allowed(network === "robinhoodMainnet")) return;
+    xPoster.post(xPosterLib.milestoneText({ milestone, name: entry.name, symbol: entry.symbol, chain: "Robinhood Chain", url: xSiteUrl() }), { kind: "milestone", key: `milestone:rh:${milestone}:${String(entry.tokenAddress).toLowerCase()}` });
+  } catch (err) { console.warn(`[x] milestone hook failed: ${err.message}`); }
+}
+function xAnnounceSolMilestone(milestone, launch) {
+  try {
+    if (!xPoster.allowed(launch.cluster === "mainnet-beta")) return;
+    xPoster.post(xPosterLib.milestoneText({ milestone, name: launch.name, symbol: launch.symbol, chain: "Solana", url: xSiteUrl() }), { kind: "milestone", key: `milestone:sol:${milestone}:${launch.mint}` });
+  } catch (err) { console.warn(`[x] Solana milestone hook failed: ${err.message}`); }
+}
+// Daily recap / top movers / promos: one tick every few minutes posts at most one due item (see marketingTick).
+function startXMarketingLoop() {
+  const fetchJson = (p) =>
+    new Promise((resolve) => {
+      const req = http.get({ hostname: "127.0.0.1", port: PORT, path: p, timeout: 15_000 }, (res) => {
+        let d = "";
+        res.on("data", (c) => (d += c));
+        res.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { resolve(null); } });
+      });
+      req.on("error", () => resolve(null));
+      req.on("timeout", () => { req.destroy(); resolve(null); });
+    });
+  const tick = async () => {
+    try {
+      await xPosterLib.marketingTick({
+        poster: xPoster,
+        getSettings: () => relayerSettings,
+        fetchJson,
+        isMainnetRh: xPoster.allowed(hre.network.name === "robinhoodMainnet"),
+        allowTestnet: xPoster.allowed(false),
+      });
+    } catch (err) {
+      console.warn(`[x] marketing tick failed: ${err.message}`);
+    } finally {
+      setTimeout(tick, 5 * 60_000);
+    }
+  };
+  setTimeout(tick, 2 * 60_000);
+  console.log("[x] marketing scheduler started (posts only when X is enabled in Admin -> Relayer settings).");
+}
 
 function feeWalletClaimMinWeiBig() { return BigInt(relayerSettings.feeWalletClaimMinWei); }
 function creatorRewardsClaimMinWeiBig() { return BigInt(relayerSettings.creatorRewardsClaimMinWei); }
@@ -1384,6 +1493,7 @@ async function relayerHealthPollLoop(watchers, relayerWallet) {
 // paid for directly by the creator's own wallet, so it's the right place to
 // hook a "new launch" announcement that never misses one.
 async function announceLaunchToTelegram(network, kind, { token, name, symbol, hasPool }) {
+  xAnnounceRhLaunch(network, kind, { token, name, symbol, hasPool });
   const label = FACTORY_LABELS[kind] || kind;
   const explorerBrowserUrl = process.env.EXPLORER_BROWSER_URL || (ROBINHOOD_NETWORKS[network] || {}).explorerBrowserUrl || null;
   const link = explorerBrowserUrl ? `${explorerBrowserUrl.replace(/\/$/, "")}/address/${token}` : null;
@@ -1412,6 +1522,7 @@ async function announceLaunchToTelegram(network, kind, { token, name, symbol, ha
 async function announceSolanaLaunchToTelegram(launch) {
   try {
     if (!launch || !launch.mint) return;
+    xAnnounceSolLaunch(launch);
     if (!relayerSettings.telegramBotToken || !relayerSettings.telegramLaunchesChatId) {
       console.warn(
         `[telegram] not announcing Solana $${launch.symbol}: ` +
@@ -1451,6 +1562,7 @@ function buildSolanaMilestoneMessage(milestone, launch) {
 async function announceSolanaMilestoneToTelegram(milestone, launch) {
   try {
     if (!launch || !launch.mint) return;
+    xAnnounceSolMilestone(milestone, launch);
     if (!relayerSettings.telegramBotToken || !relayerSettings.telegramLaunchesChatId) {
       console.warn(`[telegram] not announcing Solana ${milestone} milestone for $${launch.symbol}: bot token or launches chat ID not saved.`);
       return;
@@ -1492,6 +1604,7 @@ async function announceMilestoneToTelegram(network, entry, milestone, { mcapUsd 
   try {
     const flag = milestone === "live" ? "liveAnnouncedAt" : "graduatedAnnouncedAt";
     if (entry[flag]) return;
+    xAnnounceRhMilestone(network, entry, milestone);
     if (!relayerSettings.telegramBotToken || !relayerSettings.telegramLaunchesChatId) {
       console.warn(`[telegram] not announcing ${milestone} milestone for $${entry.symbol}: bot token or launches chat ID not saved.`);
       return;
@@ -2038,6 +2151,9 @@ async function main() {
   // with the server first, and gets a cheap 304 if nothing changed). Without
   // this a host or browser can keep showing an old index.html for a while
   // after you publish a new one. Images/other assets keep the default.
+  // The relayer's own data (saved settings incl. API keys/tokens, vouchers, X state) lives under public/assets/relayer-data
+  // unless RELAYER_DATA_DIR points elsewhere or MySQL is used. It must never be served as a static file.
+  app.use(/^\/assets\/+relayer-data(\/|$)/i, (_req, res) => res.status(404).end());
   app.use(
     express.static(path.join(__dirname, "..", "public"), {
       setHeaders(res, filePath) {
@@ -2994,6 +3110,23 @@ async function main() {
     sendJson(res, 200, { settings: redactSecretSettings(relayerSettings) });
   });
 
+  // ---- X posting status + test post ----
+  // GET is public and carries no secret: whether X is on and configured, this month's count against the cap, and the
+  // last few posts (which are public on X anyway). POST /x-test is admin-signed and sends one short test post, so the
+  // keys can be checked without waiting for a launch.
+  app.get("/x-status", asyncRoute(async (_req, res) => {
+    sendJson(res, 200, await xPoster.getStatus());
+  }));
+  app.post("/x-test", asyncRoute(async (req, res) => {
+    const { timestamp, signature } = req.body || {};
+    if (!isFreshTimestamp(timestamp)) return sendJson(res, 400, { error: "Signature timestamp is missing or too old — try again." });
+    if (!verifyAdminSignature(`Hood Launch admin: post a test message to X at ${timestamp}`, signature)) {
+      return sendJson(res, 401, { error: "Signature does not match the admin wallet." });
+    }
+    const r = await xPoster.post(`IgnitionX test post (${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC)`, { kind: "test" });
+    sendJson(res, r.posted ? 200 : 400, r.posted ? { ok: true, id: r.id } : { error: r.reason });
+  }));
+
   // ---- Robinhood RPC URL (admin-gated) ----
   // GET is public but carries no secret: only host names and whether a restart is needed (the URL holds the provider's
   // API key and never leaves this process). POST is admin-signed, see lib/rpcSettings.js for the checks and the exact
@@ -3785,6 +3918,7 @@ async function main() {
   }));
 
   app.listen(PORT, () => console.log(`Relayer API listening on :${PORT}`));
+  startXMarketingLoop();
 
   // ---- on-chain poller ----
   async function pollWatcher(watcher) {
