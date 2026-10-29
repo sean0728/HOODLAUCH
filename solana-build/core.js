@@ -159,14 +159,24 @@ export async function signMessage(text) {
 
 // Signs `tx` (legacy Transaction from the SDK) with the wallet, sends it, and waits for confirmation.
 // `extraSigners` are Keypairs that must co-sign (a new mint, a new config key).
-// On mainnet a transaction with no priority fee can sit unprocessed when the network is busy, so one is added
-// (devnet doesn't need it). 50,000 micro-lamports per compute unit is ~0.00002 SOL for a typical launch.
-export const MAINNET_PRIORITY_MICROLAMPORTS = 50_000;
+// On mainnet a transaction with a low priority fee can sit unprocessed when the network is busy, so one is added
+// (devnet doesn't need it). The price follows what recent blocks have been paying (75th percentile), never below
+// MAINNET_PRIORITY_MICROLAMPORTS and never above MAX_PRIORITY_MICROLAMPORTS: ~0.00008 SOL at the floor and
+// ~0.0004 SOL at the cap for a typical launch.
+export const MAINNET_PRIORITY_MICROLAMPORTS = 200_000;
+const MAX_PRIORITY_MICROLAMPORTS = 1_000_000;
+async function priorityFeeMicroLamports(conn) {
+  try {
+    const fees = (await conn.getRecentPrioritizationFees()).map((f) => f.prioritizationFee).filter((f) => f > 0).sort((a, b) => a - b);
+    if (fees.length) return Math.max(MAINNET_PRIORITY_MICROLAMPORTS, Math.min(MAX_PRIORITY_MICROLAMPORTS, fees[Math.floor(fees.length * 0.75)]));
+  } catch (e) { /* RPC doesn't serve fee history: use the floor */ }
+  return MAINNET_PRIORITY_MICROLAMPORTS;
+}
 export async function signSendConfirm(tx, extraSigners = []) {
   const { conn } = need();
   const payer = owner();
   if (S.cluster === "mainnet-beta" && !tx.instructions.some((ix) => ix.programId.equals(ComputeBudgetProgram.programId))) {
-    tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: MAINNET_PRIORITY_MICROLAMPORTS }));
+    tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: await priorityFeeMicroLamports(conn) }));
   }
   const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
   tx.feePayer = payer;
@@ -174,11 +184,12 @@ export async function signSendConfirm(tx, extraSigners = []) {
   if (extraSigners.length) tx.partialSign(...extraSigners);
   const chain = walletChain();
   const feats = S.wallet.features;
-  let signature;
+  let signature, rawTx = null;
   if (feats["solana:signTransaction"]) {
     const bytes = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
     const out = await feats["solana:signTransaction"].signTransaction({ transaction: bytes, account: S.account, chain });
     const signed = Array.isArray(out) ? out[0].signedTransaction : out.signedTransaction;
+    rawTx = signed;
     signature = await conn.sendRawTransaction(signed, { skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 3 });
   } else if (feats["solana:signAndSendTransaction"]) {
     const bytes = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
@@ -188,12 +199,16 @@ export async function signSendConfirm(tx, extraSigners = []) {
   } else {
     throw new Error("This wallet can't sign Solana transactions.");
   }
-  await confirmSignature(signature, lastValidBlockHeight);
+  await confirmSignature(signature, lastValidBlockHeight, rawTx);
   return signature;
 }
-async function confirmSignature(signature, lastValidBlockHeight) {
+// While waiting, the same signed transaction is re-sent every couple of seconds (re-sending is harmless: the network
+// ignores a transaction it has already processed). A single send is easily dropped by a busy or rate-limited RPC node,
+// which is what used to end in "expired before it landed".
+async function confirmSignature(signature, lastValidBlockHeight, rawTx) {
   const { conn } = need();
   const started = Date.now();
+  let lastSend = Date.now();
   for (;;) {
     const { value } = await conn.getSignatureStatuses([signature], { searchTransactionHistory: false });
     const st = value && value[0];
@@ -204,7 +219,17 @@ async function confirmSignature(signature, lastValidBlockHeight) {
     if (Date.now() - started > 90_000) throw new Error("Timed out waiting for confirmation. Check the explorer for signature " + signature + ".");
     if (lastValidBlockHeight) {
       const h = await conn.getBlockHeight("confirmed").catch(() => 0);
-      if (h && h > lastValidBlockHeight) throw new Error("The transaction expired before it landed. Nothing was spent; try again.");
+      if (h && h > lastValidBlockHeight) {
+        // one last look, including history, in case it landed right at the deadline
+        const fin = await conn.getSignatureStatuses([signature], { searchTransactionHistory: true }).catch(() => null);
+        const fs = fin && fin.value && fin.value[0];
+        if (fs && !fs.err && (fs.confirmationStatus === "confirmed" || fs.confirmationStatus === "finalized")) return;
+        throw new Error("The transaction expired before it landed (the network was busy or the RPC dropped it). Nothing was spent; try again.");
+      }
+    }
+    if (rawTx && Date.now() - lastSend >= 2000) {
+      lastSend = Date.now();
+      conn.sendRawTransaction(rawTx, { skipPreflight: true, maxRetries: 0 }).catch(() => {});
     }
     await new Promise((r) => setTimeout(r, 1500));
   }
