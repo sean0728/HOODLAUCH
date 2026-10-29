@@ -16281,6 +16281,22 @@
     { key: "telegramBotToken", label: "Telegram bot token", help: "From @BotFather — shared by both channels below. Write-only: once saved, the real value is never sent back to this page, so this field always shows blank. Leave it blank to keep the currently-saved token unchanged; paste a new one only to replace it.", secret: true },
     { key: "telegramLaunchesChatId", label: "Telegram launches chat ID", help: "Public channel's chat ID — new-launch announcements post here. Leave blank to disable launch announcements." },
     { key: "telegramAlertsChatId", label: "Telegram alerts chat ID", help: "Private channel's chat ID — relayer-wallet-mismatch alerts post here. Leave blank to disable these alerts." },
+    { key: "xEnabled", label: "Post to X", bool: true, help: "Master switch for posting to the platform's X account: launch announcements, graduations, daily recap, top movers and promos. Mainnet activity only — testnet and devnet launches are never posted. Off by default." },
+    { key: "xApiKey", label: "X API key", help: "From your X developer app (Keys and tokens). Write-only: never shown again once saved. Leave blank to keep the saved value.", secret: true },
+    { key: "xApiSecret", label: "X API key secret", help: "Consumer secret from the same page. Write-only. Leave blank to keep the saved value.", secret: true },
+    { key: "xAccessToken", label: "X access token", help: "The access token for the platform account (the app needs Read and write permission, set BEFORE generating it). Write-only.", secret: true },
+    { key: "xAccessSecret", label: "X access token secret", help: "Access token secret from the same page. Write-only.", secret: true },
+    { key: "xMonthlyCap", label: "X monthly post cap", help: "Hard limit on posts per calendar month (UTC). Counted on successful posts only. 0 = no posts. X bills per post and about $0.20 for a post containing a link, so 100 posts is roughly $20 at most." },
+    { key: "xSiteUrl", label: "X link to include", help: "The site link added to posts (https only). Blank = no link, which makes posts cheaper." },
+    { key: "xPostLaunches", label: "Post new launches", bool: true, help: "A post for every new mainnet launch on Robinhood Chain and Solana." },
+    { key: "xPostMilestones", label: "Post graduations & milestones", bool: true, help: "Curve filled / live on a pool / graduated (market-cap target reached) on both chains." },
+    { key: "xPostRecap", label: "Post a daily recap", bool: true, help: "Once a day: new launches, 24h volume and value locked per chain. Skipped on a quiet day." },
+    { key: "xPostMovers", label: "Post top movers", bool: true, help: "Periodic post of the biggest 24h gainers (at least +10%) across both chains. Skipped if nothing qualifies or the list hasn't changed." },
+    { key: "xPostPromos", label: "Post promo messages", bool: true, help: "Rotates through a list of evergreen messages (your own below, or the built-in ones)." },
+    { key: "xRecapHourUtc", label: "Daily recap hour (UTC, 0–23)", help: "The recap goes out at the first check after this hour (UTC) each day." },
+    { key: "xMoversIntervalHours", label: "Top movers every (hours)", help: "Minimum hours between top-movers posts (1–72)." },
+    { key: "xPromoIntervalHours", label: "Promo post every (hours)", help: "Minimum hours between promo posts (1–168)." },
+    { key: "xPromoMessages", label: "Promo messages (one per line)", multiline: true, help: "Your own evergreen messages, one per line, posted in rotation (the site link is added if a line has none). Blank = use the built-in set." },
     // Always last: the signed message follows RELAYER_SETTINGS_BOUNDS' key order. Shown at the TOP of the panel (see relayerSettingsPanelHTML).
     { key: "v4KeeperEnabled", label: "V4 keeper (automatic sweeps)", toggle: true, help: "Master switch for the relayer's V4 automation: converting each V4 token's collected tax to ETH, paying creators, fee-wallet and platform rewards, airdrop rounds, and compounding custom-tax liquidity. While Off, every V4 sweep is skipped (the relayer wallet spends no gas on them). Takes effect on the next tick; no restart." },
   ];
@@ -16319,8 +16335,29 @@
       // grouped settings sections rather than one long undifferentiated list.
       const sectionBreak = f.key === "telegramBotToken"
         ? `<div class="admin-cfg-row admin-cfg-head" style="margin-top:10px;"><div class="admin-cfg-col-head" style="grid-column:1 / -1;">Telegram notifications</div></div>`
+        : f.key === "xEnabled"
+        ? `<div class="admin-cfg-row admin-cfg-head" style="margin-top:10px;"><div class="admin-cfg-col-head" style="grid-column:1 / -1;">X (Twitter) posting</div></div>`
         : "";
       const b = bounds[f.key] || {};
+      if(f.bool){
+        const on = settings[f.key] === true || String(settings[f.key]) === "true";
+        return `${sectionBreak}
+        <div class="admin-cfg-row">
+          <div class="admin-cfg-label">${escapeHtml(f.label)} <span class="info-dot" title="${escapeHtml(f.help)}">?</span></div>
+          <div class="field" style="grid-column:2 / -1;">
+            <select id="rs_${f.key}" aria-label="${escapeHtml(f.label)}"><option value="true"${on ? " selected" : ""}>On</option><option value="false"${on ? "" : " selected"}>Off</option></select>
+          </div>
+        </div>`;
+      }
+      if(f.multiline){
+        return `${sectionBreak}
+        <div class="admin-cfg-row">
+          <div class="admin-cfg-label">${escapeHtml(f.label)} <span class="info-dot" title="${escapeHtml(f.help)}">?</span></div>
+          <div class="field" style="grid-column:2 / -1;">
+            <textarea id="rs_${f.key}" rows="5" maxlength="3000" placeholder="Leave blank to use the built-in messages" aria-label="${escapeHtml(f.label)}" title="${escapeHtml(f.help)}">${escapeHtml(String(settings[f.key] || ""))}</textarea>
+          </div>
+        </div>`;
+      }
       const isStringField = b.type === "string" || b.type === "secret";
       // A `secret` field (telegramBotToken) arrives here already redacted to
       // a boolean by the relayer's own redactSecretSettings — this page must
@@ -16330,7 +16367,7 @@
       // the placeholder is the only thing that reflects current state.
       if(f.secret){
         const isSet = Boolean(settings[f.key]);
-        const placeholder = isSet ? "✓ currently set — paste a new token to replace it" : "Not set — paste a bot token to enable";
+        const placeholder = isSet ? "✓ currently set — paste a new value to replace it" : "Not set — paste the value to enable";
         return `${sectionBreak}
         <div class="admin-cfg-row">
           <div class="admin-cfg-label">${escapeHtml(f.label)} <span class="info-dot" title="${escapeHtml(f.help)}">?</span></div>
@@ -16363,6 +16400,7 @@
           ${rows}
         </div>
         <button class="btn btn-primary" id="relayerSettingsSaveBtn">Save relayer settings</button>
+        <div id="xStatusBox" class="help-text" style="margin-top:16px;"></div>
       </div>`;
   }
 
@@ -16387,6 +16425,42 @@
     wrap.innerHTML = relayerSettingsPanelHTML(data.settings || {}, data.bounds || {});
     const btn = document.getElementById("relayerSettingsSaveBtn");
     if(btn) btn.addEventListener("click", ()=> runRelayerSettingsSave(btn));
+    renderXStatus(url);
+  }
+
+  // X posting status under the settings table: on/off, keys saved, posts this month vs the cap, the last error, and a
+  // "Send test post" button (admin-signed) to check the keys without waiting for a launch.
+  async function renderXStatus(url){
+    const box = document.getElementById("xStatusBox");
+    if(!box) return;
+    let st;
+    try{
+      const res = await fetch(`${url}/x-status`);
+      if(!res.ok) throw new Error("bad");
+      st = await res.json();
+    }catch(err){ box.textContent = ""; return; }
+    const last = st.lastError ? ` Last error: ${escapeHtml(String(st.lastError.message || "").slice(0, 200))}` : "";
+    const recent = (st.recent || []).map(p=> `<li>${escapeHtml(String(p.kind))}: ${escapeHtml(String(p.text).split("\n")[0].slice(0, 90))}</li>`).join("");
+    box.innerHTML = `<strong>X posting:</strong> ${st.enabled ? "ON" : "OFF"} · keys ${st.configured ? "saved" : "not saved"} · <strong>${st.count || 0}</strong> of ${st.cap || 0} posts used in ${escapeHtml(st.month || "this month")}.${last}
+      ${recent ? `<ul style="margin:6px 0 0 18px;">${recent}</ul>` : ""}
+      <div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" id="xTestBtn" ${st.enabled && st.configured ? "" : "disabled"}>Send test post</button></div>`;
+    const tb = document.getElementById("xTestBtn");
+    if(tb) tb.addEventListener("click", ()=> runXTest(tb, url));
+  }
+  async function runXTest(btn, url){
+    if(!isAdminWallet(wallet) || !getEth()){ toast("Connect the admin wallet first."); return; }
+    const timestamp = Date.now();
+    const message = `Hood Launch admin: post a test message to X at ${timestamp}`;
+    let signature;
+    try{ signature = await getEth().request({ method:"personal_sign", params:["0x"+utf8Hex(message), wallet] }); }
+    catch(err){ toast("Signature was rejected — nothing was posted."); return; }
+    const label = btn.textContent; btn.disabled = true; btn.textContent = "Posting…";
+    try{
+      const res = await fetch(`${url}/x-test`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ timestamp, signature }) });
+      const data = await res.json().catch(()=>({}));
+      toast(res.ok ? "Test post sent to X." : (data.error || "The test post failed."));
+    }catch(err){ toast("Couldn't reach the relayer."); }
+    finally{ btn.disabled = false; btn.textContent = label; renderXStatus(url); }
   }
 
   async function runRelayerSettingsSave(btnEl){
@@ -16653,7 +16727,7 @@
       const cur = (await res0.json()).settings || {};
       const settings = {};
       for(const k of RELAYER_SETTINGS_KEYS){
-        if(k === "telegramBotToken") settings[k] = "";
+        if((RELAYER_SETTINGS_FIELDS.find(f=>f.key===k) || {}).secret) settings[k] = "";
         else if(k === "v4KeeperEnabled") settings[k] = on ? "true" : "false";
         else settings[k] = (cur[k] === undefined || cur[k] === null) ? "" : String(cur[k]);
       }
