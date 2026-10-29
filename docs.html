@@ -1,0 +1,952 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="IgnitionX documentation — how the platform works today: exploring launches on Robinhood Chain and Solana, launch modes, ETH-side fees, graduation, Solana Quick Launch, and a step-by-step guide to deploying a token.">
+<!-- Same defense-in-depth CSP as index.html: single static file, no
+     per-request nonce available, so script-src keeps 'unsafe-inline' and
+     relies on this page never writing untrusted input into the DOM (it
+     doesn't — every string below is authored here, nothing is fetched or
+     interpolated). See index.html's own CSP comment for the full reasoning. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Docs — IgnitionX</title>
+<link rel="icon" href="brand/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/favicon-32.png">
+<link rel="apple-touch-icon" href="brand/favicon-180.png">
+<meta name="theme-color" content="#050505">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ============================================================
+     Same instrument-panel design system as index.html — the tokens
+     below are copied verbatim so this page reads as part of the same
+     product rather than a bolted-on help page. Keep these two token
+     blocks in sync by hand if the app's palette ever changes.
+     ============================================================ */
+  :root{
+    color-scheme: dark;
+    --ink-950:#050505; --ink-900:#100d0d; --ink-850:#161212; --ink-800:#1d1817; --ink-700:#2f2827;
+    --line: rgba(255,225,215,.09); --line-strong: rgba(255,225,215,.18);
+    --paper-100:#f5f1ef; --paper-300:#d2cac7; --paper-500:#a0979a; --paper-700:#6f6668;
+    --signal-300:#ffb59e; --signal-500:#ff4a1c; --signal-600:#ec4614; --signal-wash: rgba(255,74,28,.11);
+    --cyan-400:#ffc27a; --cyan-500:#ffa03a; --cyan-wash: rgba(255,160,58,.11);
+    --good-500:#34dd9c; --good-wash: rgba(52,221,156,.12);
+    --critical-500:#f0405f; --critical-wash: rgba(240,64,95,.12);
+    --glow-signal: 0 0 1px rgba(255,74,28,.75), 0 0 11px rgba(255,74,28,.32), 0 0 26px rgba(255,74,28,.11);
+    --glow-cyan: 0 0 1px rgba(255,160,58,.75), 0 0 11px rgba(255,160,58,.28), 0 0 26px rgba(255,160,58,.10);
+    --radius-xs: 6px; --radius-sm: 10px; --radius-md: 16px; --radius-lg: 22px;
+    --font-display:'Chakra Petch', system-ui, sans-serif;
+    --font-body:'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    --font-mono:'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+    --shadow-panel: 0 24px 60px -20px rgba(0,0,0,.7);
+  }
+  *{box-sizing:border-box;}
+  html{background:var(--ink-950); scroll-behavior:smooth;}
+  body{
+    margin:0; background:var(--ink-950); color:var(--paper-100); font-family:var(--font-body);
+    font-size:16px; line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  @media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto;} *{animation-duration:.001ms !important; transition-duration:.001ms !important;} }
+  body::before{
+    content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+    background:
+      radial-gradient(1200px 680px at 82% -8%, rgba(255,74,28,.07), transparent 60%),
+      radial-gradient(1000px 560px at -10% 8%, rgba(255,160,58,.055), transparent 55%),
+      linear-gradient(var(--ink-950), var(--ink-950));
+  }
+  a{color:inherit;}
+  button{font-family:inherit;}
+  .mono{font-family:var(--font-mono);}
+  .eyebrow{font-family:var(--font-mono); font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; color:var(--paper-500); font-weight:500;}
+  h1,h2,h3,h4{font-family:var(--font-display); text-wrap:balance; margin:0 0 .5em; font-weight:700; letter-spacing:-.01em; color:var(--paper-100);}
+  p{margin:0 0 1em; color:var(--paper-300);}
+  :focus-visible{outline:2px solid var(--signal-500); outline-offset:2px; border-radius:2px;}
+
+  /* ---------------- header ---------------- */
+  .hud{
+    position:sticky; top:0; z-index:40; background:rgba(5,5,5,.86); backdrop-filter:blur(14px) saturate(140%);
+    border-bottom:1px solid var(--line-strong); box-shadow:0 1px 0 rgba(255,160,58,.14), 0 20px 40px -24px rgba(0,0,0,.75);
+  }
+  .hud-inner{max-width:1320px; margin:0 auto; padding:14px 28px; display:flex; align-items:center; gap:20px;}
+  .brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; font-size:1.05rem; letter-spacing:.01em; white-space:nowrap; text-decoration:none;}
+  .brand-logo{height:31px; width:auto; flex:none; filter:drop-shadow(0 0 8px rgba(255,74,28,.35));}
+  .brand-x{color:var(--signal-500); text-shadow:0 0 12px rgba(255,74,28,.45);}
+  .brand small{font-family:var(--font-mono); font-weight:500; font-size:.62rem; letter-spacing:.1em; color:var(--paper-500); display:block; margin-top:1px;}
+  .hud-spacer{flex:1;}
+  .hud-nav{display:flex; gap:2px;}
+  .hud-nav a{
+    font-family:var(--font-mono); font-size:.74rem; letter-spacing:.04em; text-transform:uppercase; color:var(--paper-500);
+    text-decoration:none; padding:9px 12px; border-radius:var(--radius-xs); transition:color .15s, background .15s;
+  }
+  .hud-nav a:hover{color:var(--paper-100); background:var(--ink-900);}
+  .btn{
+    appearance:none; cursor:pointer; border-radius:var(--radius-sm); font-family:var(--font-body); font-weight:600; font-size:.86rem;
+    padding:10px 18px; border:1px solid transparent; text-decoration:none; display:inline-flex; align-items:center; gap:6px;
+    transition:transform .1s, background .15s, border-color .15s, box-shadow .2s; white-space:nowrap;
+  }
+  .btn:active{transform:translateY(1px);}
+  .btn-primary{background:linear-gradient(155deg, var(--signal-500), var(--signal-600)); color:#1a0f04;}
+  .btn-primary:hover{background:linear-gradient(155deg, var(--signal-300), var(--signal-500)); box-shadow:var(--glow-signal);}
+  .btn-ghost{background:transparent; border-color:var(--line-strong); color:var(--paper-100);}
+  .btn-ghost:hover{border-color:var(--cyan-500); box-shadow:0 0 11px rgba(255,160,58,.16);}
+  .nav-toggle{display:none; background:transparent; border:1px solid var(--line-strong); color:var(--paper-100); border-radius:var(--radius-xs); padding:8px 10px; cursor:pointer;}
+
+  /* ---------------- layout ---------------- */
+  .docs-shell{position:relative; z-index:1; max-width:1320px; margin:0 auto; padding:0 28px; display:grid; grid-template-columns:240px 1fr; gap:48px;}
+  .docs-nav{position:sticky; top:78px; align-self:start; max-height:calc(100vh - 100px); overflow-y:auto; padding:36px 0 40px;}
+  .docs-nav-group{margin-bottom:20px;}
+  .docs-nav-group .eyebrow{display:block; margin-bottom:8px;}
+  .docs-nav a{
+    display:block; font-size:.86rem; color:var(--paper-500); text-decoration:none; padding:5px 10px; margin:0 -10px;
+    border-radius:var(--radius-xs); border-left:2px solid transparent; transition:color .15s, background .15s, border-color .15s;
+  }
+  .docs-nav a:hover{color:var(--paper-100);}
+  .docs-nav a.active{color:var(--signal-300); border-left-color:var(--signal-500); background:var(--signal-wash);}
+  .docs-content{padding:36px 0 90px; min-width:0;}
+  .docs-content section{padding-top:18px; margin-bottom:56px; scroll-margin-top:88px;}
+  .docs-content section:first-child{padding-top:0;}
+  .docs-content h2{font-size:1.7rem; margin-bottom:10px;}
+  .docs-content h2 .eyebrow{display:block; margin-bottom:10px;}
+  .docs-content h3{font-size:1.15rem; margin-bottom:8px;}
+  .section-intro{max-width:64ch; color:var(--paper-300); font-size:1rem;}
+  .panel{position:relative; background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:22px;}
+
+  /* ---------------- hero ---------------- */
+  .doc-hero{padding:56px 0 8px;}
+  .doc-hero h1{font-size:clamp(2rem, 4vw, 2.9rem); line-height:1.08; max-width:20ch;}
+  .doc-hero p{font-size:1.05rem; max-width:56ch;}
+  .doc-hero-cta{display:flex; gap:12px; flex-wrap:wrap; margin-top:22px;}
+
+  /* ---------------- feature grid ---------------- */
+  .feature-grid{display:grid; grid-template-columns:repeat(3, 1fr); gap:16px;}
+  @media (max-width: 980px){ .feature-grid{grid-template-columns:repeat(2,1fr);} }
+  @media (max-width: 640px){ .feature-grid{grid-template-columns:1fr;} }
+  .feature-card{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:20px;}
+  .feature-icon{
+    width:36px; height:36px; border-radius:var(--radius-sm); display:flex; align-items:center; justify-content:center;
+    font-size:1.05rem; margin-bottom:14px; background:var(--signal-wash); border:1px solid rgba(255,74,28,.3);
+  }
+  .feature-card h3{font-size:1rem; margin-bottom:6px;}
+  .feature-card p{font-size:.86rem; margin:0; color:var(--paper-500);}
+
+  /* ---------------- launch mode cards ---------------- */
+  .mode-grid{display:grid; grid-template-columns:repeat(2, 1fr); gap:16px;}
+  @media (max-width: 900px){ .mode-grid{grid-template-columns:1fr;} }
+  .mode-card{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:22px; position:relative; overflow:hidden;}
+  .mode-card::before{content:""; position:absolute; top:0; left:0; right:0; height:2px; background:linear-gradient(90deg, var(--signal-500), var(--cyan-500)); opacity:.7;}
+  .mode-card-head{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px;}
+  .mode-card h3{margin:0; font-size:1.05rem;}
+  .mode-badge{font-family:var(--font-mono); font-size:.64rem; letter-spacing:.05em; text-transform:uppercase; padding:3px 9px; border-radius:999px; white-space:nowrap;}
+  .mode-badge.free{background:var(--good-wash); color:var(--good-500);}
+  .mode-badge.eth{background:var(--cyan-wash); color:var(--cyan-400);}
+  .mode-badge.quick{background:var(--signal-wash); color:var(--signal-300); border:1px solid rgba(255,74,28,.35);}
+  .mode-card p{font-size:.88rem; margin:0 0 12px;}
+  .mode-specs{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px;}
+  .mode-specs li{font-size:.8rem; color:var(--paper-500); display:flex; gap:8px;}
+  .mode-specs li .k{font-family:var(--font-mono); color:var(--paper-700); flex:none; min-width:88px;}
+
+  /* ---------------- numbered steps ---------------- */
+  .steps-list{counter-reset:doc-step; display:flex; flex-direction:column; gap:0;}
+  .doc-step{display:grid; grid-template-columns:40px 1fr; gap:18px; padding:22px 0; border-bottom:1px solid var(--line);}
+  .doc-step:last-child{border-bottom:none; padding-bottom:0;}
+  .doc-step:first-child{padding-top:0;}
+  .doc-step-num{
+    counter-increment:doc-step; width:36px; height:36px; border-radius:50%; background:var(--ink-800); border:1px solid var(--line-strong);
+    display:flex; align-items:center; justify-content:center; font-family:var(--font-mono); font-weight:600; color:var(--signal-300);
+  }
+  .doc-step-num::before{content:counter(doc-step);}
+  .doc-step h3{margin-bottom:6px;}
+  .doc-step p{font-size:.92rem; margin:0 0 8px;}
+  .doc-step .step-note{
+    font-size:.8rem; color:var(--paper-500); background:var(--ink-850); border:1px solid var(--line); border-radius:var(--radius-sm);
+    padding:9px 12px; margin-top:6px;
+  }
+  .doc-step .step-note b{color:var(--paper-300);}
+
+  /* ---------------- misc content blocks ---------------- */
+  .callout{
+    display:flex; gap:12px; align-items:flex-start; background:var(--cyan-wash); border:1px solid rgba(255,160,58,.3);
+    border-radius:var(--radius-md); padding:16px 18px; font-size:.88rem; color:var(--paper-300); margin:18px 0;
+  }
+  .callout.warn{background:var(--signal-wash); border-color:rgba(255,74,28,.35);}
+  .callout-icon{flex:none; font-size:1.1rem; line-height:1;}
+  .callout p{margin:0; color:inherit;}
+  .callout b{color:var(--paper-100);}
+  .kv-table{width:100%; border-collapse:collapse; font-size:.86rem;}
+  .kv-table th, .kv-table td{text-align:left; padding:10px 14px; border-bottom:1px solid var(--line);}
+  .kv-table th{font-family:var(--font-mono); font-size:.68rem; letter-spacing:.06em; text-transform:uppercase; color:var(--paper-500); font-weight:500;}
+  .kv-table td{color:var(--paper-300);}
+  .table-wrap{overflow-x:auto; border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--ink-900);}
+  .table-wrap .kv-table{margin:0;}
+  .table-wrap .kv-table th:first-child, .table-wrap .kv-table td:first-child{padding-left:18px;}
+  .badge-pill{
+    font-family:var(--font-mono); font-size:.68rem; letter-spacing:.04em; text-transform:uppercase; padding:3px 9px;
+    border-radius:999px; white-space:nowrap; display:inline-block;
+  }
+  .badge-pill.good{background:var(--good-wash); color:var(--good-500);}
+  .badge-pill.signal{background:var(--signal-wash); color:var(--signal-300);}
+  .badge-pill.cyan{background:var(--cyan-wash); color:var(--cyan-400);}
+
+  .faq-item{border-bottom:1px solid var(--line); padding:18px 0;}
+  .faq-item:last-child{border-bottom:none;}
+  .faq-item summary{cursor:pointer; font-family:var(--font-display); font-weight:600; font-size:1rem; color:var(--paper-100); list-style:none; display:flex; justify-content:space-between; align-items:center; gap:12px;}
+  .faq-item summary::-webkit-details-marker{display:none;}
+  .faq-item summary::after{content:"+"; font-family:var(--font-mono); color:var(--signal-300); font-size:1.2rem; flex:none; transition:transform .2s;}
+  .faq-item[open] summary::after{transform:rotate(45deg);}
+  .faq-item p{margin-top:10px; font-size:.9rem;}
+
+  /* ---------------- footer (mirrors index.html) ---------------- */
+  footer{position:relative; z-index:1; border-top:1px solid var(--line); margin-top:20px;}
+  .footer-inner{max-width:1320px; margin:0 auto; padding:28px 28px 36px; display:flex; justify-content:space-between; gap:24px; flex-wrap:wrap;}
+  .footer-note{font-size:.76rem; color:var(--paper-700); max-width:56ch; line-height:1.6;}
+  .footer-links{display:flex; flex-wrap:wrap; gap:8px 18px; font-family:var(--font-mono); font-size:.74rem; color:var(--paper-500); white-space:nowrap;}
+  .footer-links a{text-decoration:none; color:inherit; transition:color .15s;}
+  .footer-links a:hover{color:var(--signal-300);}
+  .footer-links a[aria-current="page"]{color:var(--signal-300);}
+
+  @media (max-width: 980px){
+    .docs-shell{grid-template-columns:1fr; padding:0 20px;}
+    .docs-nav{
+      position:fixed; inset:64px 0 0 0; top:64px; z-index:39; background:var(--ink-950); padding:20px; max-height:none;
+      transform:translateX(-100%); transition:transform .2s ease; overflow-y:auto;
+    }
+    .docs-nav.open{transform:translateX(0);}
+    .hud-nav{display:none;}
+    .nav-toggle{display:inline-flex;}
+    .hud-inner{padding:14px 20px;}
+  }
+
+  /* ---------------- additions for the current-platform docs ---------------- */
+  .update-list{display:grid; grid-template-columns:repeat(2,1fr); gap:16px;}
+  @media (max-width: 900px){ .update-list{grid-template-columns:1fr;} }
+  .update-card{background:var(--ink-900); border:1px solid var(--line); border-radius:var(--radius-lg); padding:20px 22px; border-left:3px solid var(--signal-500);}
+  .update-card .tag{font-family:var(--font-mono); font-size:.64rem; letter-spacing:.08em; text-transform:uppercase; color:var(--signal-300); display:block; margin-bottom:8px;}
+  .update-card h3{font-size:1.02rem; margin-bottom:6px;}
+  .update-card p{font-size:.86rem; margin:0; color:var(--paper-500);}
+  .update-card p + p{margin-top:8px;}
+
+  .flow{display:grid; grid-template-columns:1fr; gap:10px; margin:20px 0 6px;}
+  .flow-row{display:grid; gap:10px; align-items:stretch;}
+  .flow-row.cols-3{grid-template-columns:repeat(3,1fr);}
+  .flow-row.cols-2{grid-template-columns:repeat(2,1fr);}
+  @media (max-width: 760px){ .flow-row.cols-3, .flow-row.cols-2{grid-template-columns:1fr;} }
+  .flow-node{background:var(--ink-900); border:1px solid var(--line-strong); border-radius:var(--radius-md); padding:14px 16px; font-size:.84rem; color:var(--paper-300);}
+  .flow-node b{display:block; font-family:var(--font-display); color:var(--paper-100); font-size:.95rem; margin-bottom:3px;}
+  .flow-node .pct{font-family:var(--font-mono); font-size:.72rem; color:var(--cyan-400); display:block; margin-bottom:4px; letter-spacing:.04em;}
+  .flow-node.hot{border-color:rgba(255,74,28,.45); background:linear-gradient(180deg, rgba(255,74,28,.09), var(--ink-900));}
+  .flow-node.end{background:var(--ink-850);}
+  .flow-arrow{text-align:center; font-family:var(--font-mono); color:var(--signal-300); font-size:.78rem; letter-spacing:.06em;}
+  .flow-arrow::before{content:"↓ "; }
+
+  .compare{display:grid; grid-template-columns:repeat(2,1fr); gap:16px; margin-top:16px;}
+  @media (max-width: 760px){ .compare{grid-template-columns:1fr;} }
+  .compare .panel h3{font-size:1rem;}
+  .compare .panel.before{opacity:.78;}
+  .compare .panel.after{border-color:rgba(52,221,156,.35);}
+  .compare ul{margin:0; padding-left:18px; color:var(--paper-300); font-size:.86rem;}
+  .compare li{margin-bottom:6px;}
+  .doc-list{color:var(--paper-300); font-size:.92rem; padding-left:20px; margin:0 0 12px;}
+  .doc-list li{margin-bottom:8px;}
+  .doc-list b{color:var(--paper-100);}
+  .mini-note{font-size:.8rem; color:var(--paper-500);}
+  @media (max-width: 640px){
+    .hud-inner{gap:10px; padding:12px 16px;}
+    .hud-inner .btn-ghost{display:none;}
+    .hud-inner .btn-primary{padding:8px 12px; font-size:.78rem;}
+    .nav-toggle{padding:7px 9px; font-size:.78rem; white-space:nowrap;}
+    .brand small{display:none;}
+    .docs-nav{inset:56px 0 0 0; top:56px;}
+  }
+</style>
+</head>
+<body>
+
+<div class="hud">
+  <div class="hud-inner">
+    <a class="brand" href="index.html"><img class="brand-logo" src="brand/ignitionx-mark.png" alt="" width="36" height="31"><span>IGNITION<b class="brand-x">X</b><small>DOCUMENTATION</small></span></a>
+    <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="docsNav">☰ Menu</button>
+    <div class="hud-spacer"></div>
+    <nav class="hud-nav" aria-label="Docs sections">
+      <a href="#whats-new">What's new</a>
+      <a href="#explore">Explore</a>
+      <a href="#launch-modes">Launch modes</a>
+      <a href="#fees">Fees</a>
+      <a href="#solana">Solana</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <a class="btn btn-ghost" href="index.html">← Back to app</a>
+    <a class="btn btn-primary" href="index.html#create">Launch a token</a>
+  </div>
+</div>
+
+<div class="docs-shell">
+  <aside class="docs-nav" id="docsNav">
+    <div class="docs-nav-group">
+      <span class="eyebrow">Start here</span>
+      <a href="#overview">Overview</a>
+      <a href="#whats-new">What's new</a>
+      <a href="#getting-started">Getting started</a>
+      <a href="#explore">Exploring launches</a>
+    </div>
+    <div class="docs-nav-group">
+      <span class="eyebrow">Launching</span>
+      <a href="#launch-modes">Launch modes</a>
+      <a href="#how-to-deploy">How to deploy a token</a>
+      <a href="#gasless">Gasless launches</a>
+      <a href="#custom-tax">Custom tax tokens</a>
+      <a href="#solana">Solana Quick Launch</a>
+      <a href="#after-launch">After you launch</a>
+    </div>
+    <div class="docs-nav-group">
+      <span class="eyebrow">Trading &amp; fees</span>
+      <a href="#trading">Buying &amp; selling</a>
+      <a href="#fees">How fees work</a>
+      <a href="#graduation">Graduation &amp; anti-snipe</a>
+    </div>
+    <div class="docs-nav-group">
+      <span class="eyebrow">Community</span>
+      <a href="#community">Profiles &amp; social</a>
+    </div>
+    <div class="docs-nav-group">
+      <span class="eyebrow">Reference</span>
+      <a href="#security">Security &amp; disclosures</a>
+      <a href="#faq">FAQ</a>
+    </div>
+  </aside>
+
+  <div class="docs-content">
+
+    <section id="overview">
+      <div class="doc-hero">
+        <span class="eyebrow">Documentation</span>
+        <h1>How IgnitionX works today, and how to launch on it.</h1>
+        <p>IgnitionX is a token launchpad on two chains: Robinhood Chain, where every token trades on Uniswap V4, and Solana, with pump.fun-style quick launches on Meteora. This page covers the platform as it runs now: how to explore launches, the launch modes on each chain, how fees work, what happens at graduation, and a step-by-step guide to your first launch.</p>
+        <div class="doc-hero-cta">
+          <a class="btn btn-primary" href="#how-to-deploy">Jump to: Deploy a token</a>
+          <a class="btn btn-ghost" href="#whats-new">See what's new</a>
+        </div>
+      </div>
+      <div class="callout">
+        <span class="callout-icon">◆</span>
+        <p><b>IgnitionX is live on mainnet, on Robinhood Chain and Solana.</b> Launches, trades and prices there use real ETH and SOL, and trades are real and irreversible. A testnet mode (Robinhood Chain testnet and Solana devnet, with free test funds) is kept for practice. The network pill next to your wallet always shows which network is active, and the same setting applies to everyone using the site.</p>
+      </div>
+      <div class="callout warn">
+        <span class="callout-icon">◆</span>
+        <p><b>IgnitionX is an independent, unofficial interface built for Robinhood Chain.</b> It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
+      </div>
+    </section>
+
+    <section id="whats-new">
+      <h2><span class="eyebrow">Recent updates</span>What's new</h2>
+      <p class="section-intro">The changes that matter most if you used the platform earlier, or have only read older descriptions of it.</p>
+      <div class="update-list" style="margin-top:20px;">
+        <div class="update-card">
+          <span class="tag">Platform</span>
+          <h3>Live on mainnet, on both chains</h3>
+          <p>Robinhood Chain mainnet and Solana both run on real funds. The network pill next to your wallet shows which network the site is on, and testnet and devnet stay available for practice. See <a href="#getting-started">Getting started</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Explore</span>
+          <h3>A live home page for Robinhood Chain and Solana</h3>
+          <p>The top of the home page now shows live totals (value locked, 24h volume, active traders, tokens graduated), a ticker of the latest launches and trades, and a <b>New launches</b> row. Every token appears as a tile with its chain, a progress ring and a mini curve. Below that, <b>Explore</b> lists every launch with tabs for Launched, On the curve, Graduating soon and Graduated. See <a href="#explore">Exploring launches</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Token page</span>
+          <h3>A clearer token page, with a fee diagram</h3>
+          <p>Each token page opens with its progress ring, chain, status, price and key numbers. On Robinhood Chain it also shows <b>Where every trade goes</b>: a to-scale diagram of every fee taken from a buy or a sell. Solana token pages use the same header. See <a href="#explore">Exploring launches</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Guide</span>
+          <h3>Interactive "How it works"</h3>
+          <p>A step-by-step walkthrough on the home page. Pick Robinhood Chain or Solana and, on Robinhood Chain, the launch path and tax type, then step through what happens from launch to graduation.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Fees</span>
+          <h3>The 1% fee is taken in ETH at the trade, not by selling tokens</h3>
+          <p>The fee now comes straight off the ETH side of every buy and sell. Nothing is sold to collect it, so rewards claims no longer print a sell on the chart. See <a href="#fees">How fees work</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Custom tax</span>
+          <h3>Marketing is paid in ETH</h3>
+          <p>A custom token's marketing share is also taken in ETH and sent to the marketing wallet, instead of the wallet receiving tokens it then has to sell.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Custom tax</span>
+          <h3>Reflections can pay in ETH or another token</h3>
+          <p>When you launch a custom-tax token you choose how reflections reach holders: the same token, ETH, or another token launched on the platform. Payouts are sent to holders automatically in batches. See <a href="#custom-tax">Custom tax tokens</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Platform</span>
+          <h3>Uniswap V4 only</h3>
+          <p>Every Robinhood Chain launch now runs on Uniswap V4 and carries a V4 tag. Older V2-era tokens are hidden from Explore rather than deleted.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Trading</span>
+          <h3>Early-buy surcharge on new pools</h3>
+          <p>A brand-new pool charges a surcharge on buys that starts high and falls to zero within minutes, so bots that snipe the first blocks pay for it. See <a href="#graduation">Graduation &amp; anti-snipe</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Solana</span>
+          <h3>Solana Quick Launch is open to anyone</h3>
+          <p>Launch from a Solana wallet with the same four-step wizard. Solana tokens appear in Explore, in New launches and in the live feed next to Robinhood Chain tokens, with the same curve progress rings, and show market cap in dollars. See <a href="#solana">Solana Quick Launch</a>.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Grid</span>
+          <h3>Curve tokens are labelled as curve tokens</h3>
+          <p>A Quick Launch token shows <b>Bonding curve</b> until it graduates to a real pool. Only after that does it show as live on a DEX.</p>
+        </div>
+        <div class="update-card">
+          <span class="tag">Accounts</span>
+          <h3>One account, several wallets</h3>
+          <p>Link a Robinhood wallet and a Solana wallet to one account so your name, picture, follows, comments and launches follow you across both. See <a href="#community">Profiles &amp; social</a>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="getting-started">
+      <h2><span class="eyebrow">01</span>Getting started</h2>
+      <p class="section-intro">Three things to know before you do anything else on the platform.</p>
+      <div class="table-wrap" style="margin-top:16px;">
+        <table class="kv-table">
+          <tr><th>Connect a wallet</th><td>For Robinhood Chain, click <b>Connect Wallet</b> and approve in whichever wallet your browser has injected (such as MetaMask). For Solana, click <b>Connect Solana</b> and pick a Solana wallet. There is no sign-up beyond that. You can connect either one, or both. With only a Solana wallet connected, click your name in the header to open your profile or portfolio, or to disconnect; the Robinhood button then becomes an optional extra.</td></tr>
+          <tr><th>Check the network</th><td>The network pill next to your wallet shows whether the platform is on <b>Testnet</b> or <b>Mainnet</b>. It is a platform-wide setting, not a personal one. Solana devnet counts as testnet and Solana mainnet as mainnet. The site is live on mainnet; testnet remains for practice.</td></tr>
+          <tr><th>Know which one is real</th><td>Testnet funds have no value. Mainnet is the real chain: real ETH or SOL, real tokens, real and irreversible trades. Always check the pill before sending anything.</td></tr>
+        </table>
+      </div>
+    </section>
+
+    <section id="explore">
+      <h2><span class="eyebrow">02</span>Exploring launches</h2>
+      <p class="section-intro">The home page is a live view of both chains. Everything on it updates from real on-chain activity on whichever network the site is on.</p>
+
+      <div class="table-wrap" style="margin-top:16px;">
+        <table class="kv-table">
+          <tr><th>Live totals</th><td>Value locked, 24h volume, active traders and tokens graduated, counted across Robinhood Chain and Solana. When both chains contribute, the figure shows each chain's share.</td></tr>
+          <tr><th>Ticker</th><td>A scrolling tape of the latest launches and trades from both chains. Each trade shows its side, token and size.</td></tr>
+          <tr><th>New launches</th><td>The newest tokens, newest first, as tiles. Each tile shows the chain, how long ago it launched, a ring with its progress, key numbers, a mini bonding-curve chart for curve tokens, tags (Quick Launch, custom-tax shares, payout type) and a Trade button.</td></tr>
+          <tr><th>Explore</th><td>The full list of launches, with search by name, ticker or contract address. Use the tabs to filter by stage.</td></tr>
+        </table>
+      </div>
+
+      <h3 style="margin-top:26px;">The Explore tabs</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>All</th><td>Every launch on the active network, both chains.</td></tr>
+          <tr><th>Launched</th><td>Tokens launched with liquidity added, trading in a pool from the start.</td></tr>
+          <tr><th>On the curve</th><td>Quick Launch tokens still on their bonding curve, waiting to graduate. Robinhood Chain and Solana.</td></tr>
+          <tr><th>Graduating soon</th><td>Curve tokens that are about 85% or more of the way to their graduation target.</td></tr>
+          <tr><th>Graduated</th><td>Curve tokens that have moved into a real pool (a Uniswap V4 pool on Robinhood Chain, a Meteora DAMM v2 pool on Solana), and pool tokens whose platform fee has switched off.</td></tr>
+        </table>
+      </div>
+
+      <h3 style="margin-top:26px;">Reading a tile</h3>
+      <ul class="doc-list">
+        <li><b>The chain badge</b> in the top corner says whether the token is on Robinhood Chain or Solana.</li>
+        <li><b>The ring</b> around the logo shows progress and changes colour as it fills, from cool blue through amber to ember. Green is kept for price rises.</li>
+        <li><b>The mini curve</b> is an illustration of a bonding curve's shape; the dot on it marks the token's real progress toward graduation.</li>
+      </ul>
+
+      <h3 style="margin-top:26px;">The token page</h3>
+      <p>Click any tile to open the token's page. The header carries the same ring, chain and status, then the price with its 24h change, the chart and the key numbers (market cap, 24h volume, holders and circulating supply). Robinhood Chain tokens add the holder distribution, the custom-tax structure and the <b>Where every trade goes</b> fee diagram (see <a href="#fees">How fees work</a>). Solana token pages show the curve progress and the raised and target amounts. On both chains the buy and sell panel sits beside the page, with comments and callouts below it.</p>
+
+      <h3 style="margin-top:26px;">How it works, interactive</h3>
+      <p>Below New launches, the <b>How it works</b> panel walks through a launch step by step. Choose <b>Robinhood Chain</b> or <b>Solana</b>. On Robinhood Chain, also choose <b>Launch with liquidity</b> or <b>Quick Launch</b> and <b>0% tax</b> or <b>Custom tax</b>. Solana shows its single path, Quick Launch with 0% tax from launch to graduation. Click any step to read what happens, or let it play through on its own. The figures it shows are the platform's current settings; your launch review shows the exact numbers before you confirm.</p>
+    </section>
+
+    <section id="launch-modes">
+      <h2><span class="eyebrow">03</span>Launch modes</h2>
+      <p class="section-intro">Every launch starts the same way (name, symbol, supply), then goes one of four ways on Robinhood Chain, or the single quick-launch path on Solana.</p>
+
+      <div class="mode-grid" style="margin-top:20px;">
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Deploy + Add Liquidity</h3><span class="mode-badge eth">Needs ETH</span></div>
+          <p>Creates the token and pairs your ETH into a real Uniswap V4 pool in the same transaction. A 1.00% fee on trades funds the climb to a $50,000 market cap, then switches off for good. Your liquidity is locked to you.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat launch fee, plus the ETH you pair in</li>
+            <li><span class="k">Fee</span>1.00% of the ETH in each trade, until $50,000 market cap</li>
+            <li><span class="k">Optional</span>An initial buy, guaranteed to be the pool's first trade and exempt from the early-buy surcharge</li>
+          </ul>
+        </div>
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Deploy + Add Liquidity (Custom Tax)</h3><span class="mode-badge eth">Needs ETH</span></div>
+          <p>The fully configurable path. Set a buy tax and a sell tax independently, and split each across reflections, marketing, automatic liquidity and automatic burn. Rates lock at launch and can never be raised. The platform's 1% fee sits on top and switches off at the same market-cap target.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat launch fee, plus the ETH you pair in</li>
+            <li><span class="k">Tax</span>Your own rates (capped per side), plus the platform fee</li>
+            <li><span class="k">Best for</span>Reflections, auto-liquidity or fully custom tokenomics</li>
+          </ul>
+        </div>
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Quick Launch</h3><span class="mode-badge quick">⚡ No ETH needed</span></div>
+          <p>No upfront liquidity. Your token trades immediately against its own bonding curve, and price rises as people buy. When the curve has raised its target, it graduates: a real Uniswap V4 pool is created automatically and trading continues there.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat launch fee (plus an optional first buy)</li>
+            <li><span class="k">On the curve</span>A 1.00% fee on the ETH of every buy and sell</li>
+            <li><span class="k">After graduation</span>The pool's 1.00% fee until $50,000 market cap</li>
+          </ul>
+        </div>
+        <div class="mode-card">
+          <div class="mode-card-head"><h3>Quick Launch (Custom Tax)</h3><span class="mode-badge quick">⚡ No ETH needed</span></div>
+          <p>The same bonding-curve mechanics, but the token graduates into the configurable token type, so your reflections, marketing, auto-liquidity and burn settings apply from the first pool trade.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>A flat launch fee (plus an optional first buy)</li>
+            <li><span class="k">Tax</span>The platform fee on the curve; your configured tax once in the pool</li>
+            <li><span class="k">Best for</span>A curve launch that ends in your own tokenomics</li>
+          </ul>
+        </div>
+        <div class="mode-card" style="grid-column:1 / -1;">
+          <div class="mode-card-head"><h3>Solana Quick Launch</h3><span class="mode-badge quick">⚡ Solana wallet</span></div>
+          <p>A pump.fun-style launch on Meteora's Dynamic Bonding Curve, signed only by your Solana wallet. The token graduates to a Meteora DAMM v2 pool when the curve fills. See <a href="#solana">Solana Quick Launch</a> for the details.</p>
+          <ul class="mode-specs">
+            <li><span class="k">Cost</span>No IgnitionX launch fee, only the Solana network cost (and an optional first buy)</li>
+            <li><span class="k">On the curve</span>A trading fee on the curve (1% by default); the creator earns a share of it</li>
+            <li><span class="k">Token tax</span>0% from launch to graduation. There is no custom-tax option on Solana</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout" style="margin-top:20px;">
+        <span class="callout-icon">◆</span>
+        <p>Every Robinhood Chain mode that creates a pool <b>locks</b> the liquidity to the original creator for a fixed period. Nobody can pull it out early, and a Quick Launch's position is locked for the creator who launched it, never for whoever happens to trigger graduation. There is no deploy-only mode any more: a Quick Launch covers the case of launching without upfront liquidity.</p>
+      </div>
+    </section>
+
+    <section id="how-to-deploy">
+      <h2><span class="eyebrow">04</span>How to deploy a token</h2>
+      <p class="section-intro">The launch wizard is the same four steps for every mode. Only what you fill in on steps 2 and 3 changes.</p>
+
+      <div class="steps-list" style="margin-top:24px;">
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Connect your wallet and check the network</h3>
+            <p>Connect the wallet for the chain you want (Robinhood Chain or Solana), confirm the network pill, then open <b>Launch a token</b>. On the Create page, the <b>Robinhood / Solana</b> picker switches the wizard to the other chain.</p>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Step 01 · Identity</h3>
+            <p>Name, ticker, total supply (where the platform lets you choose it), a short description, and optionally a logo, banner and social links. This is what appears on your token's card and page. You can still edit the description, branding and socials after launch.</p>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Step 02 · Deploy mode</h3>
+            <p>Pick one of the modes from <a href="#launch-modes">Launch modes</a>. The live preview on the right shows what your token's card will look like.</p>
+            <div class="step-note"><b>Not sure?</b> No ETH to put in, or you want instant trading → Quick Launch. Want a real pool from the first second → Deploy + Add Liquidity. Want reflections, marketing or auto-liquidity → one of the Custom Tax modes.</div>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Step 03 · Terms</h3>
+            <p>For a liquidity mode, set how much ETH to pair in and, optionally, an initial buy. For a custom-tax mode, set the buy and sell split across reflections, marketing, liquidity and burn, the marketing wallet, and (once a reflection share is set) how reflections are paid. Quick Launch has almost nothing to configure here.</p>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>Step 04 · Review</h3>
+            <p>Check everything. Tokenomics cannot be edited after this. Confirm, then sign: a free message signature for a gasless launch plus one ETH deposit (see <a href="#gasless">Gasless launches</a>), or an ordinary wallet transaction. A progress panel tracks each step of the launch.</p>
+          </div>
+        </div>
+        <div class="doc-step">
+          <div class="doc-step-num" aria-hidden="true"></div>
+          <div>
+            <h3>You're live</h3>
+            <p>Once it confirms, your token appears in Explore and in New launches, a launch announcement posts to the live feed (and to the Telegram launches channel), and it is listed under <b>Your launches</b> in your Portfolio. See <a href="#after-launch">After you launch</a>.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="gasless">
+      <h2><span class="eyebrow">05</span>Gasless launches</h2>
+      <p class="section-intro">All four Robinhood Chain modes can be launched without paying your own gas.</p>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>1. Sign</th><td>You sign a message describing your launch. It is free, uses no gas and sends no transaction.</td></tr>
+          <tr><th>2. Deposit</th><td>You send <b>one plain ETH transfer</b> covering the launch fee, the liquidity and any first buy. It is an ordinary transfer, not a gas payment.</td></tr>
+          <tr><th>3. Relay</th><td>The platform's relayer submits the launch transaction and pays its gas. That gas is repaid out of the launch fee, up to a cap the platform sets.</td></tr>
+        </table>
+      </div>
+      <p style="margin-top:14px;">You still fund the launch fee, liquidity and first buy yourself; only the transaction's gas is covered. Nobody but you can redirect or forge a launch, because the contracts re-check your signature and your deposit before doing anything. If you sign and the relayer never completes the launch, you can reclaim your deposit after the voucher's deadline. When the relayer isn't ready, the page says so and falls back to a normal wallet transaction automatically.</p>
+    </section>
+
+    <section id="custom-tax">
+      <h2><span class="eyebrow">06</span>Custom tax tokens</h2>
+      <p class="section-intro">A custom-tax token lets you choose a buy tax and a sell tax independently and split each across four mechanics. Total rates are capped per side, and every rate is locked at launch with no setter afterwards.</p>
+      <div class="table-wrap" style="margin-top:16px;">
+        <table class="kv-table">
+          <tr><th>Reflections</th><td>A share of every trade is distributed to all holders in proportion to their balance. You choose at launch how holders are paid, and the choice is permanent (see below).</td></tr>
+          <tr><th>Marketing</th><td>Taken in <b>ETH</b> from the ETH side of the trade and paid to your marketing wallet. The creator can change the wallet later, but never the rate. A wallet that can't receive ETH just keeps its share waiting until it's changed; trading is never blocked.</td></tr>
+          <tr><th>Liquidity</th><td>Taken in the token and turned into permanent pool liquidity by a keeper. It can never be withdrawn.</td></tr>
+          <tr><th>Burn</th><td>Taken in the token and destroyed, reducing total supply.</td></tr>
+        </table>
+      </div>
+      <h3 style="margin-top:26px;">Choosing how reflections are paid</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Same token</th><td>Holders receive more of the token itself. Holders can claim at any time.</td></tr>
+          <tr><th>ETH</th><td>Reflection tokens are sold for ETH by a keeper and the ETH is shared out. Payouts are sent to holders automatically in batches; anyone can also claim straight from the contract. Holders owed only a dust amount keep accruing until it is worth the gas.</td></tr>
+          <tr><th>Another token</th><td>The ETH buys another token that already trades on the platform, and that token is shared out. The target is checked on-chain when you launch.</td></tr>
+        </table>
+      </div>
+      <div class="callout" style="margin-top:18px;">
+        <span class="callout-icon">◆</span>
+        <p>A custom token pays the <b>platform fee on top of your own rates</b>. The platform fee switches off at the market-cap target (see <a href="#graduation">Graduation</a>); your own rates never switch off.</p>
+      </div>
+    </section>
+
+    <section id="solana">
+      <h2><span class="eyebrow">07</span>Solana Quick Launch</h2>
+      <p class="section-intro">Solana launches use Meteora's Dynamic Bonding Curve, an audited program that already runs on Solana. IgnitionX doesn't deploy a contract for it. Anyone with a Solana wallet can launch. On mainnet it uses real SOL; on the testnet setting it runs on devnet with free test SOL.</p>
+      <div class="table-wrap" style="margin-top:16px;">
+        <table class="kv-table">
+          <tr><th>Launch</th><td>You sign two free messages and the launch transaction with your Solana wallet. Your Robinhood wallet is never asked to confirm anything. The launch can include your own first buy.</td></tr>
+          <tr><th>Trade</th><td>Anyone buys and sells against the curve from the token's page, paying in SOL. In Explore, the token sits under <b>On the curve</b> (or <b>Graduating soon</b> once the curve is mostly full), with a ring showing its progress, and its market cap is shown in dollars.</td></tr>
+          <tr><th>Graduate</th><td>When the curve has raised its SOL target, Meteora migrates the liquidity to a DAMM v2 pool. Most of the migrated LP is permanently locked to the platform and a share goes to the creator. From then on the token shows as graduated, sits under <b>Graduated</b> in Explore, and keeps trading from the same page against the DAMM v2 pool.</td></tr>
+          <tr><th>Token tax</th><td>None. Solana tokens carry no platform tax and no custom tax at any stage, before or after graduation. The $50,000 fee stage on Robinhood Chain does not exist on Solana.</td></tr>
+          <tr><th>Fees</th><td>A trading fee applies on the curve; Meteora takes its protocol share first, then the creator receives a share of the remainder and the platform the rest. The numbers (starting and graduation market cap, fee, creator share) are set by the platform and fixed into each token's curve when it launches.</td></tr>
+        </table>
+      </div>
+      <p style="margin-top:14px;">Solana tokens sit in the same <b>Explore</b> list, the home page's New launches row and the live feed as Robinhood Chain tokens, each marked with a Solana badge, and use the same comments, callouts and follows. Solana buys and sells are detected from the pool and appear in the live feed within about a minute. The Robinhood Chain fee model described below (ETH-side fee, creator rewards, platform-token buyback) is specific to Robinhood Chain; Solana follows Meteora's own fee rules.</p>
+      <div class="callout warn">
+        <span class="callout-icon">◆</span>
+        <p><b>Check the network pill before you launch or trade.</b> On mainnet, Solana launches and trades use real SOL and cannot be undone. On the testnet setting they run on devnet, where SOL is free test currency with no value.</p>
+      </div>
+    </section>
+
+    <section id="after-launch">
+      <h2><span class="eyebrow">08</span>After you launch</h2>
+      <div class="feature-grid" style="grid-template-columns:repeat(2,1fr); margin-top:16px;">
+        <div class="feature-card">
+          <h3>Edit your token</h3>
+          <p>From your token's page (or Portfolio → Your launches), update its description, logo, banner and social links any time. A quick signature from your wallet syncs it for every visitor.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Claim creator rewards</h3>
+          <p>On Robinhood Chain, 10% of the platform's 1% fee on your token's trades is credited to you in ETH, per token. Your Portfolio shows the claimable balance and you claim it straight to your wallet.</p>
+          <p>On Solana, your share of each Quick Launch token's trading fees builds up in SOL. Connect your Solana wallet and your Portfolio shows its SOL balance and holdings, plus your Solana launches, each with its unclaimed amount and a <b>Claim creator fees</b> button. This works with a Solana wallet alone.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Unlock your LP</h3>
+          <p>When your lock period ends, an <b>Unlock LP</b> button appears next to that launch in your Portfolio. Until then the countdown shows how long is left.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Watch it trade</h3>
+          <p>Every real buy and sell appears in the live feed, and your token's price and market-cap chart update from the same on-chain activity.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Manage a custom token</h3>
+          <p>Creators of a custom-tax token can change the marketing wallet and hand the creator role to someone else (a two-step transfer), or renounce it. Rates can't be changed by anyone.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Claim reflections</h3>
+          <p>If you hold a reflection token, its page shows what you're owed in the right units (the token, ETH or the payout token). Automatic batches pay most holders; you can also claim yourself.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="trading">
+      <h2><span class="eyebrow">09</span>Buying &amp; selling</h2>
+      <p class="section-intro">Trades happen on the token's own page. What it trades against depends on which side of graduation the token is on.</p>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Pool token</th><td>Deploy + Add Liquidity and Custom Tax tokens trade in a Uniswap V4 pool from the moment they launch. Use the Buy/Sell panel on the token's page: enter an amount, see the estimate, price impact and the fees included, and confirm. Sells need one approval the first time.</td></tr>
+          <tr><th>Quick Launch, on the curve</th><td>Trades go against the bonding curve itself. Price rises with every buy and falls with every sell. There is no pool yet and the token shows <b>Bonding curve</b>.</td></tr>
+          <tr><th>Quick Launch, graduated</th><td>It behaves like a pool token from then on: same trade panel, same live pricing.</td></tr>
+          <tr><th>Solana token</th><td>Connect a Solana wallet and use the trade panel on the token's page: pay in SOL on the curve, and the same panel trades against the Meteora DAMM v2 pool once the token has graduated. A graduated token can need two approvals in one trade (curve fees first, then pool fees).</td></tr>
+        </table>
+      </div>
+      <ul class="doc-list" style="margin-top:16px;">
+        <li><b>Slippage.</b> The default is 2%. The minimum you'll accept is enforced on-chain, so a trade that would fill worse than your setting reverts instead of filling badly.</li>
+        <li><b>The estimate includes the fees.</b> The 0.30% pool fee, the platform's 1% fee, any early-buy surcharge, and a custom token's own rates are all in the quote.</li>
+        <li><b>Live feed.</b> Every trade shows its chain, and curve trades carry a small <span class="badge-pill signal">⚡</span> marker so you can tell them apart from pool trades. The ticker above New launches runs the same trades across both chains.</li>
+        <li><b>Solana quotes.</b> Solana trades are quoted in SOL, and the fee model below (the 1% ETH-side fee, creator rewards, the platform-token buyback) is Robinhood Chain only.</li>
+      </ul>
+    </section>
+
+    <section id="fees">
+      <h2><span class="eyebrow">10</span>How fees work</h2>
+      <p class="section-intro">On Robinhood Chain the platform takes one 1% fee on a token's trades. It is taken in ETH, out of the trade itself, and it stops on its own once the token has grown. Solana works differently and is covered at the end of this section.</p>
+
+      <div class="compare">
+        <div class="panel before">
+          <h3>Before</h3>
+          <ul>
+            <li>The fee was taken in the launched token.</li>
+            <li>To turn it into ETH, a distributor later sold those tokens in the pool.</li>
+            <li>Every claim created a visible sell on the chart.</li>
+          </ul>
+        </div>
+        <div class="panel after">
+          <h3>Now</h3>
+          <ul>
+            <li>The fee comes straight off the ETH side of each buy and sell.</li>
+            <li>No token is sold to collect it, so nothing extra appears on the chart.</li>
+            <li>The ETH is paid out to its destinations in batches by the relayer.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3 style="margin-top:26px;">What you pay</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Buying</th><td>The fee is added on top of the ETH that reaches the pool. If you spend 1 ETH, the pool receives the amount after the fee.</td></tr>
+          <tr><th>Selling</th><td>The fee is taken from the ETH you'd receive. If the pool pays out 1 ETH, you receive 1 ETH less the fee.</td></tr>
+          <tr><th>Quote</th><td>The trade panel's estimate already includes it, so what you see is what you get within your slippage setting.</td></tr>
+        </table>
+      </div>
+
+      <h3 style="margin-top:26px;">Where the fee goes</h3>
+      <div class="flow" role="img" aria-label="Fee flow: a 1% fee on each trade is booked, then paid out 10% to the token's creator and 90% to the fee-wallet distributor, which gives half to the fee wallet and half to the platform-token buyback.">
+        <div class="flow-row"><div class="flow-node hot"><span class="pct">1% OF THE ETH IN EACH TRADE</span><b>Trade fee</b>Taken from the ETH side of every buy and sell, then booked for that token's pool until the next payout.</div></div>
+        <div class="flow-arrow">paid out in batches by the relayer</div>
+        <div class="flow-row cols-2">
+          <div class="flow-node"><span class="pct">10% OF THE FEE</span><b>Creator rewards</b>Credited to the token's creator in ETH. Claim it from your Portfolio.</div>
+          <div class="flow-node"><span class="pct">90% OF THE FEE</span><b>Fee-wallet distributor</b>Receives the rest as plain ETH.</div>
+        </div>
+        <div class="flow-arrow">the distributor splits what it receives</div>
+        <div class="flow-row cols-2">
+          <div class="flow-node end"><span class="pct">HALF</span><b>Platform fee wallet</b>Claimable by the platform.</div>
+          <div class="flow-node end"><span class="pct">HALF</span><b>Platform-token buyback</b>Buys the platform token, then burns part and airdrops part to its holders.</div>
+        </div>
+      </div>
+      <p class="mini-note">Split shown is the platform's current default setting, copied into each pool when it is created; later changes apply to new launches only, never to existing pools.</p>
+      <p class="mini-note">The fee-wallet distributor keeps a running on-chain tally of what it received, paid to the fee wallet and spent on platform-token buybacks, so these flows can be checked against the contract rather than taken on trust.</p>
+
+      <h3 style="margin-top:26px;">The other charges</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Launch fee</th><td>A flat fee at launch. When the launch is relayed, the relayer's gas is repaid from it first and the rest is split between the platform treasury and the platform rewards.</td></tr>
+          <tr><th>Curve fee</th><td>A Quick Launch charges 1% of the ETH on every curve buy and sell until the curve graduates, split the same way as above.</td></tr>
+          <tr><th>Custom rates</th><td>A custom-tax token's own reflection, marketing, liquidity and burn rates, set by the creator. Marketing is taken in ETH; the others in the token.</td></tr>
+          <tr><th>Early-buy surcharge</th><td>An extra charge on buys in a new pool's first minutes. See <a href="#graduation">below</a>.</td></tr>
+          <tr><th>Pool fee</th><td>The 0.30% Uniswap V4 pool fee, which goes to the pool's liquidity providers.</td></tr>
+        </table>
+      </div>
+
+      <h3 style="margin-top:26px;">See it on a token page</h3>
+      <p>Every Robinhood Chain token page has a <b>Where every trade goes</b> panel. Use the Buy / Sell switch to see how a trade is split, drawn to scale: what you receive, the pool fee, the platform's own fees, and, for a custom-tax token, the reflection, liquidity, burn and marketing shares, each tagged as taken in the token or in ETH. A token still on its curve shows only the curve fee, with its own tax rows dashed and marked <i>after graduation</i>. Once the platform fee has switched off, the panel says so and drops that row.</p>
+
+      <h3 style="margin-top:26px;">On Solana</h3>
+      <div class="table-wrap">
+        <table class="kv-table">
+          <tr><th>Launch cost</th><td>No IgnitionX launch fee. You pay only the Solana network cost, plus any first buy you choose to make.</td></tr>
+          <tr><th>Curve fee</th><td>A trading fee applies on the curve, 1% by default. Meteora takes its protocol share first, then the creator receives a share of the remainder (10% by default) and the platform the rest. The exact numbers are fixed into each token's curve when it launches.</td></tr>
+          <tr><th>Token tax</th><td>None. There is no platform tax and no custom tax on Solana tokens, before or after graduation.</td></tr>
+          <tr><th>After graduation</th><td>The token trades in a Meteora DAMM v2 pool under Meteora's own pool fee rules.</td></tr>
+        </table>
+      </div>
+    </section>
+
+    <section id="graduation">
+      <h2><span class="eyebrow">11</span>Graduation &amp; anti-snipe</h2>
+      <p class="section-intro">Every token is built to stop being charged the platform fee once it has grown, and new pools protect early buyers from bots.</p>
+
+      <h3>The fee switches itself off</h3>
+      <ul class="doc-list">
+        <li>A pool token starts with the 1% platform fee the moment it launches. The fee <b>permanently switches off</b> once the pool's market cap has stayed at or above the target (<b>$50,000</b> by default) across two checks at least 30 minutes apart. Two checks stop a single price spike from ending it early.</li>
+        <li>A <b>Quick Launch</b> charges its curve fee until the curve graduates, then the pool's 1% fee runs until the same $50,000 target is reached and switches off.</li>
+        <li>The market cap is measured in dollars from the pool price and a live ETH price feed. If the feed is stale or unavailable the fee simply stays on and trading is never blocked.</li>
+        <li>What switches off is the <b>platform</b> fee. A custom-tax token's own rates, including its marketing share, keep working.</li>
+        <li><b>Solana</b> tokens have no platform fee stage. They graduate when the curve has raised its SOL target and the liquidity moves to a Meteora DAMM v2 pool; no token tax applies before or after.</li>
+      </ul>
+      <p class="mini-note">In Explore, a Robinhood Chain token shows <b>Graduated</b> once its fee has switched off. A curve token first shows <b>On the curve</b> (and <b>Graduating soon</b> once it is about 85% of the way to its target), and shows as live on a DEX only once it has moved into a pool. A Solana token shows <b>Graduated</b> once it has migrated to its DAMM v2 pool.</p>
+
+      <h3 style="margin-top:22px;">Early-buy surcharge</h3>
+      <p>A new pool charges an extra fee on <b>buys only</b> that starts high at the moment the pool is created and falls in a straight line to zero over a short window. A bot buying in the first blocks hands much of its position to the platform; someone buying a couple of minutes later pays little or nothing. Sells are never charged.</p>
+      <ul class="doc-list">
+        <li>The buy quote shows it as <i>"includes X% early-buy surcharge, falling to 0"</i>, so you know what you're paying before you confirm.</li>
+        <li>It is taken in ETH and goes to the platform fee side.</li>
+        <li>Each pool keeps the surcharge settings it was created with, so nobody can raise it on a pool that is already trading.</li>
+        <li>The creator's own first buy inside the launch is exempt. For a Quick Launch the window starts when the pool is created at graduation, not on the curve.</li>
+      </ul>
+
+      <div class="callout">
+        <span class="callout-icon">◆</span>
+        <p>Nobody can raise a rate after launch. A custom token's rates have no setter at all, and a platform fee only ever moves one way: from on to permanently off.</p>
+      </div>
+    </section>
+
+    <section id="community">
+      <h2><span class="eyebrow">12</span>Profiles &amp; social</h2>
+      <p class="section-intro">An account is identified by its main wallet, which can be a Robinhood wallet or a Solana wallet. A Solana wallet on its own is a complete account.</p>
+      <div class="feature-grid" style="margin-top:16px;">
+        <div class="feature-card">
+          <h3>Profile</h3>
+          <p>Set a display name and picture. They show next to your launches, comments and callouts.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Linked wallets</h3>
+          <p>Link up to 5 wallets, across both chains, under one account. Linking takes a free signature from both wallets, and the links are public. A wallet that already has its own profile or activity can't be linked yet, so link wallets that are new to IgnitionX.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Follows</h3>
+          <p>Follow other members to keep track of what they launch and trade.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Comments</h3>
+          <p>Every token page has a comment thread, for Robinhood Chain and Solana tokens alike. Posting needs a display name.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Callouts</h3>
+          <p>Mark a token as a call at its current price and the page tracks how it has done, as a multiple. One callout per account per token. Solana callouts are priced in SOL, Robinhood ones in dollars.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Telegram posts</h3>
+          <p>New launches, and the two milestones (a curve graduating to a pool, and a token's fee switching off) are announced in the platform's Telegram launches channel, once each.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="security">
+      <h2><span class="eyebrow">13</span>Security &amp; disclosures</h2>
+      <div class="feature-grid" style="grid-template-columns:repeat(2,1fr); margin-top:16px;">
+        <div class="feature-card">
+          <h3>Locked liquidity</h3>
+          <p>Every Robinhood Chain launch locks its liquidity position to the creator for a fixed period. Neither the creator, the platform nor anyone else can pull it out early. On Solana, most of the liquidity that migrates to a Meteora DAMM v2 pool is permanently locked.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Immutable custom rates</h3>
+          <p>A custom-tax token's rates are fixed at launch. No creator, admin or platform action can raise them. Only the marketing wallet can change, and only the creator can change it.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Payouts never block trading</h3>
+          <p>Fees are booked during a trade and paid out separately. A destination that can't receive ETH has its amount held and retried; it can never make a buy or sell fail.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Your keys stay yours</h3>
+          <p>The relayer only holds a wallet used to pay gas. It can't take your funds or forge a launch, because every launch is checked against your own signature and deposit.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Independently-added pools</h3>
+          <p>If liquidity appears for a token outside IgnitionX's own launch flow, its card says so and its price isn't tracked here. The platform doesn't vouch for a market it didn't create.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Testnet vs. mainnet</h3>
+          <p>The network switch is platform-wide and covers both chains. On mainnet every launch, trade and price reflects real on-chain activity and real funds, on Robinhood Chain and on Solana.</p>
+        </div>
+      </div>
+      <div class="callout warn" style="margin-top:20px;">
+        <span class="callout-icon">◆</span>
+        <p>IgnitionX is an independent, unofficial interface built for Robinhood Chain. It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Launching or trading a token carries real financial risk. Nothing on this page or on the platform is financial advice; review a token's contract and terms before committing real funds.</p>
+      </div>
+    </section>
+
+    <section id="faq">
+      <h2><span class="eyebrow">14</span>FAQ</h2>
+      <div style="margin-top:8px;">
+        <details class="faq-item">
+          <summary>Do I need ETH to launch a token?</summary>
+          <p>Only for the modes that add liquidity upfront (Deploy + Add Liquidity and its Custom Tax version), where you pair that ETH into the pool yourself. The Quick Launch modes need no upfront liquidity, only the flat launch fee and an optional first buy.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Why doesn't claiming rewards show a sell on the chart any more?</summary>
+          <p>The platform's 1% fee is now taken in ETH directly from each trade, so there are no fee tokens to sell. Rewards are paid out in ETH from what was already collected.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Who pays the fee on a trade?</summary>
+          <p>The trader. A buyer pays it on top of the ETH that reaches the pool, and a seller receives that much less ETH. The trade panel's estimate already includes it.</p>
+        </details>
+        <details class="faq-item">
+          <summary>When does the platform fee stop?</summary>
+          <p>When the token's market cap has stayed at or above the target ($50,000 by default) across two checks at least 30 minutes apart. After that the platform fee is off for good. A custom token's own rates continue.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can a creator raise the tax after launch?</summary>
+          <p>No. A custom token's rates are locked at launch with no setter anywhere in the contract. The platform fee only ever goes from on to off.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What does "graduated" mean?</summary>
+          <p>Two things, depending on the token. For a pool token it means the platform fee has permanently switched off. For a Quick Launch it also marks the moment the token left the bonding curve for a real pool; until then it's labelled <b>Bonding curve</b>. On Solana, graduating means the curve filled and the liquidity moved to a Meteora DAMM v2 pool.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What happens to my liquidity?</summary>
+          <p>It is locked to you, the creator, for a fixed period as soon as it's added. You can't withdraw it early and neither can anyone else. When the lock ends, an Unlock LP button appears in your Portfolio.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I launch from Solana and from Robinhood Chain with one account?</summary>
+          <p>Yes. Either wallet can be your account's main wallet, and you can link the other so your name, picture, follows and launches follow you across both. See <a href="#community">Profiles &amp; social</a>.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What's the difference between Testnet and Mainnet?</summary>
+          <p>Testnet runs on Robinhood Chain's test network and Solana devnet, where nothing has real value. Mainnet is the real chain, with real ETH and SOL and real, irreversible trades. IgnitionX is live on mainnet; testnet stays available for practice. The network pill next to your wallet shows which is active, and it is the same for everyone.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What do the Explore tabs mean?</summary>
+          <p><b>Launched</b> is a token with a real pool and liquidity added from the start. <b>On the curve</b> is a Quick Launch still trading on its bonding curve. <b>Graduating soon</b> is a curve token about 85% or more of the way to its target. <b>Graduated</b> is a curve token that has moved into a pool, or a pool token whose platform fee has switched off. <b>All</b> shows everything. Robinhood Chain and Solana tokens appear together in every tab.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is there a tax on Solana tokens?</summary>
+          <p>No. Solana launches have a trading fee on the bonding curve (1% by default, with the creator earning a share) and nothing more: no platform tax and no custom tax, before or after graduation.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What does the ring around a token's logo show?</summary>
+          <p>Progress. On the curve it fills toward graduation, going from cool blue to amber to ember as it nears the target. Once a token is in a pool it shows its climb toward the $50,000 market-cap target, and it is full once graduated.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is IgnitionX affiliated with Robinhood?</summary>
+          <p>No. IgnitionX is an independent, unofficial interface built for Robinhood Chain. It is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc.</p>
+        </details>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<footer>
+  <div class="footer-inner">
+    <p class="footer-note">IgnitionX is an independent, unofficial interface built for Robinhood Chain — it is not affiliated with, endorsed by, or a product of Robinhood Markets, Inc. Wallet connection is real (via your browser wallet or Solana wallet), and the network switch targets testnet or mainnet respectively. Launching, trading and prices reflect genuine on-chain activity on the active network. What stays illustrative regardless: the holder breakdown, 24h volume shown before any real trades exist, and the price of any pool IgnitionX merely detected rather than created itself.</p>
+    <div class="footer-links"><a href="index.html">App</a><a href="docs.html" aria-current="page">Docs</a><a href="https://x.com/IgnitionX_Pad" target="_blank" rel="noopener noreferrer">X</a><a href="https://t.me/IgnitionX_Pad" target="_blank" rel="noopener noreferrer">Telegram</a><a href="status.html">Status</a><a href="terms.html">Terms</a></div>
+  </div>
+</footer>
+
+<script>
+  // Mobile nav toggle — the sidebar TOC becomes an off-canvas panel below
+  // 980px (see .docs-nav's own media query). No framework, no external
+  // script: just a class flip, matching this page's "single self-contained
+  // file" constraint.
+  (function(){
+    var toggle = document.getElementById("navToggle");
+    var nav = document.getElementById("docsNav");
+    if(!toggle || !nav) return;
+    toggle.addEventListener("click", function(){
+      var open = nav.classList.toggle("open");
+      toggle.setAttribute("aria-expanded", String(open));
+    });
+    nav.querySelectorAll("a").forEach(function(a){
+      a.addEventListener("click", function(){
+        nav.classList.remove("open");
+        toggle.setAttribute("aria-expanded", "false");
+      });
+    });
+  })();
+
+  // Scrollspy: highlights whichever section heading is currently nearest
+  // the top of the viewport in the sidebar TOC. Purely a wayfinding aid —
+  // every link already works with a plain click regardless of this.
+  (function(){
+    var sections = Array.prototype.slice.call(document.querySelectorAll(".docs-content section[id]"));
+    var links = Array.prototype.slice.call(document.querySelectorAll(".docs-nav a[href^='#']"));
+    if(!sections.length || !links.length || !("IntersectionObserver" in window)) return;
+    var byId = {};
+    links.forEach(function(a){ byId[a.getAttribute("href").slice(1)] = a; });
+    var observer = new IntersectionObserver(function(entries){
+      entries.forEach(function(entry){
+        var link = byId[entry.target.id];
+        if(!link) return;
+        if(entry.isIntersecting) links.forEach(function(a){ a.classList.remove("active"); });
+        if(entry.isIntersecting) link.classList.add("active");
+      });
+    }, { rootMargin: "-15% 0px -70% 0px", threshold: 0 });
+    sections.forEach(function(s){ observer.observe(s); });
+  })();
+</script>
+</body>
+</html>
