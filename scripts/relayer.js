@@ -417,25 +417,25 @@ function xAnnounceRhLaunch(network, kind, { token, name, symbol, hasPool }) {
     if (!xPoster.allowed(network === "robinhoodMainnet")) return;
     const kindNote =
       kind === "v4curve" || kind === "v4custom-curve" ? "Quick Launch (bonding curve)" : kind === "v4custom" ? "Custom-tax launch" : hasPool ? "Launch + liquidity" : "Token launch";
-    xPoster.post(xPosterLib.launchText({ name, symbol, chain: "Robinhood Chain", kindNote, url: xSiteUrl() }), { kind: "launch", key: `launch:rh:${String(token).toLowerCase()}` });
+    xPoster.post(xPosterLib.launchText({ name, symbol, chain: "Robinhood Chain", kindNote, url: "" }), { kind: "launch", key: `launch:rh:${String(token).toLowerCase()}` });
   } catch (err) { console.warn(`[x] launch hook failed: ${err.message}`); }
 }
 function xAnnounceSolLaunch(launch) {
   try {
     if (!xPoster.allowed(launch.cluster === "mainnet-beta")) return;
-    xPoster.post(xPosterLib.launchText({ name: launch.name, symbol: launch.symbol, chain: "Solana", kindNote: "Quick Launch (Meteora bonding curve)", url: xSiteUrl() }), { kind: "launch", key: `launch:sol:${launch.mint}` });
+    xPoster.post(xPosterLib.launchText({ name: launch.name, symbol: launch.symbol, chain: "Solana", kindNote: "Quick Launch (Meteora bonding curve)", url: "" }), { kind: "launch", key: `launch:sol:${launch.mint}` });
   } catch (err) { console.warn(`[x] Solana launch hook failed: ${err.message}`); }
 }
 function xAnnounceRhMilestone(network, entry, milestone) {
   try {
     if (!xPoster.allowed(network === "robinhoodMainnet")) return;
-    xPoster.post(xPosterLib.milestoneText({ milestone, name: entry.name, symbol: entry.symbol, chain: "Robinhood Chain", url: xSiteUrl() }), { kind: "milestone", key: `milestone:rh:${milestone}:${String(entry.tokenAddress).toLowerCase()}` });
+    xPoster.post(xPosterLib.milestoneText({ milestone, name: entry.name, symbol: entry.symbol, chain: "Robinhood Chain", url: "" }), { kind: "milestone", key: `milestone:rh:${milestone}:${String(entry.tokenAddress).toLowerCase()}` });
   } catch (err) { console.warn(`[x] milestone hook failed: ${err.message}`); }
 }
 function xAnnounceSolMilestone(milestone, launch) {
   try {
     if (!xPoster.allowed(launch.cluster === "mainnet-beta")) return;
-    xPoster.post(xPosterLib.milestoneText({ milestone, name: launch.name, symbol: launch.symbol, chain: "Solana", url: xSiteUrl() }), { kind: "milestone", key: `milestone:sol:${milestone}:${launch.mint}` });
+    xPoster.post(xPosterLib.milestoneText({ milestone, name: launch.name, symbol: launch.symbol, chain: "Solana", url: "" }), { kind: "milestone", key: `milestone:sol:${milestone}:${launch.mint}` });
   } catch (err) { console.warn(`[x] Solana milestone hook failed: ${err.message}`); }
 }
 // Daily recap / top movers / promos: one tick every few minutes posts at most one due item (see marketingTick).
