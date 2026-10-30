@@ -79,7 +79,8 @@ const fs = require("fs"); // used only by the temporary /debug/data-dirs route b
 const https = require("https"); // used only by sendTelegramMessage below — Node's built-in client, no extra dependency
 const express = require("express");
 const hre = require("hardhat");
-const http = require("http"); // the X marketing scheduler reads this relayer's own public endpoints over loopback
+const http = require("http");
+const { Duplex } = require("stream"); // the X marketing scheduler calls this relayer's own public stats routes in-process
 const xPosterLib = require("../lib/xPoster");
 const { verifyContract, verifyProxyClone } = require("../lib/verify");
 const { recordLaunch, updateLaunch, deleteLaunch, readLedger, PUBLIC_FIELDS, DEPLOYED_CONTRACTS_ROOT } = require("../lib/launchStore");
@@ -439,28 +440,36 @@ function xAnnounceSolMilestone(milestone, launch) {
 }
 // Daily recap / top movers / promos: one tick every few minutes posts at most one due item (see marketingTick).
 function startXMarketingLoop(app) {
-  // The scheduler reads this site's own public stats endpoints. It does that over a private loopback-only server of its own
-  // (random port, GET-only, only the few paths it needs) instead of the public PORT, because on hosts that put a proxy in front of
-  // the app (Passenger / GoDaddy Node hosting) the public PORT is not reachable from inside the process.
+  // The scheduler reads this site's own public stats endpoints. It calls the Express app IN-PROCESS (a fake GET request, no socket, no
+  // port) because some hosts (Passenger / GoDaddy / PaaS sandboxes) neither route the public PORT back into the app nor allow opening
+  // another port. Only the few read-only stats paths below can be reached this way.
   const ALLOWED = /^\/(stats|launches|price-history\/[^/?#]+|solana\/(stats|launches|price-history\/[^/?#]+))(\?.*)?$/;
-  let loopPort = null;
-  const loop = http.createServer((req, res) => {
-    if (req.method === "GET" && ALLOWED.test(req.url || "")) return app(req, res);
-    res.statusCode = 404; res.end();
-  });
-  loop.on("error", (err) => console.warn(`[x] internal stats server error: ${err.message}`));
-  loop.listen(0, "127.0.0.1", () => { loopPort = loop.address().port; });
-  loop.unref();
+  let lastWarnAt = 0;
   const fetchJson = (p) =>
     new Promise((resolve) => {
-      if (!loopPort) return resolve(null);
-      const req = http.get({ hostname: "127.0.0.1", port: loopPort, path: p, timeout: 15_000 }, (res) => {
-        let d = "";
-        res.on("data", (c) => (d += c));
-        res.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { resolve(null); } });
-      });
-      req.on("error", () => resolve(null));
-      req.on("timeout", () => { req.destroy(); resolve(null); });
+      if (!ALLOWED.test(p)) return resolve(null);
+      let done = false;
+      const finish = (v, why) => {
+        if (done) return; done = true; clearTimeout(timer);
+        if (v == null && why && Date.now() - lastWarnAt > 30 * 60_000) { lastWarnAt = Date.now(); console.warn(`[x] couldn't read ${p} in-process: ${why}`); }
+        resolve(v);
+      };
+      const timer = setTimeout(() => finish(null, "timed out after 15s"), 15_000);
+      try {
+        const socket = new Duplex({ read() {}, write(_c, _e, cb) { cb(); } });
+        const req = new http.IncomingMessage(socket);
+        req.method = "GET"; req.url = p; req.headers = { host: "localhost" };
+        const res = new http.ServerResponse(req);
+        const chunks = [];
+        res.write = (c) => { if (c) chunks.push(Buffer.from(c)); return true; };
+        res.end = (c) => {
+          if (c) chunks.push(Buffer.from(c));
+          if (res.statusCode !== 200) finish(null, `HTTP ${res.statusCode}`);
+          else { try { finish(JSON.parse(Buffer.concat(chunks).toString("utf8"))); } catch (e) { finish(null, "not JSON"); } }
+          return res;
+        };
+        app.handle(req, res, () => finish(null, "no route matched"));
+      } catch (err) { finish(null, err && err.message ? err.message : String(err)); }
     });
   const tick = async () => {
     try {
