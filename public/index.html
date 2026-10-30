@@ -16430,6 +16430,17 @@
 
   // X posting status under the settings table: on/off, keys saved, posts this month vs the cap, the last error, and a
   // "Send test post" button (admin-signed) to check the keys without waiting for a launch.
+  function xSchedHtml(st){
+    const when = ms => ms ? new Date(ms).toLocaleString() : "—";
+    const lines = [];
+    if(st.network) lines.push(`Network: <strong>${escapeHtml(String(st.network))}</strong>${st.autoPosting ? "" : " — launch, milestone, recap and mover posts are <strong>off</strong> here (mainnet only)"}`);
+    if(st.enabled){
+      lines.push(`Next promo: ${st.nextPromoAt ? escapeHtml(when(st.nextPromoAt)) : "starts on the next check (within ~5 min of the relayer starting)"}${st.nextMoversAt ? ` · next movers check: ${escapeHtml(when(st.nextMoversAt))}` : ""}`);
+      lines.push(`Daily recap: after ${escapeHtml(String(st.recapHourUtc))}:00 UTC${st.lastRecapDate ? ` · last: ${escapeHtml(st.lastRecapDate)}` : ""}`);
+      lines.push(st.lastTick ? `Last scheduler check: ${escapeHtml(when(st.lastTick.t))} — ${escapeHtml(String(st.lastTick.what))}` : "Scheduler hasn't run yet — restart the relayer if this stays empty.");
+    }
+    return lines.length ? `<div style="margin-top:6px;font-size:.85em;opacity:.85;">${lines.map(l=>`<div>${l}</div>`).join("")}</div>` : "";
+  }
   async function renderXStatus(url){
     const box = document.getElementById("xStatusBox");
     if(!box) return;
@@ -16442,6 +16453,7 @@
     const last = st.lastError ? ` Last error: ${escapeHtml(String(st.lastError.message || "").slice(0, 200))}` : "";
     const recent = (st.recent || []).map(p=> `<li>${escapeHtml(String(p.kind))}: ${escapeHtml(String(p.text).split("\n")[0].slice(0, 90))}</li>`).join("");
     box.innerHTML = `<strong>X posting:</strong> ${st.enabled ? "ON" : "OFF"} · keys ${st.configured ? "saved" : "not saved"} · <strong>${st.count || 0}</strong> of ${st.cap || 0} posts used in ${escapeHtml(st.month || "this month")}.${last}
+      ${xSchedHtml(st)}
       ${recent ? `<ul style="margin:6px 0 0 18px;">${recent}</ul>` : ""}
       <div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" id="xTestBtn" ${st.enabled && st.configured ? "" : "disabled"}>Send test post</button></div>`;
     const tb = document.getElementById("xTestBtn");
