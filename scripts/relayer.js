@@ -3115,7 +3115,8 @@ async function main() {
   // last few posts (which are public on X anyway). POST /x-test is admin-signed and sends one short test post, so the
   // keys can be checked without waiting for a launch.
   app.get("/x-status", asyncRoute(async (_req, res) => {
-    sendJson(res, 200, await xPoster.getStatus());
+    const st = await xPoster.getStatus();
+    sendJson(res, 200, { ...st, network: hre.network.name, autoPosting: xPoster.allowed(hre.network.name === "robinhoodMainnet") });
   }));
   app.post("/x-test", asyncRoute(async (req, res) => {
     const { timestamp, signature } = req.body || {};
