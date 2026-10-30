@@ -438,10 +438,23 @@ function xAnnounceSolMilestone(milestone, launch) {
   } catch (err) { console.warn(`[x] Solana milestone hook failed: ${err.message}`); }
 }
 // Daily recap / top movers / promos: one tick every few minutes posts at most one due item (see marketingTick).
-function startXMarketingLoop() {
+function startXMarketingLoop(app) {
+  // The scheduler reads this site's own public stats endpoints. It does that over a private loopback-only server of its own
+  // (random port, GET-only, only the few paths it needs) instead of the public PORT, because on hosts that put a proxy in front of
+  // the app (Passenger / GoDaddy Node hosting) the public PORT is not reachable from inside the process.
+  const ALLOWED = /^\/(stats|launches|price-history\/[^/?#]+|solana\/(stats|launches|price-history\/[^/?#]+))(\?.*)?$/;
+  let loopPort = null;
+  const loop = http.createServer((req, res) => {
+    if (req.method === "GET" && ALLOWED.test(req.url || "")) return app(req, res);
+    res.statusCode = 404; res.end();
+  });
+  loop.on("error", (err) => console.warn(`[x] internal stats server error: ${err.message}`));
+  loop.listen(0, "127.0.0.1", () => { loopPort = loop.address().port; });
+  loop.unref();
   const fetchJson = (p) =>
     new Promise((resolve) => {
-      const req = http.get({ hostname: "127.0.0.1", port: PORT, path: p, timeout: 15_000 }, (res) => {
+      if (!loopPort) return resolve(null);
+      const req = http.get({ hostname: "127.0.0.1", port: loopPort, path: p, timeout: 15_000 }, (res) => {
         let d = "";
         res.on("data", (c) => (d += c));
         res.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { resolve(null); } });
@@ -3919,7 +3932,7 @@ async function main() {
   }));
 
   app.listen(PORT, () => console.log(`Relayer API listening on :${PORT}`));
-  startXMarketingLoop();
+  startXMarketingLoop(app);
 
   // ---- on-chain poller ----
   async function pollWatcher(watcher) {
