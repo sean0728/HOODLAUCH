@@ -16287,7 +16287,7 @@
     { key: "xAccessToken", label: "X access token", help: "The access token for the platform account (the app needs Read and write permission, set BEFORE generating it). Write-only.", secret: true },
     { key: "xAccessSecret", label: "X access token secret", help: "Access token secret from the same page. Write-only.", secret: true },
     { key: "xMonthlyCap", label: "X monthly post cap", help: "Hard limit on posts per calendar month (UTC). Counted on successful posts only. 0 = no posts. X bills per post and about $0.20 for a post containing a link, so 100 posts is roughly $20 at most." },
-    { key: "xSiteUrl", label: "X link to include", help: "The site link added to posts (https only). Blank = no link, which makes posts cheaper." },
+    { key: "xSiteUrl", label: "X link to include", help: "The site link added to promo posts only (https only). Launch, milestone, recap and mover posts never carry a link. Blank = no link on promos either, which makes them cheaper." },
     { key: "xPostLaunches", label: "Post new launches", bool: true, help: "A post for every new mainnet launch on Robinhood Chain and Solana." },
     { key: "xPostMilestones", label: "Post graduations & milestones", bool: true, help: "Curve filled / live on a pool / graduated (market-cap target reached) on both chains." },
     { key: "xPostRecap", label: "Post a daily recap", bool: true, help: "Once a day: new launches, 24h volume and value locked per chain. Skipped on a quiet day." },
